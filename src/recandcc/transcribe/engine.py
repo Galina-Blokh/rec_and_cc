@@ -80,13 +80,18 @@ class Transcriber:
         from faster_whisper import WhisperModel
 
         t0 = time.monotonic()
-        model = WhisperModel(
-            name,
+        kwargs = dict(
             device=self.cfg.device,
             compute_type=self.cfg.compute_type,
             num_workers=self.num_workers,
             cpu_threads=self.cpu_threads,
         )
+        # Offline first: once downloaded, a model loads without contacting Hugging Face.
+        try:
+            model = WhisperModel(name, local_files_only=True, **kwargs)
+        except Exception:
+            log.info("model %s not on disk yet; downloading it once", name)
+            model = WhisperModel(name, **kwargs)
         log.info(
             "loaded whisper model %s (%s, %s, workers=%d, threads=%d) in %.1fs",
             name,

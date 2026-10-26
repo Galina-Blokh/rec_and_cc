@@ -197,7 +197,8 @@ repo):
 ## Privacy & legal
 
 - Audio and transcripts never leave your computer. The only network access is the one-time
-  model download from Hugging Face.
+  model download from Hugging Face. After that the app works fully offline: models load
+  from disk without contacting anything (verified with all network access blocked).
 - Recording people can require their consent (some US states and the EU require everyone on
   a call to agree). You are responsible for using this lawfully. Tell people when you record
   them.

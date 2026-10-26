@@ -17,6 +17,7 @@ import sys
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import numpy as np
 
@@ -37,6 +38,23 @@ def mlx_repo(model: str) -> str:
     if "/" in model:
         return model
     return MLX_REPOS.get(model, f"mlx-community/whisper-{model}-mlx")
+
+
+def local_model_path(repo: str) -> str:
+    """Local snapshot path of ``repo``, downloading it only if it isn't on disk yet.
+
+    Passing the local path to mlx_whisper (instead of the repo id) means loading never
+    contacts Hugging Face once the model has been downloaded, so the app works offline.
+    """
+    if Path(repo).exists():
+        return repo
+    from huggingface_hub import snapshot_download
+
+    try:
+        return snapshot_download(repo, local_files_only=True)
+    except Exception:
+        log.info("model %s not on disk yet; downloading it once", repo)
+        return snapshot_download(repo)
 
 
 def gpu_available() -> bool:
@@ -60,7 +78,7 @@ class MlxWhisper:
     """One MLX Whisper model, driven from a single dedicated thread."""
 
     def __init__(self, model: str) -> None:
-        self.repo = mlx_repo(model)
+        self.repo = mlx_repo(model)  # HF repo id; replaced by its local path in load()
         self._thread = ThreadPoolExecutor(1, thread_name_prefix="whisper-gpu")
         self._model = None
 
@@ -74,6 +92,7 @@ class MlxWhisper:
     def load(self) -> None:
         def _load():
             t0 = time.monotonic()
+            self.repo = local_model_path(self.repo)
             self._model = self._get_model()
             log.info("loaded MLX whisper %s on the GPU in %.1fs", self.repo, time.monotonic() - t0)
 
