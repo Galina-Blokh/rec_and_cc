@@ -7,7 +7,7 @@
 #   scripts/review_lanes.sh /tmp/pr.diff > review.md          # all lanes in parallel
 #   scripts/review_lanes.sh /tmp/pr.diff correctness          # a single lane
 #
-# Env: MODEL (default grok-4.7-high), CURSOR_API_KEY or a `cursor-agent login` session,
+# Env: MODEL (default gpt-5.6-sol-high), CURSOR_API_KEY or a `cursor-agent login` session,
 # CURSOR_AGENT (path to the agent binary), NO_FOOTER=1 (omit the timing line).
 # The agent runs read-only (--mode ask, sandboxed); run it from the repository root.
 set -euo pipefail
@@ -16,7 +16,7 @@ DIFF="${1:?usage: review_lanes.sh <diff-file> [lane ...]}"
 shift
 LANES=("$@")
 [[ ${#LANES[@]} -eq 0 ]] && LANES=(correctness security platform tests)
-MODEL="${MODEL:-grok-4.7-high}"
+MODEL="${MODEL:-gpt-5.6-sol-high}"
 AGENT="${CURSOR_AGENT:-cursor-agent}"
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT

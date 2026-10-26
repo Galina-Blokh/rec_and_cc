@@ -1,6 +1,6 @@
 name: Cursor review
 
-# AI code review of every pull request by the Cursor agent (Grok 4.7 by default). Four
+# AI code review of every pull request by the Cursor agent (GPT-5.6 Sol by default). Four
 # reviewers run in parallel, one per focus area ("lane", see scripts/review_lanes.sh); a final
 # job merges their findings into one PR comment. Needs the repo secret CURSOR_API_KEY
 # (cursor.com/dashboard → Integrations → API keys). Change the model with the repo variable
@@ -32,7 +32,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  MODEL: ${{ vars.CURSOR_REVIEW_MODEL || 'grok-4.7-high' }}
+  MODEL: ${{ vars.CURSOR_REVIEW_MODEL || 'gpt-5.6-sol-high' }}
   PR: ${{ github.event.pull_request.number }}
   BASE: ${{ github.event.pull_request.base.sha }}
   HEAD: ${{ github.event.pull_request.head.sha }}
