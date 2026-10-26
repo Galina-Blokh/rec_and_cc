@@ -223,7 +223,7 @@ def cmd_autostart(args) -> int:
 def cmd_config(args) -> int:
     load_config()  # creates the default file on first run
     print(f"# {CONFIG_PATH}\n")
-    print(CONFIG_PATH.read_text())
+    print(CONFIG_PATH.read_text(encoding="utf-8"))
     print(f"# logs: {LOG_FILE}")
     return 0
 

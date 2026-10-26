@@ -72,11 +72,13 @@ class SessionInfo:
         data["started_at"] = self.started_at.isoformat()
         data["ended_at"] = self.ended_at.isoformat() if self.ended_at else None
         data["tracks"] = {str(k): v for k, v in self.tracks.items()}
-        (self.directory / self.FILENAME).write_text(json.dumps(data, indent=2, ensure_ascii=False))
+        (self.directory / self.FILENAME).write_text(
+            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
 
     @classmethod
     def load(cls, directory: Path) -> SessionInfo:
-        data = json.loads((Path(directory) / cls.FILENAME).read_text())
+        data = json.loads((Path(directory) / cls.FILENAME).read_text(encoding="utf-8"))
         return cls(
             id=data["id"],
             directory=Path(directory),

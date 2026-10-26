@@ -230,9 +230,9 @@ def test_transcribe_session_with_language_id_model(tmp_path, monkeypatch):
     assert progress[0] == 0.0 and progress[-1] == 1.0
     assert not (tmp_path / "me.wav").exists()
     assert SessionInfo.load(tmp_path).transcribed
-    data = json.loads((tmp_path / "transcript.json").read_text())
+    data = json.loads((tmp_path / "transcript.json").read_text(encoding="utf-8"))
     assert data["languages"] == ["en", "ru"] and len(data["segments"]) == 3
-    md = (tmp_path / "transcript.md").read_text()
+    md = (tmp_path / "transcript.md").read_text(encoding="utf-8")
     assert "**[00:00:01] Others:** word слово" in md  # joined: gap < 2 s
     assert (tmp_path / "transcript.srt").exists()
 
@@ -259,7 +259,7 @@ def test_session_without_tracks_writes_empty_transcript(tmp_path):
     s = make_session(tmp_path)
     t = Transcriber(TranscriptionConfig(model="never-loaded"))
     assert t.transcribe_session(s) == []
-    assert "No speech detected" in (tmp_path / "transcript.md").read_text()
+    assert "No speech detected" in (tmp_path / "transcript.md").read_text(encoding="utf-8")
     assert t._model is None  # nothing to do -> model never loaded
 
 

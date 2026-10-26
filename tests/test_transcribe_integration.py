@@ -97,5 +97,5 @@ def test_end_to_end(session):
     assert me and all(s.start > 20 for s in me), me
     assert similarity(EN_ME, " ".join(s.text for s in me)) >= 0.7
     assert SessionInfo.load(session.directory).transcribed
-    md = (session.directory / "transcript.md").read_text()
+    md = (session.directory / "transcript.md").read_text(encoding="utf-8")
     assert "Others:**" in md and "Me:**" in md

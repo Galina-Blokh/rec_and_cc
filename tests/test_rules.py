@@ -89,7 +89,7 @@ def test_missing_permissions_and_labels(tmp_path):
     assert missing_permissions({}) == []  # unknown is not "missing"
     d = tmp_path / "2026-10-26" / "140312_zoom-us"
     d.mkdir(parents=True)
-    (d / "transcript.md").write_text("x")
+    (d / "transcript.md").write_text("x", encoding="utf-8")
     assert recent_transcripts(tmp_path) == [d / "transcript.md"]
     assert transcript_label(d / "transcript.md") == "2026-10-26 14:03 zoom-us"
 

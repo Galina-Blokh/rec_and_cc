@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import threading
@@ -22,6 +23,12 @@ except HelperNotFoundError:
 
 from recandcc.capture.system_mac import MacSystemAudioSource  # noqa: E402
 from recandcc.detect.mac import MacActivityMonitor  # noqa: E402
+
+# Hosted CI runners have no audio output device and can't grant the System Audio Recording
+# permission, so a process tap there never delivers IO. These tests run on real Macs only.
+needs_audio_hardware = pytest.mark.skipif(
+    os.environ.get("CI") == "true", reason="no audio hardware / TCC grant on CI runners"
+)
 
 
 @pytest.fixture
@@ -78,6 +85,7 @@ def test_monitor_cli_outputs_json_lines():
         proc.wait()
 
 
+@needs_audio_hardware
 def test_capture_yields_float32_stream(speech_file):
     chunks: list[np.ndarray] = []
     lock = threading.Lock()
@@ -109,6 +117,7 @@ def test_capture_yields_float32_stream(speech_file):
     print(f"captured {len(audio) / 16000:.2f}s, peak {np.abs(audio).max():.4f}")
 
 
+@needs_audio_hardware
 def test_capture_exits_when_stdout_closes():
     proc = subprocess.Popen(
         [str(HELPER), "capture"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL

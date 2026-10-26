@@ -129,7 +129,7 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         cfg = Config()
         cfg.save(path)
         return cfg
-    data = tomllib.loads(path.read_text())
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
     det = _build(DetectionConfig, data.pop("detection", {}))
     det.mode = Mode(det.mode)
     det.app_modes = {k: Mode(v) for k, v in det.app_modes.items()}
