@@ -58,6 +58,7 @@ using the mic is treated as a call (Google Meet). The global `mode = "off"` over
 | `workers` | `0` | Parallel transcription workers; `0` = auto (`min(4, cores // 4)`) |
 | `dedupe_echo` | `true` | Remove mic segments that are speaker echo of the other side |
 | `keep_audio` | `true` | `false` deletes the WAVs after a successful transcription (~115 MB per track-hour) |
+| `audio_retention_days` | `0` | Delete a recording's audio (`*.wav`) this many days after it was transcribed; `0` = keep forever. Transcripts are never deleted. Checked at startup and hourly. Also in **menu → Delete audio after** (Never / 1 / 7 / 30 / 90 days) |
 | `live` | `true` | Transcribe while recording: each phrase appears ~1 s after it is spoken (~3 s on the CPU backend) (captions, and `transcript.md` is rewritten every few seconds), and the final transcript is written about a second after the session stops. `false` = transcribe the whole session after it stops |
 
 With `live = true`, the latency is dominated by one Whisper pass per phrase (~2.5 s for

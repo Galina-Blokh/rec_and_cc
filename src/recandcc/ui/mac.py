@@ -24,6 +24,7 @@ from .. import autostart
 from ..config import CONFIG_PATH
 from ..engine import RECORDING
 from ..models import Mode, TriggerKind
+from ..retention import RETENTION_CHOICES
 from .common import (
     ONBOARDING_TEXT,
     PERM_KINDS,
@@ -90,6 +91,13 @@ class MacApp(rumps.App):
             )
         )
         self.login_item = rumps.MenuItem("Launch at login", callback=self._toggle_login)
+        self.retention_menu = rumps.MenuItem("Delete audio after")
+        for days in RETENTION_CHOICES:
+            label = "Never (keep audio)" if days == 0 else f"{days} day" + ("s" if days > 1 else "")
+            item = rumps.MenuItem(label, callback=self._set_retention)
+            item.retention_days = days
+            self.retention_menu.add(item)
+        self._render_retention()
         self.captions_item = rumps.MenuItem("Show live captions", callback=self._toggle_captions)
         self.captions_item.state = 1 if self.cfg.live_captions else 0
         self.live_open_item = rumps.MenuItem("Open live transcript")
@@ -107,6 +115,7 @@ class MacApp(rumps.App):
             None,
             self.perm_menu,
             self.login_item,
+            self.retention_menu,
             rumps.MenuItem("Edit settings", callback=lambda _: open_path(CONFIG_PATH, True)),
             None,
             rumps.MenuItem("Quit RecAndCC", callback=self._quit),
@@ -275,6 +284,21 @@ class MacApp(rumps.App):
             log.exception("autostart toggle failed")
             self._notify("Launch at login", f"Failed: {e}")
         sender.state = 1 if autostart.is_enabled() else 0
+
+    def _render_retention(self) -> None:
+        days = self.cfg.transcription.audio_retention_days
+        for item in self.retention_menu.values():
+            item.state = 1 if getattr(item, "retention_days", None) == days else 0
+
+    def _set_retention(self, sender) -> None:
+        self.cfg.transcription.audio_retention_days = sender.retention_days
+        self._render_retention()
+
+        def apply():
+            self.cfg.save()
+            self.ctrl.purge_audio_now()
+
+        threading.Thread(target=apply, daemon=True, name="retention-set").start()
 
     def _toggle_captions(self, sender) -> None:
         self.cfg.live_captions = not self.cfg.live_captions

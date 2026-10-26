@@ -110,6 +110,9 @@ class TranscriptionConfig:
     workers: int = 0  # parallel transcription workers, 0 = auto
     dedupe_echo: bool = True  # drop mic segments that are just speaker echo of "Others"
     keep_audio: bool = True  # False = delete WAVs after a successful transcription
+    # Delete a recording's audio this many days after it was transcribed (0 = keep forever).
+    # Transcripts are never deleted. Also settable from the menu: "Delete audio after".
+    audio_retention_days: int = 0
     # Transcribe while recording: text appears ~1-2 s after each phrase, and the final
     # transcript is ready right when the session stops (no post-session pass).
     live: bool = True

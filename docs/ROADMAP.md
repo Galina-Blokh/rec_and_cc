@@ -11,6 +11,7 @@
 - [x] Launch at login; Windows backends (untested on hardware)
 - [x] Live transcription while recording + floating live captions window (~1 s behind speech on the GPU)
 - [x] MLX Whisper on the Apple-silicon GPU: live captions ~1.2 s behind speech, 1-hour meeting in ~2.5 min
+- [x] Audio retention: delete audio N days after transcription (menu + config)
 - [x] Ask mode records immediately and asks whether to keep it; calls during media recordings add the mic
 
 ## Next
@@ -23,4 +24,4 @@
 - [ ] Self-contained app bundle (embedded Python, signed + notarised) so the repo folder isn't needed
 - [ ] Verified Windows build + installer; per-app capture on Windows
 - [ ] Per-app (instead of global) system-audio tap on macOS, so only the call app is recorded
-- [ ] Export to DOCX; retention policy (auto-delete old audio after N days)
+- [ ] Export to DOCX

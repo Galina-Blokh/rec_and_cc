@@ -104,6 +104,9 @@ Menu items:
 - **Open transcripts folder**
 - **Permissions**: status and "Grant…" actions.
 - **Launch at login**: starts RecAndCC every time you log in. Turn it on once.
+- **Delete audio after**: Never / 1 / 7 / 30 / 90 days. Audio of transcribed recordings is
+  deleted after that many days; transcripts are always kept. Any number of days can be set as
+  `audio_retention_days` in the settings.
 - **Edit settings**: opens `config.toml` (changes to detection settings apply live).
 - **Quit RecAndCC**
 

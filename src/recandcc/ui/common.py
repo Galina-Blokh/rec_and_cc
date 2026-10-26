@@ -26,6 +26,7 @@ from pathlib import Path
 from ..config import CONFIG_PATH, Config, load_config
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind
+from ..retention import purge_old_audio
 
 log = logging.getLogger(__name__)
 
@@ -223,6 +224,7 @@ class Controller:
         if start_threads:
             self.engine.start()
             threading.Thread(target=self._resubmit_unfinished, daemon=True, name="resubmit").start()
+            threading.Thread(target=self._retention_loop, daemon=True, name="retention").start()
             self.refresh_async(force=True)
 
     # --- callbacks from worker threads -> events
@@ -280,6 +282,21 @@ class Controller:
             self.tq.submit(session)
         else:
             self.tq.submit(session, finalize=lambda: live.finish(session))
+
+    def _retention_loop(self) -> None:
+        """Delete expired audio at startup and then hourly (audio_retention_days)."""
+        while not getattr(self, "_shut", False):
+            self.purge_audio_now()
+            for _ in range(3600):  # sleep 1 h, but notice shutdown promptly
+                if getattr(self, "_shut", False):
+                    return
+                time.sleep(1)
+
+    def purge_audio_now(self) -> None:
+        try:
+            purge_old_audio(self.cfg.output_dir, self.cfg.transcription.audio_retention_days)
+        except Exception:
+            log.exception("audio retention failed")
 
     def _resubmit_unfinished(self) -> None:
         try:
