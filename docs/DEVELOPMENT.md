@@ -63,20 +63,25 @@ gh pr create --fill
 
 Every PR gets two automatic checks:
 - **CI** (`.github/workflows/ci.yml`): lint + tests on macOS and Windows.
-- **Cursor review** (`.github/workflows/cursor-review.yml`): the Cursor agent reviews the
-  PR's own changes (three-dot diff) with **Grok 4.7** (`grok-4.7-high`; change it with the repo
-  variable `CURSOR_REVIEW_MODEL`, list models with `cursor-agent models`) and posts the
-  findings as a PR comment. It needs the repo secret `CURSOR_API_KEY`. Without it, and on fork
-  PRs, the job is skipped and stays green, so the review is advisory. The agent runs read-only
-  (`--mode ask`, sandboxed) and the PR can't configure it (`.cursor/` is removed first).
+- **Cursor review** (`.github/workflows/cursor-review.yml`): **four Cursor agents review in
+  parallel**, one per focus area (correctness & threading, security & privacy, platforms,
+  tests & performance; see `scripts/review_lanes.sh`), using **Grok 4.7** (`grok-4.7-high`;
+  change it with the repo variable `CURSOR_REVIEW_MODEL`, list models with
+  `cursor-agent models`). A final job merges them into one PR comment. Needs the repo secret
+  `CURSOR_API_KEY`; without it (and on fork PRs) the jobs are skipped and stay green, so the
+  review is advisory. Parallel lanes buy coverage, not speed: wall time is the slowest lane
+  (~5–8 min with `grok-4.7-high`; use `grok-4.7-high-fast` for quicker reviews).
+  Hardening: read-only agent (`--mode ask`, sandboxed) on the trusted base tree with the PR as
+  a diff file, instruction files removed, pinned + checksummed agent build, SHA-pinned actions,
+  secret-leak guard before posting. See the workflow header for the accepted risk.
 
-To run the same review locally (Cursor CLI: `curl https://cursor.com/install -fsS | bash`, then
-`cursor-agent login` or `CURSOR_API_KEY` in the environment):
+Run the same parallel review locally (Cursor CLI installed and logged in, or
+`CURSOR_API_KEY` set):
 
 ```bash
 git diff main...HEAD > /tmp/pr.diff
-cursor-agent -p 'Review the changes in /tmp/pr.diff. Report real problems only. Do not modify files.' \
-  --model grok-4.7-high --mode ask --trust
+scripts/review_lanes.sh /tmp/pr.diff > /tmp/review.md        # 4 lanes in parallel
+scripts/review_lanes.sh /tmp/pr.diff security                # one lane
 ```
 
 ## Testing
