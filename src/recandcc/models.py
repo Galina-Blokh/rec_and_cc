@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -11,6 +12,9 @@ from pathlib import Path
 # All captured audio is normalised to this format before it leaves a capture backend:
 # float32, mono, 16 kHz (what Whisper expects).
 SAMPLE_RATE = 16_000
+
+# Guards SessionInfo.metrics updates against a concurrent save (several pipeline threads).
+_METRICS_LOCK = threading.RLock()
 
 
 class Mode(StrEnum):
@@ -63,11 +67,20 @@ class SessionInfo:
     # Track -> WAV filename relative to `directory` (16 kHz mono).
     tracks: dict[Track, str] = field(default_factory=dict)
     transcribed: bool = False
+    # Pipeline measurements, by stage ("recording", "live", "transcription", ...): plain
+    # JSON values. Absent in session.json files written before it existed.
+    metrics: dict[str, dict] = field(default_factory=dict)
 
     FILENAME = "session.json"
 
+    def update_metrics(self, stage: str, values: dict) -> None:
+        """Merge `values` into ``metrics[stage]`` (thread-safe; not saved until ``save``)."""
+        with _METRICS_LOCK:
+            self.metrics[stage] = {**self.metrics.get(stage, {}), **values}
+
     def save(self) -> None:
-        data = asdict(self)
+        with _METRICS_LOCK:
+            data = asdict(self)
         data["directory"] = str(self.directory)
         data["started_at"] = self.started_at.isoformat()
         data["ended_at"] = self.ended_at.isoformat() if self.ended_at else None
@@ -88,4 +101,5 @@ class SessionInfo:
             ended_at=datetime.fromisoformat(data["ended_at"]) if data.get("ended_at") else None,
             tracks={Track(k): v for k, v in data.get("tracks", {}).items()},
             transcribed=data.get("transcribed", False),
+            metrics=data.get("metrics") or {},
         )

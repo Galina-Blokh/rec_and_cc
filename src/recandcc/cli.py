@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from .config import CONFIG_DIR, CONFIG_PATH, LOG_DIR, load_config
-from .logging_setup import LOG_FILE, setup_logging
+from .logging_setup import LOG_FILE, set_crash_notifier, setup_logging
 
 log = logging.getLogger("recandcc")
 
@@ -63,6 +63,7 @@ def cmd_run(args) -> int:
     from .ui.common import Controller
 
     ctrl = Controller(cfg)
+    set_crash_notifier(ctrl.post_notice)  # thread crashes -> toast (via the event queue)
     try:
         if sys.platform == "darwin":
             from .ui.mac import run_app
@@ -72,6 +73,7 @@ def cmd_run(args) -> int:
             raise NotImplementedError(sys.platform)
         run_app(ctrl)
     finally:
+        set_crash_notifier(None)
         ctrl.shutdown()  # idempotent enough: second engine/queue shutdown is a no-op
     return 0
 

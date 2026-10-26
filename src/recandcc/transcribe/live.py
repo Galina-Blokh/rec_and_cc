@@ -42,6 +42,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..metrics import latency_stats, log_session_metrics, rounded
 from ..models import SAMPLE_RATE, Segment, SessionInfo, Track
 from .engine import MIN_LANGUAGE_CONFIDENCE, SPEAKERS, Transcriber
 from .merge import ECHO_TOLERANCE_S, dedupe_echo, merge_tracks
@@ -219,6 +220,9 @@ class LiveTranscriber:
         self._ok_jobs = 0
         self._failed_jobs = 0
         self.latencies: list[float] = []  # seconds from region end (buffer time) to emit
+        self._input_lag_max = 0.0  # longest a captured block waited in the input queue
+        self._lag_from = float("inf")  # set once the model is loaded
+        self._flush_at: float | None = None  # clock() when recording stopped
 
         self._thread = threading.Thread(target=self._run, name=f"live-{session.id}", daemon=True)
         if start:
@@ -238,6 +242,8 @@ class LiveTranscriber:
         with self._lock:
             if session is not None:
                 self._final_session = session
+            if self._flush_at is None:
+                self._flush_at = self.clock()
             self._flush = True
         self._wake.set()
 
@@ -284,6 +290,7 @@ class LiveTranscriber:
         except BaseException as e:  # noqa: BLE001
             log.exception("live transcription unavailable: model failed to load")
             self._error = e
+        self._lag_from = self.clock()  # audio queued during the model load doesn't count
         try:
             while True:
                 self._wake.wait(self.step_s)
@@ -331,9 +338,11 @@ class LiveTranscriber:
     def _drain(self) -> None:
         while True:
             try:
-                track, start, frames, _ = self._inq.get_nowait()
+                track, start, frames, queued_at = self._inq.get_nowait()
             except queue.Empty:
                 return
+            if queued_at >= self._lag_from:
+                self._input_lag_max = max(self._input_lag_max, self.clock() - queued_at)
             frames = np.asarray(frames, dtype=np.float32).reshape(-1)
             tb = self._tracks.get(track)
             if tb is None:
@@ -558,6 +567,7 @@ class LiveTranscriber:
                 log.info("session %s was deleted; no live transcript written", session.id)
                 return
             self._result = self.transcriber.write_final(session, segs, duration, self._diarization)
+            self._save_metrics(session)
         log.info(
             "session %s: live transcript final, %d segments (%d regions, %d failed)",
             session.id,
@@ -565,6 +575,25 @@ class LiveTranscriber:
             self._ok_jobs,
             self._failed_jobs,
         )
+
+    def _save_metrics(self, session: SessionInfo) -> None:
+        """Caption latency (phrase end -> emit), input queue lag, time from stop to the
+        final transcript; saved into session.json and logged as one line."""
+        values = {
+            **latency_stats(self.latencies),
+            "failed_regions": self._failed_jobs,
+            "input_lag_max_s": rounded(self._input_lag_max),
+        }
+        with self._lock:
+            flush_at = self._flush_at
+        if flush_at is not None:
+            values["final_after_stop_s"] = rounded(self.clock() - flush_at, 2)
+        session.update_metrics("live", values)
+        try:
+            session.save()
+        except OSError:
+            log.exception("could not save metrics of session %s", session.id)
+        log_session_metrics(session)
 
 
 def live_title(session: SessionInfo) -> str:

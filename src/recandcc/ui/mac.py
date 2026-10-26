@@ -38,6 +38,7 @@ from .common import (
     as_str,
     keep_prompt_text,
     open_path,
+    reveal_logs,
     transcript_label,
 )
 
@@ -120,6 +121,7 @@ class MacApp(rumps.App):
             self.login_item,
             self.retention_menu,
             rumps.MenuItem("Edit settings", callback=lambda _: open_path(CONFIG_PATH, True)),
+            rumps.MenuItem("Reveal logs", callback=lambda _: reveal_logs()),
             None,
             rumps.MenuItem("Quit RecAndCC", callback=self._quit),
         ]

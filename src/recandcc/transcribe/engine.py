@@ -25,6 +25,7 @@ from pathlib import Path
 import numpy as np
 
 from ..config import TranscriptionConfig
+from ..metrics import log_session_metrics, rounded
 from ..models import SAMPLE_RATE, Segment, SessionInfo, Track
 from .chunking import Chunk, find_speech, load_track, merge_labelled, slice_chunk
 from .diarize import Diarizer, Turn, assign_speakers
@@ -81,6 +82,9 @@ class Transcriber:
         self._run_lock = threading.Lock()
         self._diarizer: Diarizer | None = None
         self.diarize_wait_s = DIARIZE_WAIT_S
+        # model -> load seconds, not yet reported in a session's metrics (the session that
+        # waited for the load gets them)
+        self._load_times: dict[str, float] = {}
 
     # -- models ------------------------------------------------------------------------------
 
@@ -100,6 +104,8 @@ class Transcriber:
         except Exception:
             log.info("model %s not on disk yet; downloading it once", name)
             model = WhisperModel(name, **kwargs)
+        elapsed = time.monotonic() - t0
+        self._load_times[name] = rounded(elapsed, 2)
         log.info(
             "loaded whisper model %s (%s, %s, workers=%d, threads=%d) in %.1fs",
             name,
@@ -107,7 +113,7 @@ class Transcriber:
             self.cfg.compute_type,
             self.num_workers,
             self.cpu_threads,
-            time.monotonic() - t0,
+            elapsed,
         )
         return model
 
@@ -119,8 +125,12 @@ class Transcriber:
                     if self.language_model and self._needs_detection():
                         self._lid_model = self._load(self.language_model)
                     if self.gpu:
+                        t0 = time.monotonic()
                         model = MlxWhisper(self.cfg.model)
                         model.load()
+                        self._load_times[f"{self.cfg.model} (gpu)"] = rounded(
+                            time.monotonic() - t0, 2
+                        )
                     else:
                         model = self._load(self.cfg.model)
                     self._pool = ThreadPoolExecutor(self.num_workers, thread_name_prefix="whisper")
@@ -335,6 +345,15 @@ class Transcriber:
                 per_track[Track.ME], per_track[Track.OTHERS], dedupe=self.cfg.dedupe_echo
             )
             elapsed = time.monotonic() - t0
+            session.update_metrics(
+                "transcription",
+                {
+                    "audio_s": rounded(duration, 1),
+                    "elapsed_s": rounded(elapsed, 2),
+                    "rtf": rounded(elapsed / duration if duration else 0.0),
+                    "chunks": len(chunks),
+                },
+            )
             log.info(
                 "session %s: %d chunks (%.1fs speech) -> %d segments; %.1fs audio in "
                 "%.1fs (vad+lang %.1fs), RTF %.3f",
@@ -349,6 +368,7 @@ class Transcriber:
             )
 
         segments = self.write_final(session, segments, duration, diarization)
+        log_session_metrics(session)
         report(1.0)
         return segments
 
@@ -367,7 +387,10 @@ class Transcriber:
             if self._diarizer is None:
                 self._diarizer = Diarizer()
             diarizer = self._diarizer
-        return diarizer.submit(path)
+        timing: dict = {}
+        future = diarizer.submit(path, timing)
+        future.timing = timing  # filled in before the result is set (see Diarizer._safe)
+        return future
 
     def write_final(
         self,
@@ -386,6 +409,10 @@ class Transcriber:
         """
         if diarization is None:
             diarization = self.start_diarization(session)
+        with self._init_lock:
+            loads, self._load_times = self._load_times, {}
+        if loads:
+            session.update_metrics("models", {"load_s": loads})
         if diarization is not None:
             try:
                 turns = diarization.result(timeout=self.diarize_wait_s)
@@ -398,6 +425,7 @@ class Transcriber:
                 return segments
             except Exception:  # noqa: BLE001 - cancelled; diarization is optional
                 turns = None
+            self._diarization_metrics(session, diarization)
             segments = self._labelled(session, segments, turns)
         self._write(session, segments, duration)
         self._drop_audio(session)
@@ -407,6 +435,12 @@ class Transcriber:
         write_outputs(session, segments, duration, self.cfg.model)
         session.transcribed = True
         session.save()
+
+    @staticmethod
+    def _diarization_metrics(session: SessionInfo, future: Future) -> None:
+        timing = getattr(future, "timing", None)
+        if timing:
+            session.update_metrics("diarization", dict(timing))
 
     def _drop_audio(self, session: SessionInfo) -> None:
         if not self.cfg.keep_audio:
@@ -436,6 +470,10 @@ class Transcriber:
             if labelled != segments and Path(session.directory).exists():
                 write_outputs(session, labelled, duration, self.cfg.model)
                 log.info("session %s: transcript rewritten with speaker labels", session.id)
+            if getattr(future, "timing", None) and Path(session.directory).exists():
+                self._diarization_metrics(session, future)
+                session.save()
+                log_session_metrics(session)
         except Exception:  # noqa: BLE001 - runs on the diarizer thread; must not raise
             log.exception("session %s: could not add speaker labels", session.id)
         finally:

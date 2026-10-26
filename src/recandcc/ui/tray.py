@@ -39,6 +39,7 @@ from .common import (
     Controller,
     keep_prompt_text,
     open_path,
+    reveal_logs,
     transcript_label,
 )
 
@@ -276,6 +277,7 @@ class TrayApp:
             Item("Permissions", pystray.Menu(perms)),
             Item("Launch at login", self._toggle_login, checked=lambda _i: autostart.is_enabled()),
             Item("Edit settings", lambda: open_path(CONFIG_PATH, True)),
+            Item("Reveal logs", lambda: reveal_logs()),
             pystray.Menu.SEPARATOR,
             Item("Quit", self._quit),
         )

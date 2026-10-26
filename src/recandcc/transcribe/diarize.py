@@ -292,6 +292,7 @@ class Diarizer:
         self._extractor = None
         self._pool: ThreadPoolExecutor | None = None  # embedding workers
         self._jobs: ThreadPoolExecutor | None = None  # one diarization at a time
+        self.load_s: float | None = None  # last model load time, until a job reports it
 
     def _load(self) -> tuple[object, ThreadPoolExecutor] | None:
         with self._lock:
@@ -305,10 +306,11 @@ class Diarizer:
                 cfg = sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(path), num_threads=1)
                 self._extractor = sherpa_onnx.SpeakerEmbeddingExtractor(cfg)
                 self._pool = ThreadPoolExecutor(self.threads, thread_name_prefix="diarize-emb")
+                self.load_s = time.monotonic() - t0
                 log.info(
                     "loaded speaker model %s in %.2fs (%d threads)",
                     path.name,
-                    time.monotonic() - t0,
+                    self.load_s,
                     self.threads,
                 )
             return self._extractor, self._pool
@@ -354,20 +356,29 @@ class Diarizer:
 
         return self.diarize(load_track(Path(path)))
 
-    def submit(self, path: Path) -> Future:
+    def submit(self, path: Path, timing: dict | None = None) -> Future:
         """Diarize the WAV at `path` in the background. The future's result is the turns, or
-        None when unavailable or failed; it never raises (errors are logged)."""
+        None when unavailable or failed; it never raises (errors are logged). When it ran,
+        `timing` gets ``elapsed_s`` (and ``model_load_s`` if the model was loaded for it)
+        before the result is set."""
         with self._lock:
             if self._jobs is None:
                 self._jobs = ThreadPoolExecutor(1, thread_name_prefix="diarize")
-            return self._jobs.submit(self._safe, Path(path))
+            return self._jobs.submit(self._safe, Path(path), timing)
 
-    def _safe(self, path: Path) -> list[Turn] | None:
+    def _safe(self, path: Path, timing: dict | None = None) -> list[Turn] | None:
         try:
             if not path.exists():
                 log.info("no audio to diarize (%s was deleted)", path.name)
                 return None
-            return self.diarize_file(path)
+            t0 = time.monotonic()
+            turns = self.diarize_file(path)
+            if timing is not None and turns is not None:
+                timing["elapsed_s"] = round(time.monotonic() - t0, 2)
+                load, self.load_s = self.load_s, None
+                if load is not None:
+                    timing["model_load_s"] = round(load, 2)
+            return turns
         except Exception as e:  # noqa: BLE001 - diarization is optional
             log.warning("speaker diarization of %s failed: %r", path, e)
             return None

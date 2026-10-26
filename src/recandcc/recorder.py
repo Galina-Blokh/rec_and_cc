@@ -78,6 +78,8 @@ class _TrackWriter:
         self.q: queue.Queue[np.ndarray | None] = queue.Queue()
         self.frames_written = 0
         self.frames_received = 0  # updated on the capture thread; ahead of frames_written
+        self.backlog_max = 0  # most samples ever waiting for the writer (disk falling behind)
+        self._padding = 0  # leading zeros (mid-session join): not counted as backlog
         self.level_dbfs = -120.0
         self.peak = 0.0  # max |sample| over the session (0.0 => digital silence throughout)
         self.error: BaseException | None = None
@@ -109,6 +111,9 @@ class _TrackWriter:
             for cb in self._listeners:
                 self._call(cb, start, block)
         self.q.put(block)
+        written = self.frames_written  # an int written by the writer thread: atomic read
+        if written >= self._padding:
+            self.backlog_max = max(self.backlog_max, start + block.size - written)
 
     def _call(self, cb: FrameListener, start: int, block: np.ndarray) -> None:
         try:
@@ -133,6 +138,7 @@ class _TrackWriter:
         includes the padding."""
         with self._tap_lock:
             self.frames_received += frames
+        self._padding += frames
         for i in range(0, frames, SAMPLE_RATE):
             self.q.put(np.zeros(min(SAMPLE_RATE, frames - i), dtype=np.float32))
 
@@ -368,6 +374,15 @@ class Recorder:
                 if w.frames_written == 0:
                     w.path.unlink(missing_ok=True)
                     session.tracks.pop(w.track, None)
+            session.update_metrics(
+                "recording",
+                {
+                    "audio_s": round(longest, 1),
+                    "writer_backlog_max_s": {
+                        str(w.track): round(w.backlog_max / SAMPLE_RATE, 3) for w in writers
+                    },
+                },
+            )
             session.save()
             log.info("recording stopped: %s (%.1fs)", session.directory, longest)
             return session

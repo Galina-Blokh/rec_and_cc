@@ -43,6 +43,7 @@ across platforms.
 | `ui/` | `common.Controller` (platform-independent glue) + `mac.py` (rumps) / `tray.py` (pystray) |
 | `ui/captions*.py` | Live captions window: `captions.py` (pure logic: ordering, trimming, header) + `captions_mac.py` (floating non-activating NSPanel); Windows uses a Tk window in `tray.py` |
 | `autostart.py` | LaunchAgent (macOS) / HKCU Run key (Windows) |
+| `logging_setup.py`, `metrics.py` | Log file + crash reporting (`sys`/`threading.excepthook` → log with traceback, thread crash → `notice` toast at most once per thread name per minute; `faulthandler` → `<log dir>/faults.log`); per-session pipeline metrics in `session.json` `metrics` + one INFO summary line |
 | `cli.py` | `recandcc` command line |
 | `native/macos/AudioTap` | SwiftPM package: `rcc-audiotap` helper + `RecAndCC` app launcher |
 

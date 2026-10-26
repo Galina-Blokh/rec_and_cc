@@ -28,7 +28,7 @@ from dataclasses import fields
 from pathlib import Path
 
 from .. import hotkey as hotkey_mod
-from ..config import CONFIG_PATH, Config, load_config
+from ..config import CONFIG_PATH, LOG_DIR, Config, load_config
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind
 from ..retention import purge_old_audio
@@ -63,6 +63,12 @@ def fmt_elapsed(seconds: float) -> str:
     h, rem = divmod(s, 3600)
     m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def reveal_logs() -> None:
+    """Open the log folder (recandcc.log, faults.log) in Finder / Explorer."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    open_path(LOG_DIR)
 
 
 def open_path(path: Path | str, text_editor: bool = False) -> None:
@@ -227,7 +233,7 @@ class Controller:
             recorder,
             _LiveAwareQueue(self),
             on_prompt=self._on_prompt,
-            on_notice=lambda t, m: self.events.put(("notice", t, m)),
+            on_notice=self.post_notice,
             on_state_change=lambda st: self.events.put(("state", st)),
             permission_status=permission_status,
             on_session_start=self._on_session_start,
@@ -307,6 +313,10 @@ class Controller:
             self.events.put(("notice", title, "Manual recording"))
 
     # --- callbacks from worker threads -> events
+    def post_notice(self, title: str, message: str) -> None:
+        """Toast from any thread (also the crash notifier, see logging_setup); never blocks."""
+        self.events.put(("notice", title, message))
+
     def _on_prompt(self, app: str, kind: TriggerKind) -> None:
         st = self.engine.state
         self.events.put(("prompt", app, kind, st.prompt_id))
