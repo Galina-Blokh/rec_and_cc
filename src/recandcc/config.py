@@ -113,6 +113,9 @@ class TranscriptionConfig:
     # Delete a recording's audio this many days after it was transcribed (0 = keep forever).
     # Transcripts are never deleted. Also settable from the menu: "Delete audio after".
     audio_retention_days: int = 0
+    # Split "Others" into "Speaker 1", "Speaker 2", ... in the final transcript (offline
+    # speaker diarization). Live captions keep showing "Others".
+    diarize: bool = True
     # Transcribe while recording: text appears ~1-2 s after each phrase, and the final
     # transcript is ready right when the session stops (no post-session pass).
     live: bool = True
