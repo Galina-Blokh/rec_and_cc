@@ -170,14 +170,6 @@ def as_str(text: str) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def mac_notify(title: str, message: str) -> None:
-    subprocess.Popen(
-        ["osascript", "-e", f"display notification {as_str(message)} with title {as_str(title)}"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-
 # ----------------------------------------------------------------------- controller
 class Controller:
     def __init__(

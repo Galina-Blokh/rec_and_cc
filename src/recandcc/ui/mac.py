@@ -33,7 +33,6 @@ from .common import (
     Controller,
     as_str,
     keep_prompt_text,
-    mac_notify,
     open_path,
     transcript_label,
 )
@@ -112,14 +111,29 @@ class MacApp(rumps.App):
             None,
             rumps.MenuItem("Quit RecAndCC", callback=self._quit),
         ]
+        self._toast = None
         self.timer = rumps.Timer(self._tick, TICK_S)
         self.timer.start()
+
+    def _notify(self, title: str, message: str) -> None:
+        """In-app toast (main thread). Not osascript: macOS attributes those notifications to
+        Script Editor, which then pops up an empty Script Editor window."""
+        try:
+            if self._toast is None:
+                from .toast_mac import ToastPanel
+
+                self._toast = ToastPanel()
+            self._toast.show(title, message)
+        except Exception:
+            log.exception("could not show notification: %s — %s", title, message)
 
     # ------------------------------------------------------------------ main thread
     def _tick(self, _timer) -> None:
         try:
             self._install_menu_delegate()
             self._drain_events()
+            if self._toast is not None:
+                self._toast.tick()
             self._render()
             self.ctrl.refresh_async()
         except Exception:
@@ -136,13 +150,13 @@ class MacApp(rumps.App):
                 _, app, tkind, prompt_id = ev
                 self._show_prompt(app, tkind, prompt_id)
             elif kind == "notice":
-                mac_notify(ev[1], ev[2])
+                self._notify(ev[1], ev[2])
             elif kind == "transcribed":
                 _, session, result = ev
                 if isinstance(result, Exception):
-                    mac_notify("Transcription failed", f"{session.directory.name}: {result}")
+                    self._notify("Transcription failed", f"{session.directory.name}: {result}")
                 else:
-                    mac_notify("Transcript ready", session.trigger_app or session.directory.name)
+                    self._notify("Transcript ready", session.trigger_app or session.directory.name)
             elif kind == "live_start":
                 self._live_started(ev[1], ev[2])
             elif kind == "live":
@@ -259,7 +273,7 @@ class MacApp(rumps.App):
             threading.Thread(target=self.cfg.save, daemon=True).start()
         except Exception as e:
             log.exception("autostart toggle failed")
-            mac_notify("Launch at login", f"Failed: {e}")
+            self._notify("Launch at login", f"Failed: {e}")
         sender.state = 1 if autostart.is_enabled() else 0
 
     def _toggle_captions(self, sender) -> None:
@@ -300,7 +314,7 @@ class MacApp(rumps.App):
     def _show_prompt(self, app: str, kind: TriggerKind, prompt_id: int | None) -> None:
         what = "a call" if kind == TriggerKind.CALL else "audio"
         msg = keep_prompt_text(app, kind, self.cfg.detection.ask_timeout_action)
-        mac_notify("Recording — keep it?", f"{app}: {what} detected")
+        self._notify("Recording — keep it?", f"{app}: {what} detected")
         timeout = max(5, int(self.cfg.detection.ask_timeout_s))
         buttons = ", ".join(f'"{label}"' for label, _ in PROMPT_BUTTONS)
         script = (
