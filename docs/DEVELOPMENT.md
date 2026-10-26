@@ -61,6 +61,15 @@ git push -u origin feature/short-name
 gh pr create --fill
 ```
 
+- **Keep PRs small: aim for ≲ 400 changed lines.** Split bigger work into a series of
+  PRs (for example: refactor first, then the feature, then docs), each green on its own.
+  Lock files and generated files don't count, but say so in the description.
+- Fill in the PR template ([.github/pull_request_template.md](../.github/pull_request_template.md)):
+  linked issue (`Closes #…`), acceptance criteria, tests, AI review findings addressed,
+  risk/rollback.
+- Rules and commands for AI coding agents (also a good checklist for humans) are in
+  [AGENTS.md](../AGENTS.md) at the repo root; `CLAUDE.md` is a symlink to it.
+
 Every PR gets two automatic checks:
 - **CI** (`.github/workflows/ci.yml`): lint + tests on macOS and Windows.
 - **Cursor review** (`.github/workflows/cursor-review.yml`): **four Cursor agents review in
