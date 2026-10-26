@@ -9,8 +9,9 @@ account, nothing uploaded.
   so the transcript knows who spoke: `Me` / `Others`.
 - 🌍 **English and Russian** are detected automatically, even when the language switches
   mid-meeting.
-- 🧠 Local Whisper (`large-v3-turbo`) via faster-whisper. On an M-series Mac it transcribes
-  about 3–4× faster than realtime, in parallel.
+- 🧠 Local Whisper (`large-v3-turbo`) via faster-whisper, **live**: each phrase appears about
+  3 s after it is spoken (floating captions window + a `transcript.md` that keeps growing),
+  and the final transcript is ready a moment after the recording stops.
 - 🟡 Three modes: **Off**, **Ask** (starts recording and asks "Keep it?"), and **Auto**. You
   can also set a different mode per app.
 - 🔐 Permissions are granted from inside the app, with a first-run setup dialog.
@@ -118,6 +119,13 @@ hides itself after 10 seconds. The close button hides it until the next recordin
 captions off for good, untick **Show live captions** in the menu. Captions need live
 transcription (`transcription.live = true`, the default).
 
+While recording, `transcript.md` in the session folder is rewritten every few seconds, so
+you can open it mid-meeting (**Open live transcript**). Text arrives about 3 s after each
+phrase on an M5 Max with `large-v3-turbo`: almost all of that is one Whisper pass. For
+faster captions see the `workers` / `model` trade-offs in
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md). The very first recording after the app starts
+shows captions only once the model has loaded (a few seconds).
+
 ### When does it record?
 
 1. Every second the app checks which apps are playing or capturing audio.
@@ -136,7 +144,9 @@ transcription (`transcription.live = true`, the default).
    - **Always**: keep it, and record this app automatically from now on (saved to settings).
 4. Recording stops when the app stops doing audio: after 8 s for videos, 20 s for calls
    (calls have natural pauses). It also stops after 30 s of silence for videos (e.g. a
-   paused tab), 3 minutes for calls. Then the recording is transcribed in the background.
+   paused tab), 3 minutes for calls. The transcript has been built while recording (see
+   [Live captions](#live-captions)), so it is final a few seconds after the stop. With
+   `transcription.live = false` the whole recording is transcribed after it stops instead.
 
 The microphone is recorded only for **calls** by default, so watching YouTube doesn't
 capture your room. If a call starts while a video is already being recorded, the session
@@ -163,6 +173,7 @@ record_mic = "calls"         # always | calls | never
 model = "large-v3-turbo"     # tiny | base | small | medium | large-v3 | large-v3-turbo
 languages = ["en", "ru"]     # auto-detect among these ([] = any language)
 keep_audio = true            # false = delete WAVs after transcription (~115 MB per track-hour)
+live = true                  # transcribe while recording (false = after the session stops)
 ```
 
 ## Command line
@@ -173,7 +184,7 @@ repo):
 | Command | What it does |
 |---|---|
 | `recandcc run` | Start the menu-bar app (what RecAndCC.app runs) |
-| `recandcc record --seconds 60 [--no-mic]` | Record now without the UI, then transcribe |
+| `recandcc record --seconds 60 [--no-mic]` | Record now without the UI; prints the text live as it is spoken, then the transcript path |
 | `recandcc transcribe <session_dir>` | (Re-)transcribe a recorded session |
 | `recandcc monitor` | Live view of which apps do audio and how the rules classify them. Use it to tune the app lists |
 | `recandcc devices` | List audio devices |
