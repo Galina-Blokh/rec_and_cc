@@ -144,3 +144,23 @@ def test_find_helper_prefers_app_bundle(tmp_path, monkeypatch):
     monkeypatch.delenv("RCC_AUDIOTAP", raising=False)
     monkeypatch.setenv("RCC_APP_BUNDLE", str(tmp_path / "RecAndCC.app"))
     assert find_helper() == helper
+
+
+@needs_audio_hardware
+def test_request_system_audio_does_not_crash():
+    """Regression: the TCC completion block escaped a non-escaping closure → SIGTRAP (exit -5).
+
+    Only runs when the calling app already has the permission, so no dialog appears.
+    """
+    from recandcc import permissions
+
+    if permissions.status()["system_audio"] != "granted":
+        pytest.skip("would show a permission prompt")
+    result = subprocess.run(
+        [str(HELPER), "request", "system_audio", "--timeout", "5"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    assert '"system_audio":"granted"' in result.stdout

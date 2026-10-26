@@ -21,7 +21,11 @@ enum PermissionKind: String {
 // launch failure.
 
 private typealias TCCPreflightFn = @convention(c) (CFString, CFDictionary?) -> Int
-private typealias TCCRequestFn = @convention(c) (CFString, CFDictionary?, @convention(block) (Bool) -> Void) -> Void
+// TCC keeps the completion block and calls it later, so it must be declared @escaping (otherwise
+// the Swift runtime traps with "non-escaping closure has escaped").
+private typealias TCCRequestFn = @convention(c) (
+    CFString, CFDictionary?, @escaping @convention(block) (Bool) -> Void
+) -> Void
 
 private let tccHandle: UnsafeMutableRawPointer? =
     dlopen("/System/Library/PrivateFrameworks/TCC.framework/Versions/A/TCC", RTLD_NOW)
