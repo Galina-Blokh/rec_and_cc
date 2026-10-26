@@ -1,0 +1,141 @@
+name: Cursor review
+
+# AI code review of every pull request by the Cursor agent (Grok 4.7 by default). Four
+# reviewers run in parallel, one per focus area ("lane", see scripts/review_lanes.sh); a final
+# job merges their findings into one PR comment. Needs the repo secret CURSOR_API_KEY
+# (cursor.com/dashboard → Integrations → API keys). Change the model with the repo variable
+# CURSOR_REVIEW_MODEL (`cursor-agent models` lists them; *-fast variants are quicker).
+#
+# The review is advisory: without the secret (or on fork PRs, which get no secrets) the jobs
+# are skipped and stay green. Make it a required check only together with the secret.
+#
+# Hardening (the agent reads untrusted PR content):
+# - the agent runs read-only (--mode ask, --sandbox enabled), never with --force;
+# - it runs on the trusted BASE tree with the PR diff as a data file, with agent instruction
+#   files (.cursor, AGENTS.md, CLAUDE.md, ...) removed, so the PR can't steer it;
+# - the Cursor agent is a pinned build verified by sha256; actions are pinned to commit SHAs;
+# - no GitHub token is persisted; the Cursor key only exists in the review step, and a review
+#   that contains it is withheld instead of posted.
+# Accepted risk: on `pull_request`, a same-repo branch can change this workflow itself. This
+# repo is private with a single maintainer; with outside collaborators, move the privileged
+# part to a `workflow_run` job on the default branch.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cursor-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  MODEL: ${{ vars.CURSOR_REVIEW_MODEL || 'grok-4.7-high' }}
+  PR: ${{ github.event.pull_request.number }}
+  BASE: ${{ github.event.pull_request.base.sha }}
+  HEAD: ${{ github.event.pull_request.head.sha }}
+  HAS_KEY: ${{ secrets.CURSOR_API_KEY != '' }}
+  AGENT_VERSION: 2026.10.22-27dcf5f
+  AGENT_SHA256: 85296944e4600a83c4b764f578d1502bf9c416db200d33a593e8f3ecabfdc294
+
+jobs:
+  review:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [correctness, security, platform, tests]
+    steps:
+      - name: Skip without API key
+        if: env.HAS_KEY != 'true'
+        run: echo "::notice::CURSOR_API_KEY secret not available — skipping the Cursor review."
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: env.HAS_KEY == 'true'
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare diff and trusted tree
+        if: env.HAS_KEY == 'true'
+        run: |
+          git fetch --no-tags origin "$BASE"
+          cp scripts/review_lanes.sh /tmp/review_lanes.sh
+          # Three-dot: only the PR's own changes, like GitHub's "Files changed".
+          git diff "$BASE...$HEAD" > /tmp/pr.diff
+          # Review against the trusted base tree; the PR is only the diff file.
+          git checkout --quiet --detach "$BASE"
+          rm -rf .cursor .cursorrules .mcp.json AGENTS.md CLAUDE.md .github/copilot-instructions.md
+
+      - name: Install Cursor agent (pinned, verified)
+        if: env.HAS_KEY == 'true'
+        run: |
+          curl -fsSL -o /tmp/agent.tgz \
+            "https://downloads.cursor.com/lab/$AGENT_VERSION/linux/x64/agent-cli-package.tar.gz"
+          echo "$AGENT_SHA256  /tmp/agent.tgz" | sha256sum -c -
+          mkdir -p "$HOME/cursor-agent"
+          tar --strip-components=1 -xzf /tmp/agent.tgz -C "$HOME/cursor-agent"
+          echo "CURSOR_AGENT=$HOME/cursor-agent/cursor-agent" >> "$GITHUB_ENV"
+
+      - name: Review (${{ matrix.lane }})
+        if: env.HAS_KEY == 'true'
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          NO_FOOTER: "1"
+        run: |
+          bash /tmp/review_lanes.sh /tmp/pr.diff "${{ matrix.lane }}" > /tmp/lane.md
+          if grep -qF "$CURSOR_API_KEY" /tmp/lane.md; then
+            echo "_Review withheld: the output contained a secret._" > /tmp/lane.md
+          fi
+          mkdir -p out && mv /tmp/lane.md "out/${{ matrix.lane }}.md"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: env.HAS_KEY == 'true'
+        with:
+          name: review-${{ matrix.lane }}
+          path: out/${{ matrix.lane }}.md
+          retention-days: 3
+
+  post:
+    needs: review
+    if: ${{ always() && !github.event.pull_request.draft && needs.review.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Skip without API key
+        if: env.HAS_KEY != 'true'
+        run: echo "::notice::No review to post."
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: env.HAS_KEY == 'true'
+        with:
+          pattern: review-*
+          merge-multiple: true
+          path: lanes
+
+      - name: Post comment
+        if: env.HAS_KEY == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A newer push makes this review stale: don't post it (that run will).
+          current=$(gh api "repos/${{ github.repository }}/pulls/$PR" -q .head.sha)
+          if [ "$current" != "$HEAD" ]; then
+            echo "::notice::PR head moved to $current — not posting a stale review of $HEAD."
+            exit 0
+          fi
+          {
+            echo "## 🤖 Cursor review (\`$MODEL\`, 4 parallel reviewers) of ${HEAD:0:7}"
+            echo
+            for lane in correctness security platform tests; do
+              if [ -f "lanes/$lane.md" ]; then cat "lanes/$lane.md"; else
+                echo "### $lane"; echo; echo "_Reviewer did not finish._"; echo; fi
+            done
+          } > review.md
+          gh pr comment "$PR" -R "${{ github.repository }}" --body-file review.md
