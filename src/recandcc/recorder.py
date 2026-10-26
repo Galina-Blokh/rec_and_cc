@@ -1,0 +1,272 @@
+"""Session recorder: capture sources -> queues -> WAV writer threads.
+
+Thread layout per track::
+
+    AudioSource worker thread --on_frames()--> queue.Queue --> writer thread (soundfile)
+
+``on_frames`` only measures the level (cheap numpy RMS) and enqueues a copy, so capture
+never blocks on disk I/O. ``stop()`` stops the sources, sends a sentinel to each writer,
+joins them, and persists session.json.
+"""
+
+from __future__ import annotations
+
+import logging
+import queue
+import re
+import shutil
+import threading
+import time
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf
+
+from .capture.base import AudioSource
+from .config import Config
+from .models import SAMPLE_RATE, SessionInfo, Track, TriggerKind
+
+log = logging.getLogger(__name__)
+
+# Sessions with less audio than this (longest track) are deleted instead of transcribed.
+MIN_SESSION_SECONDS = 3.0
+
+# Peak below this (~ -100 dBFS) counts as "digital silence" (no permission / dead device).
+DIGITAL_SILENCE = 1e-5
+
+TRACK_FILES = {Track.OTHERS: "others.wav", Track.ME: "me.wav"}
+
+SourceFactory = Callable[[], AudioSource]
+
+
+def slugify(text: str | None, default: str = "session") -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return s[:40] or default
+
+
+def dbfs(frames: np.ndarray) -> float:
+    if frames.size == 0:
+        return -120.0
+    rms = float(np.sqrt(np.mean(np.square(frames, dtype=np.float64))))
+    return 20.0 * np.log10(rms) if rms > 1e-6 else -120.0
+
+
+def should_record_mic(policy: str, kind: TriggerKind) -> bool:
+    policy = (policy or "calls").lower()
+    if policy == "always":
+        return True
+    if policy == "never":
+        return False
+    return kind in (TriggerKind.CALL, TriggerKind.MANUAL)
+
+
+class _TrackWriter:
+    def __init__(self, track: Track, path: Path, source: AudioSource, recorder: Recorder):
+        self.track = track
+        self.path = path
+        self.source = source
+        self.recorder = recorder
+        self.q: queue.Queue[np.ndarray | None] = queue.Queue()
+        self.frames_written = 0
+        self.level_dbfs = -120.0
+        self.peak = 0.0  # max |sample| over the session (0.0 => digital silence throughout)
+        self.error: BaseException | None = None
+        self._file = sf.SoundFile(
+            str(path), mode="w", samplerate=SAMPLE_RATE, channels=1, subtype="PCM_16", format="WAV"
+        )
+        self.thread = threading.Thread(target=self._run, name=f"writer-{track}", daemon=True)
+        self.thread.start()
+
+    def on_frames(self, frames: np.ndarray) -> None:  # capture thread: keep it cheap
+        frames = np.asarray(frames, dtype=np.float32).reshape(-1)
+        level = dbfs(frames)
+        self.level_dbfs = level
+        if frames.size:
+            self.peak = max(self.peak, float(np.max(np.abs(frames))))
+        self.recorder._note_level(level)
+        self.q.put(frames.copy())
+
+    def _run(self) -> None:
+        try:
+            while True:
+                block = self.q.get()
+                if block is None:
+                    break
+                self._file.write(np.clip(block, -1.0, 1.0))
+                self.frames_written += block.size
+        except BaseException as e:  # disk full etc. — drain so capture isn't stuck
+            self.error = e
+            log.exception("writer %s failed", self.track)
+            while self.q.get() is not None:
+                pass
+        finally:
+            self._file.close()
+
+    def finish(self) -> None:
+        self.q.put(None)
+        self.thread.join()
+
+
+class Recorder:
+    """Records one session at a time. Thread-safe; ``start``/``stop`` may block briefly."""
+
+    def __init__(
+        self,
+        cfg: Config,
+        mic_factory: SourceFactory | None = None,
+        system_factory: SourceFactory | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        min_session_s: float = MIN_SESSION_SECONDS,
+    ):
+        if mic_factory is None or system_factory is None:
+            from . import capture
+
+            mic_factory = mic_factory or capture.create_mic_source
+            system_factory = system_factory or capture.create_system_source
+        self.cfg = cfg
+        self.mic_factory = mic_factory
+        self.system_factory = system_factory
+        self.clock = clock
+        self.min_session_s = min_session_s
+        self._op_lock = threading.Lock()  # serialises start/stop
+        self._lvl_lock = threading.Lock()  # guards _last_sound
+        self._session: SessionInfo | None = None
+        self._writers: list[_TrackWriter] = []
+        self._started_mono = 0.0
+        self._last_sound = 0.0
+        # Peak |sample| per track of the most recently stopped session (incl. discarded).
+        self.last_peaks: dict[Track, float] = {}
+
+    # ---- levels -------------------------------------------------------------
+    def _note_level(self, level: float) -> None:
+        if level > self.cfg.detection.silence_dbfs:
+            now = self.clock()
+            with self._lvl_lock:
+                self._last_sound = now
+
+    def seconds_since_sound(self) -> float:
+        """Seconds since any track was above ``silence_dbfs`` (since start if never)."""
+        with self._lvl_lock:
+            last = self._last_sound
+        return max(0.0, self.clock() - last) if self.is_recording else 0.0
+
+    def silent_tracks(self) -> list[Track]:
+        """Tracks of the last stopped session that were digital silence the whole time
+        (typically a missing microphone / system-audio permission)."""
+        return [t for t, p in self.last_peaks.items() if p <= DIGITAL_SILENCE]
+
+    def levels(self) -> dict[Track, float]:
+        return {w.track: w.level_dbfs for w in list(self._writers)}
+
+    @property
+    def is_recording(self) -> bool:
+        return self._session is not None
+
+    @property
+    def session(self) -> SessionInfo | None:
+        return self._session
+
+    def elapsed(self) -> float:
+        return self.clock() - self._started_mono if self.is_recording else 0.0
+
+    # ---- lifecycle ----------------------------------------------------------
+    def _make_dir(self, now: datetime, app: str | None, kind: TriggerKind) -> tuple[str, Path]:
+        day = self.cfg.output_dir / now.strftime("%Y-%m-%d")
+        slug = slugify(app, default=str(kind))
+        base = f"{now.strftime('%H%M%S')}_{slug}"
+        d = day / base
+        n = 2
+        while d.exists():
+            d = day / f"{base}-{n}"
+            n += 1
+        d.mkdir(parents=True)
+        return f"{now.strftime('%Y-%m-%d')}_{d.name}", d
+
+    def start(
+        self, kind: TriggerKind, app: str | None = None, record_mic: bool | None = None
+    ) -> SessionInfo:
+        """Start a session. ``record_mic`` overrides the config policy when not None."""
+        with self._op_lock:
+            if self._session is not None:
+                raise RuntimeError("already recording")
+            now = datetime.now().astimezone()
+            sid, directory = self._make_dir(now, app, kind)
+            session = SessionInfo(
+                id=sid, directory=directory, started_at=now, trigger_kind=kind, trigger_app=app
+            )
+            want_mic = (
+                should_record_mic(self.cfg.detection.record_mic, kind)
+                if record_mic is None
+                else record_mic
+            )
+            plan = [(Track.OTHERS, self.system_factory)]
+            if want_mic:
+                plan.append((Track.ME, self.mic_factory))
+
+            writers: list[_TrackWriter] = []
+            for track, factory in plan:
+                path = directory / TRACK_FILES[track]
+                try:
+                    src = factory()
+                    w = _TrackWriter(track, path, src, self)
+                except Exception:
+                    log.exception("could not create %s source", track)
+                    continue
+                try:
+                    src.start(w.on_frames)
+                except Exception:
+                    log.exception("could not start %s source", track)
+                    w.finish()
+                    path.unlink(missing_ok=True)
+                    continue
+                writers.append(w)
+                session.tracks[track] = TRACK_FILES[track]
+
+            if not writers:
+                shutil.rmtree(directory, ignore_errors=True)
+                raise RuntimeError("no audio source could be started")
+            self._started_mono = self.clock()
+            with self._lvl_lock:
+                self._last_sound = self._started_mono
+            self._writers = writers
+            session.save()
+            self._session = session
+            log.info(
+                "recording started: %s (tracks: %s)",
+                directory,
+                ", ".join(str(t) for t in session.tracks),
+            )
+            return session
+
+    def stop(self) -> SessionInfo | None:
+        """Stop, flush and close. Returns the session, or None if nothing was recording
+        or the session was shorter than ``min_session_s`` (its directory is deleted)."""
+        with self._op_lock:
+            session, writers = self._session, self._writers
+            if session is None:
+                return None
+            for w in writers:
+                try:
+                    w.source.stop()
+                except Exception:
+                    log.exception("stopping %s source failed", w.track)
+            for w in writers:
+                w.finish()
+            self._session, self._writers = None, []
+            self.last_peaks = {w.track: w.peak for w in writers}
+            session.ended_at = datetime.now().astimezone()
+
+            longest = max((w.frames_written for w in writers), default=0) / SAMPLE_RATE
+            if longest < self.min_session_s:
+                log.info("discarding short session %s (%.1fs)", session.directory, longest)
+                shutil.rmtree(session.directory, ignore_errors=True)
+                return None
+            for w in writers:  # drop empty tracks (e.g. a source that never delivered)
+                if w.frames_written == 0:
+                    w.path.unlink(missing_ok=True)
+                    session.tracks.pop(w.track, None)
+            session.save()
+            log.info("recording stopped: %s (%.1fs)", session.directory, longest)
+            return session

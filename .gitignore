@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+*.wav
+native/macos/*/.build/
+bin/
+.DS_Store
+.pytest_cache/
+dist/

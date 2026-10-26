@@ -1,0 +1,206 @@
+import threading
+import time
+
+import numpy as np
+import pytest
+import soundfile as sf
+
+from recandcc.capture.base import AudioSource
+from recandcc.capture.mic import StreamResampler
+from recandcc.config import Config
+from recandcc.models import SAMPLE_RATE, SessionInfo, Track, TriggerKind
+from recandcc.recorder import Recorder, dbfs, should_record_mic, slugify
+
+
+class FakeSource(AudioSource):
+    """Pushes pre-generated frames from a background thread, as fast as possible."""
+
+    def __init__(self, signal: np.ndarray, block: int = 1600, fail: bool = False):
+        self.signal = signal.astype(np.float32)
+        self.block = block
+        self.fail = fail
+        self.started = threading.Event()
+        self.done = threading.Event()
+        self.stopped = False
+        self._thread = None
+
+    def start(self, on_frames):
+        if self.fail:
+            raise RuntimeError("no permission")
+
+        def run():
+            for i in range(0, len(self.signal), self.block):
+                if self.stopped:
+                    break
+                on_frames(self.signal[i : i + self.block])
+            self.done.set()
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self.stopped = True
+        if self._thread:
+            self._thread.join()
+
+
+def sine(seconds, freq=440.0, amp=0.5):
+    t = np.arange(int(seconds * SAMPLE_RATE)) / SAMPLE_RATE
+    return amp * np.sin(2 * np.pi * freq * t)
+
+
+@pytest.fixture
+def cfg(tmp_path):
+    c = Config(output_dir=tmp_path / "out")
+    return c
+
+
+def make(cfg, sys_signal, mic_signal=None, **kw):
+    sources = {}
+
+    def sysf():
+        sources["sys"] = FakeSource(sys_signal)
+        return sources["sys"]
+
+    def micf():
+        sources["mic"] = FakeSource(mic_signal if mic_signal is not None else sine(1))
+        return sources["mic"]
+
+    return Recorder(cfg, mic_factory=micf, system_factory=sysf, **kw), sources
+
+
+def test_records_both_tracks_for_call(cfg):
+    sig = np.concatenate([sine(2), np.zeros(2 * SAMPLE_RATE)])
+    rec, src = make(cfg, sig, sine(4, 300, 0.3))
+    s = rec.start(TriggerKind.CALL, "zoom.us")
+    assert rec.is_recording
+    src["sys"].done.wait(5)
+    src["mic"].done.wait(5)
+    out = rec.stop()
+    assert out is not None and out.ended_at is not None
+    assert out.tracks == {Track.OTHERS: "others.wav", Track.ME: "me.wav"}
+    d = out.directory
+    assert d.parent.parent == cfg.output_dir
+    assert d.name.endswith("_zoom-us")
+    data, sr = sf.read(d / "others.wav")
+    assert sr == SAMPLE_RATE
+    assert sf.info(str(d / "others.wav")).subtype == "PCM_16"
+    assert len(data) == len(sig)
+    assert np.allclose(data[:1000], sig[:1000], atol=1e-3)
+    loaded = SessionInfo.load(d)
+    assert loaded.id == s.id and loaded.ended_at is not None
+    assert rec.silent_tracks() == []
+    assert not rec.is_recording
+
+
+def test_media_skips_mic_by_policy(cfg):
+    rec, src = make(cfg, sine(4))
+    rec.start(TriggerKind.MEDIA, "Google Chrome")
+    src["sys"].done.wait(5)
+    out = rec.stop()
+    assert "mic" not in src
+    assert out.tracks == {Track.OTHERS: "others.wav"}
+    assert not (out.directory / "me.wav").exists()
+
+
+def test_record_mic_override(cfg):
+    rec, src = make(cfg, sine(4), sine(4))
+    rec.start(TriggerKind.CALL, "x", record_mic=False)
+    src["sys"].done.wait(5)
+    assert rec.stop().tracks == {Track.OTHERS: "others.wav"}
+
+
+def test_discard_short_session(cfg):
+    rec, src = make(cfg, sine(1))
+    s = rec.start(TriggerKind.MANUAL)
+    src["sys"].done.wait(5)
+    assert rec.stop() is None
+    assert not s.directory.exists()
+
+
+def test_stop_when_idle_returns_none(cfg):
+    rec, _ = make(cfg, sine(1))
+    assert rec.stop() is None
+
+
+def test_silence_tracking(cfg):
+    clock = [100.0]
+    sig = np.concatenate([sine(1), np.zeros(4 * SAMPLE_RATE)])
+    rec, src = make(cfg, sig, clock=lambda: clock[0])
+    rec.start(TriggerKind.MEDIA, "x")
+    src["sys"].done.wait(5)
+    time.sleep(0.05)
+    clock[0] = 130.0
+    # the last loud frame was observed at t=100 -> 30 s of silence
+    assert rec.seconds_since_sound() == pytest.approx(30.0)
+    assert rec.levels()[Track.OTHERS] < -100
+    rec.stop()
+
+
+def test_digital_silence_detected(cfg):
+    rec, src = make(cfg, np.zeros(4 * SAMPLE_RATE))
+    rec.start(TriggerKind.MEDIA, "x")
+    src["sys"].done.wait(5)
+    rec.stop()
+    assert rec.silent_tracks() == [Track.OTHERS]
+
+
+def test_failing_source_is_skipped(cfg):
+    def bad():
+        return FakeSource(sine(1), fail=True)
+
+    good = FakeSource(sine(4))
+    rec = Recorder(cfg, mic_factory=bad, system_factory=lambda: good)
+    s = rec.start(TriggerKind.CALL, "zoom")
+    assert s.tracks == {Track.OTHERS: "others.wav"}
+    good.done.wait(5)
+    assert rec.stop() is not None
+
+    rec2 = Recorder(cfg, mic_factory=bad, system_factory=bad)
+    with pytest.raises(RuntimeError):
+        rec2.start(TriggerKind.CALL, "zoom")
+    assert not rec2.is_recording
+
+
+def test_unique_dirs_and_double_start(cfg):
+    rec, src = make(cfg, sine(4))
+    a = rec.start(TriggerKind.MEDIA, "x")
+    with pytest.raises(RuntimeError):
+        rec.start(TriggerKind.MEDIA, "x")
+    src["sys"].done.wait(5)
+    rec.stop()
+    b = rec.start(TriggerKind.MEDIA, "x")
+    src["sys"].done.wait(5)
+    rec.stop()
+    assert a.directory != b.directory and a.id != b.id
+
+
+def test_helpers():
+    assert slugify("zoom.us") == "zoom-us"
+    assert slugify(None, "manual") == "manual"
+    assert dbfs(np.zeros(10)) == -120.0
+    assert dbfs(np.ones(10)) == pytest.approx(0.0)
+    assert should_record_mic("calls", TriggerKind.CALL)
+    assert should_record_mic("calls", TriggerKind.MANUAL)
+    assert not should_record_mic("calls", TriggerKind.MEDIA)
+    assert should_record_mic("always", TriggerKind.MEDIA)
+    assert not should_record_mic("never", TriggerKind.CALL)
+
+
+@pytest.mark.parametrize("src_rate", [48000, 44100, 16000, 8000])
+def test_resampler_chunked(src_rate):
+    t = np.arange(src_rate * 2) / src_rate
+    x = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+    r = StreamResampler(src_rate)
+    out = np.concatenate([r.process(x[i : i + 4410]) for i in range(0, len(x), 4410)])
+    assert abs(len(out) - 2 * SAMPLE_RATE) <= 2
+    # dominant frequency preserved
+    spec = np.abs(np.fft.rfft(out[1000:17000]))
+    freq = np.argmax(spec) * SAMPLE_RATE / 16000
+    assert abs(freq - 440) < 5
+    # high frequency above new Nyquist is attenuated when downsampling
+    if src_rate > SAMPLE_RATE:
+        hi = (0.5 * np.sin(2 * np.pi * 12000 * t)).astype(np.float32)
+        r2 = StreamResampler(src_rate)
+        o2 = np.concatenate([r2.process(hi[i : i + 4410]) for i in range(0, len(hi), 4410)])
+        assert np.sqrt(np.mean(o2[2000:] ** 2)) < 0.05

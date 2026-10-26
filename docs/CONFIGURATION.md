@@ -1,0 +1,75 @@
+# Configuration
+
+File: `~/Library/Application Support/RecAndCC/config.toml` (macOS) or
+`%LOCALAPPDATA%\RecAndCC\config.toml` (Windows). It is created with defaults on first run.
+Open it from **menu → Edit settings**, or print it with `recandcc config`. Unknown keys are
+ignored, and missing keys take their default values.
+
+Changes to `[detection]` are picked up while the app runs. Restart the app after changing
+`[transcription]` or `output_dir`.
+
+## Top level
+
+| Key | Default | Description |
+|---|---|---|
+| `output_dir` | `~/Documents/Transcribes` | Where sessions are saved (`<date>/<time>_<app>/`) |
+| `autostart` | `false` | Informational; use **menu → Launch at login** or `recandcc autostart on` |
+| `hotkey` | `"<cmd>+<shift>+r"` | Reserved; a global hotkey is not implemented yet (see roadmap) |
+
+## `[detection]`
+
+| Key | Default | Description |
+|---|---|---|
+| `mode` | `"ask"` | `off` never records · `ask` offers to record · `auto` records automatically |
+| `poll_interval_s` | `1.0` | How often audio activity is checked |
+| `min_active_s` | `3.0` | An app must be doing audio this long before a recording starts or a prompt appears |
+| `stop_after_inactive_s` | `20.0` | Stop when the trigger app has stopped doing audio for this long |
+| `stop_after_silence_s` | `180.0` | Stop when all tracks have been below `silence_dbfs` for this long |
+| `silence_dbfs` | `-50.0` | Level below which audio counts as silence |
+| `ask_timeout_s` | `30.0` | The "Record?" prompt closes after this (counts as Ignore) |
+| `record_mic` | `"calls"` | `always` · `calls` (calls and manual recordings only) · `never` |
+| `call_apps` | Zoom, Teams, FaceTime, Slack, Discord, Telegram, WhatsApp, Skype, Webex | Patterns for call apps |
+| `media_apps` | browsers, QuickTime, VLC, Podcasts, TV | Patterns for media apps |
+| `ignore_apps` | Spotify, Music, system sounds, Siri, Voice Memos | Never trigger |
+| `app_modes` | `{}` | Per-app mode overrides, e.g. `{"us.zoom" = "auto", "com.google.chrome" = "ask"}` |
+
+**Patterns** are case-insensitive substrings matched against the app's bundle id (macOS,
+e.g. `us.zoom.xos`) or process/exe name (Windows, e.g. `zoom.exe`). To find the right
+pattern, run `uv run recandcc monitor` while the app plays audio.
+
+Classification order: ignore → call → media → unknown. An unknown app using the mic counts
+as a call, and an unknown app that only plays audio counts as media. A media app (a browser)
+using the mic is treated as a call (Google Meet). The global `mode = "off"` overrides all
+`app_modes`.
+
+## `[transcription]`
+
+| Key | Default | Description |
+|---|---|---|
+| `model` | `"large-v3-turbo"` | faster-whisper model name (`tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo`) or a local CTranslate2 model path |
+| `device` | `"auto"` | `auto` · `cpu` · `cuda` (NVIDIA on Windows) |
+| `compute_type` | `"float32"` on macOS, `"int8"` elsewhere | Quantisation. On Apple silicon float32 is ~20% faster (Accelerate) at ~3 GB RAM; int8 uses ~1 GB |
+| `languages` | `["en", "ru"]` | Detect only among these languages; `[]` = any language |
+| `workers` | `0` | Parallel transcription workers; `0` = auto (`min(4, cores // 4)`) |
+| `dedupe_echo` | `true` | Remove mic segments that are speaker echo of the other side |
+| `keep_audio` | `true` | `false` deletes the WAVs after a successful transcription (~115 MB per track-hour) |
+
+## Example
+
+```toml
+output_dir = "/Users/me/Documents/Transcribes"
+
+[detection]
+mode = "ask"
+record_mic = "calls"
+ignore_apps = ["com.spotify.client", "com.apple.music", "coreaudiod", "recandcc", "rcc-audiotap"]
+
+[detection.app_modes]
+"us.zoom" = "auto"
+"com.microsoft.teams" = "auto"
+
+[transcription]
+model = "large-v3-turbo"
+languages = ["en", "ru"]
+keep_audio = false
+```
