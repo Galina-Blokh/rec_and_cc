@@ -117,9 +117,8 @@ class Config:
     output_dir: Path = DEFAULT_OUTPUT_DIR
     autostart: bool = False
     hotkey: str = "<cmd>+<shift>+r"
-    live_captions: bool = (
-        True  # floating captions window while recording (needs transcription.live)
-    )
+    # Floating captions window while recording (needs transcription.live).
+    live_captions: bool = True
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
 
