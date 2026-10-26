@@ -4,6 +4,10 @@ All rumps/AppKit objects are touched only on the main thread: a ``rumps.Timer`` 
 0.5 s, drains ``Controller.events`` and re-renders the title/menu from ``engine.state``.
 Dialogs (record prompt, onboarding) run ``osascript`` on worker threads and route answers
 back to the engine, whose API is thread-safe.
+
+Live captions: the Controller posts ``live_start`` / ``live`` / ``live_end`` events; the
+same timer feeds them to a floating ``CaptionsPanel`` (``captions_mac.py``) when
+``cfg.live_captions`` is on.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import contextlib
 import logging
 import subprocess
 import threading
+from pathlib import Path
 
 import rumps
 
@@ -33,6 +38,11 @@ from .common import (
     transcript_label,
 )
 
+try:
+    from .captions_mac import CaptionsPanel
+except Exception:  # pragma: no cover - captions are optional; never break the menu bar app
+    CaptionsPanel = None
+
 log = logging.getLogger(__name__)
 
 TICK_S = 0.5
@@ -48,6 +58,11 @@ class MacApp(rumps.App):
         self._onboarded = False
         self._delegate = None
         self._recent_sig: tuple = ()
+        # live captions (main thread only)
+        self.captions = CaptionsPanel() if CaptionsPanel is not None else None
+        self._live_id: str | None = None  # session currently being captioned
+        self._live_dir: str | None = None  # its directory (kept after it ends)
+        self._live_open_enabled: bool | None = None
 
         self.status_item = rumps.MenuItem("Starting…")
         self.mode_items = {
@@ -76,12 +91,17 @@ class MacApp(rumps.App):
             )
         )
         self.login_item = rumps.MenuItem("Launch at login", callback=self._toggle_login)
+        self.captions_item = rumps.MenuItem("Show live captions", callback=self._toggle_captions)
+        self.captions_item.state = 1 if self.cfg.live_captions else 0
+        self.live_open_item = rumps.MenuItem("Open live transcript")
 
         self.menu = [
             self.status_item,
             None,
             self.mode_menu,
             self.rec_item,
+            self.captions_item,
+            self.live_open_item,
             None,
             rumps.MenuItem("Open transcripts folder", callback=self._open_folder),
             self.recent_menu,
@@ -123,6 +143,18 @@ class MacApp(rumps.App):
                     mac_notify("Transcription failed", f"{session.directory.name}: {result}")
                 else:
                     mac_notify("Transcript ready", session.trigger_app or session.directory.name)
+            elif kind == "live_start":
+                self._live_started(ev[1], ev[2])
+            elif kind == "live":
+                if ev[1] != self._live_id:
+                    self._live_started(ev[1], "")
+                if self.captions is not None:
+                    self.captions.append(ev[2])
+            elif kind == "live_end":
+                if ev[1] == self._live_id:
+                    self._live_id = None
+                    if self.captions is not None:
+                        self.captions.end()
             elif kind == "refreshed":
                 self._render_recent()
                 self._render_permissions()
@@ -138,12 +170,31 @@ class MacApp(rumps.App):
             item.state = 1 if st.mode == m else 0
         self.rec_item.title = "Stop recording" if st.status == RECORDING else "Start recording"
         self.login_item.state = 1 if autostart.is_enabled() else 0
+        self._render_live(st)
         # close a stale prompt dialog (answered elsewhere, expired, mode changed, ...)
         with self._dialog_lock:
             if self._dialog and st.prompt_id != self._dialog[0]:
                 with contextlib.suppress(Exception):
                     self._dialog[1].terminate()
                 self._dialog = None
+
+    def _live_started(self, session_id: str, title: str) -> None:
+        self._live_id = session_id
+        self._live_dir = self.ctrl.engine.state.session_dir
+        if self.captions is not None:
+            self.captions.show(title, display=self.cfg.live_captions)
+
+    def _render_live(self, st) -> None:
+        if self._live_id is not None and st.session_dir:
+            self._live_dir = st.session_dir
+        if self.captions is not None:
+            live = self._live_id is not None and st.status == RECORDING
+            self.captions.tick(st.elapsed if live else None)
+        enabled = bool(self._live_dir)
+        if enabled != self._live_open_enabled:
+            self._live_open_enabled = enabled
+            # rumps greys out an item that has no callback
+            self.live_open_item.set_callback(self._open_live if enabled else None)
 
     def _render_recent(self) -> None:
         recent = self.ctrl.recent
@@ -210,6 +261,25 @@ class MacApp(rumps.App):
             log.exception("autostart toggle failed")
             mac_notify("Launch at login", f"Failed: {e}")
         sender.state = 1 if autostart.is_enabled() else 0
+
+    def _toggle_captions(self, sender) -> None:
+        self.cfg.live_captions = not self.cfg.live_captions
+        sender.state = 1 if self.cfg.live_captions else 0
+        threading.Thread(target=self.cfg.save, daemon=True).start()
+        if self.captions is None:
+            return
+        if self.cfg.live_captions:
+            if self._live_id is not None:
+                self.captions.reveal()
+        else:
+            self.captions.hide()
+
+    def _open_live(self, _sender) -> None:
+        if not self._live_dir:
+            return
+        d = Path(self._live_dir)
+        md = d / "transcript.md"
+        open_path(md if md.exists() else d)
 
     def _open_folder(self, _sender) -> None:
         self.cfg.output_dir.mkdir(parents=True, exist_ok=True)

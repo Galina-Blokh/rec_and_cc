@@ -103,13 +103,30 @@ def cmd_record(args) -> int:
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     session = rec.start(TriggerKind.MANUAL, "manual", record_mic=False if args.no_mic else None)
     print(f"Recording to {session.directory} (tracks: {', '.join(map(str, session.tracks))})")
+    live = transcriber = None
+    print_lock = threading.Lock()
+    if cfg.transcription.live and not args.no_transcribe:
+        from .transcribe import Transcriber
+        from .transcribe.live import LiveTranscriber
+        from .transcribe.output import fmt_hms
+
+        def show(segs) -> None:
+            with print_lock:
+                for s in segs:
+                    print(f"\r\033[K[{fmt_hms(s.start)}] {s.speaker}: {s.text}", flush=True)
+
+        transcriber = Transcriber(cfg.transcription)
+        live = LiveTranscriber(transcriber, session, on_segments=show)
+        rec.add_listener(live.feed)
+        print("Live transcription on (the model loads in the background).")
     print("Press Ctrl-C to stop." if args.seconds is None else f"Recording {args.seconds}s…")
     t0 = time.monotonic()
     while not stop.is_set():
         if args.seconds is not None and time.monotonic() - t0 >= args.seconds:
             break
         levels = " ".join(f"{t}:{v:6.1f}dB" for t, v in rec.levels().items())
-        print(f"\r  {time.monotonic() - t0:6.1f}s  {levels}   ", end="", flush=True)
+        with print_lock:
+            print(f"\r  {time.monotonic() - t0:6.1f}s  {levels}   ", end="", flush=True)
         stop.wait(0.25)
     print()
     result = rec.stop()
@@ -120,12 +137,27 @@ def cmd_record(args) -> int:
             "check microphone / system audio permissions."
         )
     if result is None:
+        if live is not None:
+            live.cancel()
+            transcriber.close()
         print("Session too short; discarded.")
         return 1
     print(f"Saved {result.directory}")
     if args.no_transcribe:
         return 0
-    _transcribe_now(cfg, result)
+    if live is None:
+        _transcribe_now(cfg, result)
+        return 0
+    try:
+        t1 = time.monotonic()
+        segs = live.finish(result)
+        print(f"Final transcript ({len(segs)} segments) {time.monotonic() - t1:.1f}s after stop")
+        print(f"Transcript: {Path(result.directory) / 'transcript.md'}")
+    except Exception as e:
+        print(f"Live transcription failed ({e}); transcribing the recording instead.")
+        _transcribe_now(cfg, result)
+    finally:
+        transcriber.close()
     return 0
 
 
@@ -236,7 +268,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("run", help="start the menu-bar / tray app").set_defaults(func=cmd_run)
 
-    r = sub.add_parser("record", help="record manually (headless), then transcribe")
+    r = sub.add_parser(
+        "record", help="record manually (headless), transcribing live (transcription.live)"
+    )
     r.add_argument("--seconds", type=float, default=None, help="stop after N seconds")
     r.add_argument("--no-mic", action="store_true", help="system audio only")
     r.add_argument("--no-transcribe", action="store_true", help="just record")

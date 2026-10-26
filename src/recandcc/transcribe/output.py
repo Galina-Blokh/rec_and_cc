@@ -46,7 +46,10 @@ def paragraphs(segments: list[Segment], gap_s: float = PARAGRAPH_GAP_S) -> list[
     return out
 
 
-def format_markdown(session: SessionInfo, segments: list[Segment], duration: float) -> str:
+def format_markdown(
+    session: SessionInfo, segments: list[Segment], duration: float, live: bool = False
+) -> str:
+    """``live``: the session is still recording (partial transcript, rewritten as it grows)."""
     started = session.started_at
     trigger = session.trigger_app or "manual"
     lines = [
@@ -58,7 +61,9 @@ def format_markdown(session: SessionInfo, segments: list[Segment], duration: flo
         f"- **Languages:** {', '.join(languages_of(segments)) or '-'}",
         "",
     ]
-    if not segments:
+    if live:
+        lines += ["_Live transcript — recording in progress, updated every few seconds._", ""]
+    if not segments and not live:
         lines.append("_No speech detected._")
     for p in paragraphs(segments):
         lines += [f"**[{fmt_hms(p.start)}] {p.speaker}:** {p.text}", ""]
@@ -98,10 +103,19 @@ def write_outputs(
         JSON_NAME: format_json(session, segments, duration, model),
         SRT_NAME: format_srt(segments),
     }
-    paths = []
-    for name, text in contents.items():
-        tmp = d / f".{name}.tmp"
-        tmp.write_text(text, encoding="utf-8")
-        tmp.replace(d / name)
-        paths.append(d / name)
-    return paths
+    return [atomic_write(d / name, text) for name, text in contents.items()]
+
+
+def write_live_markdown(session: SessionInfo, segments: list[Segment], duration: float) -> Path:
+    """Rewrite transcript.md of a session that is still recording (atomically)."""
+    return atomic_write(
+        Path(session.directory) / MD_NAME, format_markdown(session, segments, duration, live=True)
+    )
+
+
+def atomic_write(path: Path, text: str) -> Path:
+    """Write via a temp file + rename, so readers never see a half-written file."""
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+    return path

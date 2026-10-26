@@ -5,8 +5,9 @@ Thread layout per track::
     AudioSource worker thread --on_frames()--> queue.Queue --> writer thread (soundfile)
 
 ``on_frames`` only measures the level (cheap numpy RMS) and enqueues a copy, so capture
-never blocks on disk I/O. ``stop()`` stops the sources, sends a sentinel to each writer,
-joins them, and persists session.json.
+never blocks on disk I/O. Frame listeners (``add_listener``, used for live transcription) get
+the same copy on the capture thread and must only enqueue it. ``stop()`` stops the sources,
+sends a sentinel to each writer, joins them, and persists session.json.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import re
 import shutil
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +41,11 @@ DIGITAL_SILENCE = 1e-5
 TRACK_FILES = {Track.OTHERS: "others.wav", Track.ME: "me.wav"}
 
 SourceFactory = Callable[[], AudioSource]
+# listener(track, start_frame, frames): ``start_frame`` is the sample index of frames[0] in the
+# track's timeline (= in its WAV), so a mic track that joined mid-session starts at its padding.
+FrameListener = Callable[[Track, int, np.ndarray], None]
+# Captured audio kept per track to replay to a listener added after the session started.
+REPLAY_SECONDS = 10.0
 
 
 def slugify(text: str | None, default: str = "session") -> str:
@@ -74,6 +81,10 @@ class _TrackWriter:
         self.level_dbfs = -120.0
         self.peak = 0.0  # max |sample| over the session (0.0 => digital silence throughout)
         self.error: BaseException | None = None
+        self._tap_lock = threading.Lock()  # frames_received + listeners + replay buffer
+        self._listeners: tuple[FrameListener, ...] = recorder._listeners
+        self._recent: deque[tuple[int, np.ndarray]] = deque()
+        self._recent_frames = 0
         self._file = sf.SoundFile(
             str(path), mode="w", samplerate=SAMPLE_RATE, channels=1, subtype="PCM_16", format="WAV"
         )
@@ -87,12 +98,41 @@ class _TrackWriter:
         if frames.size:
             self.peak = max(self.peak, float(np.max(np.abs(frames))))
         self.recorder._note_level(level)
-        self.frames_received += frames.size
-        self.q.put(frames.copy())
+        block = frames.copy()
+        with self._tap_lock:
+            start = self.frames_received
+            self.frames_received += block.size
+            self._recent.append((start, block))
+            self._recent_frames += block.size
+            while self._recent_frames - self._recent[0][1].size >= REPLAY_SECONDS * SAMPLE_RATE:
+                self._recent_frames -= self._recent.popleft()[1].size
+            for cb in self._listeners:
+                self._call(cb, start, block)
+        self.q.put(block)
+
+    def _call(self, cb: FrameListener, start: int, block: np.ndarray) -> None:
+        try:
+            cb(self.track, start, block)
+        except Exception:  # a listener must never break capture
+            log.exception("frame listener failed (%s)", self.track)
+
+    def add_listener(self, cb: FrameListener) -> None:
+        """Replay the recent audio to ``cb``, then deliver new frames to it."""
+        with self._tap_lock:
+            for start, block in self._recent:
+                self._call(cb, start, block)
+            self._listeners = (*self._listeners, cb)
+
+    def remove_listener(self, cb: FrameListener) -> None:
+        with self._tap_lock:
+            self._listeners = tuple(c for c in self._listeners if c is not cb)
 
     def pad_silence(self, frames: int) -> None:
-        """Queue ``frames`` zeros ahead of any captured audio (track joining mid-session)."""
-        self.frames_received += frames
+        """Queue ``frames`` zeros ahead of any captured audio (track joining mid-session).
+        Listeners are not sent the zeros: the first captured block's ``start_frame`` already
+        includes the padding."""
+        with self._tap_lock:
+            self.frames_received += frames
         for i in range(0, frames, SAMPLE_RATE):
             self.q.put(np.zeros(min(SAMPLE_RATE, frames - i), dtype=np.float32))
 
@@ -146,6 +186,25 @@ class Recorder:
         self._last_sound = 0.0
         # Peak |sample| per track of the most recently stopped session (incl. discarded).
         self.last_peaks: dict[Track, float] = {}
+        self._listeners: tuple[FrameListener, ...] = ()
+
+    # ---- frame tap ----------------------------------------------------------
+    def add_listener(self, cb: FrameListener) -> None:
+        """Receive every track's frames as they are captured: ``cb(track, start_frame,
+        frames)`` on the capture thread (keep it cheap: enqueue only; don't mutate
+        ``frames``). Added during a session, it first gets the last ``REPLAY_SECONDS`` of
+        audio, so nothing since the start is missed. Tracks added later (mic joining a call)
+        are included. Listeners are per session: ``stop()`` removes them all."""
+        with self._op_lock:
+            self._listeners = (*self._listeners, cb)
+            for w in self._writers:
+                w.add_listener(cb)
+
+    def remove_listener(self, cb: FrameListener) -> None:
+        with self._op_lock:
+            self._listeners = tuple(c for c in self._listeners if c is not cb)
+            for w in self._writers:
+                w.remove_listener(cb)
 
     # ---- levels -------------------------------------------------------------
     def _note_level(self, level: float) -> None:
@@ -296,7 +355,7 @@ class Recorder:
                     log.exception("stopping %s source failed", w.track)
             for w in writers:
                 w.finish()
-            self._session, self._writers = None, []
+            self._session, self._writers, self._listeners = None, [], ()
             self.last_peaks = {w.track: w.peak for w in writers}
             session.ended_at = datetime.now().astimezone()
 

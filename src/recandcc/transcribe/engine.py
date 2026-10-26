@@ -17,7 +17,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -160,11 +160,10 @@ class Transcriber:
         return chunks
 
     def _transcribe_chunk(self, chunk: Chunk, audio: np.ndarray) -> list[Segment]:
-        model = self._model
         piece = slice_chunk(audio, chunk)
         lang = chunk.language
         if lang is None or chunk.confidence < MIN_LANGUAGE_CONFIDENCE:
-            lang, conf = self._detect(model, piece)
+            lang, conf = self._detect(self._model, piece)
             log.debug(
                 "chunk %s %.1fs: main-model language %s (%.2f, was %s)",
                 chunk.track,
@@ -173,24 +172,69 @@ class Transcriber:
                 conf,
                 chunk.language,
             )
-        segments, _ = model.transcribe(
-            piece,
-            language=lang,
+        return self.transcribe_audio(
+            piece, chunk.start, SPEAKERS[chunk.track], lang, max_end=chunk.end
+        )
+
+    # -- building blocks (also used by LiveTranscriber) --------------------------------------
+
+    def ensure_loaded(self) -> None:
+        """Load the model(s) and create the worker pool if needed (thread-safe, blocking)."""
+        self._ensure_loaded()
+
+    def submit(self, fn: Callable, *args) -> Future:
+        """Run ``fn(*args)`` on the shared worker pool (loads the model first if needed)."""
+        self._ensure_loaded()
+        return self._pool.submit(fn, *args)
+
+    @property
+    def has_language_model(self) -> bool:
+        """True if a separate small language-ID model is used (main-model re-check possible)."""
+        self._ensure_loaded()
+        return self._lid_model is not None
+
+    def detect_language(self, audio: np.ndarray, main: bool = False) -> tuple[str, float]:
+        """(language, confidence) among cfg.languages. Uses the small language-ID model unless
+        ``main`` is set or there is none. A single configured language is returned as is."""
+        if not self._needs_detection():
+            return self.cfg.languages[0], 1.0
+        self._ensure_loaded()
+        model = self._model if main or self._lid_model is None else self._lid_model
+        return self._detect(model, audio)
+
+    def transcribe_audio(
+        self,
+        audio: np.ndarray,
+        offset: float,
+        speaker: str,
+        language: str,
+        *,
+        beam_size: int = 5,
+        max_end: float | None = None,
+    ) -> list[Segment]:
+        """Transcribe one piece of audio (<= 30 s) in a fixed language. Segment times are
+        ``offset`` + position in the piece, clipped to ``max_end``. Blocking; call it from a
+        pool worker (see ``submit``) to run pieces in parallel."""
+        self._ensure_loaded()
+        segments, _ = self._model.transcribe(
+            audio,
+            language=language,
             vad_filter=False,
-            beam_size=5,
+            beam_size=beam_size,
             condition_on_previous_text=False,
         )
+        end_cap = max_end if max_end is not None else offset + len(audio) / SAMPLE_RATE
         out = []
         for s in segments:
             text = s.text.strip()
             if text:
                 out.append(
                     Segment(
-                        start=round(chunk.start + s.start, 3),
-                        end=round(min(chunk.start + s.end, chunk.end), 3),
+                        start=round(offset + s.start, 3),
+                        end=round(min(offset + s.end, end_cap), 3),
                         text=text,
-                        speaker=SPEAKERS[chunk.track],
-                        language=lang,
+                        speaker=speaker,
+                        language=language,
                     )
                 )
         return out
@@ -270,14 +314,18 @@ class Transcriber:
                 elapsed / duration if duration else 0.0,
             )
 
+        self.write_final(session, segments, duration)
+        report(1.0)
+        return segments
+
+    def write_final(self, session: SessionInfo, segments: list[Segment], duration: float) -> None:
+        """Write transcript.{md,json,srt}, mark the session transcribed, honour keep_audio."""
         write_outputs(session, segments, duration, self.cfg.model)
         session.transcribed = True
         session.save()
         if not self.cfg.keep_audio:
             for name in session.tracks.values():
                 (Path(session.directory) / name).unlink(missing_ok=True)
-        report(1.0)
-        return segments
 
 
 def transcribe_directory(path: Path, cfg: TranscriptionConfig) -> list[Segment]:

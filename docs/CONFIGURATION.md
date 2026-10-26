@@ -15,6 +15,7 @@ Changes to `[detection]` are picked up while the app runs. Restart the app after
 | `output_dir` | `~/Documents/Transcribes` | Where sessions are saved (`<date>/<time>_<app>/`) |
 | `autostart` | `false` | Informational; use **menu → Launch at login** or `recandcc autostart on` |
 | `hotkey` | `"<cmd>+<shift>+r"` | Reserved; a global hotkey is not implemented yet (see roadmap) |
+| `live_captions` | `true` | Show the floating captions window while recording (needs `transcription.live`) |
 
 ## `[detection]`
 
@@ -56,6 +57,15 @@ using the mic is treated as a call (Google Meet). The global `mode = "off"` over
 | `workers` | `0` | Parallel transcription workers; `0` = auto (`min(4, cores // 4)`) |
 | `dedupe_echo` | `true` | Remove mic segments that are speaker echo of the other side |
 | `keep_audio` | `true` | `false` deletes the WAVs after a successful transcription (~115 MB per track-hour) |
+| `live` | `true` | Transcribe while recording: each phrase appears ~3 s after it is spoken (captions, and `transcript.md` is rewritten every few seconds), and the final transcript is written about a second after the session stops. `false` = transcribe the whole session after it stops |
+
+With `live = true`, the latency is dominated by one Whisper pass per phrase (~2.5 s for
+`large-v3-turbo` with the default 4 workers on an M5 Max). `workers = 1` gives every pass all
+cores (~2.6 s phrase-to-text instead of ~3.4 s), but the two tracks then wait for each other
+and a post-session transcription is ~40% slower. `model = "small"` gets ~1.7 s, at a clear
+loss of accuracy in the final transcript too. Sessions recorded with `live = false`, sessions
+left untranscribed when the app quit, and `recandcc transcribe` always use the full
+post-session pass.
 
 ## Example
 

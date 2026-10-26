@@ -9,6 +9,10 @@ Threading model
   enqueue a command / mutate small state under ``self._lock`` and wake the thread.
 * One lock (``self._lock``) guards all state. Nothing blocking (monitor snapshot, recorder
   start/stop, config save, callbacks) runs while it is held.
+* ``on_session_start(session)`` / ``on_session_end(session | None, kept)`` (used for live
+  transcription) run on the engine thread right after the recorder started / stopped, also
+  outside the lock. ``on_session_end`` runs before the session is submitted to the queue (kept)
+  or deleted (discarded); ``session`` is None if the recorder dropped it (too short) or failed.
 * Time comes from an injectable ``clock`` so tests can drive the state machine with a fake
   clock by calling ``tick()`` directly without starting the thread.
 """
@@ -167,6 +171,8 @@ class Engine:
         own_pids: Iterable[int] | None = None,
         on_notice: Callable[[str, str], None] | None = None,
         permission_status: Callable[[], dict[str, str]] | None = None,
+        on_session_start: Callable[[SessionInfo], None] | None = None,
+        on_session_end: Callable[[SessionInfo | None, bool], None] | None = None,
     ):
         self.cfg = cfg
         self.monitor = monitor
@@ -179,6 +185,8 @@ class Engine:
         self.on_notice = on_notice
         # permission_status() -> {"microphone": ..., "system_audio": ...}; see permissions.py
         self.permission_status = permission_status
+        self.on_session_start = on_session_start
+        self.on_session_end = on_session_end
         self._save_config = save_config if save_config is not None else cfg.save
         self.own_pids = set(own_pids) if own_pids is not None else {os.getpid()}
 
@@ -586,6 +594,18 @@ class Engine:
             if self._rec is not None:
                 self._rec.session = session
                 self._rec.started = self.clock()
+        if self.on_session_start:
+            try:
+                self.on_session_start(session)
+            except Exception:
+                log.exception("on_session_start callback failed")
+
+    def _session_end(self, session: SessionInfo | None, kept: bool) -> None:
+        if self.on_session_end:
+            try:
+                self.on_session_end(session, kept)
+            except Exception:
+                log.exception("on_session_end callback failed")
 
     def _do_upgrade(self, app: str) -> None:
         upgrade = getattr(self.recorder, "upgrade_to_call", None)
@@ -604,7 +624,9 @@ class Engine:
             session = self.recorder.stop()
         except Exception:
             log.exception("could not stop recording cleanly")
+            self._session_end(None, False)
             return
+        self._session_end(session, False)
         if session is not None:
             shutil.rmtree(session.directory, ignore_errors=True)
             log.info("discarded recording %s", session.directory)
@@ -616,8 +638,10 @@ class Engine:
             session = self.recorder.stop()
         except Exception:
             log.exception("could not stop recording cleanly")
+            self._session_end(None, False)
             return
         self._check_silent_tracks()
+        self._session_end(session, session is not None)
         if session is None:
             return
         if self.queue is not None:

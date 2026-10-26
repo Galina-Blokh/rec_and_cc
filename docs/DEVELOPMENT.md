@@ -40,10 +40,11 @@ src/recandcc/
   recorder.py engine.py         session recording + detection state machine
   transcribe/                   chunking, language ID, parallel Whisper, merge, outputs, queue
   permissions.py native.py      TCC permissions + helper discovery (macOS)
-  ui/                           common Controller + rumps (mac) / pystray (windows)
+  ui/                           common Controller + rumps (mac) / pystray (windows) + live captions
   autostart.py cli.py logging_setup.py
 native/macos/AudioTap/          SwiftPM: rcc-audiotap (monitor/capture/permissions) + RecAndCC launcher
 tests/                          pytest suite
+scripts/                        dev demos (captions_demo.py)
 docs/                           this documentation
 ```
 
@@ -76,6 +77,24 @@ bin/rcc-audiotap permissions                  # TCC status (as seen by the calli
 bin/rcc-audiotap capture | head -c 64000 > x.raw   # 1 s of f32le 16 kHz mono
 tail -f ~/Library/Logs/RecAndCC/recandcc.log
 ```
+
+### Live captions demo
+
+`scripts/captions_demo.py` shows the macOS captions panel (`ui/captions_mac.py`) without
+recording anything. It posts fake `live_start` / `live` / `live_end` events (English and
+Russian lines, one per second for ~15 s) through a queue drained by a 0.5 s rumps timer,
+the same way `ui/mac.py` does, then quits after the panel auto-hides.
+
+```bash
+uv run python scripts/captions_demo.py                       # watch it on screen
+uv run python scripts/captions_demo.py --seconds 30 --interval 0.5
+uv run python scripts/captions_demo.py --snapshot /tmp/cc.png           # PNG after the end
+uv run python scripts/captions_demo.py --snapshot-live --snapshot /tmp/cc.png  # PNG while live
+```
+
+`--snapshot` renders the panel window in-process, so it works without Screen Recording
+permission for the terminal. The line formatting, ordering and trimming logic lives in
+`ui/captions.py` and is covered by `tests/test_captions.py`.
 
 Permissions are tracked per app. When you run things from a terminal, the terminal app is the
 one asking. Test permission flows through `RecAndCC.app`.

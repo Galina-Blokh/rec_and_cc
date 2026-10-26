@@ -535,3 +535,68 @@ def test_silent_track_warning_only_without_permission():
     h.mon.procs = []
     h.run(10)
     assert "Recording was completely silent" in h.notices
+
+
+# --- session start/end callbacks (live transcription) -----------------------------------
+def _hooked(h):
+    calls = []
+    h.eng.on_session_start = lambda s: calls.append(("start", s.trigger_app))
+
+    def end(s, kept):
+        # discarded sessions are reported before their directory is deleted
+        exists = s is not None and s.directory.exists()
+        calls.append(("end", kept, exists, len(h.q.submitted)))
+
+    h.eng.on_session_end = end
+    return calls
+
+
+def test_session_callbacks_on_stop():
+    h = Harness(Mode.AUTO)
+    calls = _hooked(h)
+    h.mon.procs = [ZOOM]
+    h.run(4)
+    assert calls == [("start", "zoom.us")]
+    assert h.eng.state.session_dir  # populated before/while the live session runs
+    h.mon.procs = []
+    h.run(25)
+    assert calls[1][:2] == ("end", True) and calls[1][3] == 0  # before the queue submit
+    assert len(h.q.submitted) == 1
+
+
+def test_session_callbacks_on_discard(tmp_path):
+    h = Harness(Mode.ASK)
+    h.rec = h.eng.recorder = DiscardingRecorder(tmp_path)
+    calls = _hooked(h)
+    h.mon.procs = [CHROME]
+    h.run(4)
+    h.eng.respond("ignore")
+    h.eng.tick()
+    assert calls == [("start", "Google Chrome"), ("end", False, True, 0)]
+    assert not h.rec.dirs[0].exists() and h.q.submitted == []
+
+
+def test_session_end_reported_when_recorder_drops_session():
+    h = Harness(Mode.AUTO)
+    calls = _hooked(h)
+    h.rec.stop = lambda: None  # too short: the recorder deleted it
+    h.eng.start_manual()
+    h.eng.tick()
+    h.eng.stop()
+    h.eng.tick()
+    assert calls == [("start", None), ("end", False, False, 0)]
+
+
+def test_failing_session_callbacks_do_not_break_engine():
+    h = Harness(Mode.AUTO)
+
+    def boom(*_):
+        raise RuntimeError("x")
+
+    h.eng.on_session_start = h.eng.on_session_end = boom
+    h.eng.start_manual()
+    h.eng.tick()
+    assert h.status == RECORDING
+    h.eng.stop()
+    h.eng.tick()
+    assert h.status == IDLE and len(h.q.submitted) == 1

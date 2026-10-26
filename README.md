@@ -97,12 +97,26 @@ Menu items:
 - **Mode → Off / Ask / Auto**
 - **Start recording / Stop recording**: manual control. A manual recording only stops when
   you stop it.
+- **Show live captions**: on/off switch for the floating captions window (saved to settings).
+- **Open live transcript**: opens the current (or last) live session's `transcript.md`.
 - **Recent transcripts**: the last 10, click to open.
 - **Open transcripts folder**
 - **Permissions**: status and "Grant…" actions.
 - **Launch at login**: starts RecAndCC every time you log in. Turn it on once.
 - **Edit settings**: opens `config.toml` (changes to detection settings apply live).
 - **Quit RecAndCC**
+
+### Live captions
+
+While a session is being transcribed live, a small floating window at the bottom of the
+screen shows the text as it is spoken, one line per phrase, labelled `Me` / `Others`
+(English and Russian mixed freely). It stays on top of other windows, including full-screen
+video and Zoom, on every desktop, and never takes keyboard focus. Drag or resize it and it
+remembers where you put it. It scrolls along with new text unless you scroll up to reread
+something. When the recording stops it shows "Recording finished — transcript saved" and
+hides itself after 10 seconds. The close button hides it until the next recording; to turn
+captions off for good, untick **Show live captions** in the menu. Captions need live
+transcription (`transcription.live = true`, the default).
 
 ### When does it record?
 

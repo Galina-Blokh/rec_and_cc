@@ -3,8 +3,11 @@
 ``Controller`` owns the runtime (monitor, recorder, transcription queue, engine) and turns
 engine/queue callbacks (which arrive on worker threads) into events on a thread-safe
 ``queue.Queue``. The UI drains that queue from its own main-thread timer, so no UI object
-is ever touched from a worker thread. Slow things (permission checks, scanning for recent
-transcripts) run on short-lived worker threads and publish results under ``self._lock``.
+is ever touched from a worker thread. With ``transcription.live`` each session gets a
+``LiveTranscriber`` (fed by the recorder's frame tap) that posts ``live_start`` / ``live`` /
+``live_end`` events, and its ``finish()`` replaces the post-session transcription. Slow
+things (permission checks, scanning for recent transcripts) run on short-lived worker threads
+and publish results under ``self._lock``.
 """
 
 from __future__ import annotations
@@ -211,15 +214,19 @@ class Controller:
             tq = TranscriptionQueue(transcriber, on_done=self._on_transcribed)
         self.transcriber = transcriber
         self.tq = tq
+        self._live = None  # LiveTranscriber of the session being recorded (engine thread)
+        self._live_done: dict[str, object] = {}  # session id -> flushed LiveTranscriber
         self.engine = Engine(
             cfg,
             monitor,
             recorder,
-            tq,
+            _LiveAwareQueue(self),
             on_prompt=self._on_prompt,
             on_notice=lambda t, m: self.events.put(("notice", t, m)),
             on_state_change=lambda st: self.events.put(("state", st)),
             permission_status=permission_status,
+            on_session_start=self._on_session_start,
+            on_session_end=self._on_session_end,
         )
         if start_threads:
             self.engine.start()
@@ -234,6 +241,53 @@ class Controller:
     def _on_transcribed(self, session: SessionInfo, result) -> None:
         self.events.put(("transcribed", session, result))
         self.refresh_async(force=True)
+
+    # --- live transcription (engine thread)
+    def _on_session_start(self, session: SessionInfo) -> None:
+        if not self.cfg.transcription.live or self.transcriber is None:
+            return
+        add_listener = getattr(self.engine.recorder, "add_listener", None)
+        if add_listener is None:
+            return
+        from ..transcribe.live import LiveTranscriber, live_title
+
+        sid = session.id
+        live = LiveTranscriber(
+            self.transcriber,
+            session,
+            on_segments=lambda segs: self.events.put(("live", sid, segs)),
+            on_end=lambda: self.events.put(("live_end", sid)),
+        )
+        self.events.put(("live_start", sid, live_title(session)))
+        try:
+            add_listener(live.feed)
+        except Exception:
+            log.exception("could not attach live transcription")
+            live.cancel()
+            self.events.put(("live_end", sid))
+            return
+        self._live = live
+        log.info("live transcription on for %s", sid)
+
+    def _on_session_end(self, session: SessionInfo | None, kept: bool) -> None:
+        live, self._live = self._live, None
+        if live is None:
+            return
+        if kept and session is not None:
+            # Transcribe the tail now (not when the queue gets to it); live_end is posted by
+            # the LiveTranscriber once the final transcript is written.
+            live.flush(session)
+            self._live_done[session.id] = live
+        else:
+            live.cancel()  # before the engine deletes the directory
+            self.events.put(("live_end", live.session.id))
+
+    def _submit(self, session: SessionInfo) -> None:
+        live = self._live_done.pop(session.id, None)
+        if live is None:
+            self.tq.submit(session)
+        else:
+            self.tq.submit(session, finalize=lambda: live.finish(session))
 
     def _resubmit_unfinished(self) -> None:
         try:
@@ -376,6 +430,17 @@ class Controller:
         elif self.transcriber is not None and hasattr(self.transcriber, "close"):
             with contextlib.suppress(Exception):
                 self.transcriber.close()
+
+
+class _LiveAwareQueue:
+    """What the Engine submits to: routes sessions that were transcribed live to a fast
+    "finalize" job instead of a full transcription."""
+
+    def __init__(self, ctrl: Controller) -> None:
+        self._ctrl = ctrl
+
+    def submit(self, session: SessionInfo) -> None:
+        self._ctrl._submit(session)
 
 
 def keep_prompt_text(app: str, kind: TriggerKind, timeout_action: str) -> str:

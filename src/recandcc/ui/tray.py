@@ -6,14 +6,19 @@ pystray runs its own message loop in ``icon.run()``; a poll thread drains
 Record prompts: a tray notification plus a small always-on-top tkinter window with
 Record / Always / Ignore buttons (own Tk root on its own thread, auto-closes after
 ``ask_timeout_s``), and the "Record now" menu item while a prompt is pending.
+Live captions: ``TkCaptions``, a topmost tkinter window on its own Tk thread, fed through a
+queue from the ``live_start`` / ``live`` / ``live_end`` events (UNTESTED as well).
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import queue
 import threading
 import time
+from pathlib import Path
 
 import pystray
 from PIL import Image, ImageDraw
@@ -22,6 +27,7 @@ from .. import autostart
 from ..config import CONFIG_PATH
 from ..engine import PROMPTING, RECORDING
 from ..models import Mode, TriggerKind
+from .captions import CaptionBuffer, header_text, should_auto_hide
 from .common import (
     ONBOARDING_TEXT,
     PERM_KINDS,
@@ -56,6 +62,125 @@ def make_icon(color: tuple[int, int, int], pending: bool, warn: bool) -> Image.I
     return img
 
 
+class TkCaptions:
+    """Topmost live-captions window. UNTESTED (written without access to Windows).
+
+    All tkinter calls happen on one dedicated thread that owns its own ``Tk`` root; other
+    threads only ``post()`` commands onto a queue that the Tk thread polls. Commands:
+    ``("show", title, display)``, ``("append", segments)``, ``("end",)``, ``("hide",)``,
+    ``("reveal",)``. Closing the window hides it until the next session.
+    """
+
+    POLL_MS = 150
+
+    def __init__(self):
+        self._q: queue.Queue = queue.Queue()
+        self._thread: threading.Thread | None = None
+
+    def post(self, *cmd) -> None:
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._run, daemon=True, name="captions-tk")
+            self._thread.start()
+        self._q.put(cmd)
+
+    def _run(self) -> None:
+        try:
+            import tkinter as tk
+        except Exception:
+            log.info("tkinter unavailable; no live captions window")
+            return
+        root = tk.Tk()
+        root.withdraw()
+        win = tk.Toplevel(root)
+        win.withdraw()
+        win.attributes("-topmost", True)
+        with contextlib.suppress(Exception):
+            win.attributes("-alpha", 0.92)
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        w, h = min(760, int(sw * 0.8)), 190
+        win.geometry(f"{w}x{h}+{(sw - w) // 2}+{sh - h - 120}")
+        text = tk.Text(
+            win,
+            wrap="word",
+            bg="#1c1c1e",
+            fg="#f2f2f2",
+            font=("Segoe UI", 13),
+            padx=10,
+            pady=8,
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        text.tag_configure("Me", foreground="#8cdc9e", font=("Segoe UI", 10, "bold"))
+        text.tag_configure("Others", foreground="#85bdff", font=("Segoe UI", 10, "bold"))
+        text.tag_configure("other", foreground="#d9bf80", font=("Segoe UI", 10, "bold"))
+        text.tag_configure("line", lmargin2=64, tabs=(64,))
+        text.pack(fill="both", expand=True)
+        text.configure(state="disabled")
+
+        buf = CaptionBuffer()
+        st = {"title": "", "started": None, "ended": None, "visible": False}
+
+        def render(force_scroll: bool = False) -> None:
+            follow = force_scroll or text.yview()[1] >= 0.999
+            text.configure(state="normal")
+            text.delete("1.0", "end")
+            for i, ln in enumerate(buf.lines):
+                tag = ln.label if ln.label in ("Me", "Others") else "other"
+                text.insert("end", ln.label + "\t", (tag, "line"))
+                text.insert("end", ln.text + ("\n" if i < len(buf) - 1 else ""), ("line",))
+            text.configure(state="disabled")
+            if follow:
+                text.see("end")
+
+        def set_visible(on: bool) -> None:
+            st["visible"] = on
+            if on:
+                win.deiconify()
+                win.attributes("-topmost", True)
+            else:
+                win.withdraw()
+
+        win.protocol("WM_DELETE_WINDOW", lambda: set_visible(False))
+
+        def poll() -> None:
+            try:
+                while True:
+                    cmd = self._q.get_nowait()
+                    op = cmd[0]
+                    if op == "show":
+                        buf.clear()
+                        st.update(title=cmd[1] or "", started=time.monotonic(), ended=None)
+                        render(True)
+                        set_visible(bool(cmd[2]))
+                    elif op == "append":
+                        if buf.add(cmd[1]):
+                            render()
+                    elif op == "end":
+                        if st["started"] is not None:
+                            st["ended"] = time.monotonic()
+                    elif op == "hide":
+                        set_visible(False)
+                    elif op == "reveal":
+                        if st["started"] is not None:
+                            render(True)
+                            set_visible(True)
+            except queue.Empty:
+                pass
+            except Exception:
+                log.exception("captions window update failed")
+            if st["started"] is not None:
+                if should_auto_hide(st["ended"], time.monotonic()):
+                    set_visible(False)
+                    st.update(started=None, ended=None)
+                else:
+                    elapsed = time.monotonic() - st["started"]
+                    win.title(header_text(st["title"], elapsed, finished=st["ended"] is not None))
+            root.after(self.POLL_MS, poll)
+
+        root.after(self.POLL_MS, poll)
+        root.mainloop()
+
+
 class TrayApp:
     def __init__(self, ctrl: Controller):
         self.ctrl = ctrl
@@ -63,6 +188,9 @@ class TrayApp:
         self._stop = threading.Event()
         self._last_look = None
         self._prompt_windows: dict[int | None, object] = {}
+        self.captions = TkCaptions()
+        self._live_id: str | None = None
+        self._live_dir: str | None = None
         self.icon = pystray.Icon(
             "RecAndCC", make_icon(COLORS["ask"], False, False), "RecAndCC", menu=self._menu()
         )
@@ -127,6 +255,17 @@ class TrayApp:
                 lambda: self.ctrl.toggle_recording(),
             ),
             pystray.Menu.SEPARATOR,
+            Item(
+                "Show live captions",
+                self._toggle_captions,
+                checked=lambda _i: bool(self.cfg.live_captions),
+            ),
+            Item(
+                "Open live transcript",
+                self._open_live,
+                enabled=lambda _i: bool(self._live_dir),
+            ),
+            pystray.Menu.SEPARATOR,
             Item("Open transcripts folder", self._open_folder),
             Item("Recent transcripts", pystray.Menu(recent)),
             Item("Permissions", pystray.Menu(perms)),
@@ -139,6 +278,28 @@ class TrayApp:
     def _open_folder(self) -> None:
         self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
         open_path(self.cfg.output_dir)
+
+    def _toggle_captions(self) -> None:
+        self.cfg.live_captions = not self.cfg.live_captions
+        try:
+            self.cfg.save()
+        except Exception:
+            log.exception("saving settings failed")
+        if not self.cfg.live_captions:
+            self.captions.post("hide")
+        elif self._live_id is not None:
+            self.captions.post("reveal")
+
+    def _open_live(self) -> None:
+        if self._live_dir:
+            d = Path(self._live_dir)
+            md = d / "transcript.md"
+            open_path(md if md.exists() else d)
+
+    def _live_started(self, session_id: str, title: str) -> None:
+        self._live_id = session_id
+        self._live_dir = self.ctrl.engine.state.session_dir or self._live_dir
+        self.captions.post("show", title, bool(self.cfg.live_captions))
 
     def _toggle_login(self) -> None:
         try:
@@ -190,6 +351,16 @@ class TrayApp:
                 ).start()
             elif ev[0] == "notice":
                 self._notify(ev[1], ev[2])
+            elif ev[0] == "live_start":
+                self._live_started(ev[1], ev[2])
+            elif ev[0] == "live":
+                if ev[1] != self._live_id:
+                    self._live_started(ev[1], "")
+                self.captions.post("append", ev[2])
+            elif ev[0] == "live_end":
+                if ev[1] == self._live_id:
+                    self._live_id = None
+                    self.captions.post("end")
             elif ev[0] == "transcribed":
                 _, s, res = ev
                 self._notify(
@@ -199,6 +370,8 @@ class TrayApp:
 
     def _render(self) -> None:
         st = self.ctrl.engine.state
+        if self._live_id is not None and st.session_dir:
+            self._live_dir = st.session_dir
         if st.status == RECORDING:
             color = COLORS["rec"]
         elif st.status == PROMPTING:

@@ -240,3 +240,82 @@ def test_upgrade_respects_never_policy(cfg):
     src["sys"].done.wait(5)
     assert rec.stop().tracks == {Track.OTHERS: "others.wav"}
     assert "mic" not in src
+
+
+# --- frame tap (live transcription) ----------------------------------------------------
+class Tap:
+    def __init__(self):
+        self.got: dict[Track, list[tuple[int, np.ndarray]]] = {}
+        self.lock = threading.Lock()
+
+    def __call__(self, track, start, frames):
+        with self.lock:
+            self.got.setdefault(track, []).append((start, frames))
+
+    def audio(self, track) -> tuple[int, np.ndarray]:
+        blocks = self.got[track]
+        for (s0, b0), (s1, _) in zip(blocks, blocks[1:], strict=False):
+            assert s1 == s0 + len(b0)  # contiguous, in order
+        return blocks[0][0], np.concatenate([b for _, b in blocks])
+
+
+def test_listener_gets_all_frames_with_positions(cfg):
+    sig = sine(4)
+    rec, src = make(cfg, sig)
+    rec.start(TriggerKind.MEDIA, "Google Chrome")
+    src["sys"].done.wait(5)
+    tap = Tap()
+    rec.add_listener(tap)  # added late: the recent audio is replayed
+    out = rec.stop()
+    start, audio = tap.audio(Track.OTHERS)
+    assert start == 0 and np.allclose(audio, sig, atol=1e-6)
+    wav, _ = sf.read(out.directory / "others.wav")
+    assert len(wav) == len(audio)
+
+
+def test_listener_mic_joining_mid_session_starts_at_padding(cfg):
+    rec, src = make(cfg, sine(3), sine(1, 300, 0.3))
+    tap = Tap()
+    rec.start(TriggerKind.MEDIA, "Google Chrome")
+    rec.add_listener(tap)
+    src["sys"].done.wait(5)
+    rec.upgrade_to_call("zoom.us")
+    src["mic"].done.wait(5)
+    rec.stop()
+    start, audio = tap.audio(Track.ME)
+    assert start == 3 * SAMPLE_RATE and len(audio) == SAMPLE_RATE
+    assert tap.audio(Track.OTHERS)[0] == 0
+
+
+def test_listeners_are_per_session_and_errors_contained(cfg):
+    rec, src = make(cfg, sine(1))
+    rec.start(TriggerKind.MANUAL)
+
+    def bad(*_):
+        raise RuntimeError("boom")
+
+    rec.add_listener(bad)
+    src["sys"].done.wait(5)
+    tap = Tap()
+    rec.add_listener(tap)
+    rec.stop()  # still records fine
+    assert tap.got
+    rec.min_session_s = 0
+    rec.start(TriggerKind.MANUAL)
+    src["sys"].done.wait(5)
+    rec.stop()
+    assert sum(len(b) for _, b in tap.got[Track.OTHERS]) == SAMPLE_RATE  # nothing new
+
+
+def test_replay_buffer_is_bounded(cfg):
+    from recandcc import recorder as recmod
+
+    rec, src = make(cfg, sine(15))
+    rec.start(TriggerKind.MEDIA, "x")
+    src["sys"].done.wait(5)
+    tap = Tap()
+    rec.add_listener(tap)
+    rec.stop()
+    start, audio = tap.audio(Track.OTHERS)
+    assert recmod.REPLAY_SECONDS * SAMPLE_RATE <= len(audio) < 11 * SAMPLE_RATE
+    assert start + len(audio) == 15 * SAMPLE_RATE
