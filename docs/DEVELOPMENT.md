@@ -50,6 +50,28 @@ docs/                           this documentation
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit together.
 
+## Pull requests and AI review
+
+Changes go through pull requests, not straight to `main`:
+
+```bash
+git switch -c feature/short-name
+# ... commit ...
+git push -u origin feature/short-name
+gh pr create --fill
+```
+
+Every PR gets two automatic checks:
+- **CI** (`.github/workflows/ci.yml`): lint + tests on macOS and Windows.
+- **Cursor review** (`.github/workflows/cursor-review.yml`): the Cursor agent reviews the diff
+  with **Grok** (repo variable `CURSOR_REVIEW_MODEL`, default `grok`) and posts the findings as
+  a PR comment. Requires the repo secret `CURSOR_API_KEY` (cursor.com/dashboard → Integrations
+  → API keys); without it the job is skipped with a notice.
+
+To run the same review locally, install the Cursor CLI (`curl https://cursor.com/install -fsS | bash`),
+log in (`cursor-agent login`) and run e.g.
+`cursor-agent -p "Review the changes in $(git diff main...)" --model grok`.
+
 ## Testing
 
 ```bash

@@ -1,0 +1,80 @@
+name: Cursor review
+
+# AI code review of every pull request by the Cursor agent (Grok by default), posted as a PR
+# comment. Needs a Cursor API key in the repo secret CURSOR_API_KEY
+# (cursor.com/dashboard → Integrations → API keys). The model can be changed without editing
+# this file via the repo variable CURSOR_REVIEW_MODEL.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: cursor-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+      MODEL: ${{ vars.CURSOR_REVIEW_MODEL || 'grok' }}
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.pull_request.number }}
+      BASE: ${{ github.event.pull_request.base.sha }}
+      HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Skip without API key
+        if: env.CURSOR_API_KEY == ''
+        run: echo "::notice::CURSOR_API_KEY secret not set — skipping the Cursor review."
+
+      - uses: actions/checkout@v4
+        if: env.CURSOR_API_KEY != ''
+        with:
+          fetch-depth: 0
+
+      - name: Install Cursor agent
+        if: env.CURSOR_API_KEY != ''
+        run: |
+          curl -fsSL https://cursor.com/install | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Review
+        if: env.CURSOR_API_KEY != ''
+        run: |
+          git diff --stat "$BASE" "$HEAD" > diffstat.txt
+          git diff "$BASE" "$HEAD" > pr.diff
+          cat > prompt.md <<'EOF'
+          You are reviewing a pull request for RecAndCC, a local macOS/Windows menu-bar app
+          (Python 3.12 + a Swift Core Audio helper) that records calls/videos and transcribes
+          them live (MLX Whisper on the GPU, faster-whisper on CPU, sherpa-onnx diarization).
+          Read docs/ARCHITECTURE.md for the design and threading rules.
+
+          The diff is in pr.diff (summary in diffstat.txt); open any repository file you need
+          for context. Do NOT modify files.
+
+          Report only real problems, most severe first: correctness bugs, race conditions and
+          thread-safety (real-time audio threads must never block; AppKit only on the main
+          thread; engine side effects outside its lock), resource leaks, macOS permission/TCC
+          or code-signing regressions (the app bundle must not change needlessly), Windows
+          breakage, offline guarantees (no network after model download), privacy, and missing
+          tests. For each: file:line, what goes wrong in a concrete scenario, and a suggested
+          fix. Skip style nits. If you find nothing significant, say so in one line.
+          Answer in GitHub-flavoured Markdown, starting with a one-line verdict.
+          EOF
+          {
+            echo "## 🤖 Cursor review (\`$MODEL\`)"
+            echo
+            cursor-agent -p "$(cat prompt.md)" --model "$MODEL" --output-format text
+          } > review.md
+          cat review.md
+
+      - name: Post comment
+        if: env.CURSOR_API_KEY != ''
+        run: gh pr comment "$PR" --body-file review.md
