@@ -17,13 +17,22 @@
 - [x] Global start/stop shortcut ⌃⌥R (`hotkey`), for in-person meetings; no extra permissions
 - [x] Ask mode records immediately and asks whether to keep it; calls during media recordings add the mic
 
-## Next
-- [ ] **Speaker names**: assign a name to `Speaker N` once and recognise the voice in later
-      calls (the speaker embeddings are already computed)
-- [ ] **Summaries & action items** with a local LLM (e.g. Qwen 2.5/3 7B quantised via
-      llama.cpp / MLX), off by default
-- [ ] **Search** across all transcripts from the menu
-- [ ] Self-contained app bundle (embedded Python, signed + notarised) so the repo folder isn't needed
-- [ ] Verified Windows build + installer; per-app capture on Windows
-- [ ] Per-app (instead of global) system-audio tap on macOS, so only the call app is recorded
-- [ ] Export to DOCX
+## Future work
+
+Each item is tracked as a GitHub issue (label `future work`) with a design proposal and
+acceptance criteria.
+
+- [ ] **Speaker names & many speakers** ([#1](https://github.com/Galina-Blokh/rec_and_cc/issues/1)): name `Speaker N` once and recognise
+      the voice later (local voice profiles; optionally names from Zoom/Teams); overlap-aware
+      segmentation and adaptive speaker counting for large meetings; live speaker labels.
+- [ ] **Room listening** ([#2](https://github.com/Galina-Blokh/rec_and_cc/issues/2)): auto-record conversations near the laptop, also with
+      the screen locked: always-on mic VAD, pre-roll buffer, mic-track diarization; opt-in
+      (the orange mic indicator stays on).
+- [ ] **Architecture review** ([#3](https://github.com/Galina-Blokh/rec_and_cc/issues/3)): languages and packaging: self-contained,
+      Developer-ID-signed app now; benchmark whisper.cpp / WhisperKit vs MLX; possible Rust +
+      Tauri or native-UI rewrite.
+- [ ] **Summaries, action items, search, export** ([#4](https://github.com/Galina-Blokh/rec_and_cc/issues/4)): local LLM (e.g. Qwen via
+      MLX / llama.cpp), SQLite FTS search, DOCX/PDF export.
+- [ ] **Windows for real** ([#5](https://github.com/Galina-Blokh/rec_and_cc/issues/5)): hardware test pass, per-app capture, installer,
+      signing.
+- [ ] Per-app (instead of global) system-audio tap on macOS, so only the call app is recorded.
