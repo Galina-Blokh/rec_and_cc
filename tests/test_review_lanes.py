@@ -70,3 +70,33 @@ def test_error_text_is_capped(tmp_path):
     assert "boom" in r.stdout  # the error is shown...
     assert "x" * 500 not in r.stdout  # ...but capped
     assert all(len(line) <= 400 for line in r.stdout.splitlines())
+
+
+WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "cursor-review.yml"
+
+
+def _prepare_step() -> str:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    start = text.index("- name: Prepare diff and trusted tree")
+    return text[start : text.index("- name:", start + 10)]
+
+
+def test_workflow_only_runs_the_base_branch_script():
+    """Security: the script that sees CURSOR_API_KEY must come from the trusted base branch,
+    never from the PR (no fallback), and a missing base script must fail the job."""
+    step = _prepare_step()
+    checkout_base = step.index('git checkout --quiet --detach "$BASE"')
+    copies = [i for i in range(len(step)) if step.startswith("cp scripts/review_lanes.sh", i)]
+    assert copies, "the review script is never copied"
+    assert all(i > checkout_base for i in copies), "script copied from the PR tree"
+    assert "review_lanes.pr.sh" not in WORKFLOW.read_text(encoding="utf-8")
+    missing = step.index("if [ ! -f scripts/review_lanes.sh ]")
+    assert checkout_base < missing < copies[0]
+    assert "exit 1" in step[missing : copies[0]]
+
+
+def test_workflow_runs_the_copied_script_and_fails_red():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert 'bash /tmp/review_lanes.sh /tmp/pr.diff "${{ matrix.lane }}"' in text
+    assert 'exit "$status"' in text  # a failed reviewer fails the lane check
+    assert "--sandbox enabled" in SCRIPT.read_text(encoding="utf-8")
