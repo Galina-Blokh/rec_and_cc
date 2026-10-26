@@ -70,16 +70,17 @@ jobs:
         if: env.HAS_KEY == 'true'
         run: |
           git fetch --no-tags origin "$BASE"
-          cp scripts/review_lanes.sh /tmp/review_lanes.pr.sh  # fallback if base has none
           # Three-dot: only the PR's own changes, like GitHub's "Files changed".
           git diff "$BASE...$HEAD" > /tmp/pr.diff
           # Review against the trusted base tree; the PR is only the diff file.
           git checkout --quiet --detach "$BASE"
-          if [ -f scripts/review_lanes.sh ]; then
-            cp scripts/review_lanes.sh /tmp/review_lanes.sh
-          else
-            cp /tmp/review_lanes.pr.sh /tmp/review_lanes.sh
+          # Only the base branch's review script is trusted: never fall back to the PR's copy,
+          # which would run PR-controlled code with the Cursor key.
+          if [ ! -f scripts/review_lanes.sh ]; then
+            echo "::error::scripts/review_lanes.sh is missing on the base branch."
+            exit 1
           fi
+          cp scripts/review_lanes.sh /tmp/review_lanes.sh
           rm -rf .cursor .cursorrules .mcp.json AGENTS.md CLAUDE.md .github/copilot-instructions.md
 
       - name: Install Cursor agent (pinned, verified)
