@@ -27,6 +27,7 @@ from .. import autostart
 from ..config import CONFIG_PATH
 from ..engine import RECORDING
 from ..models import Mode, TriggerKind
+from ..recorder import make_private_dir
 from ..retention import RETENTION_CHOICES
 from .common import (
     ONBOARDING_TEXT,
@@ -329,7 +330,7 @@ class MacApp(rumps.App):
         open_path(md if md.exists() else d)
 
     def _open_folder(self, _sender) -> None:
-        self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
+        make_private_dir(self.cfg.output_dir)  # owner-only, like the session folders
         open_path(self.cfg.output_dir)
 
     def _open_recent(self, sender) -> None:

@@ -29,6 +29,7 @@ from .. import autostart
 from ..config import CONFIG_PATH
 from ..engine import PROMPTING, RECORDING
 from ..models import Mode, TriggerKind
+from ..recorder import make_private_dir
 from .captions import CaptionBuffer, header_text, should_auto_hide
 from .common import (
     ONBOARDING_TEXT,
@@ -283,7 +284,7 @@ class TrayApp:
         )
 
     def _open_folder(self) -> None:
-        self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
+        make_private_dir(self.cfg.output_dir)  # owner-only, like the session folders
         open_path(self.cfg.output_dir)
 
     def _toggle_captions(self) -> None:

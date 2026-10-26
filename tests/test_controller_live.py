@@ -46,7 +46,9 @@ def make_ctrl(tmp_path, live=True, sync=True):
     return ctrl, sources, tr
 
 
-def events_until(ctrl, kind, timeout=10.0):
+# Generous: the first event can wait for a cold Silero VAD load (fresh venv, or several test
+# runs loading models at once). The happy path returns as soon as the event arrives.
+def events_until(ctrl, kind, timeout=45.0):
     out, deadline = [], time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
