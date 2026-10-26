@@ -1,5 +1,7 @@
 # Architecture
 
+> Why things are built this way, with the alternatives and measurements: [Architecture Decision Records](adr/README.md) (`docs/adr/`).
+
 RecAndCC is a Python 3.12 application with a small native helper on macOS. It is organised
 as independent modules that only talk to each other through the types in
 `src/recandcc/models.py` and the interfaces in `capture/base.py` and `detect/base.py`. Each
