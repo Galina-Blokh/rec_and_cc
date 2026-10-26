@@ -35,4 +35,8 @@ acceptance criteria.
       MLX / llama.cpp), SQLite FTS search, DOCX/PDF export.
 - [ ] **Windows for real** ([#5](https://github.com/Galina-Blokh/rec_and_cc/issues/5)): hardware test pass, per-app capture, installer,
       signing.
+- [ ] **Hebrew** ([#6](https://github.com/Galina-Blokh/rec_and_cc/issues/6)): he/en/ru language ID, Hebrew-tuned Whisper (e.g. ivrit.ai),
+      right-to-left captions and transcripts.
+- [ ] **Sensitivity slider** ([#7](https://github.com/Galina-Blokh/rec_and_cc/issues/7)): balance outside (room/mic) vs inside (system
+      audio) and trigger recording on whichever side passes its threshold; live level meters.
 - [ ] Per-app (instead of global) system-audio tap on macOS, so only the call app is recorded.
