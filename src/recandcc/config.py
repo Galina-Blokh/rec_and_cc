@@ -69,6 +69,7 @@ DEFAULT_IGNORE_APPS = [
     "com.apple.siri",
     "com.apple.voicememos",
     "recandcc",
+    "afplay",  # command-line player (scripts, tests), not something you watch
     "rcc-audiotap",
 ]
 
