@@ -10,7 +10,12 @@ name: Cursor review
 # are skipped and stay green. Make it a required check only together with the secret.
 #
 # Hardening (the agent reads untrusted PR content):
-# - the agent runs read-only (--mode ask, --sandbox enabled), never with --force;
+# - the agent runs read-only (--mode ask) inside Cursor's sandbox (--sandbox enabled), never
+#   with --force. Ubuntu 24.04 runners block the unprivileged user namespaces the sandbox
+#   needs (AppArmor), so the throwaway runner VM allows them just before the review;
+# - the review script comes from the trusted base branch, not from the PR (so fixes on main
+#   also apply to PRs that are already open);
+# - a reviewer that fails turns its check red — a review that didn't happen never looks green;
 # - it runs on the trusted BASE tree with the PR diff as a data file, with agent instruction
 #   files (.cursor, AGENTS.md, CLAUDE.md, ...) removed, so the PR can't steer it;
 # - the Cursor agent is a pinned build verified by sha256; actions are pinned to commit SHAs;
@@ -65,11 +70,16 @@ jobs:
         if: env.HAS_KEY == 'true'
         run: |
           git fetch --no-tags origin "$BASE"
-          cp scripts/review_lanes.sh /tmp/review_lanes.sh
+          cp scripts/review_lanes.sh /tmp/review_lanes.pr.sh  # fallback if base has none
           # Three-dot: only the PR's own changes, like GitHub's "Files changed".
           git diff "$BASE...$HEAD" > /tmp/pr.diff
           # Review against the trusted base tree; the PR is only the diff file.
           git checkout --quiet --detach "$BASE"
+          if [ -f scripts/review_lanes.sh ]; then
+            cp scripts/review_lanes.sh /tmp/review_lanes.sh
+          else
+            cp /tmp/review_lanes.pr.sh /tmp/review_lanes.sh
+          fi
           rm -rf .cursor .cursorrules .mcp.json AGENTS.md CLAUDE.md .github/copilot-instructions.md
 
       - name: Install Cursor agent (pinned, verified)
@@ -82,20 +92,32 @@ jobs:
           tar --strip-components=1 -xzf /tmp/agent.tgz -C "$HOME/cursor-agent"
           echo "CURSOR_AGENT=$HOME/cursor-agent/cursor-agent" >> "$GITHUB_ENV"
 
+      # Cursor's sandbox needs unprivileged user namespaces; Ubuntu 24.04 restricts them with
+      # AppArmor ("Sandbox mode is enabled but not available"). Allow them on this throwaway VM
+      # so the agent keeps running sandboxed.
+      - name: Allow the agent sandbox
+        if: env.HAS_KEY == 'true'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Review (${{ matrix.lane }})
         if: env.HAS_KEY == 'true'
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           NO_FOOTER: "1"
         run: |
-          bash /tmp/review_lanes.sh /tmp/pr.diff "${{ matrix.lane }}" > /tmp/lane.md
+          status=0
+          bash /tmp/review_lanes.sh /tmp/pr.diff "${{ matrix.lane }}" > /tmp/lane.md || status=$?
           if grep -qF "$CURSOR_API_KEY" /tmp/lane.md; then
             echo "_Review withheld: the output contained a secret._" > /tmp/lane.md
           fi
           mkdir -p out && mv /tmp/lane.md "out/${{ matrix.lane }}.md"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::The ${{ matrix.lane }} reviewer failed — see the PR comment."
+            exit "$status"
+          fi
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: env.HAS_KEY == 'true'
+        if: always() && env.HAS_KEY == 'true'
         with:
           name: review-${{ matrix.lane }}
           path: out/${{ matrix.lane }}.md

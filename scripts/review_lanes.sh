@@ -10,6 +10,7 @@
 # Env: MODEL (default gpt-5.6-sol-high), CURSOR_API_KEY or a `cursor-agent login` session,
 # CURSOR_AGENT (path to the agent binary), NO_FOOTER=1 (omit the timing line).
 # The agent runs read-only (--mode ask, sandboxed); run it from the repository root.
+# Exits 1 if any lane's reviewer failed (the report still contains every lane).
 set -euo pipefail
 
 DIFF="${1:?usage: review_lanes.sh <diff-file> [lane ...]}"
@@ -51,7 +52,8 @@ Answer in GitHub-flavoured Markdown."
       --sandbox enabled > "$OUT/$lane.md" 2> "$OUT/$lane.err"; then
     :
   else
-    { echo "_Reviewer failed:_"; echo '```'; tail -5 "$OUT/$lane.err"; echo '```'; } > "$OUT/$lane.md"
+    { echo "_Reviewer failed:_"; echo '```'; tail -5 "$OUT/$lane.err" | cut -c1-400; echo '```'; } > "$OUT/$lane.md"
+    touch "$OUT/$lane.failed"
   fi
 }
 
@@ -78,3 +80,7 @@ for lane in "${LANES[@]}"; do
   echo
 done
 [[ -n "${NO_FOOTER:-}" ]] || echo "<sub>${#LANES[@]} parallel reviewers · \`$MODEL\` · ${secs}s</sub>"
+
+# Fail loudly if any reviewer failed, so CI never shows a green check for a review that
+# didn't happen.
+if compgen -G "$OUT/*.failed" > /dev/null; then exit 1; fi
