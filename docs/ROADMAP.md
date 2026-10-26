@@ -9,12 +9,13 @@
 - [x] Markdown / SRT / JSON transcripts in `~/Documents/Transcribes`
 - [x] RecAndCC.app with in-app permission requests and first-run setup
 - [x] Launch at login; Windows backends (untested on hardware)
+- [x] Live transcription while recording + floating live captions window (~3 s behind speech)
+- [x] Ask mode records immediately and asks whether to keep it; calls during media recordings add the mic
 
 ## Next
+- [ ] Faster live captions (< 2 s): MLX Whisper on the Metal GPU, or a streaming model
 - [ ] **Speaker diarization of "Others"**: split into `Speaker 1/2/…` (sherpa-onnx or
       pyannote), optionally with names you assign once
-- [ ] **Live transcription while recording**: transcribe finished chunks during the call,
-      so the transcript is ready seconds after it ends, plus live captions
 - [ ] **Summaries & action items** with a local LLM (e.g. Qwen 2.5/3 7B quantised via
       llama.cpp / MLX), off by default
 - [ ] **Search** across all transcripts from the menu
