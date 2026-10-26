@@ -332,6 +332,7 @@ class Engine:
         start_req: tuple[TriggerKind, str | None] | None = None
         stop_req = False
         prompt_evt: tuple[str, TriggerKind] | None = None
+        upgrade_req: str | None = None
         save = False
 
         with self._lock:
@@ -403,6 +404,25 @@ class Engine:
                     self._suppressed.add(r.key)  # app may still hold an audio session
                     stop_req = True
 
+            # --- a call started while a media session records (e.g. YouTube was playing when
+            # Zoom rang, or the same browser tab now uses the mic): follow the call, so the mic
+            # gets recorded and the session doesn't end when the video stops.
+            r = self._rec
+            if r is not None and r.kind == TriggerKind.MEDIA and start_req is None and not stop_req:
+                for a in apps.values():
+                    if a.kind != TriggerKind.CALL:
+                        continue
+                    if a.key != r.key and (
+                        a.key in self._suppressed
+                        or now - self._first_seen[a.key] < det.min_active_s
+                        or effective_mode(det, a.key, a.procs) == Mode.OFF
+                    ):
+                        continue
+                    log.info("call detected during media recording: now following %s", a.name)
+                    r.key, r.name, r.kind = a.key, a.name, TriggerKind.CALL
+                    upgrade_req = a.name
+                    break
+
             # --- new triggers
             if self._rec is None and self._prompt is None and start_req is None:
                 cands = [
@@ -435,6 +455,8 @@ class Engine:
             self._do_stop()
         if start_req is not None:
             self._do_start(*start_req)
+        if upgrade_req is not None:
+            self._do_upgrade(upgrade_req)
         if prompt_evt is not None and self.on_prompt:
             try:
                 self.on_prompt(*prompt_evt)
@@ -501,6 +523,15 @@ class Engine:
             if self._rec is not None:
                 self._rec.session = session
                 self._rec.started = self.clock()
+
+    def _do_upgrade(self, app: str) -> None:
+        upgrade = getattr(self.recorder, "upgrade_to_call", None)
+        if upgrade is None:
+            return
+        try:
+            upgrade(app)
+        except Exception:
+            log.exception("could not add the microphone to the running session")
 
     def _do_stop(self) -> None:
         with self._lock:

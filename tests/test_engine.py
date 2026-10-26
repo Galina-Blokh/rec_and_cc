@@ -369,3 +369,65 @@ def test_thread_and_shutdown():
     h.eng.shutdown()
     assert h.status == IDLE and h.rec.stops == 1 and len(h.q.submitted) == 1
     assert h.mon.closed
+
+
+# --- a call starting during a media recording -------------------------------------------
+def _upgrade_harness():
+    h = Harness(mode=Mode.AUTO)
+    h.rec.upgrades = []
+    h.rec.upgrade_to_call = h.rec.upgrades.append
+    return h
+
+
+def test_call_during_media_recording_upgrades_session():
+    h = _upgrade_harness()
+    h.mon.procs = [CHROME]
+    h.run(4)
+    assert h.rec.starts == [(TriggerKind.MEDIA, "Google Chrome")]
+    h.mon.procs = [CHROME, ZOOM]
+    h.run(4)
+    assert h.rec.upgrades == ["zoom.us"]
+    assert h.eng.state.kind == TriggerKind.CALL and h.eng.state.app == "zoom.us"
+    assert h.rec.stops == 0  # same session continues
+    # The video stops but the call goes on: the session must keep recording.
+    h.mon.procs = [ZOOM]
+    h.run(60)
+    assert h.rec.stops == 0 and h.eng.state.status == RECORDING
+    # Call ends → session stops after stop_after_inactive_s.
+    h.mon.procs = []
+    h.run(25)
+    assert h.rec.stops == 1
+    assert len(h.rec.starts) == 1
+
+
+def test_same_browser_starting_mic_upgrades_immediately():
+    h = _upgrade_harness()
+    h.mon.procs = [CHROME]
+    h.run(4)
+    meet = AudioProcess(
+        pid=11,
+        bundle_id="com.google.Chrome",
+        name="Google Chrome",
+        input_active=True,
+        output_active=True,
+    )
+    h.mon.procs = [meet]
+    h.eng.tick()
+    assert h.rec.upgrades == ["Google Chrome"]
+    assert h.eng.state.kind == TriggerKind.CALL
+
+
+def test_call_upgrade_respects_off_override_and_debounce():
+    h = _upgrade_harness()
+    h.cfg.detection.app_modes["us.zoom"] = Mode.OFF
+    h.mon.procs = [CHROME]
+    h.run(4)
+    h.mon.procs = [CHROME, ZOOM]
+    h.run(10)
+    assert h.rec.upgrades == []
+    h2 = _upgrade_harness()
+    h2.mon.procs = [CHROME]
+    h2.run(4)
+    h2.mon.procs = [CHROME, ZOOM]
+    h2.run(1)  # call active < min_active_s
+    assert h2.rec.upgrades == []

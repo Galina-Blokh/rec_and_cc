@@ -365,7 +365,15 @@ class Controller:
             self.tq.shutdown()
         except Exception:
             log.exception("transcription queue shutdown failed")
-        if self.transcriber is not None and hasattr(self.transcriber, "close"):
+        busy = 0
+        with contextlib.suppress(Exception):
+            busy = int(self.tq.pending())
+        if busy:
+            # A session is mid-transcription. Don't pull the pool out from under it (that
+            # fails the job) or wait for it (could be minutes): the process exits and the
+            # untranscribed session is re-queued on the next start.
+            log.info("quitting during a transcription; it will resume on next start")
+        elif self.transcriber is not None and hasattr(self.transcriber, "close"):
             with contextlib.suppress(Exception):
                 self.transcriber.close()
 

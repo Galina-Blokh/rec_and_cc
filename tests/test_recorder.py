@@ -204,3 +204,39 @@ def test_resampler_chunked(src_rate):
         r2 = StreamResampler(src_rate)
         o2 = np.concatenate([r2.process(hi[i : i + 4410]) for i in range(0, len(hi), 4410)])
         assert np.sqrt(np.mean(o2[2000:] ** 2)) < 0.05
+
+
+def test_upgrade_media_to_call_adds_aligned_mic(cfg):
+    rec, src = make(cfg, sine(3), sine(1, 300, 0.3))
+    rec.start(TriggerKind.MEDIA, "Google Chrome")
+    src["sys"].done.wait(5)
+    assert "mic" not in src
+    assert rec.upgrade_to_call("zoom.us") is True
+    src["mic"].done.wait(5)
+    out = rec.stop()
+    assert out.trigger_kind == TriggerKind.CALL and out.trigger_app == "zoom.us"
+    assert out.tracks == {Track.OTHERS: "others.wav", Track.ME: "me.wav"}
+    me, _ = sf.read(out.directory / "me.wav")
+    # Mic joined after 3 s of system audio: padded with 3 s of silence, then 1 s of mic.
+    assert len(me) == 4 * SAMPLE_RATE
+    assert np.all(me[: 3 * SAMPLE_RATE] == 0)
+    assert np.abs(me[3 * SAMPLE_RATE :]).max() > 0.2
+    assert SessionInfo.load(out.directory).trigger_kind == TriggerKind.CALL
+
+
+def test_upgrade_is_noop_for_calls_and_idle(cfg):
+    rec, src = make(cfg, sine(4), sine(4))
+    assert rec.upgrade_to_call("zoom.us") is False
+    rec.start(TriggerKind.CALL, "zoom.us")
+    assert rec.upgrade_to_call("zoom.us") is False
+    rec.stop()
+
+
+def test_upgrade_respects_never_policy(cfg):
+    cfg.detection.record_mic = "never"
+    rec, src = make(cfg, sine(4))
+    rec.start(TriggerKind.MEDIA, "Google Chrome")
+    assert rec.upgrade_to_call("zoom.us") is True
+    src["sys"].done.wait(5)
+    assert rec.stop().tracks == {Track.OTHERS: "others.wav"}
+    assert "mic" not in src

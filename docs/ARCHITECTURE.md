@@ -94,7 +94,8 @@ activity (debounce), and applies the per-app or global mode. Level-based silence
 dBFS) is a second stop condition, for apps that keep the audio device open while paused.
 
 ### Two tracks → speaker labels for free
-Mic → `Me`, system → `Others`. If you use speakers instead of headphones, the mic also picks
+Mic → `Me`, system → `Others`. A mic track that joins mid-session (a media recording upgraded
+to a call) starts with silence up to that moment, so both tracks share one timeline. If you use speakers instead of headphones, the mic also picks
 up the other side. Echo removal drops a `Me` segment that overlaps an `Others` segment in time
 and has similar text (`difflib` ratio ≥ 0.6).
 
@@ -128,7 +129,8 @@ it ends. Real meetings with longer same-language stretches are faster than this 
 ## Session lifecycle
 
 ```
-detected ─(3 s)─► [ask?] ─► recording ─(app inactive 20 s │ silent 3 min │ manual stop)─►
+detected ─(3 s)─► [ask?] ─► recording ─[call app appears during media → upgrade: + mic track, padded]
+          ─(app inactive 20 s │ silent 3 min │ manual stop)─►
   stop(): flush writers, save session.json ─► (< 3 s audio? delete) ─► TranscriptionQueue
   ─► transcript.md/.srt/.json, session.transcribed = true ─► (keep_audio = false? delete WAVs)
 ```

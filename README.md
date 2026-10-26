@@ -122,7 +122,9 @@ Menu items:
    silence. Then the recording is transcribed in the background.
 
 The microphone is recorded only for **calls** by default, so watching YouTube doesn't
-capture your room. You can change this with `record_mic` in the settings.
+capture your room. If a call starts while a video is already being recorded, the session
+becomes a call: the microphone joins in, lined up in time, and the recording follows the call
+instead of stopping when the video ends. You can change this with `record_mic` in the settings.
 
 ## Settings
 

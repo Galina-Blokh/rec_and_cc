@@ -70,6 +70,7 @@ class _TrackWriter:
         self.recorder = recorder
         self.q: queue.Queue[np.ndarray | None] = queue.Queue()
         self.frames_written = 0
+        self.frames_received = 0  # updated on the capture thread; ahead of frames_written
         self.level_dbfs = -120.0
         self.peak = 0.0  # max |sample| over the session (0.0 => digital silence throughout)
         self.error: BaseException | None = None
@@ -86,7 +87,14 @@ class _TrackWriter:
         if frames.size:
             self.peak = max(self.peak, float(np.max(np.abs(frames))))
         self.recorder._note_level(level)
+        self.frames_received += frames.size
         self.q.put(frames.copy())
+
+    def pad_silence(self, frames: int) -> None:
+        """Queue ``frames`` zeros ahead of any captured audio (track joining mid-session)."""
+        self.frames_received += frames
+        for i in range(0, frames, SAMPLE_RATE):
+            self.q.put(np.zeros(min(SAMPLE_RATE, frames - i), dtype=np.float32))
 
     def _run(self) -> None:
         try:
@@ -207,22 +215,9 @@ class Recorder:
 
             writers: list[_TrackWriter] = []
             for track, factory in plan:
-                path = directory / TRACK_FILES[track]
-                try:
-                    src = factory()
-                    w = _TrackWriter(track, path, src, self)
-                except Exception:
-                    log.exception("could not create %s source", track)
-                    continue
-                try:
-                    src.start(w.on_frames)
-                except Exception:
-                    log.exception("could not start %s source", track)
-                    w.finish()
-                    path.unlink(missing_ok=True)
-                    continue
-                writers.append(w)
-                session.tracks[track] = TRACK_FILES[track]
+                w = self._open_track(session, track, factory)
+                if w is not None:
+                    writers.append(w)
 
             if not writers:
                 shutil.rmtree(directory, ignore_errors=True)
@@ -239,6 +234,53 @@ class Recorder:
                 ", ".join(str(t) for t in session.tracks),
             )
             return session
+
+    def _open_track(
+        self, session: SessionInfo, track: Track, factory: SourceFactory, pad_frames: int = 0
+    ) -> _TrackWriter | None:
+        """Create and start one track; None (logged) if its source can't be started."""
+        path = session.directory / TRACK_FILES[track]
+        try:
+            src = factory()
+            w = _TrackWriter(track, path, src, self)
+        except Exception:
+            log.exception("could not create %s source", track)
+            return None
+        if pad_frames:
+            w.pad_silence(pad_frames)
+        try:
+            src.start(w.on_frames)
+        except Exception:
+            log.exception("could not start %s source", track)
+            w.finish()
+            path.unlink(missing_ok=True)
+            return None
+        session.tracks[track] = TRACK_FILES[track]
+        return w
+
+    def upgrade_to_call(self, app: str | None) -> bool:
+        """Turn a running media session into a call session (a call started while e.g. a
+        video was playing): adds the mic track if the policy wants it for calls. The mic
+        track starts with silence up to "now" so it stays aligned with the other tracks."""
+        with self._op_lock:
+            session = self._session
+            if session is None or session.trigger_kind != TriggerKind.MEDIA:
+                return False
+            session.trigger_kind = TriggerKind.CALL
+            session.trigger_app = app or session.trigger_app
+            have_mic = any(w.track == Track.ME for w in self._writers)
+            if not have_mic and should_record_mic(self.cfg.detection.record_mic, TriggerKind.CALL):
+                pad = max((w.frames_received for w in self._writers), default=0)
+                w = self._open_track(session, Track.ME, self.mic_factory, pad_frames=pad)
+                if w is not None:
+                    self._writers = [*self._writers, w]
+            session.save()
+            log.info(
+                "session upgraded to call (%s); tracks: %s",
+                app,
+                ", ".join(str(t) for t in session.tracks),
+            )
+            return True
 
     def stop(self) -> SessionInfo | None:
         """Stop, flush and close. Returns the session, or None if nothing was recording
