@@ -32,6 +32,26 @@ from .models import SAMPLE_RATE, SessionInfo, Track, TriggerKind
 
 log = logging.getLogger(__name__)
 
+PRIVATE_DIR_MODE = 0o700  # owner-only (POSIX; ignored on Windows, where ACLs apply)
+
+
+def make_private_dir(path: Path) -> None:
+    """Create ``path`` (and missing parents) with owner-only permissions, if it doesn't exist.
+
+    ``mkdir(mode=...)`` is filtered by the umask and only applies to the last component, so
+    each folder this creates is chmod-ed explicitly. Existing folders are left untouched.
+    """
+    if path.is_dir():
+        return
+    if not path.parent.is_dir():
+        make_private_dir(path.parent)
+    try:
+        path.mkdir(mode=PRIVATE_DIR_MODE)
+    except FileExistsError:
+        return  # created concurrently
+    path.chmod(PRIVATE_DIR_MODE)
+
+
 # Sessions with less audio than this (longest track) are deleted instead of transcribed.
 MIN_SESSION_SECONDS = 3.0
 
@@ -248,7 +268,11 @@ class Recorder:
         while d.exists():
             d = day / f"{base}-{n}"
             n += 1
-        d.mkdir(parents=True)
+        # Recordings and transcripts are private: owner-only folders (0700) at every level the
+        # recorder creates. An output folder that already exists keeps its permissions.
+        for p in (self.cfg.output_dir, day):
+            make_private_dir(p)
+        d.mkdir(mode=PRIVATE_DIR_MODE)
         return f"{now.strftime('%Y-%m-%d')}_{d.name}", d
 
     def start(

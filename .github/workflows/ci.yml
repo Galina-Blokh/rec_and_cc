@@ -5,14 +5,22 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+# Supply chain: actions are pinned to commit SHAs (Dependabot bumps them, see
+# .github/dependabot.yml) and every `uv` call uses --locked, so CI fails instead of silently
+# resolving dependencies that differ from uv.lock.
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-      - run: uv run --only-dev ruff check .
-      - run: uv run --only-dev ruff format --check src tests
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+      - run: uv run --locked --only-dev ruff check .
+      - run: uv run --locked --only-dev ruff format --check src tests
 
   test:
     strategy:
@@ -21,10 +29,14 @@ jobs:
         os: [macos-15, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+      - name: Install (exactly as locked)
+        run: uv sync --locked
       - name: Build macOS helper
         if: runner.os == 'macOS'
         run: ./native/macos/build.sh
       - name: Unit tests (fast; model-free)
-        run: uv run pytest -v
+        run: uv run --locked pytest -v

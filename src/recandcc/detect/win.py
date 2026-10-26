@@ -133,7 +133,7 @@ class WinActivityMonitor(ActivityMonitor):
                 if (p.info.get("name") or "").lower() == exe_lower:
                     return p.pid
         except Exception:
-            pass
+            log.debug("process lookup for %s failed", exe_lower, exc_info=True)
         return 0
 
     def snapshot(self) -> list[AudioProcess]:
@@ -177,5 +177,5 @@ class WinActivityMonitor(ActivityMonitor):
 
                 comtypes.CoUninitialize()
             except Exception:
-                pass
+                log.debug("CoUninitialize failed", exc_info=True)
             self._tls.com = False

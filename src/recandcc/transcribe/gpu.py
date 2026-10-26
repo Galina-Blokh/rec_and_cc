@@ -23,6 +23,7 @@ import numpy as np
 
 from ..config import TranscriptionConfig
 from .merge import language_confidence
+from .revisions import revision
 
 log = logging.getLogger("recandcc.transcribe")
 
@@ -44,17 +45,21 @@ def local_model_path(repo: str) -> str:
     """Local snapshot path of ``repo``, downloading it only if it isn't on disk yet.
 
     Passing the local path to mlx_whisper (instead of the repo id) means loading never
-    contacts Hugging Face once the model has been downloaded, so the app works offline.
+    contacts Hugging Face once the model has been downloaded, so the app works offline. The
+    repo's pinned commit (revisions.py) is used, both on disk and for the download.
     """
     if Path(repo).exists():
         return repo
     from huggingface_hub import snapshot_download
 
+    rev = revision(repo)
+    if rev is None:
+        log.info("model %s has no pinned revision; using its latest version", repo)
     try:
-        return snapshot_download(repo, local_files_only=True)
+        return snapshot_download(repo, revision=rev, local_files_only=True)
     except Exception:
         log.info("model %s not on disk yet; downloading it once", repo)
-        return snapshot_download(repo)
+        return snapshot_download(repo, revision=rev)
 
 
 def gpu_available() -> bool:

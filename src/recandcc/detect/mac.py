@@ -70,7 +70,7 @@ class MacActivityMonitor(ActivityMonitor):
 
     def _run_once(self) -> None:
         cmd = [str(find_helper()), "monitor", "--interval", str(self._interval)]
-        proc = subprocess.Popen(
+        proc = subprocess.Popen(  # noqa: S603 - fixed argv: our own bundled helper, no shell
             cmd,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -83,7 +83,7 @@ class MacActivityMonitor(ActivityMonitor):
         if self._closed.is_set():  # close() raced with the start
             proc.kill()
         threading.Thread(target=_pump_stderr, args=(proc,), daemon=True).start()
-        assert proc.stdout is not None
+        assert proc.stdout is not None  # noqa: S101 - type narrowing: the pipe was requested in Popen
         for line in proc.stdout:
             try:
                 parsed = _parse(line)
@@ -111,7 +111,7 @@ def _parse(line: str) -> list[AudioProcess]:
 
 
 def _pump_stderr(proc: subprocess.Popen[str]) -> None:
-    assert proc.stderr is not None
+    assert proc.stderr is not None  # noqa: S101 - type narrowing: the pipe was requested in Popen
     for line in proc.stderr:
         if line.strip():
             log.info("%s", line.rstrip())

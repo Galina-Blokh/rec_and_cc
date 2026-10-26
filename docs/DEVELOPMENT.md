@@ -101,6 +101,8 @@ uv run ruff check . && uv run ruff format --check src tests
   audio with `afplay`/`say` and checks that it is detected and captured.
 
 CI (`.github/workflows/ci.yml`) runs lint on Linux and the fast suite on macOS and Windows.
+It uses `--locked`, so commit `uv.lock` with every dependency change (`uv add` / `uv lock`);
+Dependabot (`.github/dependabot.yml`) proposes weekly updates.
 
 ## Useful commands while developing
 

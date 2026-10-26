@@ -250,7 +250,7 @@ class HotkeyListener:
             from .native import find_helper
 
             base = [str(find_helper()), "hotkey"]
-        proc = subprocess.Popen(
+        proc = subprocess.Popen(  # noqa: S603 - fixed argv: our helper (or a test stub), no shell
             [*base, self.hotkey.mac_combo()],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -265,7 +265,7 @@ class HotkeyListener:
             proc.kill()
         threading.Thread(target=_pump_stderr, args=(proc,), daemon=True).start()
         error: tuple[str, str] | None = None
-        assert proc.stdout is not None
+        assert proc.stdout is not None  # noqa: S101 - type narrowing: the pipe was requested in Popen
         for line in proc.stdout:
             try:
                 msg = json.loads(line)
@@ -289,7 +289,7 @@ class HotkeyListener:
 
 
 def _pump_stderr(proc: subprocess.Popen[str]) -> None:
-    assert proc.stderr is not None
+    assert proc.stderr is not None  # noqa: S101 - type narrowing: the pipe was requested in Popen
     for line in proc.stderr:
         if line.strip():
             log.info("%s", line.rstrip())

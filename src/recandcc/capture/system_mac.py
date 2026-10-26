@@ -39,7 +39,7 @@ class MacSystemAudioSource(AudioSource):
             for pid in self._exclude_pids:
                 cmd += ["--exclude-pid", str(pid)]
             log.debug("starting %s", cmd)
-            self._proc = subprocess.Popen(
+            self._proc = subprocess.Popen(  # noqa: S603 - fixed argv: our own bundled helper, no shell
                 cmd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -82,7 +82,7 @@ class MacSystemAudioSource(AudioSource):
 
     @staticmethod
     def _read_audio(proc: subprocess.Popen[bytes], on_frames: FrameCallback) -> None:
-        assert proc.stdout is not None
+        assert proc.stdout is not None  # noqa: S101 - type narrowing: the pipe was requested in Popen
         pending = b""
         while True:
             try:
@@ -110,7 +110,7 @@ class MacSystemAudioSource(AudioSource):
 
 def _pump_stderr(proc: subprocess.Popen[bytes]) -> None:
     """Forward helper diagnostics to logging."""
-    assert proc.stderr is not None
+    assert proc.stderr is not None  # noqa: S101 - type narrowing: the pipe was requested in Popen
     for raw in iter(proc.stderr.readline, b""):
         line = raw.decode(errors="replace").rstrip()
         if line:

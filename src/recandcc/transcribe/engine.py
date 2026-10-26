@@ -31,6 +31,7 @@ from .diarize import Diarizer, Turn, assign_speakers
 from .gpu import MlxWhisper, use_gpu
 from .merge import ME, OTHERS, language_confidence, merge_tracks, smooth_languages
 from .output import write_outputs
+from .revisions import faster_whisper_revision
 
 log = logging.getLogger("recandcc.transcribe")
 
@@ -93,6 +94,7 @@ class Transcriber:
             compute_type=self.cfg.compute_type,
             num_workers=self.num_workers,
             cpu_threads=self.cpu_threads,
+            revision=faster_whisper_revision(name),  # pinned commit (revisions.py)
         )
         # Offline first: once downloaded, a model loads without contacting Hugging Face.
         try:
