@@ -18,5 +18,8 @@ updates:
       interval: weekly
     open-pull-requests-limit: 10
     groups:
+      # sherpa-onnx pins sherpa-onnx-core to its exact version: always bump them together.
+      sherpa-onnx:
+        patterns: ["sherpa-onnx", "sherpa-onnx-core"]
       python-minor-patch:
         update-types: [minor, patch]
