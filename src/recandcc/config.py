@@ -107,6 +107,9 @@ class TranscriptionConfig:
     workers: int = 0  # parallel transcription workers, 0 = auto
     dedupe_echo: bool = True  # drop mic segments that are just speaker echo of "Others"
     keep_audio: bool = True  # False = delete WAVs after a successful transcription
+    # Transcribe while recording: text appears ~1-2 s after each phrase, and the final
+    # transcript is ready right when the session stops (no post-session pass).
+    live: bool = True
 
 
 @dataclass
@@ -114,6 +117,9 @@ class Config:
     output_dir: Path = DEFAULT_OUTPUT_DIR
     autostart: bool = False
     hotkey: str = "<cmd>+<shift>+r"
+    live_captions: bool = (
+        True  # floating captions window while recording (needs transcription.live)
+    )
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
 
