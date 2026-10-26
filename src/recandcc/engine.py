@@ -424,10 +424,13 @@ class Engine:
                 and not (stop_req or discard_req)
             ):
                 last = max(self._last_seen.get(r.key, r.started), r.started)
-                if r.key not in apps and now - last >= det.stop_after_inactive_s:
+                media = r.kind == TriggerKind.MEDIA
+                inactive_s = det.media_stop_after_inactive_s if media else det.stop_after_inactive_s
+                silence_s = det.media_stop_after_silence_s if media else det.stop_after_silence_s
+                if r.key not in apps and now - last >= inactive_s:
                     log.info("stopping: %s inactive for %.0fs", r.name, now - last)
                     stop_req = True
-                elif silence >= det.stop_after_silence_s:
+                elif silence >= silence_s:
                     log.info("stopping: silent for %.0fs", silence)
                     self._suppressed.add(r.key)  # app may still hold an audio session
                     stop_req = True
@@ -544,6 +547,21 @@ class Engine:
             tracks = list(silent())
         except Exception:
             return
+        # A track of pure zeros only means "permission missing" if the permission isn't
+        # granted: with nothing playing, the system-audio track is legitimately all zeros.
+        perms: dict = {}
+        if self.permission_status is not None:
+            try:
+                perms = self.permission_status() or {}
+            except Exception:
+                perms = {}
+        needed = {"others": "system_audio", "me": "microphone"}
+        tracks = [
+            t
+            for t in tracks
+            if perms.get(needed.get(str(t), ""), "unknown") != "granted"
+            and (perms or str(t) == "me")  # unknown status: only a dead-silent mic is telling
+        ]
         if tracks:
             names = {"others": "system audio", "me": "microphone"}
             what = " and ".join(names.get(str(t), str(t)) for t in tracks)

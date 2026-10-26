@@ -80,6 +80,9 @@ class DetectionConfig:
     min_active_s: float = 3.0  # audio must be active this long before we trigger
     stop_after_inactive_s: float = 20.0  # stop when the trigger app stopped doing audio I/O
     stop_after_silence_s: float = 180.0  # stop when everything has been silent this long
+    # Videos/podcasts end crisply (no conversational pauses), so media sessions stop sooner.
+    media_stop_after_inactive_s: float = 8.0
+    media_stop_after_silence_s: float = 30.0
     silence_dbfs: float = -50.0  # below this level a frame counts as silence
     ask_timeout_s: float = 30.0  # "keep recording?" prompt auto-dismisses after this
     # In ask mode recording starts right away and the prompt asks whether to keep it, so

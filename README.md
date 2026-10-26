@@ -120,8 +120,9 @@ Menu items:
    - **Discard**: stop and delete the recording, and don't ask again until this app's audio
      stops.
    - **Always**: keep it, and record this app automatically from now on (saved to settings).
-4. Recording stops 20 s after the app stops doing audio, or after 3 minutes of total
-   silence. Then the recording is transcribed in the background.
+4. Recording stops when the app stops doing audio: after 8 s for videos, 20 s for calls
+   (calls have natural pauses). It also stops after 30 s of silence for videos (e.g. a
+   paused tab), 3 minutes for calls. Then the recording is transcribed in the background.
 
 The microphone is recorded only for **calls** by default, so watching YouTube doesn't
 capture your room. If a call starts while a video is already being recorded, the session

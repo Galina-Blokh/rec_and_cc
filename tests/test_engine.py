@@ -493,3 +493,45 @@ def test_call_upgrade_respects_off_override_and_debounce():
     h2.mon.procs = [CHROME, ZOOM]
     h2.run(1)  # call active < min_active_s
     assert h2.rec.upgrades == []
+
+
+def test_media_stops_sooner_than_calls():
+    h = Harness(Mode.AUTO)
+    h.mon.procs = [CHROME]
+    h.run(4)
+    h.mon.procs = []
+    h.run(9)  # media_stop_after_inactive_s = 8
+    assert h.rec.stops == 1
+    h2 = Harness(Mode.AUTO)
+    h2.mon.procs = [ZOOM]
+    h2.run(4)
+    h2.mon.procs = []
+    h2.run(9)
+    assert h2.rec.stops == 0  # calls wait stop_after_inactive_s = 20
+    h2.run(12)
+    assert h2.rec.stops == 1
+
+
+def test_media_silence_stop_is_shorter():
+    h = Harness(Mode.AUTO)
+    h.mon.procs = [CHROME]  # e.g. a paused tab that keeps its audio stream open
+    h.run(4)
+    h.rec.silence = 31.0
+    h.eng.tick()
+    assert h.rec.stops == 1
+
+
+def test_silent_track_warning_only_without_permission():
+    h = Harness(Mode.AUTO)
+    h.rec.silent = [Track.OTHERS]  # nothing played during the session
+    h.mon.procs = [ZOOM]
+    h.run(4)
+    h.mon.procs = []
+    h.run(25)
+    assert "Recording was completely silent" not in h.notices  # permission is granted
+    h.perm = {"microphone": "granted", "system_audio": "denied"}
+    h.mon.procs = [CHROME]
+    h.run(4)
+    h.mon.procs = []
+    h.run(10)
+    assert "Recording was completely silent" in h.notices
