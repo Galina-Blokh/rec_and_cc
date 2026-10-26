@@ -4,6 +4,14 @@
 #
 #   native/macos/build_app.sh             # -> <repo>/dist/RecAndCC.app
 #   native/macos/build_app.sh --install   # ... and copy it to ~/Applications
+#
+# macOS remembers permissions by the app's code signature. The bundle is ad-hoc signed, so its
+# identity is the hash of its contents: ANY change to the bundle makes it a "new" app and the
+# permissions must be granted again. To keep that from happening on every update:
+#   - the bundle holds only the launcher, Info.plist, launcher.json and the icon. Python code
+#     runs from the repo and the rcc-audiotap helper lives in <repo>/bin (see native.py), so
+#     neither needs an app rebuild;
+#   - --install keeps the installed app untouched when the bundle contents are unchanged.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,13 +21,13 @@ app="$repo/dist/RecAndCC.app"
 install=0
 [[ "${1:-}" == "--install" ]] && install=1
 
+"$here/build.sh"  # helper -> <repo>/bin/rcc-audiotap (outside the bundle, on purpose)
 swift build --package-path "$pkg" -c release
 bin_dir="$(swift build --package-path "$pkg" -c release --show-bin-path)"
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp -f "$bin_dir/RecAndCC" "$app/Contents/MacOS/RecAndCC"
-cp -f "$bin_dir/rcc-audiotap" "$app/Contents/MacOS/rcc-audiotap"
 
 # Where the launcher finds Python. Baked in at build time; RCC_PYTHON overrides it at runtime.
 python3 - "$repo" "$app/Contents/Resources/launcher.json" <<'PY'
@@ -82,14 +90,27 @@ if [[ ! -f "$icon_cache" ]]; then
 fi
 [[ -f "$icon_cache" ]] && cp -f "$icon_cache" "$app/Contents/Resources/AppIcon.icns"
 
-# Ad-hoc sign: the nested helper first (keeps its own identifier), then the bundle.
-codesign -s - -f --identifier com.gblokh.recandcc.audiotap "$app/Contents/MacOS/rcc-audiotap"
-codesign --force --deep -s - "$app"
+# Fingerprint of everything that ends up in the bundle (before signing), to detect no-op updates.
+fingerprint="$(cd "$app/Contents" && cat MacOS/RecAndCC Info.plist Resources/launcher.json \
+  $([[ -f Resources/AppIcon.icns ]] && echo Resources/AppIcon.icns) | shasum -a 256 | cut -d' ' -f1)"
+echo "$fingerprint" > "$app/Contents/Resources/build-fingerprint"
+
+codesign --force -s - "$app"
 echo "Built $app"
 
 if (( install )); then
-  mkdir -p "$HOME/Applications"
-  rm -rf "$HOME/Applications/RecAndCC.app"
-  cp -R "$app" "$HOME/Applications/RecAndCC.app"
-  echo "Installed $HOME/Applications/RecAndCC.app"
+  target="$HOME/Applications/RecAndCC.app"
+  installed="$(cat "$target/Contents/Resources/build-fingerprint" 2>/dev/null || true)"
+  if [[ "$installed" == "$fingerprint" ]]; then
+    echo "Installed app is unchanged; kept $target as is (its permissions stay valid)."
+  else
+    mkdir -p "$HOME/Applications"
+    rm -rf "$target"
+    cp -R "$app" "$target"
+    echo "Installed $target"
+    if [[ -n "$installed" || -d "$HOME/Library/Logs/RecAndCC" ]]; then
+      echo "NOTE: the app bundle changed, so macOS sees a new app. Restart RecAndCC and grant"
+      echo "      Microphone + System audio again (menu bar → Permissions)."
+    fi
+  fi
 fi

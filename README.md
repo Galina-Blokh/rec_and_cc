@@ -179,7 +179,8 @@ repo):
 | Permission prompts show "Terminal" instead of RecAndCC | You ran `recandcc run` from a terminal. Launch `RecAndCC.app` instead. |
 | An app isn't detected / something is detected that shouldn't be | Run `uv run recandcc monitor`, note the `bundle_id`, and add it to `call_apps` / `media_apps` / `ignore_apps`. |
 | App doesn't start | Look at `~/Library/Logs/RecAndCC/app.log` and `recandcc.log`. |
-| Moved the repo folder | Run `./native/macos/build_app.sh --install` again. |
+| Moved the repo folder | Run `./native/macos/build_app.sh --install` again, then re-grant permissions (macOS sees a changed app as a new one). |
+| Permissions reset after an update | Only updates to the app bundle itself do that, and the build script warns you. Menu → Permissions → Grant… again. Normal code updates just need a restart of RecAndCC. |
 | Transcription is too slow | Use `model = "small"` in settings, or lower `workers`. |
 
 ## Windows

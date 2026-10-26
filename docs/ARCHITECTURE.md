@@ -81,7 +81,10 @@ paced by the wall clock.
 macOS (TCC) attributes permission requests to the *responsible process*. `RecAndCC.app`'s
 executable is a tiny Swift launcher that `posix_spawn`s Python as a child, so the app stays
 responsible, the prompts say "RecAndCC", and the grant survives restarts. The launcher sets
-`RCC_APP_BUNDLE`, and `native.find_helper()` then uses the helper inside the bundle.
+`RCC_APP_BUNDLE`. The helper deliberately lives **outside** the bundle in `<repo>/bin`: TCC
+charges its audio access to the responsible app wherever the binary is. Keeping it out means
+helper updates don't change the app's ad-hoc signature, which would make macOS treat
+RecAndCC as a new app and drop its permissions.
 System-audio permission status/request uses the TCC SPI (`TCCAccessPreflight` /
 `TCCAccessRequest`, loaded with `dlopen`). If that SPI is missing, the helper falls back to
 starting a tap, which triggers the system prompt.

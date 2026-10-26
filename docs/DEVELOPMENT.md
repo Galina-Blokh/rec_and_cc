@@ -9,9 +9,27 @@ uv sync                          # creates .venv with Python 3.12 + all deps (in
 ./native/macos/build_app.sh      # builds dist/RecAndCC.app   (--install → ~/Applications)
 ```
 
-Rebuild the helper after changing Swift code. Rebuild the app if you move the repo, because
-the repo path is baked into `RecAndCC.app/Contents/Resources/launcher.json`. You can override
-it at runtime with the `RCC_PYTHON` environment variable.
+### What to rebuild after a change (and why it matters for permissions)
+
+macOS remembers RecAndCC's permissions by the app bundle's code signature. The app is ad-hoc
+signed, so that identity is a hash of the bundle's contents. **If the bundle changes, macOS
+sees a new app and you have to grant Microphone and System audio again.** That's why the
+bundle holds only the launcher, `Info.plist`, `launcher.json` and the icon:
+
+| You changed | Do this | Permissions |
+|---|---|---|
+| Python code (`src/`) | Quit and reopen RecAndCC (the app runs the repo's code) | kept |
+| Swift helper (`Sources/rcc-audiotap`) | `./native/macos/build.sh`, then restart the app | kept (helper lives in `bin/`, outside the bundle) |
+| Launcher, `Info.plist`, icon, or moved the repo | `./native/macos/build_app.sh --install` | **re-grant** (the script tells you) |
+
+`build_app.sh --install` compares a fingerprint of the bundle contents and leaves the
+installed app untouched when nothing changed. The build is reproducible: the same sources
+give the same cdhash. The repo path is baked into `launcher.json`; `RCC_PYTHON` overrides
+the Python path at runtime.
+
+A self-signed code-signing certificate would make permissions survive bundle changes too, by
+pinning the identity to the certificate instead of the content hash. That needs a keychain
+change and isn't set up.
 
 ## Project layout
 

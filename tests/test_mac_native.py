@@ -136,14 +136,25 @@ def test_permissions_status_json():
     assert result["system_audio"] in {"granted", "denied", "undetermined", "unknown"}
 
 
-def test_find_helper_prefers_app_bundle(tmp_path, monkeypatch):
-    helper = tmp_path / "RecAndCC.app" / "Contents" / "MacOS" / "rcc-audiotap"
-    helper.parent.mkdir(parents=True)
-    helper.write_text("#!/bin/sh\n")
-    helper.chmod(0o755)
+def _fake_exe(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def test_find_helper_prefers_repo_build_over_app_bundle(tmp_path, monkeypatch):
+    """Rebuilt helpers in <repo>/bin win, so the app bundle (and its signature) never changes."""
+    from recandcc import native
+
+    repo_helper = _fake_exe(tmp_path / "repo" / "bin" / "rcc-audiotap")
+    bundle_helper = _fake_exe(tmp_path / "RecAndCC.app" / "Contents" / "MacOS" / "rcc-audiotap")
     monkeypatch.delenv("RCC_AUDIOTAP", raising=False)
     monkeypatch.setenv("RCC_APP_BUNDLE", str(tmp_path / "RecAndCC.app"))
-    assert find_helper() == helper
+    monkeypatch.setattr(native, "REPO_ROOT", tmp_path / "repo")
+    assert find_helper() == repo_helper
+    repo_helper.unlink()  # fallback: helper bundled by older builds of the app
+    assert find_helper() == bundle_helper
 
 
 @needs_audio_hardware

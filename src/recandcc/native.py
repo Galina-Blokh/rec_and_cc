@@ -24,11 +24,15 @@ def find_helper(name: str = HELPER_NAME) -> Path:
 
     Search order:
       1. $RCC_AUDIOTAP (explicit override)
-      2. $RCC_APP_BUNDLE/Contents/MacOS/<name> (set by the RecAndCC.app launcher, so TCC
-         permissions are attributed to the app bundle)
-      3. <repo>/bin/<name> (output of native/macos/build.sh)
+      2. <repo>/bin/<name> (output of native/macos/build.sh)
+      3. $RCC_APP_BUNDLE/Contents/MacOS/<name> (helper bundled by older builds of the app)
       4. next to sys.executable
       5. $PATH
+
+    The helper deliberately lives outside RecAndCC.app: TCC attributes its audio access to
+    the *responsible* app (the launcher that spawned us), wherever the binary is. Keeping it
+    out of the bundle means rebuilding the helper doesn't change the app's code signature,
+    which would make macOS treat RecAndCC as a new app and drop its permissions.
     """
     candidates: list[Path] = []
     if env := os.environ.get("RCC_AUDIOTAP"):
@@ -38,9 +42,9 @@ def find_helper(name: str = HELPER_NAME) -> Path:
                 f"RCC_AUDIOTAP points to {override}, which is not an executable file"
             )
         return override
+    candidates.append(REPO_ROOT / "bin" / name)
     if bundle := os.environ.get("RCC_APP_BUNDLE"):
         candidates.append(Path(bundle) / "Contents" / "MacOS" / name)
-    candidates.append(REPO_ROOT / "bin" / name)
     candidates.append(Path(sys.executable).parent / name)
     for candidate in candidates:
         if _is_executable(candidate):
