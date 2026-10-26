@@ -42,7 +42,7 @@ src/recandcc/
   permissions.py native.py      TCC permissions + helper discovery (macOS)
   ui/                           common Controller + rumps (mac) / pystray (windows) + live captions
   autostart.py cli.py logging_setup.py
-native/macos/AudioTap/          SwiftPM: rcc-audiotap (monitor/capture/permissions) + RecAndCC launcher
+native/macos/AudioTap/          SwiftPM: rcc-audiotap (monitor/capture/permissions/hotkey) + RecAndCC launcher
 tests/                          pytest suite
 scripts/                        dev demos (captions_demo.py)
 docs/                           this documentation
@@ -74,6 +74,7 @@ CI (`.github/workflows/ci.yml`) runs lint on Linux and the fast suite on macOS a
 uv run recandcc monitor                       # watch detection/classification live
 uv run recandcc record --seconds 10 --no-mic  # end-to-end check of capture + transcription
 bin/rcc-audiotap permissions                  # TCC status (as seen by the calling app!)
+bin/rcc-audiotap hotkey "<ctrl>+<alt>+f9"     # register a shortcut, prints a line per press
 bin/rcc-audiotap capture | head -c 64000 > x.raw   # 1 s of f32le 16 kHz mono
 tail -f ~/Library/Logs/RecAndCC/recandcc.log
 ```

@@ -126,7 +126,8 @@ class TranscriptionConfig:
 class Config:
     output_dir: Path = DEFAULT_OUTPUT_DIR
     autostart: bool = False
-    hotkey: str = "<cmd>+<shift>+r"
+    # Global start/stop shortcut. ⌃⌥R by default: ⌘⇧R would override Chrome/Safari shortcuts.
+    hotkey: str = "<ctrl>+<alt>+r"
     # Floating captions window while recording (needs transcription.live).
     live_captions: bool = True
     detection: DetectionConfig = field(default_factory=DetectionConfig)

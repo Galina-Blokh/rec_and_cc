@@ -8,6 +8,8 @@ Record / Always / Ignore buttons (own Tk root on its own thread, auto-closes aft
 ``ask_timeout_s``), and the "Record now" menu item while a prompt is pending.
 Live captions: ``TkCaptions``, a topmost tkinter window on its own Tk thread, fed through a
 queue from the ``live_start`` / ``live`` / ``live_end`` events (UNTESTED as well).
+Global shortcut (default Ctrl+Shift+R): ``hotkey.WinHotkeyListener``, owned by the Controller;
+the Start/Stop item shows it after a tab (Win32 menus right-align text after ``\t``).
 """
 
 from __future__ import annotations
@@ -251,7 +253,10 @@ class TrayApp:
                 ),
             ),
             Item(
-                lambda _i: "Stop recording" if st().status == RECORDING else "Start recording",
+                lambda _i: (
+                    ("Stop recording" if st().status == RECORDING else "Start recording")
+                    + (f"\t{self.ctrl.hotkey_label}" if self.ctrl.hotkey_label else "")
+                ),
                 lambda: self.ctrl.toggle_recording(),
             ),
             pystray.Menu.SEPARATOR,

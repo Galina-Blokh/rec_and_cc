@@ -5,6 +5,9 @@ All rumps/AppKit objects are touched only on the main thread: a ``rumps.Timer`` 
 Dialogs (record prompt, onboarding) run ``osascript`` on worker threads and route answers
 back to the engine, whose API is thread-safe.
 
+Global shortcut (default ⌃⌥R, ``cfg.hotkey``): owned by the Controller; its toasts arrive as
+``notice`` events and the Start/Stop item shows the combination.
+
 Live captions: the Controller posts ``live_start`` / ``live`` / ``live_end`` events; the
 same timer feeds them to a floating ``CaptionsPanel`` (``captions_mac.py``) when
 ``cfg.live_captions`` is on.
@@ -191,7 +194,11 @@ class MacApp(rumps.App):
         self.status_item.title = self.ctrl.status_line(st)
         for m, item in self.mode_items.items():
             item.state = 1 if st.mode == m else 0
-        self.rec_item.title = "Stop recording" if st.status == RECORDING else "Start recording"
+        rec_title = "Stop recording" if st.status == RECORDING else "Start recording"
+        if shortcut := self.ctrl.hotkey_label:
+            rec_title += f"  {shortcut}"
+        if self.rec_item.title != rec_title:
+            self.rec_item.title = rec_title
         self.login_item.state = 1 if autostart.is_enabled() else 0
         self._render_live(st)
         # close a stale prompt dialog (answered elsewhere, expired, mode changed, ...)

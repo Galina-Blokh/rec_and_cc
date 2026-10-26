@@ -14,7 +14,9 @@ pool). Data flow::
                        live worker <-------------+  results collected in per-track order
                          -> on_segments(new)       (captions)
                          -> transcript.md rewrite  (debounced, atomic)
-                         -> at the end: final transcript.{md,json,srt}
+                         -> at the end: final transcript.{md,json,srt}; speaker
+                            diarization of the others track starts with the flush, so it
+                            overlaps with transcribing the tail (captions keep "Others")
 
 A region is committed when it is followed by ``commit_silence_s`` of silence before the end of
 the buffer, or force-cut at the quietest point once it is ``max_region_s`` long. Audio before
@@ -206,6 +208,8 @@ class LiveTranscriber:
         self._finished = threading.Event()
         self._error: BaseException | None = None
         self._result: list[Segment] = []
+        self._diarization: Future | None = None
+        self._diarization_started = False
 
         self._tracks: dict[Track, _TrackBuf] = {}
         self._held: list[tuple[Segment, float]] = []  # Me segments waiting for Others
@@ -309,6 +313,9 @@ class LiveTranscriber:
 
     def _step(self, flush: bool) -> bool:
         """One worker iteration: buffer new audio, scan, submit, emit. True when done."""
+        if flush and not self._diarization_started:
+            self._diarization_started = True
+            self._start_diarization()
         self._drain()
         for tb in list(self._tracks.values()):
             self._safe_scan(tb, final=flush)
@@ -525,6 +532,16 @@ class LiveTranscriber:
             except Exception:
                 log.exception("could not write the live transcript")
 
+    def _start_diarization(self) -> None:
+        """At the flush (the WAVs are complete): diarize the others track in the background
+        while the tail is transcribed; ``write_final`` picks the result up."""
+        with self._lock:
+            session = self._final_session or self.session
+        try:
+            self._diarization = self.transcriber.start_diarization(session)
+        except Exception:  # noqa: BLE001 - diarization is optional
+            log.exception("could not start speaker diarization")
+
     def _write_final(self) -> None:
         if self._failed_jobs and not self._ok_jobs:
             raise RuntimeError(f"all {self._failed_jobs} live regions failed")
@@ -540,8 +557,7 @@ class LiveTranscriber:
             if not Path(session.directory).exists():
                 log.info("session %s was deleted; no live transcript written", session.id)
                 return
-            self.transcriber.write_final(session, segs, duration)
-            self._result = segs
+            self._result = self.transcriber.write_final(session, segs, duration, self._diarization)
         log.info(
             "session %s: live transcript final, %d segments (%d regions, %d failed)",
             session.id,

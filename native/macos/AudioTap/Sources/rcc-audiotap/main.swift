@@ -9,6 +9,7 @@
 //                                               show the system prompt, print the resulting status
 //   rcc-audiotap open-settings microphone|system_audio
 //                                               open the matching System Settings privacy pane
+//   rcc-audiotap hotkey "<cmd>+<shift>+r"       register a global shortcut, JSON line per press
 
 import Foundation
 
@@ -20,6 +21,7 @@ usage:
   rcc-audiotap permissions
   rcc-audiotap request microphone|system_audio [--timeout SECONDS]
   rcc-audiotap open-settings microphone|system_audio
+  rcc-audiotap hotkey COMBO        (e.g. "<cmd>+<shift>+r")
 
 """
 
@@ -98,6 +100,10 @@ do {
         let kind = value(after: "open-settings") { PermissionKind(rawValue: $0) }
         guard args.isEmpty else { fail("unexpected argument \(args[0])") }
         runOpenSettings(kind)
+
+    case "hotkey":
+        guard args.count == 1 else { fail("hotkey takes exactly one combo, e.g. \"<cmd>+<shift>+r\"") }
+        runHotkey(args[0])
 
     case "-h", "--help", "help":
         print(usage, terminator: "")

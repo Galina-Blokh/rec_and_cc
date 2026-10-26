@@ -14,7 +14,7 @@ Changes to `[detection]` are picked up while the app runs. Restart the app after
 |---|---|---|
 | `output_dir` | `~/Documents/Transcribes` | Where sessions are saved (`<date>/<time>_<app>/`) |
 | `autostart` | `false` | Informational; use **menu → Launch at login** or `recandcc autostart on` |
-| `hotkey` | `"<cmd>+<shift>+r"` | Reserved; a global hotkey is not implemented yet (see roadmap) |
+| `hotkey` | `"<ctrl>+<alt>+r"` (⌃⌥R) | Global start/stop shortcut (toggle; stops any recording). Modifiers `<cmd>`, `<shift>`, `<alt>`/`<option>`, `<ctrl>` (`<win>` = Windows key) + one key: `a`–`z`, `0`–`9`, `f1`–`f12`, `space`. Keys other than F1–F12 need a modifier. On Windows `<cmd>` means Ctrl. `""` disables it. Applied live when the file changes |
 | `live_captions` | `true` | Show the floating captions window while recording (needs `transcription.live`) |
 
 ## `[detection]`
@@ -57,6 +57,7 @@ using the mic is treated as a call (Google Meet). The global `mode = "off"` over
 | `languages` | `["en", "ru"]` | Detect only among these languages; `[]` = any language |
 | `workers` | `0` | Parallel transcription workers; `0` = auto (`min(4, cores // 4)`) |
 | `dedupe_echo` | `true` | Remove mic segments that are speaker echo of the other side |
+| `diarize` | `true` | Split `Others` into `Speaker 1`, `Speaker 2`, … (numbered by first appearance) in the final transcript (md/srt/json), with offline speaker diarization of the system-audio track. One other speaker stays `Others`; `Me` is never changed; live captions keep `Others`. Costs ~1.5 s per 10 min of audio (CPU, overlapped with transcription). Needs the audio, so sessions whose WAVs were deleted are not diarized. The 28 MB model is downloaded once to `~/Library/Caches/RecAndCC/models` (Windows: `%LOCALAPPDATA%\RecAndCC\Cache\models`); without it (offline) transcripts keep `Others` |
 | `keep_audio` | `true` | `false` deletes the WAVs after a successful transcription (~115 MB per track-hour) |
 | `audio_retention_days` | `0` | Delete a recording's audio (`*.wav`) this many days after it was transcribed; `0` = keep forever. Transcripts are never deleted. Checked at startup and hourly. Also in **menu → Delete audio after** (Never / 1 / 7 / 30 / 90 days) |
 | `live` | `true` | Transcribe while recording: each phrase appears ~1 s after it is spoken (~3 s on the CPU backend) (captions, and `transcript.md` is rewritten every few seconds), and the final transcript is written about a second after the session stops. `false` = transcribe the whole session after it stops |

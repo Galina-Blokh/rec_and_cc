@@ -7,6 +7,9 @@ account, nothing uploaded.
 
 - 🎙️ Records **you** (microphone) and **everyone else** (system audio) as separate tracks,
   so the transcript knows who spoke: `Me` / `Others`.
+- 🗣️ **Speaker labels** for the other side: in a 5-person call, `Others` is split into
+  `Speaker 1`, `Speaker 2`, … in the final transcript (offline speaker diarization, a few
+  seconds per hour of audio). Live captions keep showing `Others`.
 - 🌍 **English and Russian** are detected automatically, even when the language switches
   mid-meeting.
 - 🧠 Local Whisper (`large-v3-turbo`) on the **Apple-silicon GPU** (MLX), with CPU threads
@@ -36,8 +39,10 @@ Sample `transcript.md`:
 - **Duration:** 00:42:10
 - **Languages:** en, ru
 
-**[00:00:02] Others:** Hello team, this is the weekly sync. We will discuss the release schedule.
+**[00:00:02] Speaker 1:** Hello team, this is the weekly sync. We will discuss the release schedule.
 **[00:00:09] Me:** Привет всем, давайте обсудим бюджет на следующий квартал.
+**[00:00:15] Speaker 2:** Sounds good. I have the numbers from the last quarter ready.
+**[00:00:21] Speaker 1:** Great, let's start with those.
 ```
 
 ---
@@ -96,8 +101,11 @@ The menu-bar icon shows the state:
 
 Menu items:
 - **Mode → Off / Ask / Auto**
-- **Start recording / Stop recording**: manual control. A manual recording only stops when
-  you stop it.
+- **Start recording / Stop recording  ⌃⌥R**: manual control. A manual recording only stops
+  when you stop it. The global shortcut **⌃⌥R** (Control+Option+R; Ctrl+Alt+R on Windows) does the same from
+  any app without opening the menu: it stops whatever is recording, otherwise it starts a
+  manual recording, and a small toast confirms it. Change or disable it with `hotkey` in the
+  settings.
 - **Show live captions**: on/off switch for the floating captions window (saved to settings).
 - **Open live transcript**: opens the current (or last) live session's `transcript.md`.
 - **Recent transcripts**: the last 10, click to open.
@@ -107,7 +115,7 @@ Menu items:
 - **Delete audio after**: Never / 1 / 7 / 30 / 90 days. Audio of transcribed recordings is
   deleted after that many days; transcripts are always kept. Any number of days can be set as
   `audio_retention_days` in the settings.
-- **Edit settings**: opens `config.toml` (changes to detection settings apply live).
+- **Edit settings**: opens `config.toml` (changes to detection settings and `hotkey` apply live).
 - **Quit RecAndCC**
 
 ### Live captions
@@ -128,6 +136,16 @@ phrase on an M5 Max with `large-v3-turbo`: almost all of that is one Whisper pas
 faster captions see the `workers` / `model` trade-offs in
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md). The very first recording after the app starts
 shows captions only once the model has loaded (a few seconds).
+
+### In-person meetings: press ⌃⌥R
+
+A meeting in a room doesn't make any app play or capture audio, so nothing triggers a
+recording. Press **⌃⌥R** (Control+Option+R) when it starts and again when it ends. It works in every app, needs
+no extra permission (no Accessibility / Input Monitoring), and uses the physical R key, so it
+works with a Russian keyboard layout too. While RecAndCC runs, the shortcut belongs to it, so
+the default avoids ⌘⇧R (hard reload in Chrome, Reader in Safari). If another app already
+registered the shortcut, RecAndCC tells you once; pick another one, e.g.
+`hotkey = "<cmd>+<shift>+r"`.
 
 ### When does it record?
 
@@ -197,7 +215,8 @@ repo):
 ## Privacy & legal
 
 - Audio and transcripts never leave your computer. The only network access is the one-time
-  model download from Hugging Face. After that the app works fully offline: models load
+  model download (Whisper from Hugging Face, the 28 MB speaker model from the sherpa-onnx
+  GitHub releases, checksum-verified). After that the app works fully offline: models load
   from disk without contacting anything (verified with all network access blocked).
 - Recording people can require their consent (some US states and the EU require everyone on
   a call to agree). You are responsible for using this lawfully. Tell people when you record

@@ -8,6 +8,10 @@ is ever touched from a worker thread. With ``transcription.live`` each session g
 ``live_end`` events, and its ``finish()`` replaces the post-session transcription. Slow
 things (permission checks, scanning for recent transcripts) run on short-lived worker threads
 and publish results under ``self._lock``.
+
+The global shortcut (``cfg.hotkey``, see ``hotkey.py``) calls ``hotkey_pressed()`` on the
+listener's thread: it toggles recording through the engine's thread-safe commands and posts a
+``notice`` event, so the toast is shown by the UI's main thread.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import time
 from dataclasses import fields
 from pathlib import Path
 
+from .. import hotkey as hotkey_mod
 from ..config import CONFIG_PATH, Config, load_config
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind
@@ -31,6 +36,7 @@ from ..retention import purge_old_audio
 log = logging.getLogger(__name__)
 
 RECENT_COUNT = 10
+HOTKEY_DEBOUNCE_S = 0.5
 REFRESH_EVERY_S = 10.0
 PERM_KINDS = ("microphone", "system_audio")
 PERM_TITLES = {"microphone": "Microphone", "system_audio": "System audio"}
@@ -191,6 +197,12 @@ class Controller:
         self._refreshing = False
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
+        # global shortcut
+        self._hotkey_lock = threading.Lock()
+        self._hotkey = None  # HotkeyListener / WinHotkeyListener
+        self._hotkey_label = ""  # "⌘⇧R" while the shortcut is (being) registered
+        self._last_hotkey = float("-inf")
+        self.clock = time.monotonic
 
         if monitor is None:
             from ..detect import create_monitor
@@ -226,6 +238,73 @@ class Controller:
             threading.Thread(target=self._resubmit_unfinished, daemon=True, name="resubmit").start()
             threading.Thread(target=self._retention_loop, daemon=True, name="retention").start()
             self.refresh_async(force=True)
+            self.apply_hotkey(cfg.hotkey)
+
+    # --- global shortcut
+    def apply_hotkey(self, text: str | None, factory=None) -> None:
+        """(Re)register the global shortcut; ``""`` disables it. Blocks briefly while the old
+        listener shuts down, so call it off the main thread. ``factory`` is for tests."""
+        factory = factory or hotkey_mod.create_listener
+        with self._hotkey_lock:
+            old, self._hotkey, self._hotkey_label = self._hotkey, None, ""
+        if old is not None:
+            with contextlib.suppress(Exception):
+                old.close()
+        if getattr(self, "_shut", False):
+            return
+        try:
+            parsed = hotkey_mod.parse_hotkey(text)
+        except hotkey_mod.HotkeyError as e:
+            log.warning("invalid hotkey %r: %s", text, e)
+            self.events.put(("notice", "Shortcut not set", f"{e} — change `hotkey` in settings"))
+            return
+        if parsed is None:
+            log.info("global shortcut disabled")
+            return
+        with self._hotkey_lock:  # before the listener exists: its on_error may fire at once
+            self._hotkey_label = parsed.label()
+        try:
+            listener = factory(text, self.hotkey_pressed, self._hotkey_failed)
+        except Exception:
+            log.exception("could not start the global shortcut")
+            listener = None
+        with self._hotkey_lock:
+            self._hotkey = listener
+            if listener is None:
+                self._hotkey_label = ""
+
+    @property
+    def hotkey_label(self) -> str:
+        """Shortcut to show in the menu ("⌘⇧R"), "" if disabled or not working."""
+        with self._hotkey_lock:
+            return self._hotkey_label
+
+    def _hotkey_failed(self, kind: str, message: str) -> None:
+        with self._hotkey_lock:
+            label, self._hotkey_label = self._hotkey_label, ""
+        log.warning("global shortcut %s not available (%s): %s", label, kind, message)
+        if kind == "taken":
+            text = f"Shortcut {label} is used by another app — change `hotkey` in settings"
+        else:
+            text = f"Shortcut {label} could not be registered — change `hotkey` in settings"
+        self.events.put(("notice", "Shortcut unavailable", text))
+
+    def hotkey_pressed(self) -> None:
+        """Global shortcut: stop if recording (any session), else start a manual recording.
+        Runs on the listener's thread; presses within HOTKEY_DEBOUNCE_S are ignored."""
+        now = self.clock()
+        with self._hotkey_lock:
+            if now - self._last_hotkey < HOTKEY_DEBOUNCE_S:
+                return
+            self._last_hotkey = now
+            label = self._hotkey_label
+        if self.engine.state.status == RECORDING:
+            self.engine.stop()
+            self.events.put(("notice", "Recording stopped", "Saved; the transcript follows"))
+        else:
+            self.engine.start_manual()
+            title = f"Recording started ({label} to stop)" if label else "Recording started"
+            self.events.put(("notice", title, "Manual recording"))
 
     # --- callbacks from worker threads -> events
     def _on_prompt(self, app: str, kind: TriggerKind) -> None:
@@ -350,6 +429,9 @@ class Controller:
         for f in fields(new.detection):
             setattr(self.cfg.detection, f.name, getattr(new.detection, f.name))
         self.cfg.output_dir = new.output_dir
+        if new.hotkey != self.cfg.hotkey:
+            self.cfg.hotkey = new.hotkey
+            self.apply_hotkey(new.hotkey)
         log.info("config reloaded from %s", CONFIG_PATH)
 
     @property
@@ -421,6 +503,11 @@ class Controller:
                 return
             self._shut = True
         log.info("shutting down")
+        with self._hotkey_lock:
+            hk, self._hotkey = self._hotkey, None
+        if hk is not None:
+            with contextlib.suppress(Exception):
+                hk.close()
         self.engine.shutdown()
         try:
             self.tq.shutdown(wait=False)

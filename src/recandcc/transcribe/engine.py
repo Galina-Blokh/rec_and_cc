@@ -8,6 +8,8 @@ Pipeline per session:
   3. Merge consecutive same-language regions into chunks <= 30 s.
   4. Transcribe all chunks of both tracks concurrently on one shared WhisperModel.
   5. Merge tracks, drop mic echo, write transcript.{md,json,srt}.
+  6. Speaker diarization of the "Others" track (diarize.py) runs on its own CPU threads from
+     the start, alongside steps 1-4; "Others" segments become "Speaker 1", "Speaker 2", ...
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ import numpy as np
 from ..config import TranscriptionConfig
 from ..models import SAMPLE_RATE, Segment, SessionInfo, Track
 from .chunking import Chunk, find_speech, load_track, merge_labelled, slice_chunk
+from .diarize import Diarizer, Turn, assign_speakers
 from .gpu import MlxWhisper, use_gpu
 from .merge import ME, OTHERS, language_confidence, merge_tracks, smooth_languages
 from .output import write_outputs
@@ -36,6 +39,9 @@ SPEAKERS = {Track.ME: ME, Track.OTHERS: OTHERS}
 
 LANGUAGE_ID_MODEL = "base"  # small multilingual model used only for per-region language ID
 MIN_LANGUAGE_CONFIDENCE = 0.75  # below this a chunk's language is re-checked with the main model
+# How long writing the final transcript waits for speaker diarization. If it takes longer, the
+# transcript is written with "Others" right away and rewritten with speaker labels when ready.
+DIARIZE_WAIT_S = 5.0
 
 
 def auto_parallelism(workers: int = 0, cores: int | None = None) -> tuple[int, int]:
@@ -73,6 +79,8 @@ class Transcriber:
         self._pool: ThreadPoolExecutor | None = None
         self._init_lock = threading.Lock()
         self._run_lock = threading.Lock()
+        self._diarizer: Diarizer | None = None
+        self.diarize_wait_s = DIARIZE_WAIT_S
 
     # -- models ------------------------------------------------------------------------------
 
@@ -130,6 +138,9 @@ class Transcriber:
             if isinstance(self._model, MlxWhisper):
                 self._model.close()
             self._pool, self._model, self._lid_model = None, None, None
+            diarizer, self._diarizer = self._diarizer, None
+        if diarizer is not None:
+            diarizer.close(wait=True)  # lets a pending transcript relabel finish (seconds)
 
     # -- steps -------------------------------------------------------------------------------
 
@@ -277,6 +288,7 @@ class Transcriber:
     def _run(self, session: SessionInfo, progress: ProgressCallback | None) -> list[Segment]:
         report = progress or (lambda _f: None)
         report(0.0)
+        diarization = self.start_diarization(session)  # CPU threads, overlaps with Whisper
         audio: dict[Track, np.ndarray] = {}
         for track, name in session.tracks.items():
             path = Path(session.directory) / name
@@ -336,18 +348,99 @@ class Transcriber:
                 elapsed / duration if duration else 0.0,
             )
 
-        self.write_final(session, segments, duration)
+        segments = self.write_final(session, segments, duration, diarization)
         report(1.0)
         return segments
 
-    def write_final(self, session: SessionInfo, segments: list[Segment], duration: float) -> None:
-        """Write transcript.{md,json,srt}, mark the session transcribed, honour keep_audio."""
+    # -- final transcript + speaker diarization ----------------------------------------------
+
+    def start_diarization(self, session: SessionInfo) -> Future | None:
+        """Start diarizing the session's "Others" track in the background (CPU threads).
+        None if disabled (cfg.diarize) or there is no others track on disk."""
+        if not self.cfg.diarize:
+            return None
+        name = session.tracks.get(Track.OTHERS)
+        path = Path(session.directory) / name if name else None
+        if path is None or not path.exists():
+            return None
+        with self._init_lock:
+            if self._diarizer is None:
+                self._diarizer = Diarizer()
+            diarizer = self._diarizer
+        return diarizer.submit(path)
+
+    def write_final(
+        self,
+        session: SessionInfo,
+        segments: list[Segment],
+        duration: float,
+        diarization: Future | None = None,
+    ) -> list[Segment]:
+        """Write transcript.{md,json,srt}, mark the session transcribed, honour keep_audio.
+
+        `diarization`: a ``start_diarization`` future (started now if None). If its speaker
+        turns are ready within ``diarize_wait_s``, "Others" segments are relabelled before
+        writing; otherwise the transcript is written as is and rewritten with the labels in the
+        background as soon as they are ready (WAVs are deleted only after that). Returns the
+        segments written now.
+        """
+        if diarization is None:
+            diarization = self.start_diarization(session)
+        if diarization is not None:
+            try:
+                turns = diarization.result(timeout=self.diarize_wait_s)
+            except TimeoutError:
+                log.info("session %s: speaker labels follow when diarization ends", session.id)
+                self._write(session, segments, duration)
+                diarization.add_done_callback(
+                    lambda f: self._relabel_later(session, segments, duration, f)
+                )
+                return segments
+            except Exception:  # noqa: BLE001 - cancelled; diarization is optional
+                turns = None
+            segments = self._labelled(session, segments, turns)
+        self._write(session, segments, duration)
+        self._drop_audio(session)
+        return segments
+
+    def _write(self, session: SessionInfo, segments: list[Segment], duration: float) -> None:
         write_outputs(session, segments, duration, self.cfg.model)
         session.transcribed = True
         session.save()
+
+    def _drop_audio(self, session: SessionInfo) -> None:
         if not self.cfg.keep_audio:
             for name in session.tracks.values():
                 (Path(session.directory) / name).unlink(missing_ok=True)
+
+    @staticmethod
+    def _labelled(
+        session: SessionInfo, segments: list[Segment], turns: list[Turn] | None
+    ) -> list[Segment]:
+        if not turns:
+            return segments
+        out = assign_speakers(segments, turns)
+        speakers = sorted({s.speaker for s in out} - {ME, OTHERS})
+        log.info(
+            "session %s: %s", session.id, ", ".join(speakers) if speakers else "one other speaker"
+        )
+        return out
+
+    def _relabel_later(
+        self, session: SessionInfo, segments: list[Segment], duration: float, future: Future
+    ) -> None:
+        """Done-callback of a slow diarization: rewrite the transcript with speaker labels."""
+        try:
+            turns = None if future.cancelled() else future.result()
+            labelled = self._labelled(session, segments, turns)
+            if labelled != segments and Path(session.directory).exists():
+                write_outputs(session, labelled, duration, self.cfg.model)
+                log.info("session %s: transcript rewritten with speaker labels", session.id)
+        except Exception:  # noqa: BLE001 - runs on the diarizer thread; must not raise
+            log.exception("session %s: could not add speaker labels", session.id)
+        finally:
+            if Path(session.directory).exists():
+                self._drop_audio(session)
 
 
 def transcribe_directory(path: Path, cfg: TranscriptionConfig) -> list[Segment]:

@@ -49,7 +49,8 @@ def test_live_end_to_end(tmp_path):
     session.save()
 
     model = os.environ.get("RECANDCC_TEST_MODEL", "large-v3-turbo")
-    t = Transcriber(TranscriptionConfig(model=model))
+    # Two voices on the others track; diarization has its own test (test_diarize_integration).
+    t = Transcriber(TranscriptionConfig(model=model, diarize=False))
     t.ensure_loaded()  # don't count model loading
     got, lock = [], threading.Lock()
 

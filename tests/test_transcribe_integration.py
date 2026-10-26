@@ -1,7 +1,7 @@
 """End-to-end transcription with a real Whisper model and macOS `say` audio.
 
 Run: uv run pytest -m slow tests/test_transcribe_integration.py -v
-Model: RECANDCC_TEST_MODEL (default "small").
+Model: RECANDCC_TEST_MODEL (default "large-v3-turbo", the app default, so it is cached).
 """
 
 from __future__ import annotations
@@ -77,8 +77,9 @@ def session(tmp_path_factory) -> SessionInfo:
 
 
 def test_end_to_end(session):
-    model = os.environ.get("RECANDCC_TEST_MODEL", "small")
-    t = Transcriber(TranscriptionConfig(model=model))
+    model = os.environ.get("RECANDCC_TEST_MODEL", "large-v3-turbo")
+    # Two voices on the others track; diarization has its own test (test_diarize_integration).
+    t = Transcriber(TranscriptionConfig(model=model, diarize=False))
     try:
         segs = t.transcribe_session(session)
     finally:

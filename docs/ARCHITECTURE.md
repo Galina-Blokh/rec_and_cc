@@ -11,7 +11,8 @@ across platforms.
                 │  Contents/MacOS/RecAndCC   Swift launcher: TCC "responsible process" │
                 │      └─ spawns ─► .venv/bin/python -m recandcc run                   │
                 │                        ├─ spawns ─► rcc-audiotap monitor   (JSON/s)  │
-                │                        └─ spawns ─► rcc-audiotap capture   (PCM)     │
+                │                        ├─ spawns ─► rcc-audiotap capture   (PCM)     │
+                │                        └─ spawns ─► rcc-audiotap hotkey    (JSON/s)  │
                 └──────────────────────────────────────────────────────────────────────┘
 
   ActivityMonitor ──snapshot()──► Engine ──start/stop──► Recorder ──SessionInfo──► TranscriptionQueue
@@ -36,6 +37,8 @@ across platforms.
 | `recorder.py` | One session: sources → queues → WAV writer threads, live levels, silence tracking, frame tap for live transcription |
 | `engine.py` | Detection state machine: classify apps, debounce, ask/auto/off, stop conditions |
 | `transcribe/` | VAD chunking, language ID, parallel Whisper, merge + echo removal, md/srt/json output, background queue, live transcription (`live.py`) |
+| `transcribe/diarize.py` | Offline speaker diarization of the `Others` track (speaker embeddings + clustering) and `Others` → `Speaker N` relabelling of the final transcript; one-time, checksum-verified model download |
+| `hotkey.py` | Global start/stop shortcut: parses `hotkey`, runs `rcc-audiotap hotkey` (macOS) or `RegisterHotKey` (Windows) |
 | `permissions.py` | Query, request and open settings for mic and system-audio permissions |
 | `ui/` | `common.Controller` (platform-independent glue) + `mac.py` (rumps) / `tray.py` (pystray) |
 | `ui/captions*.py` | Live captions window: `captions.py` (pure logic: ordering, trimming, header) + `captions_mac.py` (floating non-activating NSPanel); Windows uses a Tk window in `tray.py` |
@@ -52,6 +55,8 @@ The app is built around one rule: **real-time audio threads never block**. Every
 |---|---|---|
 | `rcc-audiotap capture` (process) | Core Audio IO proc → copy → conversion queue → stdout; silence-filler timer | pipe (raw f32le) |
 | `rcc-audiotap monitor` (process) | Polls Core Audio process list | pipe (JSON lines) |
+| `rcc-audiotap hotkey` (process) | Carbon `RegisterEventHotKey` + AppKit run loop; one line per press; exits on stdin EOF | pipe (JSON lines) |
+| hotkey reader | Reads the helper (restart with backoff) / Windows: `GetMessage` loop for `WM_HOTKEY`; calls `Controller.hotkey_pressed()` (debounced 0.5 s → `start_manual`/`stop` commands + `notice` event) | engine commands, event queue |
 | capture reader (per source) | Reads the pipe / PortAudio callback → `on_frames` (+ frame listeners, which only enqueue) | `queue.Queue` |
 | WAV writer (per track) | Writes PCM_16 WAV, so disk I/O never stalls capture | owns its file |
 | monitor reader | Parses JSON, keeps the latest snapshot (lock-protected) | `snapshot()` |
@@ -59,6 +64,7 @@ The app is built around one rule: **real-time audio threads never block**. Every
 | transcription dispatcher | Processes sessions in order, one at a time: a full transcription, or the "finalize" job of a live session (waits for `LiveTranscriber.finish()`) | `TranscriptionQueue` |
 | live worker (per recording session) | Buffers the tap's frames, VAD every 0.3 s, submits ended phrases, emits results, rewrites `transcript.md`, writes the final transcript | input `SimpleQueue`; callbacks |
 | transcription workers (N) | Whisper chunks / live phrases from **both tracks concurrently** (shared by batch and live) | `ThreadPoolExecutor` |
+| diarizer (1) + embedding workers (`min(6, cores // 2)`) | Speaker diarization of `others.wav`, one session at a time; then (if it finished late) rewrites the transcript with speaker labels | `Future` + done-callback |
 | UI main thread | rumps/AppKit; drains an event queue every 0.5 s | event queue |
 | UI workers | Permission checks, recent-transcript scan, `osascript` dialogs | event queue |
 
@@ -97,6 +103,19 @@ System-audio permission status/request uses the TCC SPI (`TCCAccessPreflight` /
 `TCCAccessRequest`, loaded with `dlopen`). If that SPI is missing, the helper falls back to
 starting a tap, which triggers the system prompt.
 
+### Global shortcut without extra permissions
+NSEvent global monitors, CGEventTaps and pynput see every keystroke, so macOS requires
+Accessibility / Input Monitoring for them. Carbon's `RegisterEventHotKey` only delivers the
+one registered combination and needs no permission. It is still the supported API for this
+(no modern replacement) and works in a background process with an AppKit run loop, which is
+why it lives in the helper (`rcc-audiotap hotkey "<cmd>+<shift>+r"`): registered with
+`kEventHotKeyExclusive`, so a combination another app already holds fails with a clear
+`{"error":"taken"}` (exit 2) instead of silently sharing it. A registered hot key takes
+precedence over the focused app's own shortcut. The helper matches the physical key, so the
+shortcut doesn't depend on the keyboard layout (en/ru). Its stdin is a pipe from Python and
+EOF ends it, so it never outlives the app. The Windows backend uses `RegisterHotKey`
+(`MOD_NOREPEAT`) on a thread with a `GetMessage` loop.
+
 ### Detection = who is doing audio I/O, not "is there sound"
 Core Audio reports per process whether input or output is running
 (`kAudioProcessPropertyIsRunningInput/Output`); Windows reports active audio sessions. The
@@ -109,6 +128,37 @@ Mic → `Me`, system → `Others`. A mic track that joins mid-session (a media r
 to a call) starts with silence up to that moment, so both tracks share one timeline. If you use speakers instead of headphones, the mic also picks
 up the other side. Echo removal drops a `Me` segment that overlaps an `Others` segment in time
 and has similar text (`difflib` ratio ≥ 0.6).
+
+### Speaker diarization: `Others` → `Speaker 1`, `Speaker 2`, …
+The system-audio track mixes everyone else on the call. Only the **final** transcript splits
+it; live captions keep `Others`, and `Me` is never touched (`diarize.py`):
+
+1. Silero VAD (the one used for chunking) finds speech in `others.wav`; regions are cut into
+   ~2 s windows.
+2. One 192-d speaker embedding per window with **3D-Speaker CAM++** (zh+en "advanced",
+   28 MB ONNX, Apache-2.0) through **sherpa-onnx**, on `min(6, cores // 2)` threads (ONNX
+   Runtime releases the GIL).
+3. Average-linkage agglomerative clustering on cosine distance (threshold 0.5) of the windows
+   ≥ 1 s; clusters with < 2 s of speech and shorter windows join the nearest speaker.
+4. Each `Others` segment takes the speaker it overlaps most (nearest one if none), numbered by
+   first appearance. If only one speaker is found the label stays `Others`.
+
+Why not sherpa-onnx's own pyannote pipeline (segmentation-3.0 + embeddings per 10 s window):
+on the same synthetic en/ru voices it took **20 s for 13 min** of audio and got 141/170
+phrases right, against **1.5 s per 10 min** and 170/170 here. It does find speaker changes
+without a pause and overlapping speech, which this window approach resolves only to ~2 s.
+pyannote's own HF models need an account/token, so they are out.
+
+Timing (M5 Max, 6 threads): 2 min of audio 0.5 s, 10 min 1.5 s, 60 min 8.5 s (about half
+of it VAD). It runs on the CPU and overlaps other work: the batch pass starts it together
+with Whisper; a live session starts it at `flush()`, while the tail phrase is transcribed.
+`write_final` waits up to `DIARIZE_WAIT_S` (5 s) for it; after that, the transcript is
+written with `Others` straight away and rewritten with labels when diarization ends (WAVs
+are deleted only after that, if `keep_audio = false`). No WAV (deleted) or `diarize = false`
+→ skipped. The model is downloaded once (sha256-checked) to
+`platformdirs.user_cache_dir("RecAndCC")/models`; if that fails (offline) diarization is
+skipped, retried at most every 10 minutes, and transcripts keep `Others`. Once it is on
+disk, nothing touches the network (tested with all network access blocked).
 
 ### Mixed English/Russian
 Whisper normally detects one language per 30 s window. Instead:
@@ -152,14 +202,14 @@ detected ─(active 3 s)─► recording ─────────────
    call app appears during a media recording → upgrade: + mic track, padded        │
 stop: app inactive 20 s │ silent 3 min │ manual stop ◄─────────────────────────────┘
   stop(): flush writers, save session.json ─► (< 3 s audio? delete) ─► TranscriptionQueue
-  ─► transcript.md/.srt/.json, session.transcribed = true ─► (keep_audio = false? delete WAVs)
+  ─► transcript.md/.srt/.json (+ Speaker N labels), session.transcribed = true ─► (keep_audio = false? delete WAVs)
 ```
 
 With `transcription.live` (default):
 
 ```
 recording ── frames ──► LiveTranscriber: phrases → captions + transcript.md (every ≤ 3 s)
-stop ─► flush(): tail phrase, final transcript.md/.srt/.json, transcribed = true ─► live_end
+stop ─► flush(): tail phrase ∥ diarization, final transcript.md/.srt/.json, transcribed = true ─► live_end
      └► TranscriptionQueue "finalize" job waits for it (⏳) ─► transcribed event
 discard / too short ─► cancel() (nothing written) ─► live_end ─► directory deleted
 ```
