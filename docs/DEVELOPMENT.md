@@ -63,14 +63,21 @@ gh pr create --fill
 
 Every PR gets two automatic checks:
 - **CI** (`.github/workflows/ci.yml`): lint + tests on macOS and Windows.
-- **Cursor review** (`.github/workflows/cursor-review.yml`): the Cursor agent reviews the diff
-  with **Grok** (repo variable `CURSOR_REVIEW_MODEL`, default `grok`) and posts the findings as
-  a PR comment. Requires the repo secret `CURSOR_API_KEY` (cursor.com/dashboard → Integrations
-  → API keys); without it the job is skipped with a notice.
+- **Cursor review** (`.github/workflows/cursor-review.yml`): the Cursor agent reviews the
+  PR's own changes (three-dot diff) with **Grok 4.7** (`grok-4.7-high`; change it with the repo
+  variable `CURSOR_REVIEW_MODEL`, list models with `cursor-agent models`) and posts the
+  findings as a PR comment. It needs the repo secret `CURSOR_API_KEY`. Without it, and on fork
+  PRs, the job is skipped and stays green, so the review is advisory. The agent runs read-only
+  (`--mode ask`, sandboxed) and the PR can't configure it (`.cursor/` is removed first).
 
-To run the same review locally, install the Cursor CLI (`curl https://cursor.com/install -fsS | bash`),
-log in (`cursor-agent login`) and run e.g.
-`cursor-agent -p "Review the changes in $(git diff main...)" --model grok`.
+To run the same review locally (Cursor CLI: `curl https://cursor.com/install -fsS | bash`, then
+`cursor-agent login` or `CURSOR_API_KEY` in the environment):
+
+```bash
+git diff main...HEAD > /tmp/pr.diff
+cursor-agent -p 'Review the changes in /tmp/pr.diff. Report real problems only. Do not modify files.' \
+  --model grok-4.7-high --mode ask --trust
+```
 
 ## Testing
 
