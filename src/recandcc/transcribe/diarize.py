@@ -120,10 +120,12 @@ def _download(model: ModelFile, path: Path) -> None:
     tmp = path.with_name(f".{path.name}.part")
     log.info("downloading speaker model %s (%.0f MB, once)", model.name, model.size / 1e6)
     t0 = time.monotonic()
+    if not model.url.startswith("https://"):
+        raise ValueError(f"refusing non-https model URL {model.url!r}")
     digest = hashlib.sha256()
     try:
         with (
-            urllib.request.urlopen(model.url, timeout=DOWNLOAD_TIMEOUT_S) as r,
+            urllib.request.urlopen(model.url, timeout=DOWNLOAD_TIMEOUT_S) as r,  # noqa: S310 - https only, checked above
             tmp.open("wb") as f,
         ):
             while block := r.read(1 << 20):

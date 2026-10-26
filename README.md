@@ -212,15 +212,73 @@ repo):
 | `recandcc autostart on\|off\|status` | Launch at login |
 | `recandcc config` | Show the config path and contents |
 
-## Privacy & legal
+## Privacy & consent
 
-- Audio and transcripts never leave your computer. The only network access is the one-time
-  model download (Whisper from Hugging Face, the 28 MB speaker model from the sherpa-onnx
-  GitHub releases, checksum-verified). After that the app works fully offline: models load
-  from disk without contacting anything (verified with all network access blocked).
-- Recording people can require their consent (some US states and the EU require everyone on
-  a call to agree). You are responsible for using this lawfully. Tell people when you record
-  them.
+> This section is general information, not legal advice. Laws differ between countries and
+> states and change over time; check the rules that apply to you and to everyone you record.
+
+### Recording people is regulated
+
+- **One-party consent** (e.g. US federal law and most US states): you may record a
+  conversation you take part in without telling the others.
+- **All-party ("two-party") consent** (e.g. California, Florida, Illinois, Washington, and
+  several countries): **everyone** on the call must agree before you record. When people are
+  in different places, assume the strictest rule applies.
+- **GDPR (EU/EEA, UK GDPR)**: a recording or transcript of an identifiable person is personal
+  data. Recording for anything beyond purely personal use (e.g. at work) needs a lawful basis,
+  telling people what you record and why, keeping it no longer than needed, and deleting it
+  on request.
+- In practice: **say that you are recording** at the start of a call, and stop if someone
+  objects. You are responsible for using RecAndCC lawfully. In **Ask** mode a recording is
+  only kept if you confirm it.
+
+### Where your data lives
+
+Audio and transcripts never leave your computer. The only network access is the one-time
+model download: Whisper from Hugging Face, pinned to exact repo commits
+([`revisions.py`](src/recandcc/transcribe/revisions.py)), and the 28 MB speaker model from the
+sherpa-onnx GitHub releases, verified by its SHA-256. After that the app works fully offline:
+models load from disk without contacting anything (tested with all network access blocked).
+
+| What | macOS | Windows |
+|---|---|---|
+| Recordings (`*.wav`), transcripts (`transcript.md/.json/.srt`), `session.json` | `~/Documents/Transcribes/` (or your `output_dir`) | `Documents\Transcribes\` |
+| Settings (`config.toml`) | `~/Library/Application Support/RecAndCC/` | `%LOCALAPPDATA%\RecAndCC\` |
+| Logs (events, app names, file paths) | `~/Library/Logs/RecAndCC/` | `%LOCALAPPDATA%\RecAndCC\Logs\` |
+| Speaker-diarization model | `~/Library/Caches/RecAndCC/models/` | `%LOCALAPPDATA%\RecAndCC\Cache\models\` |
+| Whisper models (shared Hugging Face cache) | `~/.cache/huggingface/hub/models--*whisper*` | `%USERPROFILE%\.cache\huggingface\hub\` |
+| Launch at login | `~/Library/LaunchAgents/com.gblokh.recandcc.plist` | registry `HKCU\…\CurrentVersion\Run\RecAndCC` |
+
+The folders RecAndCC creates for recordings (the transcripts folder, each day and each
+session) are readable only by you (`0700` on macOS). A transcripts folder that already
+existed keeps its permissions; tighten it with `chmod 700 ~/Documents/Transcribes`.
+`~/Documents` may be synced by iCloud Drive ("Desktop & Documents Folders"); set
+`output_dir` to a folder outside it if recordings must stay on this Mac only.
+
+### Retention
+
+- `keep_audio = false` deletes a session's WAVs as soon as it is transcribed.
+- `audio_retention_days = N` (menu → **Delete audio after**: Never / 1 / 7 / 30 / 90 days)
+  deletes the audio N days after transcription; `0` keeps it forever.
+- Transcripts are never deleted automatically. Delete a session by deleting its folder.
+
+### Delete everything
+
+Quit RecAndCC and turn off **Launch at login** (or `uv run recandcc autostart off`). Then, on
+macOS:
+
+```bash
+rm -rf ~/Documents/Transcribes                    # recordings + transcripts (or your output_dir)
+rm -rf ~/Library/Application\ Support/RecAndCC    # settings
+rm -rf ~/Library/Logs/RecAndCC                    # logs
+rm -rf ~/Library/Caches/RecAndCC                  # speaker model
+rm -rf ~/.cache/huggingface/hub/models--*whisper* # Whisper models (if no other app uses them)
+rm -f  ~/Library/LaunchAgents/com.gblokh.recandcc.plist
+rm -rf ~/Applications/RecAndCC.app                # the app (and the repo folder, if you like)
+```
+
+Remove the Microphone / System audio permissions in System Settings → Privacy & Security. On
+Windows, delete the folders listed in the table above.
 
 ## Troubleshooting
 
@@ -256,3 +314,5 @@ Windows needs no system-audio permission. The microphone is controlled in
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md): every setting explained
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): building, testing, project layout, contributing
 - [docs/ROADMAP.md](docs/ROADMAP.md): what's next
+- [CHANGELOG.md](CHANGELOG.md): what changed in each version
+- [SECURITY.md](SECURITY.md): reporting security issues, threat model

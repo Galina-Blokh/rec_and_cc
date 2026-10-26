@@ -41,7 +41,21 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+# S = flake8-bandit (security). Production hits are fixed or carry an inline
+# `# noqa: S... - reason`; the exceptions below are reviewed and scoped per file.
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests: pytest asserts; fixed-argv calls to macOS tools (say, afconvert, the built helper);
+# "/tmp/x" literals are fake paths that are never opened.
+"tests/**" = ["S101", "S603", "S607", "S108"]
+# UI openers / dialogs: fixed argv lists without a shell (open, xdg-open, notepad.exe,
+# osascript with an AppleScript built from escaped strings, os.startfile with a constant URI
+# or a path we created); S112 skips an unreadable session.json. To be moved to inline noqa
+# comments with the next ui/ change.
+"src/recandcc/ui/common.py" = ["S603", "S606", "S607", "S112"]
+"src/recandcc/ui/mac.py" = ["S603", "S607"]
+"src/recandcc/ui/tray.py" = ["S606", "S607"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

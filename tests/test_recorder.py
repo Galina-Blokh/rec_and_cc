@@ -1,3 +1,5 @@
+import stat
+import sys
 import threading
 import time
 
@@ -9,7 +11,7 @@ from recandcc.capture.base import AudioSource
 from recandcc.capture.mic import StreamResampler
 from recandcc.config import Config
 from recandcc.models import SAMPLE_RATE, SessionInfo, Track, TriggerKind
-from recandcc.recorder import Recorder, dbfs, should_record_mic, slugify
+from recandcc.recorder import Recorder, dbfs, make_private_dir, should_record_mic, slugify
 
 
 class FakeSource(AudioSource):
@@ -319,3 +321,31 @@ def test_replay_buffer_is_bounded(cfg):
     start, audio = tap.audio(Track.OTHERS)
     assert recmod.REPLAY_SECONDS * SAMPLE_RATE <= len(audio) < 11 * SAMPLE_RATE
     assert start + len(audio) == 15 * SAMPLE_RATE
+
+
+def _mode(p):
+    return stat.S_IMODE(p.stat().st_mode)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+def test_session_folders_are_owner_only(cfg):
+    rec, src = make(cfg, sine(4))
+    s = rec.start(TriggerKind.MANUAL)
+    src["sys"].done.wait(5)
+    rec.stop()
+    d = s.directory
+    assert d.parent.parent == cfg.output_dir
+    for p in (cfg.output_dir, d.parent, d):
+        assert _mode(p) == 0o700, p
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+def test_make_private_dir_creates_parents_and_keeps_existing(tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o755)
+    shared.chmod(0o755)
+    make_private_dir(shared)
+    assert _mode(shared) == 0o755  # an existing folder keeps its permissions
+    deep = shared / "a" / "b"
+    make_private_dir(deep)
+    assert _mode(shared / "a") == 0o700 and _mode(deep) == 0o700

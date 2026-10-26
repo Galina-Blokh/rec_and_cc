@@ -33,7 +33,7 @@ def _check_kind(kind: str) -> None:
 def _run_helper(args: list[str], timeout: float) -> dict:
     from .native import find_helper
 
-    result = subprocess.run(
+    result = subprocess.run(  # noqa: S603 - fixed argv: our own bundled helper, no shell
         [str(find_helper()), *args],
         stdin=subprocess.DEVNULL,
         capture_output=True,
@@ -86,7 +86,7 @@ def open_settings(kind: str) -> None:
     """Open the System Settings / Windows Settings page where the permission can be changed."""
     _check_kind(kind)
     if sys.platform == "win32":
-        os.startfile("ms-settings:privacy-microphone")  # type: ignore[attr-defined]
+        os.startfile("ms-settings:privacy-microphone")  # type: ignore[attr-defined]  # noqa: S606, S607 - constant URI
         return
     if sys.platform != "darwin":
         return
@@ -95,7 +95,7 @@ def open_settings(kind: str) -> None:
     except Exception:
         log.exception("could not open settings for %s", kind)
         anchor = "Privacy_Microphone" if kind == MICROPHONE else "Privacy_AudioCapture"
-        subprocess.run(
-            ["open", f"x-apple.systempreferences:com.apple.preference.security?{anchor}"],
+        subprocess.run(  # noqa: S603 - fixed argv (absolute path), constant URL, no shell
+            ["/usr/bin/open", f"x-apple.systempreferences:com.apple.preference.security?{anchor}"],
             check=False,
         )
