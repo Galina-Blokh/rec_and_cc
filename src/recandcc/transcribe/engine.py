@@ -25,6 +25,7 @@ import numpy as np
 from ..config import TranscriptionConfig
 from ..models import SAMPLE_RATE, Segment, SessionInfo, Track
 from .chunking import Chunk, find_speech, load_track, merge_labelled, slice_chunk
+from .gpu import MlxWhisper, use_gpu
 from .merge import ME, OTHERS, language_confidence, merge_tracks, smooth_languages
 from .output import write_outputs
 
@@ -63,6 +64,10 @@ class Transcriber:
         self.cfg = cfg
         self.num_workers, self.cpu_threads = auto_parallelism(cfg.workers)
         self.language_model = language_model if language_model != cfg.model else None
+        # Main model: a faster-whisper WhisperModel (CPU/CUDA) or, on Apple silicon, an
+        # MlxWhisper running on the GPU (see gpu.py). The small language-ID model stays on the
+        # CPU, so CPU workers and the GPU run at the same time.
+        self.gpu = use_gpu(cfg)
         self._model = None
         self._lid_model = None
         self._pool: ThreadPoolExecutor | None = None
@@ -100,7 +105,11 @@ class Transcriber:
                 if self._model is None:
                     if self.language_model and self._needs_detection():
                         self._lid_model = self._load(self.language_model)
-                    model = self._load(self.cfg.model)
+                    if self.gpu:
+                        model = MlxWhisper(self.cfg.model)
+                        model.load()
+                    else:
+                        model = self._load(self.cfg.model)
                     self._pool = ThreadPoolExecutor(self.num_workers, thread_name_prefix="whisper")
                     self._model = model
         return self._model
@@ -113,11 +122,15 @@ class Transcriber:
         with self._init_lock:
             if self._pool:
                 self._pool.shutdown(wait=True)
+            if isinstance(self._model, MlxWhisper):
+                self._model.close()
             self._pool, self._model, self._lid_model = None, None, None
 
     # -- steps -------------------------------------------------------------------------------
 
     def _detect(self, model, piece: np.ndarray) -> tuple[str, float]:
+        if isinstance(model, MlxWhisper):
+            return model.detect_language(piece, self.cfg.languages)
         _, _, probs = model.detect_language(audio=piece)
         return language_confidence(probs, self.cfg.languages)
 
@@ -215,23 +228,27 @@ class Transcriber:
         """Transcribe one piece of audio (<= 30 s) in a fixed language. Segment times are
         ``offset`` + position in the piece, clipped to ``max_end``. Blocking; call it from a
         pool worker (see ``submit``) to run pieces in parallel."""
-        self._ensure_loaded()
-        segments, _ = self._model.transcribe(
-            audio,
-            language=language,
-            vad_filter=False,
-            beam_size=beam_size,
-            condition_on_previous_text=False,
-        )
+        model = self._ensure_loaded()
+        if isinstance(model, MlxWhisper):
+            pieces = model.transcribe(audio, language)  # GPU thread; greedy + fallback
+        else:
+            segments, _ = model.transcribe(
+                audio,
+                language=language,
+                vad_filter=False,
+                beam_size=beam_size,
+                condition_on_previous_text=False,
+            )
+            pieces = [(s.start, s.end, s.text) for s in segments]
         end_cap = max_end if max_end is not None else offset + len(audio) / SAMPLE_RATE
         out = []
-        for s in segments:
-            text = s.text.strip()
+        for start, end, raw in pieces:
+            text = raw.strip()
             if text:
                 out.append(
                     Segment(
-                        start=round(offset + s.start, 3),
-                        end=round(min(offset + s.end, end_cap), 3),
+                        start=round(offset + start, 3),
+                        end=round(min(offset + end, end_cap), 3),
                         text=text,
                         speaker=speaker,
                         language=language,

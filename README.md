@@ -9,8 +9,8 @@ account, nothing uploaded.
   so the transcript knows who spoke: `Me` / `Others`.
 - 🌍 **English and Russian** are detected automatically, even when the language switches
   mid-meeting.
-- 🧠 Local Whisper (`large-v3-turbo`) via faster-whisper, **live**: each phrase appears about
-  3 s after it is spoken (floating captions window + a `transcript.md` that keeps growing),
+- 🧠 Local Whisper (`large-v3-turbo`) on the **Apple-silicon GPU** (MLX), with CPU threads
+  working alongside: a 1-hour meeting transcribes in about 2–3 minutes. Windows uses the CPU.
   and the final transcript is ready a moment after the recording stops.
 - 🟡 Three modes: **Off**, **Ask** (starts recording and asks "Keep it?"), and **Auto**. You
   can also set a different mode per app.
@@ -120,7 +120,7 @@ captions off for good, untick **Show live captions** in the menu. Captions need 
 transcription (`transcription.live = true`, the default).
 
 While recording, `transcript.md` in the session folder is rewritten every few seconds, so
-you can open it mid-meeting (**Open live transcript**). Text arrives about 3 s after each
+you can open it mid-meeting (**Open live transcript**). Text arrives about 1 s after each
 phrase on an M5 Max with `large-v3-turbo`: almost all of that is one Whisper pass. For
 faster captions see the `workers` / `model` trade-offs in
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md). The very first recording after the app starts

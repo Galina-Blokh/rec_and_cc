@@ -51,13 +51,14 @@ using the mic is treated as a call (Google Meet). The global `mode = "off"` over
 | Key | Default | Description |
 |---|---|---|
 | `model` | `"large-v3-turbo"` | faster-whisper model name (`tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo`) or a local CTranslate2 model path |
+| `backend` | `"auto"` | `auto` = MLX on the Apple-silicon GPU when available (one pass ~0.13 s vs ~2.5 s on the CPU), else faster-whisper · `mlx` · `faster-whisper` (CPU/CUDA) |
 | `device` | `"auto"` | `auto` · `cpu` · `cuda` (NVIDIA on Windows) |
 | `compute_type` | `"float32"` on macOS, `"int8"` elsewhere | Quantisation. On Apple silicon float32 is ~20% faster (Accelerate) at ~3 GB RAM; int8 uses ~1 GB |
 | `languages` | `["en", "ru"]` | Detect only among these languages; `[]` = any language |
 | `workers` | `0` | Parallel transcription workers; `0` = auto (`min(4, cores // 4)`) |
 | `dedupe_echo` | `true` | Remove mic segments that are speaker echo of the other side |
 | `keep_audio` | `true` | `false` deletes the WAVs after a successful transcription (~115 MB per track-hour) |
-| `live` | `true` | Transcribe while recording: each phrase appears ~3 s after it is spoken (captions, and `transcript.md` is rewritten every few seconds), and the final transcript is written about a second after the session stops. `false` = transcribe the whole session after it stops |
+| `live` | `true` | Transcribe while recording: each phrase appears ~1 s after it is spoken (~3 s on the CPU backend) (captions, and `transcript.md` is rewritten every few seconds), and the final transcript is written about a second after the session stops. `false` = transcribe the whole session after it stops |
 
 With `live = true`, the latency is dominated by one Whisper pass per phrase (~2.5 s for
 `large-v3-turbo` with the default 4 workers on an M5 Max). `workers = 1` gives every pass all

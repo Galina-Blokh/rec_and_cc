@@ -99,6 +99,9 @@ class DetectionConfig:
 @dataclass
 class TranscriptionConfig:
     model: str = "large-v3-turbo"  # any faster-whisper model name or local path
+    # "auto" = MLX on the Apple-silicon GPU when available (~20x faster per pass than the CPU),
+    # else faster-whisper. "faster-whisper" | "mlx" force one.
+    backend: str = "auto"
     device: str = "auto"  # "auto" | "cpu" | "cuda"
     # "float32" uses Apple Accelerate and benchmarked ~20% faster than "int8" on Apple silicon
     # (at ~3 GB RAM instead of ~1 GB); int8 is the better trade-off on typical Windows laptops.
