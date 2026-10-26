@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -147,6 +148,8 @@ class _Rec:
     started: float
     manual: bool
     session: SessionInfo | None = None
+    # Started while asking the user (ask mode): kept or discarded depending on the answer.
+    provisional: bool = False
 
 
 class Engine:
@@ -288,7 +291,7 @@ class Engine:
                 r.kind,
                 max(0.0, self.clock() - r.started),
                 r.manual,
-                None,
+                self._prompt.id if self._prompt is not None else None,  # "keep it?" pending
                 str(r.session.directory) if r.session else None,
             )
         if self._prompt is not None:
@@ -333,6 +336,7 @@ class Engine:
         stop_req = False
         prompt_evt: tuple[str, TriggerKind] | None = None
         upgrade_req: str | None = None
+        discard_req = False
         save = False
 
         with self._lock:
@@ -367,6 +371,7 @@ class Engine:
                     if self._rec is not None and start_req is None:
                         if self._rec.key:
                             self._suppressed.add(self._rec.key)
+                        self._prompt = None  # explicit stop: keep what was recorded
                         stop_req = True
                     elif self._prompt is not None:
                         self._suppressed.add(self._prompt.key)
@@ -377,24 +382,47 @@ class Engine:
                     if p is None or (pid is not None and pid != p.id):
                         continue
                     self._prompt = None
+                    r = self._rec
+                    pending = r is not None and r.provisional and r.key == p.key
                     if choice == "ignore":
                         self._suppressed.add(p.key)
+                        if pending:
+                            discard_req = True
                         continue
                     if choice == "always":
                         det.app_modes[p.key] = Mode.AUTO
                         save = True
-                    self._rec = _Rec(p.key, p.name, p.kind, now, manual=False)
-                    start_req = (p.kind, p.name)
+                    if pending:
+                        r.provisional = False  # recording since the prompt appeared: keep it
+                    elif r is None:
+                        self._rec = _Rec(p.key, p.name, p.kind, now, manual=False)
+                        start_req = (p.kind, p.name)
 
             # --- prompt expiry
             if self._prompt is not None and now >= self._prompt.deadline:
-                log.info("prompt for %s expired", self._prompt.name)
+                keep = det.ask_timeout_action != "ignore"
+                log.info(
+                    "prompt for %s expired: %s the recording",
+                    self._prompt.name,
+                    "keeping" if keep else "discarding",
+                )
                 self._suppressed.add(self._prompt.key)
+                r = self._rec
+                if r is not None and r.provisional and r.key == self._prompt.key:
+                    if keep:
+                        r.provisional = False
+                    else:
+                        discard_req = True
                 self._prompt = None
 
             # --- auto-stop
             r = self._rec
-            if r is not None and not r.manual and start_req is None and not stop_req:
+            if (
+                r is not None
+                and not r.manual
+                and start_req is None
+                and not (stop_req or discard_req)
+            ):
                 last = max(self._last_seen.get(r.key, r.started), r.started)
                 if r.key not in apps and now - last >= det.stop_after_inactive_s:
                     log.info("stopping: %s inactive for %.0fs", r.name, now - last)
@@ -404,11 +432,22 @@ class Engine:
                     self._suppressed.add(r.key)  # app may still hold an audio session
                     stop_req = True
 
+            # Audio ended before the user answered: resolve the prompt by the timeout policy.
+            if stop_req and r is not None and r.provisional:
+                self._prompt = None
+                if det.ask_timeout_action == "ignore":
+                    stop_req, discard_req = False, True
+
             # --- a call started while a media session records (e.g. YouTube was playing when
             # Zoom rang, or the same browser tab now uses the mic): follow the call, so the mic
             # gets recorded and the session doesn't end when the video stops.
             r = self._rec
-            if r is not None and r.kind == TriggerKind.MEDIA and start_req is None and not stop_req:
+            if (
+                r is not None
+                and r.kind == TriggerKind.MEDIA
+                and start_req is None
+                and not (stop_req or discard_req)
+            ):
                 for a in apps.values():
                     if a.kind != TriggerKind.CALL:
                         continue
@@ -440,17 +479,23 @@ class Engine:
                         self._rec = _Rec(a.key, a.name, a.kind, now, manual=False)
                         start_req = (a.kind, a.name)
                     else:
+                        # Record right away and ask whether to keep it: an unanswered or
+                        # unseen prompt must not lose the start of a meeting.
                         self._prompt_seq += 1
                         self._prompt = _Prompt(
                             self._prompt_seq, a.key, a.name, a.kind, now + det.ask_timeout_s
                         )
+                        self._rec = _Rec(a.key, a.name, a.kind, now, manual=False, provisional=True)
+                        start_req = (a.kind, a.name)
                         prompt_evt = (a.name, a.kind)
-                        log.info("asking whether to record %s (%s)", a.name, a.kind)
+                        log.info("recording %s (%s), asking whether to keep it", a.name, a.kind)
                     break
 
         # --- side effects, outside the lock
         if save:
             self._safe_save()
+        if discard_req:
+            self._do_discard()
         if stop_req:
             self._do_stop()
         if start_req is not None:
@@ -532,6 +577,19 @@ class Engine:
             upgrade(app)
         except Exception:
             log.exception("could not add the microphone to the running session")
+
+    def _do_discard(self) -> None:
+        """Stop the current session and delete it (the user chose not to keep it)."""
+        with self._lock:
+            self._rec = None
+        try:
+            session = self.recorder.stop()
+        except Exception:
+            log.exception("could not stop recording cleanly")
+            return
+        if session is not None:
+            shutil.rmtree(session.directory, ignore_errors=True)
+            log.info("discarded recording %s", session.directory)
 
     def _do_stop(self) -> None:
         with self._lock:

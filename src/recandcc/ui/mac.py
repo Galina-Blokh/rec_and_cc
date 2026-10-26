@@ -24,8 +24,10 @@ from .common import (
     PERM_KINDS,
     PERM_LABELS,
     PERM_TITLES,
+    PROMPT_BUTTONS,
     Controller,
     as_str,
+    keep_prompt_text,
     mac_notify,
     open_path,
     transcript_label,
@@ -227,12 +229,13 @@ class MacApp(rumps.App):
     # ------------------------------------------------------------------ dialogs (workers)
     def _show_prompt(self, app: str, kind: TriggerKind, prompt_id: int | None) -> None:
         what = "a call" if kind == TriggerKind.CALL else "audio"
-        msg = f"RecAndCC detected {what} in {app}.\n\nRecord and transcribe it?"
-        mac_notify("Record?", f"{app} is playing {what}")
+        msg = keep_prompt_text(app, kind, self.cfg.detection.ask_timeout_action)
+        mac_notify("Recording — keep it?", f"{app}: {what} detected")
         timeout = max(5, int(self.cfg.detection.ask_timeout_s))
+        buttons = ", ".join(f'"{label}"' for label, _ in PROMPT_BUTTONS)
         script = (
             f'display dialog {as_str(msg)} with title "RecAndCC" '
-            f'buttons {{"Ignore", "Always", "Record"}} default button "Record" '
+            f'buttons {{{buttons}}} default button "Keep" '
             f"with icon note giving up after {timeout}"
         )
 
@@ -252,7 +255,7 @@ class MacApp(rumps.App):
             out = out or ""
             if "gave up:true" in out:
                 return  # the engine expires the prompt itself
-            for label, choice in (("Record", "record"), ("Always", "always"), ("Ignore", "ignore")):
+            for label, choice in PROMPT_BUTTONS:
                 if f"button returned:{label}" in out:
                     self.ctrl.engine.respond(choice, prompt_id)
                     return

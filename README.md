@@ -11,7 +11,7 @@ account, nothing uploaded.
   mid-meeting.
 - 🧠 Local Whisper (`large-v3-turbo`) via faster-whisper. On an M-series Mac it transcribes
   about 3–4× faster than realtime, in parallel.
-- 🟡 Three modes: **Off**, **Ask** ("Audio detected in Zoom. Record?"), and **Auto**. You
+- 🟡 Three modes: **Off**, **Ask** (starts recording and asks "Keep it?"), and **Auto**. You
   can also set a different mode per app.
 - 🔐 Permissions are granted from inside the app, with a first-run setup dialog.
 - 💻 macOS today (14.4+). Windows is supported by design (see [Windows](#windows)).
@@ -77,7 +77,7 @@ You can check or fix permissions at any time in **menu bar icon → Permissions*
 
 Without **System audio** permission, macOS gives the app silence instead of an error. The
 app warns you before recording, and again after a recording that came out completely silent.
-After setup, test once: play a YouTube clip in Ask mode, click **Record**, stop it, and check
+After setup, test once: play a YouTube clip in Ask mode, click **Keep**, stop it, and check
 that the transcript has text.
 
 ## Using it
@@ -89,8 +89,7 @@ The menu-bar icon shows the state:
 | ⚪ | Off: never records |
 | 🟡 | Ask mode, idle |
 | 🎧 | Auto mode, idle |
-| 🟠 | Asking you whether to record |
-| 🔴 03:12 | Recording (elapsed time) |
+| 🔴 03:12 | Recording (elapsed time), including while a "Keep it?" pop-up is open |
 | ⏳ | Transcriptions in progress (number = queued sessions) |
 | ⚠️ (prefix) | A needed permission is missing |
 
@@ -113,11 +112,14 @@ Menu items:
    and **ignored apps** (Spotify, Music, system sounds). An unknown app that uses the
    microphone counts as a call; a browser that uses the microphone (Google Meet) counts as a
    call too.
-3. When an app has been active for 3 s, the app records (Auto) or asks you (Ask). In the Ask
-   dialog:
-   - **Record**: record this session.
-   - **Ignore**: don't ask again until this app's audio stops.
-   - **Always**: record this app automatically from now on (saved to settings).
+3. When an app has been active for 3 s, recording **starts**. In Auto mode that's all. In
+   Ask mode a pop-up also asks whether to keep the recording, so no audio is lost while you
+   decide or if you're away from the screen:
+   - **Keep**: keep recording this session (also the default if you don't answer in 30 s;
+     set `ask_timeout_action = "ignore"` to discard unanswered recordings instead).
+   - **Discard**: stop and delete the recording, and don't ask again until this app's audio
+     stops.
+   - **Always**: keep it, and record this app automatically from now on (saved to settings).
 4. Recording stops 20 s after the app stops doing audio, or after 3 minutes of total
    silence. Then the recording is transcribed in the background.
 

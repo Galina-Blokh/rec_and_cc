@@ -132,8 +132,10 @@ it ends. Real meetings with longer same-language stretches are faster than this 
 ## Session lifecycle
 
 ```
-detected ─(3 s)─► [ask?] ─► recording ─[call app appears during media → upgrade: + mic track, padded]
-          ─(app inactive 20 s │ silent 3 min │ manual stop)─►
+detected ─(active 3 s)─► recording ──────────────────────────────────────────────┐
+   ask mode: "Keep it?" pop-up → Keep/Always/no answer: keep · Discard: stop+delete │
+   call app appears during a media recording → upgrade: + mic track, padded        │
+stop: app inactive 20 s │ silent 3 min │ manual stop ◄─────────────────────────────┘
   stop(): flush writers, save session.json ─► (< 3 s audio? delete) ─► TranscriptionQueue
   ─► transcript.md/.srt/.json, session.transcribed = true ─► (keep_audio = false? delete WAVs)
 ```

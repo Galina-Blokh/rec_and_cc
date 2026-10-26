@@ -20,13 +20,14 @@ Changes to `[detection]` are picked up while the app runs. Restart the app after
 
 | Key | Default | Description |
 |---|---|---|
-| `mode` | `"ask"` | `off` never records · `ask` offers to record · `auto` records automatically |
+| `mode` | `"ask"` | `off` never records · `ask` records and asks whether to keep it · `auto` records automatically |
 | `poll_interval_s` | `1.0` | How often audio activity is checked |
 | `min_active_s` | `3.0` | An app must be doing audio this long before a recording starts or a prompt appears |
 | `stop_after_inactive_s` | `20.0` | Stop when the trigger app has stopped doing audio for this long |
 | `stop_after_silence_s` | `180.0` | Stop when all tracks have been below `silence_dbfs` for this long |
 | `silence_dbfs` | `-50.0` | Level below which audio counts as silence |
-| `ask_timeout_s` | `30.0` | The "Record?" prompt closes after this (counts as Ignore) |
+| `ask_timeout_s` | `30.0` | The "Keep it?" pop-up closes after this |
+| `ask_timeout_action` | `"record"` | What an unanswered pop-up means: `record` keeps the recording (nothing is lost if you're away), `ignore` discards it. In Ask mode recording always starts right away; the pop-up only decides whether to keep it |
 | `record_mic` | `"calls"` | `always` · `calls` (calls and manual recordings only) · `never` |
 | `call_apps` | Zoom, Teams, FaceTime, Slack, Discord, Telegram, WhatsApp, Skype, Webex | Patterns for call apps |
 | `media_apps` | browsers, QuickTime, VLC, Podcasts, TV | Patterns for media apps |

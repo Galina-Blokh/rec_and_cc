@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from recandcc.config import Config, DetectionConfig
-from recandcc.engine import IDLE, PROMPTING, RECORDING, Engine
+from recandcc.engine import IDLE, RECORDING, Engine
 from recandcc.models import AudioProcess, Mode, SessionInfo, Track, TriggerKind
 
 
@@ -215,32 +215,58 @@ def test_call_preferred_over_media():
     assert h.rec.starts == [(TriggerKind.CALL, "zoom.us")]
 
 
-def test_ask_record():
+class DiscardingRecorder(FakeRecorder):
+    """FakeRecorder whose sessions live in a real directory, so discards can be checked."""
+
+    def __init__(self, root):
+        super().__init__()
+        self.root = root
+        self.dirs = []
+
+    def stop(self):
+        s = super().stop()
+        s.directory = self.root / f"s{self.stops}"
+        s.directory.mkdir(parents=True)
+        self.dirs.append(s.directory)
+        return s
+
+
+def test_ask_records_immediately_and_record_keeps_it():
     h = Harness(Mode.ASK)
     h.mon.procs = [CHROME]
     h.run(4)
-    assert h.status == PROMPTING
+    # Recording starts with the prompt, so nothing is lost while the user decides.
     assert h.prompts == [("Google Chrome", TriggerKind.MEDIA)]
+    assert h.rec.starts == [(TriggerKind.MEDIA, "Google Chrome")]
+    assert h.status == RECORDING and h.eng.state.prompt_id is not None
     h.run(5)
     assert len(h.prompts) == 1  # no re-prompt while pending
     h.eng.respond("record")
     h.eng.tick()
-    assert h.status == RECORDING
-    assert h.rec.starts == [(TriggerKind.MEDIA, "Google Chrome")]
+    assert h.status == RECORDING and h.eng.state.prompt_id is None
+    assert len(h.rec.starts) == 1 and h.rec.stops == 0
+    h.mon.procs = []
+    h.run(25)
+    assert h.rec.stops == 1 and len(h.q.submitted) == 1
 
 
-def test_ask_ignore_suppresses_until_audio_stops():
+def test_ask_ignore_discards_and_suppresses_until_audio_stops(tmp_path):
     h = Harness(Mode.ASK)
+    h.rec = h.eng.recorder = DiscardingRecorder(tmp_path)
     h.mon.procs = [CHROME]
     h.run(4)
     h.eng.respond("ignore")
+    h.eng.tick()
+    assert h.status == IDLE and h.rec.stops == 1
+    assert not h.rec.dirs[0].exists()  # discarded, not transcribed
+    assert h.q.submitted == []
     h.run(60)
     assert h.status == IDLE and len(h.prompts) == 1
     h.mon.procs = []
     h.run(25)
     h.mon.procs = [CHROME]
     h.run(4)
-    assert h.status == PROMPTING and len(h.prompts) == 2
+    assert h.status == RECORDING and len(h.prompts) == 2
 
 
 def test_ask_always_sets_auto_and_saves():
@@ -249,7 +275,7 @@ def test_ask_always_sets_auto_and_saves():
     h.run(4)
     h.eng.respond("always")
     h.eng.tick()
-    assert h.status == RECORDING
+    assert h.status == RECORDING and len(h.rec.starts) == 1
     assert h.cfg.detection.app_modes == {"us.zoom": Mode.AUTO}
     assert h.saves == 1
     # next time: no prompt
@@ -261,28 +287,64 @@ def test_ask_always_sets_auto_and_saves():
     assert h.status == RECORDING and len(h.prompts) == 1
 
 
-def test_ask_timeout_expires_and_suppresses():
+def test_unanswered_prompt_keeps_recording_by_default():
     h = Harness(Mode.ASK)
+    h.mon.procs = [ZOOM]
+    h.run(4)
+    h.run(31)  # nobody clicked
+    assert h.status == RECORDING and h.eng.state.prompt_id is None
+    assert h.rec.stops == 0
+    h.run(120)
+    assert len(h.prompts) == 1  # no re-prompt for the same call
+    h.mon.procs = []
+    h.run(25)
+    assert h.rec.stops == 1 and len(h.q.submitted) == 1
+
+
+def test_unanswered_prompt_discards_when_configured(tmp_path):
+    h = Harness(Mode.ASK, ask_timeout_action="ignore")
+    h.rec = h.eng.recorder = DiscardingRecorder(tmp_path)
     h.mon.procs = [CHROME]
     h.run(4)
-    assert h.status == PROMPTING
     h.run(31)
-    assert h.status == IDLE
+    assert h.status == IDLE and h.q.submitted == []
+    assert not h.rec.dirs[0].exists()
     h.run(30)
-    assert len(h.prompts) == 1 and h.rec.starts == []
+    assert len(h.prompts) == 1
 
 
-def test_stale_prompt_id_ignored():
+def test_audio_ending_before_answer_keeps_recording():
     h = Harness(Mode.ASK)
+    h.cfg.detection.ask_timeout_s = 300
+    h.mon.procs = [CHROME]
+    h.run(4)
+    h.mon.procs = []
+    h.run(25)  # short clip ended while the prompt was still open
+    assert h.status == IDLE and h.rec.stops == 1 and len(h.q.submitted) == 1
+    assert h.eng.state.prompt_id is None
+
+
+def test_manual_stop_while_prompt_pending_keeps_recording():
+    h = Harness(Mode.ASK)
+    h.mon.procs = [ZOOM]
+    h.run(4)
+    h.eng.stop()
+    h.eng.tick()
+    assert h.status == IDLE and len(h.q.submitted) == 1
+
+
+def test_stale_prompt_id_ignored(tmp_path):
+    h = Harness(Mode.ASK)
+    h.rec = h.eng.recorder = DiscardingRecorder(tmp_path)
     h.mon.procs = [CHROME]
     h.run(4)
     pid = h.eng.state.prompt_id
-    h.eng.respond("record", prompt_id=pid + 100)
+    h.eng.respond("ignore", prompt_id=pid + 100)
     h.eng.tick()
-    assert h.status == PROMPTING
-    h.eng.respond("record", prompt_id=pid)
+    assert h.status == RECORDING and h.eng.state.prompt_id == pid
+    h.eng.respond("ignore", prompt_id=pid)
     h.eng.tick()
-    assert h.status == RECORDING
+    assert h.status == IDLE and h.rec.stops == 1
 
 
 def test_silence_stop():

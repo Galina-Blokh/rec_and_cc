@@ -81,7 +81,10 @@ class DetectionConfig:
     stop_after_inactive_s: float = 20.0  # stop when the trigger app stopped doing audio I/O
     stop_after_silence_s: float = 180.0  # stop when everything has been silent this long
     silence_dbfs: float = -50.0  # below this level a frame counts as silence
-    ask_timeout_s: float = 30.0  # "record?" prompt auto-dismisses after this
+    ask_timeout_s: float = 30.0  # "keep recording?" prompt auto-dismisses after this
+    # In ask mode recording starts right away and the prompt asks whether to keep it, so
+    # nothing is lost while you decide. Unanswered prompt: "record" keeps it, "ignore" discards.
+    ask_timeout_action: str = "record"
     record_mic: str = "calls"  # "always" | "calls" | "never"
     call_apps: list[str] = field(default_factory=lambda: list(DEFAULT_CALL_APPS))
     media_apps: list[str] = field(default_factory=lambda: list(DEFAULT_MEDIA_APPS))

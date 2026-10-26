@@ -27,7 +27,9 @@ from .common import (
     PERM_KINDS,
     PERM_LABELS,
     PERM_TITLES,
+    PROMPT_BUTTONS,
     Controller,
+    keep_prompt_text,
     open_path,
     transcript_label,
 )
@@ -182,9 +184,9 @@ class TrayApp:
             if ev[0] == "prompt":
                 _, app, kind, pid = ev
                 what = "a call" if kind == TriggerKind.CALL else "audio"
-                self._notify("Record?", f"{app} is playing {what}. Use the tray menu or dialog.")
+                self._notify("Recording — keep it?", f"{app}: {what} detected")
                 threading.Thread(
-                    target=self._prompt_window, args=(app, what, pid), daemon=True
+                    target=self._prompt_window, args=(app, kind, pid), daemon=True
                 ).start()
             elif ev[0] == "notice":
                 self._notify(ev[1], ev[2])
@@ -219,7 +221,7 @@ class TrayApp:
     def _answer(self, prompt_id, choice: str) -> None:
         self.ctrl.engine.respond(choice, prompt_id)
 
-    def _prompt_window(self, app: str, what: str, prompt_id) -> None:
+    def _prompt_window(self, app: str, kind: TriggerKind, prompt_id) -> None:
         try:
             import tkinter as tk
         except Exception:
@@ -230,7 +232,7 @@ class TrayApp:
         root.resizable(False, False)
         tk.Label(
             root,
-            text=f"RecAndCC detected {what} in {app}.\nRecord and transcribe it?",
+            text=keep_prompt_text(app, kind, self.cfg.detection.ask_timeout_action),
             padx=20,
             pady=12,
             justify="left",
@@ -242,7 +244,7 @@ class TrayApp:
             self._answer(prompt_id, c)
             root.destroy()
 
-        for label, c in (("Record", "record"), ("Always", "always"), ("Ignore", "ignore")):
+        for label, c in PROMPT_BUTTONS:
             tk.Button(row, text=label, width=10, command=lambda c=c: choose(c)).pack(
                 side="left", padx=4
             )

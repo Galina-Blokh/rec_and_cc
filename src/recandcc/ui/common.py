@@ -378,4 +378,26 @@ class Controller:
                 self.transcriber.close()
 
 
-__all__ = ["Controller", "IDLE", "PROMPTING", "RECORDING", "ONBOARDING_TEXT"]
+def keep_prompt_text(app: str, kind: TriggerKind, timeout_action: str) -> str:
+    """Body of the ask-mode dialog. Recording has already started when it is shown."""
+    what = "a call" if kind == TriggerKind.CALL else "audio"
+    default = "kept" if timeout_action != "ignore" else "discarded"
+    return (
+        f"RecAndCC is recording {what} in {app}.\n\n"
+        f"Keep the recording and transcribe it?\n(If you don't answer, it will be {default}.)"
+    )
+
+
+# Dialog button label -> Engine.respond() choice.
+PROMPT_BUTTONS = (("Discard", "ignore"), ("Always", "always"), ("Keep", "record"))
+
+
+__all__ = [
+    "PROMPT_BUTTONS",
+    "keep_prompt_text",
+    "Controller",
+    "IDLE",
+    "PROMPTING",
+    "RECORDING",
+    "ONBOARDING_TEXT",
+]
