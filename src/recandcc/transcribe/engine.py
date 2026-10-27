@@ -32,7 +32,7 @@ from ..models import SAMPLE_RATE, Segment, SessionInfo, Track, TriggerKind
 from . import callnames, voices
 from .chunking import Chunk, find_speech, load_track, merge_labelled, slice_chunk
 from .diarize import Diarizer, Turn, label_speakers, model_path
-from .gpu import MlxWhisper, hf_cache_folder, use_gpu
+from .gpu import MlxWhisper, hf_cache_folder, mlx_word_timestamps, use_gpu
 from .merge import (
     ME,
     OTHERS,
@@ -144,6 +144,10 @@ class Transcriber:
         self._pool: ThreadPoolExecutor | None = None
         self._init_lock = threading.Lock()
         self._run_lock = threading.Lock()
+        # Word-timestamp failures in the current session (reset per session in _run); after
+        # the first one the session's remaining chunks are transcribed without words.
+        self._word_failures = 0
+        self._word_failures_lock = threading.Lock()
         self._diarizer: Diarizer | None = None
         # cfg.language_models: model name -> loaded model (under _route_lock, on first use or
         # prefetched). Until it is loaded, or after a failed load until _route_retry[name]
@@ -486,27 +490,35 @@ class Transcriber:
         ``offset`` + position in the piece, clipped to ``max_end``. Blocking; call it from a
         pool worker (see ``submit``) to run pieces in parallel. ``language`` picks the model
         (cfg.language_models); ``wait_for_model=False`` uses the main model while that one is
-        still loading (live). ``words``: keep word timings in ``Segment.words`` (faster-whisper
-        only; never requested from MLX, whose word timestamps need numba and scipy)."""
+        still loading (live). ``words``: keep word timings in ``Segment.words`` (on MLX only
+        when ``mlx_word_timestamps()``: mlx-whisper 0.4.3 with our numpy aligner)."""
         model = self._model_for(language, wait_for_model)
-        if isinstance(model, MlxWhisper):
-            pieces = [(a, b, t, []) for a, b, t in model.transcribe(audio, language)]
-        else:
-            segments, _ = model.transcribe(
-                audio,
-                language=language,
-                vad_filter=False,
-                beam_size=beam_size,
-                condition_on_previous_text=False,
-                word_timestamps=words,
-            )
-            pieces = [(s.start, s.end, s.text, getattr(s, "words", None) or []) for s in segments]
+        if words and self._word_failures:
+            words = False  # circuit breaker: this session's word pass already failed
+        failure = None
+        try:
+            pieces = self._pieces(model, audio, language, beam_size, words)
+        except Exception as e:
+            if not words:
+                raise
+            failure = type(e).__name__
+            log.debug("word timestamp failure", exc_info=True)
+        if failure is not None:
+            # Retried outside the except block, so the failed call (and its frames) are gone.
+            # One odd chunk must not fail the session: keep it whole (no words, never split).
+            self._note_word_failure(type(model).__name__, failure, offset)
+            pieces = self._pieces(model, audio, language, beam_size, False)
         end_cap = max_end if max_end is not None else offset + len(audio) / SAMPLE_RATE
         out = []
         for start, end, raw, ws in pieces:
             text = raw.strip()
             if text:
-                kept = [w for w in ws if offset + w.start < end_cap]
+                # Both backends' words as (start, end, " word"), in session time.
+                kept = [
+                    (round(offset + a, 3), round(min(offset + b, end_cap), 3), w)
+                    for a, b, w in ws
+                    if offset + a < end_cap
+                ]
                 out.append(
                     Segment(
                         start=round(offset + start, 3),
@@ -514,19 +526,57 @@ class Transcriber:
                         text=text,
                         speaker=speaker,
                         language=language,
-                        words=[
-                            (
-                                round(offset + w.start, 3),
-                                round(min(offset + w.end, end_cap), 3),
-                                w.word,
-                            )
-                            for w in kept
-                        ]
-                        if len(kept) == len(ws)
-                        else [],  # words were cut off: the text is whole, so never split it
+                        # words were cut off: the text is whole, so never split it
+                        words=kept if len(kept) == len(ws) else [],
                     )
                 )
         return out
+
+    def _note_word_failure(self, backend: str, error: str, offset: float) -> None:
+        """Count, and warn once per session (no transcript text); chunks already running
+        in parallel may fail too, and only log at DEBUG."""
+        with self._word_failures_lock:
+            self._word_failures += 1
+            first = self._word_failures == 1
+        (log.warning if first else log.debug)(
+            "word timestamps failed (%s, %s) for the chunk at %.1f s; kept without words, "
+            "and off for the rest of this session",
+            backend,
+            error,
+            offset,
+        )
+
+    @staticmethod
+    def _pieces(
+        model: Any, audio: np.ndarray, language: str, beam_size: int, words: bool
+    ) -> list[tuple[float, float, str, list[tuple[float, float, str]]]]:
+        """(start, end, text, [(start, end, " word")]) per segment, relative to ``audio``."""
+        if isinstance(model, MlxWhisper):
+            if words and mlx_word_timestamps():
+                return model.transcribe(audio, language, words=True)
+            return [(a, b, t, []) for a, b, t in model.transcribe(audio, language)]
+        segments, _ = model.transcribe(
+            audio,
+            language=language,
+            vad_filter=False,
+            beam_size=beam_size,
+            condition_on_previous_text=False,
+            word_timestamps=words,
+        )
+        try:  # faster-whisper decodes lazily: consume it here, and always close it
+            return [
+                (
+                    s.start,
+                    s.end,
+                    s.text,
+                    [(w.start, w.end, w.word) for w in getattr(s, "words", None) or []],
+                )
+                for s in segments
+            ]
+        finally:
+            close = getattr(segments, "close", None)
+            if close is not None:
+                close()
 
     # -- public ------------------------------------------------------------------------------
 
@@ -554,6 +604,7 @@ class Transcriber:
     def _run(self, session: SessionInfo, progress: ProgressCallback | None) -> list[Segment]:
         report = progress or (lambda _f: None)
         report(0.0)
+        self._word_failures = 0
         diarization = self.start_diarization(session)  # CPU threads, overlaps with Whisper
         audio: dict[Track, np.ndarray] = {}
         for track, name in session.tracks.items():
@@ -681,6 +732,11 @@ class Transcriber:
         background as soon as they are ready (WAVs are deleted only after that). Returns the
         segments written now.
         """
+        # A "forget all" after this drops our voice writes; it counts from when the session
+        # was recorded, so one recorded or queued before a forget keeps no voice data either.
+        gen = session.voices_generation
+        if gen is None:
+            gen = voices.forget_generation()
         if diarization is None:
             diarization = self.start_diarization(session)
         with self._init_lock:
@@ -692,29 +748,35 @@ class Transcriber:
                 turns = diarization.result(timeout=self.diarize_wait_s)
             except TimeoutError:
                 log.info("session %s: speaker labels follow when diarization ends", session.id)
-                self._write(session, segments, duration)
+                with voices.NAMING_LOCK:
+                    self._write(session, segments, duration)
                 with self._init_lock:  # before the callback, which may run right away
                     self._label_waiters[_dir_key(session.directory)] = (self.clock(), [])
                 diarization.add_done_callback(
-                    lambda f: self._relabel_later(session, segments, duration, f)
+                    lambda f: self._relabel_later(session, segments, duration, f, gen)
                 )
                 return segments
             except Exception:  # noqa: BLE001 - cancelled; diarization is optional
                 turns = None
             self._diarization_metrics(session, diarization)
-            segments = self._labelled(session, segments, turns)
-        self._write(session, segments, duration)
-        self._name_from_call_app(session)
+            with voices.NAMING_LOCK:  # voices and transcript change together, not mid-naming
+                segments = self._labelled_now(session, segments, turns, gen)
+                self._write(session, segments, duration)
+            self._prune_voices()
+        else:
+            with voices.NAMING_LOCK:
+                self._write(session, segments, duration)
+        self._name_from_call_app(session, gen)
         self._drop_audio(session)
         return segments
 
-    def _name_from_call_app(self, session: SessionInfo) -> None:
+    def _name_from_call_app(self, session: SessionInfo, gen: int | None = None) -> None:
         """Opt-in: name the one unknown speaker after the one free call-app participant."""
         if not (self.cfg.speaker_names and self.cfg.names_from_call_app):
             callnames.forget(session.id)  # switched off since the call: don't keep the names
             return
         try:
-            callnames.apply(Path(session.directory))
+            callnames.apply(Path(session.directory), since=gen)  # takes NAMING_LOCK
         except Exception as e:  # noqa: BLE001 - optional; the numbered label stays
             # The exception text or traceback could quote a name: type at WARNING, rest at DEBUG
             log.warning(
@@ -773,45 +835,58 @@ class Transcriber:
         session: SessionInfo,
         segments: list[Segment],
         turns: list[Turn] | dict[Track, list[Turn] | None] | None,
+        gen: int | None = None,
+        use_names: bool = True,
     ) -> list[Segment]:
         """Number (or name) the speakers of each diarized track independently; a later
-        track's numbers continue after the earlier ones' ("Speaker 3" after 1 and 2)."""
+        track's numbers continue after the earlier ones' ("Speaker 3" after 1 and 2).
+        `use_names=False`: numbers only, no voice-profile names."""
         by_track = turns if isinstance(turns, dict) else {diarized_tracks(session)[0]: turns}
         out, n_labels, n_named = list(segments), 0, 0
         speakers: dict[str, np.ndarray] = {}
-        for track, track_turns in by_track.items():
-            centroids = getattr(track_turns, "centroids", {}) if self.cfg.speaker_names else {}
-            names: dict[int, str] = {}
-            if track_turns and centroids:
-                try:
-                    names = voices.match_profiles(centroids, voices.load_profiles())
-                except Exception:  # noqa: BLE001 - names are optional; numbers still work
-                    log.exception("session %s: could not match voice profiles", session.id)
-            taken = {s.speaker for s in out} - {ME, OTHERS}
-            # One person, one name: a profile already given on an earlier track numbers this
-            # track's cluster instead (and its stored voice can't overwrite the first one).
-            folded = {t.casefold() for t in taken}
-            names = {k: n for k, n in names.items() if n.casefold() not in folded}
-            if track_turns and self.cfg.split_on_speaker_change:
-                # this track's segments still carry "Me"/"Others": split them at speaker changes
-                out = split_on_speaker_change(out, track_turns, SPEAKERS[track])
-            out, labels = label_speakers(
-                out, track_turns or [], SPEAKERS[track], names=names, reserved=taken
-            )
-            # A lone speaker in a room session keeps "Me", which is never renamed: no voice.
-            speakers |= {
-                lbl: centroids[k] for k, lbl in labels.items() if k in centroids and lbl != ME
-            }
-            n_labels += len(labels)
-            n_named += len(names.keys() & labels.keys())
-        try:  # opt-in only, in the private voices folder: lets `name-speaker` name them later
-            if speakers and Path(session.directory).exists():
-                voices.write_session_voices(session, speakers)
-            else:  # never leave voices of an older transcript of this session behind
-                voices.delete_session_voices(session.id)
-            voices.prune_session_voices()  # of sessions whose folder was deleted
-        except OSError:
-            log.exception("session %s: could not update speaker voices", session.id)
+        folder_exists = Path(session.directory).exists()  # outside the voice lock: may be slow
+        # Names, the generation check and the voice writes are one step against a forget.
+        # If another process holds the store past LOCK_WAIT_S: numbers only, no voice work.
+        with voices.store_lock_best_effort() as locked:
+            for track, track_turns in by_track.items():
+                centroids = getattr(track_turns, "centroids", {}) if self.cfg.speaker_names else {}
+                names: dict[int, str] = {}
+                if track_turns and centroids and locked and use_names:
+                    try:
+                        known = voices.profiles_if_current(gen)  # none after a forget since `gen`
+                        names = voices.match_profiles(centroids, known)
+                    except Exception:  # noqa: BLE001 - names are optional; numbers still work
+                        log.exception("session %s: could not match voice profiles", session.id)
+                taken = {s.speaker for s in out} - {ME, OTHERS}
+                # One person, one name: a profile already given on an earlier track numbers this
+                # track's cluster instead (and its stored voice can't overwrite the first one).
+                folded = {t.casefold() for t in taken}
+                names = {k: n for k, n in names.items() if n.casefold() not in folded}
+                if names and gen is not None and gen != voices.forget_generation():
+                    names = {}  # all voices were deleted meanwhile: no remembered names in the text
+                if track_turns and self.cfg.split_on_speaker_change:
+                    # this track's segments still carry "Me"/"Others": split them at speaker changes
+                    out = split_on_speaker_change(out, track_turns, SPEAKERS[track])
+                out, labels = label_speakers(
+                    out, track_turns or [], SPEAKERS[track], names=names, reserved=taken
+                )
+                # A lone speaker in a room session keeps "Me", which is never renamed: no voice.
+                speakers |= {
+                    lbl: centroids[k] for k, lbl in labels.items() if k in centroids and lbl != ME
+                }
+                n_labels += len(labels)
+                n_named += len(names.keys() & labels.keys())
+            try:  # opt-in only, in the private voices folder: lets `name-speaker` name them later
+                if not locked:
+                    pass  # the store is busy: leave its voices as they are
+                elif speakers and folder_exists:
+                    voices.write_session_voices(session, speakers, since=gen)
+                elif gen is None or gen == voices.forget_generation():
+                    # never leave voices of an older transcript of this session behind (but not
+                    # those stored after a forget that this run began before)
+                    voices.delete_session_voices(session.id)
+            except OSError:
+                log.exception("session %s: could not update speaker voices", session.id)
         if not any(by_track.values()):
             return segments
         log.info(  # counts only: names are personal data
@@ -822,18 +897,54 @@ class Transcriber:
         )
         return out
 
+    def _labelled_now(
+        self,
+        session: SessionInfo,
+        segments: list[Segment],
+        turns: list[Turn] | dict[Track, list[Turn] | None] | None,
+        gen: int | None,
+    ) -> list[Segment]:
+        """``_labelled``, re-checked just before the caller writes the transcript (under
+        NAMING_LOCK): if all voices were forgotten meanwhile (by another process: this one's
+        forget waits for NAMING_LOCK), the text gets numbers, never a forgotten name."""
+        out = self._labelled(session, segments, turns, gen)
+        if gen is not None and gen != voices.forget_generation():
+            log.info("session %s: voices were forgotten meanwhile; numbers only", session.id)
+            out = self._labelled(session, segments, turns, gen, use_names=False)
+        return out
+
+    @staticmethod
+    def _prune_voices() -> None:
+        """Drop the voices of deleted sessions; outside NAMING_LOCK: it walks session folders."""
+        try:
+            voices.prune_session_voices()
+        except OSError:
+            log.exception("could not prune speaker voices")
+
     def _relabel_later(
-        self, session: SessionInfo, segments: list[Segment], duration: float, future: Future
+        self,
+        session: SessionInfo,
+        segments: list[Segment],
+        duration: float,
+        future: Future,
+        gen: int | None = None,
     ) -> None:
         """Done-callback of a slow diarization: rewrite the transcript with speaker labels."""
         try:
             turns = None if future.cancelled() else future.result()
-            labelled = self._labelled(session, segments, turns)
-            if labelled != segments and Path(session.directory).exists():
-                write_outputs(session, labelled, duration, self.cfg.model)
-                log.info("session %s: transcript rewritten with speaker labels", session.id)
+            with voices.NAMING_LOCK:  # voices and transcript change together, not mid-naming
+                if voices.has_user_names(session.directory):
+                    # a speaker was named meanwhile (here or by the CLI): keep their names
+                    log.info("session %s: speakers already named; labels kept", session.id)
+                    labelled = segments
+                else:
+                    labelled = self._labelled_now(session, segments, turns, gen)
+                if labelled != segments and Path(session.directory).exists():
+                    write_outputs(session, labelled, duration, self.cfg.model)
+                    log.info("session %s: transcript rewritten with speaker labels", session.id)
+            self._prune_voices()
             if Path(session.directory).exists():
-                self._name_from_call_app(session)
+                self._name_from_call_app(session, gen)
             if getattr(future, "timing", None) and Path(session.directory).exists():
                 self._diarization_metrics(session, future)
                 session.save()

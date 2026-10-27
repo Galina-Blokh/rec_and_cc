@@ -17,6 +17,8 @@ if their cosine similarity is >= ``MATCH_SIMILARITY`` and beats the second-best 
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -87,6 +89,157 @@ def check_name(name: str) -> str:
     return name
 
 
+# Every change of the voice store holds LOCK (re-entrant: name_speaker calls the others), so
+# "Forget all voices" can't interleave with a naming or a diarization. `delete_all_profiles`
+# also bumps the generation: a write that began before it (`since=`) is dropped.
+LOCK = threading.RLock()
+# Held by name_speaker for its whole run, before LOCK; "forget all" never takes it, so a slow
+# transcript folder (cloud sync) can't stall a forget or the diarizer's voice writes.
+NAMING_LOCK = threading.Lock()
+GENERATION_FILE = "generation"  # in the voices folder: shared with the CLI and other processes
+LOCK_FILE = "lock"
+
+
+def forget_generation(voices_dir: Path | None = None) -> int:
+    """Changes every time all voices are deleted, by this process or another (the CLI);
+    see ``write_session_voices(since=)``."""
+    try:
+        return int(json.loads((_dir(voices_dir) / GENERATION_FILE).read_text("utf-8"))["n"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0
+
+
+_held = threading.local()  # per thread: voices folder -> lock depth (re-entrant)
+LOCK_WAIT_S = 60.0  # Windows: how long to wait for another process before giving up
+
+
+def _depth(d: Path) -> int:
+    return getattr(_held, "depths", {}).get(str(d), 0)
+
+
+def _set_depth(d: Path, n: int) -> None:
+    if not hasattr(_held, "depths"):
+        _held.depths = {}
+    _held.depths[str(d)] = n
+
+
+def _lock_windows(f) -> None:
+    """msvcrt.LK_LOCK gives up after ~10 s: poll LK_NBLCK with a backoff up to LOCK_WAIT_S."""
+    import msvcrt
+
+    deadline, pause = time.monotonic() + LOCK_WAIT_S, 0.02
+    while True:
+        try:
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)  # pyright: ignore[reportAttributeAccessIssue] - Windows only
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise OSError("the voice data is in use by another process; try again") from None
+            time.sleep(pause)
+            pause = min(pause * 2, 0.5)
+
+
+def _lock_posix(f) -> None:
+    """flock with a deadline (LOCK_WAIT_S), like Windows: a stuck CLI must not wedge the app."""
+    import fcntl
+
+    deadline, pause = time.monotonic() + LOCK_WAIT_S, 0.02
+    while True:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise OSError("the voice data is in use by another process; try again") from None
+            time.sleep(pause)
+            pause = min(pause * 2, 0.5)
+
+
+def _gave_up(d: Path) -> bool:
+    return str(d) in getattr(_held, "gave_up", set())
+
+
+@contextlib.contextmanager
+def _file_lock(voices_dir: Path | None = None):
+    """Exclusive lock on the voices folder across processes and threads, taken by every
+    change of the voice store. Re-entrant per thread and folder: a second handle on the same
+    file would block this very thread. The OS lock (one handle per holder, so it excludes the
+    other threads of this process too) is polled *before* LOCK is taken: a thread waiting
+    for another process never blocks this process's other voice operations."""
+    d = _dir(voices_dir)
+    if _depth(d):  # this thread holds it already
+        _set_depth(d, _depth(d) + 1)
+        try:
+            yield
+        finally:
+            _set_depth(d, _depth(d) - 1)
+        return
+    if _gave_up(d):  # inside store_lock_best_effort that already waited: never wait twice
+        raise OSError("the voice data is in use by another process; try again")
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with open(d / LOCK_FILE, "a+b") as f:
+        if os.name == "nt":
+            _lock_windows(f)
+        else:
+            _lock_posix(f)
+        try:
+            with LOCK:
+                _set_depth(d, 1)
+                try:
+                    yield
+                finally:
+                    _set_depth(d, 0)
+        finally:
+            if os.name == "nt":
+                import msvcrt
+
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            # POSIX: closing the file releases the flock
+
+
+store_lock = _file_lock  # for callers that must act on the store atomically
+
+
+@contextlib.contextmanager
+def store_lock_best_effort(voices_dir: Path | None = None):
+    """``store_lock``, but when another process holds it for longer than ``LOCK_WAIT_S``,
+    carry on without it (finalizing a transcript must not hang): yields whether it is held.
+    Without it, every voice operation inside fails at once with OSError instead of waiting
+    again, so the whole block never waits longer than one ``LOCK_WAIT_S``."""
+    d = _dir(voices_dir)
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(_file_lock(voices_dir))
+        except OSError:
+            log.warning("the voice store is busy; continuing without voice data")
+            if not hasattr(_held, "gave_up"):
+                _held.gave_up = set()
+            _held.gave_up.add(str(d))
+            stack.callback(_held.gave_up.discard, str(d))
+            yield False
+            return
+        yield True
+
+
+def profiles_if_current(since: int | None, voices_dir: Path | None = None) -> list[Profile]:
+    """The profiles, or none when all voices were deleted since generation `since`."""
+    with _file_lock(voices_dir):
+        if since is not None and since != forget_generation(voices_dir):
+            return []
+        return load_profiles(voices_dir)
+
+
+def _locked(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _file_lock():
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
 def _dir(voices_dir: Path | None) -> Path:
     return Path(voices_dir) if voices_dir is not None else VOICES_DIR
 
@@ -134,14 +287,16 @@ def _vector(c) -> list[float]:
 
 # --------------------------------------------------------------------------- profiles store
 def load_profiles(voices_dir: Path | None = None) -> list[Profile]:
-    """Profiles of the current embedding model, sorted by name; unreadable files are skipped
-    (logged by file name)."""
+    """Profiles of the current embedding model and forget generation, sorted by name;
+    unreadable files are skipped (logged by file name)."""
     d = _dir(voices_dir)
     out = []
+    gen = forget_generation(voices_dir) if d.is_dir() else 0
     for f in sorted(d.glob("*.json")) if d.is_dir() else []:
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
-            if data.get("model") == MODEL:
+            # a profile from before a "forget all" that could not be deleted never matches
+            if data.get("model") == MODEL and data.get("generation", 0) == gen:
                 count = int(data["count"])
                 if "sum" in data:
                     total = np.asarray(data["sum"], dtype=np.float64)
@@ -153,6 +308,7 @@ def load_profiles(voices_dir: Path | None = None) -> list[Profile]:
     return sorted(out, key=lambda p: _key(p.name))
 
 
+@_locked
 def save_profile(name: str, centroid, voices_dir: Path | None = None) -> Profile:
     """Fold `centroid` into the profile of `name` (created if new): the mean of all of them."""
     profile = _fold(name, centroid, +1, voices_dir)
@@ -179,11 +335,18 @@ def _fold(name: str, centroid, sign: int, voices_dir: Path | None) -> Profile | 
         path.unlink(missing_ok=True)
         return None
     now = datetime.now().isoformat(timespec="seconds")
-    data = {"name": name, "model": MODEL, "count": count, "updated": now}
+    data = {
+        "name": name,
+        "model": MODEL,
+        "count": count,
+        "updated": now,
+        "generation": forget_generation(voices_dir),
+    }
     _write_private(path, {**data, "sum": [round(float(x), 6) for x in total]})
     return Profile(name, _unit(total), count, now, total)
 
 
+@_locked
 def delete_profile(name: str, voices_dir: Path | None = None) -> bool:
     """Delete the profile of `name` and every session's centroid labelled `name` or folded
     into it, so the voice can't come back from a session."""
@@ -209,13 +372,30 @@ def delete_profile(name: str, voices_dir: Path | None = None) -> bool:
 
 def delete_all_profiles(voices_dir: Path | None = None) -> int:
     """Every profile, every session's speaker voices and any temp file left by a crash
-    (they hold voice data too); returns the number of profiles."""
+    (they hold voice data too); returns the number of profiles. Keeps deleting after a
+    failure and raises OSError at the end if something is left."""
     d = _dir(voices_dir)
-    profiles = list(d.glob("*.json")) if d.is_dir() else []
-    stale = [*d.glob(".*.tmp"), *d.glob("sessions/.*.tmp")] if d.is_dir() else []
-    for f in [*profiles, *_session_files(voices_dir), *stale]:
-        f.unlink(missing_ok=True)
-    return len(profiles)
+    with _file_lock(voices_dir):
+        _write_private(d / GENERATION_FILE, {"n": forget_generation(voices_dir) + 1})
+        profiles = list(d.glob("*.json"))
+        stale = [*d.glob(".*.tmp"), *d.glob("sessions/.*.tmp")]
+        left = 0
+        for f in [*profiles, *_session_files(voices_dir), *stale]:
+            try:
+                _retry(lambda f=f: f.unlink(missing_ok=True))
+            except OSError:
+                left += 1
+        if left:
+            raise OSError(f"{left} voice file(s) could not be deleted")
+        return len(profiles)
+
+
+def forget_all(voices_dir: Path | None = None) -> int:
+    """``delete_all_profiles`` after any naming or finalize of this process has finished
+    (``NAMING_LOCK``): the forget comes last, so no remembered name lands in a transcript
+    after it. Other processes are covered by the generation checks before every write."""
+    with NAMING_LOCK:
+        return delete_all_profiles(voices_dir)
 
 
 # --------------------------------------------------------------------------- matching
@@ -275,8 +455,10 @@ def prune_session_voices(voices_dir: Path | None = None) -> int:
     for f in _session_files(voices_dir):
         try:
             directory = json.loads(f.read_text(encoding="utf-8")).get("directory")
+            # the folder check may walk a slow (cloud) tree: no lock for it, only the unlink
             if isinstance(directory, str) and directory and _deleted(Path(directory)):
-                f.unlink()
+                with _file_lock(voices_dir):
+                    f.unlink(missing_ok=True)
                 n += 1
         except (OSError, ValueError, AttributeError):
             log.warning("could not check session voices %s", f.name)
@@ -290,9 +472,29 @@ def write_session_voices(
     speakers: Mapping[str, np.ndarray],
     folded: Mapping[str, str] | None = None,
     voices_dir: Path | None = None,
+    since: int | None = None,
 ) -> None:
     """Save a session's label -> centroid. `folded`: label -> the profile it was already
-    added to (so naming it again doesn't count the same session twice)."""
+    added to (so naming it again doesn't count the same session twice). `since`: the
+    ``forget_generation()`` when the work began; if all voices were deleted since, nothing
+    is written."""
+    directory = _folder(session)  # outside the lock: it may touch a slow (cloud) folder
+    with _file_lock(voices_dir):  # check and write together: a forget can't land between
+        if since is None or since == forget_generation(voices_dir):
+            _store_session_voices(session, directory, speakers, folded, voices_dir)
+
+
+def _folder(session: SessionInfo) -> str:
+    return str(Path(session.directory).resolve())  # to prune deleted sessions
+
+
+def _store_session_voices(
+    session: SessionInfo,
+    directory: str,
+    speakers: Mapping[str, np.ndarray],
+    folded: Mapping[str, str] | None,
+    voices_dir: Path | None,
+) -> None:
     folded = folded or {}
     entries = {
         label: {"centroid": _vector(c), "profile": folded.get(label)}
@@ -301,8 +503,9 @@ def write_session_voices(
     data = {
         "version": 1,
         "session_id": session.id,
-        "directory": str(Path(session.directory).resolve()),  # to prune deleted sessions
+        "directory": directory,
         "model": MODEL,
+        "generation": forget_generation(voices_dir),
         "speakers": entries,
     }
     _write_private(_session_path(session.id, voices_dir), data)
@@ -314,24 +517,37 @@ def _names_path(session_id: str, voices_dir: Path | None) -> Path:
 
 
 def write_session_names(
-    session: SessionInfo, names: list[str], voices_dir: Path | None = None
-) -> None:
+    session: SessionInfo,
+    names: list[str],
+    voices_dir: Path | None = None,
+    since: int | None = None,
+) -> bool:
     """Keep the participant names a call app showed during `session` in the owner-only store
     (never in the session folder, which may sync to a cloud). Like the session's voices it is
-    pruned when the folder is deleted and removed by `voices delete --all`."""
-    data = {
-        "version": 1,
-        "session_id": session.id,
-        "directory": str(Path(session.directory).resolve()),
-        "participants": [str(n) for n in names],
-    }
-    _write_private(_names_path(session.id, voices_dir), data)
+    pruned when the folder is deleted and removed by `voices delete --all`. `since`: the
+    ``forget_generation()`` when the session began; if all voices were deleted since, nothing
+    is written. Returns whether the names were kept."""
+    directory = _folder(session)  # outside the lock: it may touch a slow (cloud) folder
+    with _file_lock(voices_dir):
+        if since is not None and since != forget_generation(voices_dir):
+            return False
+        data = {
+            "version": 1,
+            "session_id": session.id,
+            "directory": directory,
+            "generation": forget_generation(voices_dir),
+            "participants": [str(n) for n in names],
+        }
+        _write_private(_names_path(session.id, voices_dir), data)
+        return True
 
 
 def read_session_names(session_id: str, voices_dir: Path | None = None) -> list[str]:
     path = _names_path(session_id, voices_dir)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("generation", 0) != forget_generation(voices_dir):
+            return []  # left over by a "forget all" that could not delete it
         return [str(n) for n in data.get("participants", [])]
     except (OSError, ValueError, AttributeError):
         return []
@@ -347,16 +563,28 @@ def read_session_voices(session_id: str, voices_dir: Path | None = None) -> dict
     if not path.exists():
         return {}
     data = json.loads(path.read_text(encoding="utf-8"))
-    if data.get("model") != MODEL:
-        return {}
+    if data.get("model") != MODEL or data.get("generation", 0) != forget_generation(voices_dir):
+        return {}  # another model, or left over by a "forget all" that could not delete it
     return {
         label: {"centroid": _unit(v["centroid"]), "profile": v.get("profile")}
         for label, v in data.get("speakers", {}).items()
     }
 
 
+@_locked
 def delete_session_voices(session_id: str, voices_dir: Path | None = None) -> None:
     _session_path(session_id, voices_dir).unlink(missing_ok=True)
+
+
+def has_user_names(directory: Path) -> bool:
+    """True if the transcript on disk has a speaker that is not Me, Others or `Speaker N`:
+    a name the user gave, which a late relabel must not overwrite."""
+    try:
+        data = json.loads((Path(directory) / JSON_NAME).read_text(encoding="utf-8"))
+        labels = {s["speaker"] for s in data.get("segments", [])}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+    return any(lbl not in (ME, OTHERS) and not re.fullmatch(r"Speaker \d+", lbl) for lbl in labels)
 
 
 def session_speakers(directory: Path, lines: int = 2) -> list[tuple[str, list[str]]]:
@@ -373,7 +601,11 @@ def name_speaker(directory: Path, label: str, name: str, voices_dir: Path | None
     """Save `label`'s voice of the session in `directory` as `name` and rewrite its transcript
     files with the name. Labels and names compare case-insensitively. Raises ValueError when
     that is not possible."""
-    directory, name = Path(directory), check_name(name)
+    with NAMING_LOCK:  # one renaming at a time: each rewrites the whole transcript
+        return _name_speaker(Path(directory), label, check_name(name), voices_dir)
+
+
+def _name_speaker(directory: Path, label: str, name: str, voices_dir: Path | None) -> Profile:
     session = SessionInfo.load(directory)
     data = json.loads((directory / JSON_NAME).read_text(encoding="utf-8"))
     segments = [Segment(**s) for s in data["segments"]]
@@ -385,33 +617,34 @@ def name_speaker(directory: Path, label: str, name: str, voices_dir: Path | None
         raise ValueError(f'"{ME}" is your microphone track and is never renamed')
     if any(_key(s.speaker) == _key(name) and s.speaker != label for s in segments):
         raise ValueError(f"{name!r} is already another speaker of this session")
-    stored = read_session_voices(session.id, voices_dir)
-    folded_as = {k: _key(v["profile"] or "") for k, v in stored.items()}
-    # `name`: its voice was renamed already, but rewriting the transcript failed last time
-    found = [k for k in stored if _key(k) == _key(label)] or [
-        k for k in stored if _key(k) == _key(name) == folded_as[k]
-    ]
-    if not found:
-        raise ValueError(
-            f"no voice data for {label!r} (speaker_names was off when this session was "
-            "transcribed, or its voices were deleted)"
+    with _file_lock(voices_dir):  # the voice store only; the transcript is rewritten outside it
+        stored = read_session_voices(session.id, voices_dir)
+        folded_as = {k: _key(v["profile"] or "") for k, v in stored.items()}
+        # `name`: its voice was renamed already, but rewriting the transcript failed last time
+        found = [k for k in stored if _key(k) == _key(label)] or [
+            k for k in stored if _key(k) == _key(name) == folded_as[k]
+        ]
+        if not found:
+            raise ValueError(
+                f"no voice data for {label!r} (speaker_names was off when this session was "
+                "transcribed, or its voices were deleted)"
+            )
+        entry, previous = stored[found[0]], folded_as[found[0]]
+        known = {_key(p.name): p for p in load_profiles(voices_dir)}
+        voices = {name if k == found[0] else k: v for k, v in stored.items()}
+        # Mark this session as folded into `name` first: a failure below can then leave the
+        # profile one session short, but never count this session twice.
+        write_session_voices(
+            session,
+            {lbl: v["centroid"] for lbl, v in voices.items()},
+            {lbl: v["profile"] for lbl, v in voices.items() if v["profile"]} | {name: name},
+            voices_dir,
         )
-    entry, previous = stored[found[0]], folded_as[found[0]]
-    known = {_key(p.name): p for p in load_profiles(voices_dir)}
-    voices = {name if k == found[0] else k: v for k, v in stored.items()}
-    # Mark this session as folded into `name` first: a failure below can then leave the
-    # profile one session short, but never count this session twice.
-    write_session_voices(
-        session,
-        {lbl: v["centroid"] for lbl, v in voices.items()},
-        {lbl: v["profile"] for lbl, v in voices.items() if v["profile"]} | {name: name},
-        voices_dir,
-    )
-    profile = known.get(_key(name))
-    if previous != _key(name) or profile is None:
-        if previous and previous != _key(name) and previous in known:
-            _fold(known[previous].name, entry["centroid"], -1, voices_dir)  # Anna -> Bob
-        profile = save_profile(name, entry["centroid"], voices_dir)
+        profile = known.get(_key(name))
+        if previous != _key(name) or profile is None:
+            if previous and previous != _key(name) and previous in known:
+                _fold(known[previous].name, entry["centroid"], -1, voices_dir)  # Anna -> Bob
+            profile = save_profile(name, entry["centroid"], voices_dir)
     if label != name:
         segments = [replace(s, speaker=name) if s.speaker == label else s for s in segments]
         write_outputs(session, segments, data["duration"], data["model"])
@@ -420,12 +653,20 @@ def name_speaker(directory: Path, label: str, name: str, voices_dir: Path | None
 
 
 __all__ = [
+    "LOCK",
+    "forget_generation",
+    "store_lock",
+    "store_lock_best_effort",
+    "has_user_names",
+    "profiles_if_current",
     "MATCH_MARGIN",
+    "NAMING_LOCK",
     "MATCH_SIMILARITY",
     "VOICES_DIR",
     "Profile",
     "check_name",
     "delete_all_profiles",
+    "forget_all",
     "delete_profile",
     "delete_session_names",
     "delete_session_voices",
