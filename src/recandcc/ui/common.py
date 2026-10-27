@@ -460,6 +460,9 @@ class Controller:
         would leave the device. Runs on every refresh (worker thread; the check is local and
         cheap), so a folder that becomes synced later is still reported."""
         out = Path(self.cfg.output_dir)
+        with self._lock:
+            if out in self._cloud_warned:
+                return
         provider = cloud_sync_provider(out)
         if provider is None:
             return

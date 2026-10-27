@@ -35,6 +35,7 @@ def _finder_prefs(home, **keys):
     prefs = home / "Library" / "Preferences"
     prefs.mkdir(parents=True, exist_ok=True)
     (prefs / "com.apple.finder.plist").write_bytes(plistlib.dumps(keys))
+    cloudsync._prefs_cache.clear()  # the cache keys on mtime, which may not tick in a test
 
 
 def test_mac_desktop_and_documents(tmp_path):
@@ -51,13 +52,20 @@ def test_mac_desktop_and_documents(tmp_path):
     assert mac_provider(docs, home) == "iCloud Drive (Desktop & Documents)"
     assert mac_provider(home / "Desktop" / "x", home) is None  # only Documents is synced
     assert mac_provider(home / "Transcribes", home) is None
+    _finder_prefs(home, FXICloudDriveDocuments=0, FXICloudDriveDesktop=1)  # `defaults -int`
+    assert mac_provider(docs, home) is None
+    assert mac_provider(home / "Desktop" / "x", home) == "iCloud Drive (Desktop & Documents)"
     (home / "Library" / "Preferences" / "com.apple.finder.plist").write_bytes(b"garbage")
+    cloudsync._prefs_cache.clear()
     assert mac_provider(docs, home) is None
 
 
 def test_mac_legacy_sync_folders(tmp_path):
     assert mac_provider(tmp_path / "Dropbox" / "Rec", tmp_path) == "Dropbox"
     assert mac_provider(tmp_path / "Google Drive" / "Rec", tmp_path) == "Google Drive"
+    assert mac_provider("/Volumes/GoogleDrive/My Drive/Rec", tmp_path) == "Google Drive"
+    box = tmp_path / "Library" / "CloudStorage" / "Box-Box" / "Rec"
+    assert mac_provider(box, tmp_path) == "Box"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need admin rights on Windows")
@@ -152,7 +160,6 @@ def test_refresh_runs_the_check(tmp_path, monkeypatch):
     import recandcc.ui.common as common
 
     monkeypatch.setattr(common, "permission_status", lambda: {})
-    monkeypatch.setattr(common, "cloud_sync_provider", lambda p: "iCloud Drive")
     ctrl = Controller(
         Config(output_dir=tmp_path),
         monitor=_Monitor(),
@@ -160,10 +167,13 @@ def test_refresh_runs_the_check(tmp_path, monkeypatch):
         tq=_Q(),
         start_threads=False,
     )
+    calls = []
+    monkeypatch.setattr(common, "cloud_sync_provider", lambda p: calls.append(p) or "iCloud Drive")
     ctrl._maybe_reload_config = lambda: None
     ctrl._refresh()
     ctrl._refresh()
     assert len(_notices(ctrl)) == 1
+    assert len(calls) == 1  # an already-warned folder is not checked again
 
 
 def test_cli_config_prints_warning(tmp_path, monkeypatch, capsys):
