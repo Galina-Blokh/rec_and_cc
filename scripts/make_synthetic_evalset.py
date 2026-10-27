@@ -35,7 +35,6 @@ import soundfile as sf
 SR = 16_000
 LEAD_S, GAP_S, TAIL_S = 0.5, 0.7, 2.0  # eval.py: end clips with a couple of seconds of silence
 SILENCE = 1e-3  # trim threshold (float samples)
-REPO = Path(__file__).resolve().parents[1]
 
 # speaker id -> say voice; its language is the id's first two letters
 VOICES = {
@@ -167,8 +166,12 @@ def build_clip(parts: list[tuple[str, str]], synth: Synth) -> tuple[np.ndarray, 
 
 
 def build_set(out: Path, clips: dict[str, list[tuple[str, str]]], synth: Synth) -> dict:
-    """Write ``<id>.wav`` per clip and ``manifest.json`` into ``out``; returns the manifest."""
+    """Write ``<id>.wav`` per clip and ``manifest.json`` into ``out``; returns the manifest.
+
+    The old manifest goes first and the new one is written last, so a run that fails halfway
+    leaves no manifest pointing at a mix of old and new clips."""
     out.mkdir(parents=True, exist_ok=True)
+    (out / "manifest.json").unlink(missing_ok=True)
     manifest: dict[str, list] = {"clips": []}
     for cid, parts in clips.items():
         audio, utts = build_clip(parts, synth)
@@ -185,11 +188,16 @@ def build_set(out: Path, clips: dict[str, list[tuple[str, str]]], synth: Synth) 
 
 
 def forbidden(out: Path) -> str | None:
-    """Why ``out`` must not hold the set (inside the repo or ~/Documents), else None."""
+    """Why ``out`` must not hold the set, else None: inside ~/Documents or any git checkout
+    (this repo, its main checkout from a worktree, or another one), or a non-empty folder
+    that is not an earlier set."""
     out = out.expanduser().resolve()
-    for root, what in ((REPO, "the repo"), (Path.home() / "Documents", "~/Documents")):
-        if out.is_relative_to(root.resolve()):
-            return f"refusing to write the set inside {what}"
+    if out.is_relative_to((Path.home() / "Documents").resolve()):
+        return "refusing to write the set inside ~/Documents"
+    if any((d / ".git").exists() for d in (out, *out.parents)):
+        return "refusing to write the set inside a git checkout"
+    if out.is_dir() and any(out.iterdir()) and not (out / "manifest.json").exists():
+        return "refusing to write into a non-empty folder that holds no eval set"
     return None
 
 

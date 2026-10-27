@@ -63,8 +63,14 @@ speakers, and speaker-phone echo. Hebrew goes in later (#6).
 **Synthetic interim set.** Until the consented set exists, `scripts/make_synthetic_evalset.py`
 (macOS only) renders 7 clips (~2.7 min) of fixed, neutral sentences with `say` voices: en, ru
 and he alone, en+ru, en+he and ru+he code-switching, and a 3-speaker English dialogue. It
-writes the WAVs and `manifest.json` to the system temp folder (never the repo or ~/Documents)
-and skips clips whose voice is not installed. Studio TTS is far cleaner than a call, so these
+writes the WAVs and `manifest.json` to the system temp folder (never into a git checkout,
+~/Documents or a non-empty folder that holds no earlier set). The baseline below was measured
+with the voices Samantha, Reed (English (US)) and Flo (English (US)) for en, Milena for ru and
+Carmit for he. Some macOS versions need Milena or Carmit downloaded first (System Settings >
+Accessibility > Spoken Content > System voice > Manage Voices); a clip whose voice is missing
+is skipped with a message, so a set without it is not comparable with the baseline. Clips with
+one voice are `me` tracks (no DER); clips with two or three voices, including the
+code-switching ones, are `others` tracks and scored for DER. Studio TTS is far cleaner than a call, so these
 scores overstate real-world accuracy; use them to catch regressions, not to choose models.
 
 **Consent.** Only record people who agreed to the recording being used to test this app.
@@ -85,8 +91,9 @@ uv run python scripts/eval.py ~/RecAndCC-eval --hypotheses ~/RecAndCC-eval/whisp
 ```
 
 `--backend` and `--languages` change the transcription settings in memory for that run only;
-the config on disk is never written. The languages used are stored as `languages`. `mlx` fails at once if MLX is not available (not Apple silicon, or
-mlx-whisper not installed). `auto` (the default) uses the config's `backend` and `device`.
+the config on disk is never written. The languages used are stored as `languages`; an unknown
+or empty `--languages` is an error. `mlx` fails at once if MLX is not available (not Apple
+silicon, or mlx-whisper not installed). `auto` (the default) uses the config's `backend` and `device`.
 The chosen backend is printed and stored in `eval-results.json` as `backend`, with
 `wall_s`, `peak_memory_mb` and, on MLX, `gpu_peak_memory_mb`. Run one backend per process,
 so that the peak memory belongs to that backend alone. Peak memory is this process's high-water

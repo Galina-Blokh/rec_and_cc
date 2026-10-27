@@ -88,14 +88,56 @@ def test_build_set_is_a_valid_eval_set(tmp_path):
     assert len({u.speaker for u in loaded[-1].utterances}) == 3
 
 
-def test_refuses_the_repo_and_documents(tmp_path):
-    assert mk.forbidden(ROOT / "eval") is not None
-    assert mk.forbidden(Path.home() / "Documents" / "x") is not None
+def test_refuses_checkouts_documents_and_foreign_folders(tmp_path):
+    assert "git checkout" in mk.forbidden(ROOT / "eval")
+    (tmp_path / "other" / ".git").mkdir(parents=True)  # any checkout, e.g. the main one
+    assert "git checkout" in mk.forbidden(tmp_path / "other" / "sub")
+    assert "Documents" in mk.forbidden(Path.home() / "Documents" / "x")
+    (tmp_path / "busy").mkdir()
+    (tmp_path / "busy" / "notes.txt").write_text("x", encoding="utf-8")
+    assert "non-empty" in mk.forbidden(tmp_path / "busy")
     assert mk.forbidden(tmp_path / "set") is None
 
 
+def test_rebuild_drops_the_old_manifest_first(tmp_path):
+    out = tmp_path / "set"
+    mk.build_set(out, {"en-01": mk.CLIPS["en-01"]}, fake_synth)
+    assert mk.forbidden(out) is None  # an earlier set may be overwritten
+
+    def broken(voice, text):
+        raise RuntimeError("say failed")
+
+    with pytest.raises(RuntimeError):
+        mk.build_set(out, {"en-01": mk.CLIPS["en-01"]}, broken)
+    assert not (out / "manifest.json").exists()  # no manifest over half-written clips
+
+
+def fake_sys(platform):
+    return type("Sys", (), {"platform": platform, "stderr": sys.stderr})
+
+
 def test_non_macos_exits_with_a_message(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(mk.sys, "platform", "win32")
+    monkeypatch.setattr(mk, "sys", fake_sys("win32"))  # not the global sys
     assert mk.main([str(tmp_path / "set")]) == 2
     assert "needs macOS" in capsys.readouterr().err
     assert not (tmp_path / "set").exists()
+
+
+def test_main_skips_missing_voices_and_writes_the_rest(tmp_path, monkeypatch, capsys):
+    listing = "".join(f"{v}  en_US    # hi\n" for v in mk.VOICES.values() if v != "Carmit")
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        return type("Done", (), {"stdout": listing})
+
+    monkeypatch.setattr(mk, "sys", fake_sys("darwin"))
+    monkeypatch.setattr(mk.subprocess, "run", run)
+    monkeypatch.setattr(mk, "say_synth", lambda tmp: fake_synth)
+    assert mk.main([str(tmp_path / "set")]) == 0
+    assert calls == [["/usr/bin/say", "-v", "?"]]  # only the listing; fake TTS for the rest
+    out = capsys.readouterr().out
+    assert "skipping he-01: needs voices Carmit" in out
+    ids = [c.id for c in ev.load_manifest(tmp_path / "set")]
+    assert ids == ["en-01", "ru-01", "en-ru-01", "en-3spk-01"]
+    assert mk.main([str(ROOT / "eval")]) == 2  # never inside the repo

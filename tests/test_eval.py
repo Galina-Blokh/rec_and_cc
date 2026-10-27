@@ -550,10 +550,24 @@ def test_languages_flag_sets_detection_languages_in_memory(tmp_path, monkeypatch
     cfg, seen = config.Config(), {}
     patch_pipeline(monkeypatch, cfg, seen)  # Config.save raises: never written
     out = tmp_path / "r.json"
-    argv = [str(tmp_path), "--languages", "EN, ru,iw,xx", "--no-diarize", "--json", str(out)]
+    argv = [str(tmp_path), "--languages", "EN, ru,iw,ru", "--no-diarize", "--json", str(out)]
     assert ev.main(argv) == 0
-    assert seen["cfg"].languages == ["en", "ru", "he"]  # normalised, unknown dropped
+    assert seen["cfg"].languages == ["en", "ru", "he"]  # normalised, aliases, no duplicates
     assert json.loads(out.read_text(encoding="utf-8"))["languages"] == ["en", "ru", "he"]
+
+
+@pytest.mark.parametrize("value", ["", ",", " ", "en,xx"])
+def test_languages_flag_rejects_empty_or_unknown_codes(tmp_path, monkeypatch, capsys, value):
+    import recandcc.config as config
+
+    write_set(tmp_path, {"id": "c", "audio": "c.wav", "utterances": [U]})
+    seen = {}
+    patch_pipeline(monkeypatch, config.Config(), seen)
+    with pytest.raises(SystemExit):  # [] would silently mean "any language"
+        ev.main(
+            [str(tmp_path), "--languages", value, "--no-diarize", "--json", str(tmp_path / "r")]
+        )
+    assert "cfg" not in seen and "--languages" in capsys.readouterr().err
 
 
 def test_maxrss_units_and_peak_memory():

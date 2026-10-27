@@ -556,7 +556,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--hypotheses", type=Path, help="score <clip-id>.json/.txt from another tool")
     p.add_argument("--json", type=Path, default=Path("eval-results.json"))
     args = p.parse_args(argv)
-    if args.hypotheses and (args.model or args.live or args.languages or args.backend != "auto"):
+    if args.hypotheses and (
+        args.model or args.live or args.languages is not None or args.backend != "auto"
+    ):
         p.error(
             "--hypotheses scores existing transcripts: no --model, --backend, --languages or --live"
         )
@@ -575,7 +577,7 @@ def main(argv: list[str] | None = None) -> int:
         }
         return write_report(args.json, report, results, t_start)
 
-    from recandcc.config import load_config, normalize_languages
+    from recandcc.config import WHISPER_LANGUAGES, language_code, load_config, normalize_languages
     from recandcc.transcribe import Transcriber
     from recandcc.transcribe.diarize import Diarizer
     from recandcc.transcribe.gpu import gpu_available
@@ -585,8 +587,12 @@ def main(argv: list[str] | None = None) -> int:
     cfg.keep_audio = True  # only a temporary copy; the clip itself is never touched
     if args.model:
         cfg.model = args.model
-    if args.languages:
-        cfg.languages = normalize_languages([c for c in args.languages.split(",") if c.strip()])
+    if args.languages is not None:  # [] would silently mean "any language"
+        codes = [c for c in args.languages.split(",") if c.strip()]
+        bad = [c.strip() for c in codes if language_code(c) not in WHISPER_LANGUAGES]
+        if not codes or bad:
+            p.error(f"--languages: not Whisper language codes: {', '.join(bad) or 'none given'}")
+        cfg.languages = normalize_languages(codes)
     if args.backend == "mlx":
         if not gpu_available():
             p.error("--backend mlx needs Apple silicon with mlx-whisper installed")
