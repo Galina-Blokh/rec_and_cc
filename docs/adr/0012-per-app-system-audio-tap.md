@@ -1,4 +1,4 @@
-# 0011. Optional per-app system-audio tap that follows the trigger app
+# 0012. Optional per-app system-audio tap that follows the trigger app
 
 - Status: Accepted
 - Date: 2026-10-27

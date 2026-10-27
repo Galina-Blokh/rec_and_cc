@@ -30,7 +30,8 @@ acceptance criteria.
       (the orange mic indicator stays on).
 - [ ] **Architecture review** ([#3](https://github.com/Galina-Blokh/rec_and_cc/issues/3)): languages and packaging: self-contained,
       Developer-ID-signed app now; benchmark whisper.cpp / WhisperKit vs MLX; possible Rust +
-      Tauri or native-UI rewrite.
+      Tauri or native-UI rewrite. Review and staged plan: [ADR 0011](adr/0011-stack-and-packaging-after-v0-1.md)
+      (keep the Python core, package it properly, switch engines only past a benchmark gate).
 - [ ] **Summaries, action items, search, export** ([#4](https://github.com/Galina-Blokh/rec_and_cc/issues/4)): local LLM (e.g. Qwen via
       MLX / llama.cpp), SQLite FTS search, DOCX/PDF export.
 - [ ] **Windows for real** ([#5](https://github.com/Galina-Blokh/rec_and_cc/issues/5)): hardware test pass, per-app capture, installer,
@@ -40,4 +41,4 @@ acceptance criteria.
 - [ ] **Sensitivity slider** ([#7](https://github.com/Galina-Blokh/rec_and_cc/issues/7)): balance outside (room/mic) vs inside (system
       audio) and trigger recording on whichever side passes its threshold; live level meters.
 - [x] Per-app (instead of global) system-audio tap on macOS, so only the call app is recorded
-      (opt-in: `system_audio_scope = "app"`, [ADR 0011](adr/0011-per-app-system-audio-tap.md)).
+      (opt-in: `system_audio_scope = "app"`, [ADR 0012](adr/0012-per-app-system-audio-tap.md)).

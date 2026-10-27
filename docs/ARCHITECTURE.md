@@ -101,7 +101,7 @@ second it re-matches the pattern and updates the running tap's description, so b
 Electron helpers that start later are included; `pid` / `match` lines on its stdin add a
 second app when a call upgrades a media session. No process object yet, or a failing
 per-app tap, falls back to the global tap
-([ADR 0011](adr/0011-per-app-system-audio-tap.md)).
+([ADR 0012](adr/0012-per-app-system-audio-tap.md)).
 
 ### Permissions belong to RecAndCC, not Terminal/python
 macOS (TCC) attributes permission requests to the *responsible process*. `RecAndCC.app`'s

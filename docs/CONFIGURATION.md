@@ -32,7 +32,7 @@ Changes to `[detection]` are picked up while the app runs. Restart the app after
 | `ask_timeout_s` | `30.0` | The "Keep it?" pop-up closes after this |
 | `ask_timeout_action` | `"record"` | What an unanswered pop-up means: `record` keeps the recording (nothing is lost if you're away), `ignore` discards it. In Ask mode recording always starts right away; the pop-up only decides whether to keep it |
 | `record_mic` | `"calls"` | `always` · `calls` (calls and manual recordings only) · `never` |
-| `system_audio_scope` | `"all"` | What the `Others` track records. `all`: everything the Mac plays. `app` (macOS): only the app that triggered the session, including helper processes it starts later; a call joining a video session adds the call app. Manual sessions, and apps with no audio process yet, record `all`. FaceTime plays calls through a system daemon, so keep `all` for it ([ADR 0011](adr/0011-per-app-system-audio-tap.md)) |
+| `system_audio_scope` | `"all"` | What the `Others` track records. `all`: everything the Mac plays. `app` (macOS): only the app that triggered the session, including helper processes it starts later; a call joining a video session adds the call app. Manual sessions, and apps with no audio process yet, record `all`. FaceTime plays calls through a system daemon, so keep `all` for it ([ADR 0012](adr/0012-per-app-system-audio-tap.md)) |
 | `call_apps` | Zoom, Teams, FaceTime, Slack, Discord, Telegram, WhatsApp, Skype, Webex | Patterns for call apps |
 | `media_apps` | browsers, QuickTime, VLC, Podcasts, TV | Patterns for media apps |
 | `ignore_apps` | Spotify, Music, system sounds, Siri, Voice Memos | Never trigger |
