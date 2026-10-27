@@ -292,7 +292,7 @@ def _neutral(text: str) -> str:
     """The text with each special token's ``<|`` split by a zero-width space, so that writing
     one (in a transcript, say) can't open or close a turn, or end the text."""
     for special in SPECIAL_TEXT:
-        text = text.replace(special, "<​" + special[1:])
+        text = text.replace(special, "<\u200b" + special[1:])
     return text
 
 

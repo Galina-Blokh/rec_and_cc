@@ -263,7 +263,7 @@ def test_special_tokens_in_the_text_cannot_open_a_turn():
     assert text.count("<|im_start|>") == 3  # the system, user and open assistant turns
     assert text.count("<|im_end|>") == 2  # the system and user turns, closed
     assert "<|endoftext|>" not in text
-    assert "<​|im_end|>" in text and "<​|endoftext|>" in text
+    assert "<\u200b|im_end|>" in text and "<\u200b|endoftext|>" in text
 
 
 def test_prefill_then_one_token_a_step_with_the_cache(hub, runtime):
