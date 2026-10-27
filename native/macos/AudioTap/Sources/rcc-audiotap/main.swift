@@ -13,7 +13,7 @@
 //                                               open the matching System Settings privacy pane
 //   rcc-audiotap hotkey "<cmd>+<shift>+r"       register a global shortcut, JSON line per press
 //   rcc-audiotap ax-status                      JSON: is Accessibility trusted (never prompts)
-//   rcc-audiotap participants [--pid PID]... [--match TEXT]...
+//   rcc-audiotap participants --parent-pid PID [--pid PID]... [--match TEXT]...
 //                                               JSON: names in the app's visible participant list
 
 import Foundation
@@ -27,7 +27,7 @@ usage:
   rcc-audiotap request microphone|system_audio [--timeout SECONDS]
   rcc-audiotap open-settings microphone|system_audio
   rcc-audiotap ax-status
-  rcc-audiotap participants [--pid PID ...] [--match TEXT ...]
+  rcc-audiotap participants --parent-pid PID [--pid PID ...] [--match TEXT ...]
   rcc-audiotap hotkey COMBO       (e.g. "<cmd>+<shift>+r")
 
 """
@@ -119,15 +119,17 @@ do {
     case "participants":
         var pids: [pid_t] = []
         var matches: [String] = []
+        var parentPID: pid_t?
         while let flag = args.first {
             args.removeFirst()
             switch flag {
+            case "--parent-pid": parentPID = value(after: flag) { pid_t($0) }
             case "--pid": pids.append(value(after: flag) { pid_t($0) })
             case "--match": matches.append(value(after: flag) { $0.isEmpty ? nil : $0 })
             default: fail("unknown option \(flag)")
             }
         }
-        runParticipants(pids: pids, matches: matches)
+        runParticipants(pids: pids, matches: matches, parentPID: parentPID)
 
     case "hotkey":
         guard args.count == 1 else { fail("hotkey takes exactly one combo, e.g. \"<cmd>+<shift>+r\"") }

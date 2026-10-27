@@ -13,8 +13,10 @@ menu action, see ``open_accessibility_settings``. Windows: everything here is a 
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -61,35 +63,50 @@ def clean_names(raw: list[str]) -> list[str]:
     return out
 
 
-def _run_helper(args: list[str]) -> dict:
+def _run_helper(
+    args: list[str], on_start: Callable[[subprocess.Popen], None] | None = None
+) -> dict:
+    """Run the helper and parse its last JSON line. ``on_start(proc)`` lets the caller kill it."""
     from .native import find_helper
 
-    result = subprocess.run(  # noqa: S603 - fixed argv: our own bundled helper, no shell
-        [str(find_helper()), *args],
+    # --parent-pid: `participants` refuses to run unless this process started it
+    argv = [str(find_helper()), *args, "--parent-pid", str(os.getpid())]
+    proc = subprocess.Popen(  # noqa: S603 - fixed argv: our own bundled helper, no shell
+        argv,
         stdin=subprocess.DEVNULL,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
         text=True,
-        timeout=HELPER_TIMEOUT_S,
     )
-    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    if on_start is not None:
+        on_start(proc)
+    try:
+        out, _ = proc.communicate(timeout=HELPER_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise
+    lines = [line for line in (out or "").splitlines() if line.strip()]
     if not lines:
-        raise RuntimeError(f"rcc-audiotap {args[0]} printed nothing (exit {result.returncode})")
+        raise RuntimeError(f"rcc-audiotap {args[0]} printed nothing (exit {proc.returncode})")
     return json.loads(lines[-1])
 
 
-def ax_trusted() -> bool:
+def ax_trusted(on_start: Callable[[subprocess.Popen], None] | None = None) -> bool:
     """Is Accessibility granted? Silent: the helper uses AXIsProcessTrusted, which never
     prompts. False when unknown or not on macOS."""
     if sys.platform != "darwin":
         return False
     try:
-        return bool(_run_helper(["ax-status"]).get("trusted"))
+        return bool(_run_helper(["ax-status"], on_start).get("trusted"))
     except Exception:  # noqa: BLE001 - the feature is optional
         log.debug("could not check Accessibility trust", exc_info=True)
         return False
 
 
-def read_participants(target: AppTarget) -> list[str] | None:
+def read_participants(
+    target: AppTarget, on_start: Callable[[subprocess.Popen], None] | None = None
+) -> list[str] | None:
     """Raw names in the app's visible participant list; None when Accessibility isn't granted
     (or the helper failed), [] when no participant list is visible."""
     args = ["participants"]
@@ -98,7 +115,7 @@ def read_participants(target: AppTarget) -> list[str] | None:
     for pattern in target.match:
         args += ["--match", pattern]
     try:
-        data = _run_helper(args)
+        data = _run_helper(args, on_start)
     except Exception:  # noqa: BLE001
         log.debug("could not read the participant list", exc_info=True)
         return None
@@ -125,12 +142,16 @@ class ParticipantSampler:
         self,
         target: AppTarget,
         *,
-        trusted: Callable[[], bool] = ax_trusted,
-        read: Callable[[AppTarget], list[str] | None] = read_participants,
+        trusted: Callable[[], bool] | None = None,
+        read: Callable[[AppTarget], list[str] | None] | None = None,
         interval: float = INTERVAL_S,
         first_after: float = FIRST_SAMPLE_S,
     ) -> None:
-        self._target, self._trusted, self._read = target, trusted, read
+        self._target = target
+        self._proc: subprocess.Popen | None = None  # the helper run in flight, if any
+        # by default the helper runs are tracked so that signal() can kill an in-flight one
+        self._trusted = trusted or (lambda: ax_trusted(self._track))
+        self._read = read or (lambda t: read_participants(t, self._track))
         self._interval, self._first = interval, first_after
         self._names: list[str] = []
         self._lock = threading.Lock()
@@ -140,9 +161,21 @@ class ParticipantSampler:
     def start(self) -> None:
         self._thread.start()
 
+    def _track(self, proc: subprocess.Popen) -> None:
+        with self._lock:
+            self._proc = proc
+            if self._stop.is_set():  # stopped while the helper was starting
+                proc.kill()
+
     def signal(self) -> None:
-        """Ask the thread to end (returns at once); ``stop()`` then collects the names."""
+        """Ask the thread to end and kill the helper run in flight (returns at once);
+        ``stop()`` then collects the names."""
         self._stop.set()
+        with self._lock:
+            proc = self._proc
+        if proc is not None and proc.poll() is None:
+            with contextlib.suppress(OSError):
+                proc.kill()
 
     def stop(self) -> list[str]:
         """Stop sampling and return every name seen, in order of first appearance."""
@@ -183,6 +216,13 @@ def start_sampler(cfg: Config, target: AppTarget | None, **kwargs) -> Participan
     sampler = ParticipantSampler(target, **kwargs)
     sampler.start()
     return sampler
+
+
+def forget(session_id: str) -> None:
+    """Drop a session's stored names (discarded session, or the option is off)."""
+    from .transcribe import callnames
+
+    callnames.forget(session_id)
 
 
 def store(session: SessionInfo, names: list[str]) -> None:

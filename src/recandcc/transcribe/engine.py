@@ -592,6 +592,7 @@ class Transcriber:
     def _name_from_call_app(self, session: SessionInfo) -> None:
         """Opt-in: name the one unknown speaker after the one free call-app participant."""
         if not (self.cfg.speaker_names and self.cfg.names_from_call_app):
+            callnames.forget(session.id)  # switched off since the call: don't keep the names
             return
         try:
             callnames.apply(Path(session.directory))

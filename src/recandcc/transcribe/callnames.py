@@ -70,6 +70,14 @@ def plan(labels: list[str], participants: list[str]) -> dict[str, str]:
     return {unnamed[0]: free[0]} if len(unnamed) == 1 and len(free) == 1 else {}
 
 
+def forget(session_id: str) -> None:
+    """Delete the names kept for a session. Never raises."""
+    try:
+        voices.delete_session_names(session_id)
+    except OSError:
+        log.warning("session %s: could not delete the participant names", session_id)
+
+
 def suggestions(directory: Path) -> list[str]:
     """Participant names a user could still give to unnamed speakers (for `speakers`)."""
     session = SessionInfo.load(directory)

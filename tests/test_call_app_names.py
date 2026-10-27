@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -100,16 +101,24 @@ def test_clean_names():
 def test_trust_check_never_prompts(mac, monkeypatch):
     calls = []
 
-    def run(argv, **_kw):
-        calls.append(argv)
-        return subprocess.CompletedProcess(argv, 0, stdout='{"trusted": false}\n', stderr="")
+    class FakeProc:
+        returncode = 0
 
-    monkeypatch.setattr(subprocess, "run", run)
+        def communicate(self, timeout=None):
+            return '{"trusted": false}\n', None
+
+    def popen(argv, **_kw):
+        calls.append(argv)
+        return FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
     monkeypatch.setattr("recandcc.native.find_helper", lambda *_: "/h/rcc-audiotap")
     assert participants.ax_trusted() is False
     assert participants.read_participants(TARGET) is None
     assert [c[1] for c in calls] == ["ax-status", "participants"]
     assert "--pid" in calls[1] and "us.zoom" in calls[1]
+    # the helper's participants command only runs for the process that started it
+    assert calls[1][-2:] == ["--parent-pid", str(os.getpid())]
 
 
 def swift_sources() -> dict[str, str]:
@@ -133,6 +142,8 @@ def test_helper_walk_is_limited_to_call_windows_and_has_budgets():
     code = swift_sources()["Accessibility.swift"]
     assert "browserIDs" in code and "callPageWords" in code  # browsers: call windows only
     assert "AXUIElementCreateSystemWide()" in code and "perAppSeconds" in code
+    assert "AXUIElementSetMessagingTimeout(root" in code  # app elements don't inherit it
+    assert "startedByRecAndCC" in code  # defense in depth for `participants`
 
 
 def _recorder(tmp_path, cfg):
@@ -287,6 +298,57 @@ def test_failure_logs_the_type_only(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
     t._name_from_call_app(make_session(tmp_path))
     assert "ValueError" in caplog.text and NAME not in caplog.text
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses a shell script as the helper")
+def test_stop_kills_an_in_flight_helper(tmp_path, monkeypatch):
+    slow = tmp_path / "rcc-audiotap"
+    slow.write_text("#!/bin/sh\nexec sleep 30\n")
+    slow.chmod(0o755)
+    monkeypatch.setattr("recandcc.native.find_helper", lambda *_: slow)
+    s = participants.ParticipantSampler(TARGET, trusted=lambda: True, interval=60, first_after=0)
+    s.start()
+    time.sleep(0.5)  # the helper is running
+    assert s._proc is not None and s._proc.poll() is None
+    started = time.monotonic()
+    assert s.stop() == []
+    assert time.monotonic() - started < 2.5
+    assert s._proc.poll() is not None  # killed, so the next session's sampler can't overlap
+    assert not s._thread.is_alive()
+
+
+def test_discarded_sessions_leave_no_names(tmp_path):
+    from test_engine import CHROME, IDLE, DiscardingRecorder, Harness
+
+    from recandcc.models import Mode
+
+    class NamingRecorder(DiscardingRecorder):
+        def stop(self):
+            s = super().stop()
+            voices.write_session_names(s, ["Anna"])  # what Recorder.stop() stores
+            return s
+
+    h = Harness(Mode.ASK)
+    h.rec = h.eng.recorder = NamingRecorder(tmp_path / "days")
+    h.mon.procs = [CHROME]
+    h.run(4)
+    h.eng.respond("ignore")
+    h.eng.tick()
+    assert h.status == IDLE and h.rec.stops == 1
+    assert voices.read_session_names("s") == []
+
+
+def test_names_are_deleted_not_applied_when_the_option_was_switched_off(tmp_path):
+    from recandcc.config import TranscriptionConfig
+    from recandcc.transcribe.engine import Transcriber
+
+    s = _session_with_voice(tmp_path, ["Anna"])
+    t = Transcriber(
+        TranscriptionConfig(model="fake", speaker_names=True, names_from_call_app=False)
+    )
+    t._name_from_call_app(s)
+    assert voices.read_session_names(s.id) == []
+    assert "Speaker 1" in (tmp_path / "transcript.json").read_text()  # not applied
 
 
 # -- menu toggle --------------------------------------------------------------------------------

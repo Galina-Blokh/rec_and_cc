@@ -247,9 +247,21 @@ when it is certain (`callnames.plan`: name count equals non-`Me` speaker count, 
 speakers match names by shared word, one `Speaker N` and one name left, no disagreeing
 self-introduction). It rewrites the transcript only and never creates a voice profile from a
 call-app name. The menu toggle checks Accessibility trust on a worker thread and writes only
-its own key to `config.toml`. `rcc-audiotap` is out of the bundle, and macOS attributes
-Accessibility to the responsible (spawning) app, so another process running the helper does not
-borrow RecAndCC's grant.
+its own key to `config.toml`. Helper runs are killed when the session stops.
+
+Whose Accessibility grant is used? Checked on a Mac with `rcc-audiotap ax-status` started from
+Terminal while watching `log show --predicate 'subsystem == "com.apple.TCC"'`: tccd logged
+`Handling access request to kTCCServiceAccessibility, from Sub:{com.apple.Terminal}
+Resp:{identifier=com.apple.Terminal, ...}` for the helper process
+(`identifier=com.gblokh.recandcc.audiotap`). So the decision is made for the *responsible
+process* that spawned the helper (here Terminal, which had no grant, so the answer was
+"untrusted"), not for the helper binary. When RecAndCC.app spawns the helper the user therefore
+grants **RecAndCC** in System Settings > Accessibility, and a stranger process that runs
+`rcc-audiotap` from its own parent is judged by that parent's grant, not RecAndCC's. As defense
+in depth `participants` also refuses unless `--parent-pid` equals its real parent (a Python or
+RecAndCC process); this is not a security boundary, since any same-user process can run
+RecAndCC's Python. The same log shows `ax-status` only does a preflight (`preflight=true`),
+so it never prompts.
 
 Accessibility is only ever *checked* (`AXIsProcessTrusted`); the prompting API is never
 called (a test greps the Swift sources for it). The sole entry point towards the permission is

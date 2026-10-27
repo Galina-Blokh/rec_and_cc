@@ -107,9 +107,26 @@ private final class Walker {
     }
 }
 
+/// Defense in depth, not a security boundary: `participants` runs only when started by the
+/// RecAndCC app's Python, which passes its own pid. (macOS attributes Accessibility to the
+/// responsible app that spawned the helper, so another process's run is not covered by
+/// RecAndCC's grant anyway; this just refuses the obvious misuse.)
+private func startedByRecAndCC(_ expected: pid_t?) -> Bool {
+    guard let expected, getppid() == expected else { return false }
+    var buffer = [CChar](repeating: 0, count: 4096)
+    guard proc_pidpath(expected, &buffer, UInt32(buffer.count)) > 0 else { return false }
+    let path = String(cString: buffer).lowercased()
+    return path.contains("python") || path.contains("recandcc")
+}
+
 /// Prints {"trusted": bool, "names": [...]} for the visible participant list of the running
 /// apps whose pid is in `pids` or whose bundle id / name contains one of `matches`.
-func runParticipants(pids: [pid_t], matches: [String]) -> Never {
+func runParticipants(pids: [pid_t], matches: [String], parentPID: pid_t?) -> Never {
+    guard startedByRecAndCC(parentPID) else {
+        logError("participants runs only when started by RecAndCC")
+        printJSON(["trusted": false, "names": [String](), "refused": true])
+        exit(3)
+    }
     guard AXIsProcessTrusted() else {
         printJSON(["trusted": false, "names": [String]()])
         exit(0)
@@ -130,12 +147,15 @@ func runParticipants(pids: [pid_t], matches: [String]) -> Never {
     for app in apps {
         let walker = Walker()
         let root = AXUIElementCreateApplication(app.processIdentifier)
+        // The system-wide timeout is not inherited by application elements: set it on each.
+        AXUIElementSetMessagingTimeout(root, 0.5)
         let id = (app.bundleIdentifier ?? "").lowercased()
         if browserIDs.contains(where: { id.contains($0) }) {
             let windows = (attribute(root, kAXWindowsAttribute) as? [AXUIElement]) ?? []
             for window in windows {
                 let title = text(window, kAXTitleAttribute).lowercased()
                 if callPageWords.contains(where: { title.contains($0) }) {
+                    AXUIElementSetMessagingTimeout(window, 0.5)
                     walker.find(window, depth: 0)
                 }
             }
