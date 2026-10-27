@@ -449,6 +449,7 @@ class Controller:
             return
 
         def run() -> None:
+            msg = "Export failed (see the log)"
             try:
                 from ..transcribe.export import ExportError, export_session
 
@@ -469,10 +470,9 @@ class Controller:
             except Exception as e:  # noqa: BLE001
                 # the type only: a library error can quote the transcript
                 log.error("transcript export failed: %s", type(e).__name__)
-                msg = "Export failed (see the log)"
-            finally:
+            finally:  # the notice is queued before the next export may start
+                self.events.put(("notice", "Export", msg))
                 self._export_lock.release()
-            self.events.put(("notice", "Export", msg))
 
         try:
             threading.Thread(target=run, daemon=True, name="export").start()

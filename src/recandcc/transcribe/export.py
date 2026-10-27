@@ -105,7 +105,14 @@ def _write(path: Path, render) -> Path:
             with contextlib.suppress(OSError):  # a stale file must not block O_EXCL
                 tmp.unlink(missing_ok=True)
             os.close(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
-            render(tmp)  # the library truncates and rewrites the existing file: mode kept
+            for attempt in range(_REPLACE_TRIES):  # Windows: a scanner may hold the new file
+                try:
+                    render(tmp)  # the library rewrites the existing file: mode kept
+                    break
+                except PermissionError:
+                    if attempt + 1 == _REPLACE_TRIES:
+                        raise
+                    time.sleep(_REPLACE_WAIT_S)
         except ExportError:
             raise
         except Exception as e:

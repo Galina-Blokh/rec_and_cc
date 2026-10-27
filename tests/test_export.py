@@ -439,3 +439,5 @@ def test_a_long_meeting_exports(tmp_path):
         json.dumps({"segments": segs}, ensure_ascii=False), "utf-8"
     )
     assert len(Document(str(export.export_docx(tmp_path))).paragraphs) > 4000
+    if have_font():
+        assert export.export_pdf(tmp_path).read_bytes().startswith(b"%PDF")
