@@ -56,6 +56,9 @@ IDLE, PROMPTING, RECORDING = "idle", "prompting", "recording"
 # "@" keeps the pseudo-app out of the substring matching of real apps ("Zoom Rooms").
 ROOM_KEY, ROOM_NAME = "@room", "Room"
 OWN_AUDIO = ("recandcc", "rcc-audiotap")  # our own mic use (the room monitor) never blocks it
+# System chimes and alerts playing (not capturing): no one excluded them, and one must not cut
+# a room session mid-conversation.
+SYSTEM_SOUNDS = ("com.apple.systemsound", "com.apple.notificationcenter", "coreaudiod")
 ROOM_RETRY_S = 60.0  # wait this long before reopening a room-listening mic that failed
 
 
@@ -403,6 +406,7 @@ class Engine:
             if (p.input_active or p.output_active)
             and p.pid not in self.own_pids
             and not match_pattern(OWN_AUDIO, p)
+            and (p.input_active or not match_pattern(SYSTEM_SOUNDS, p))
         ]
         was_busy, self._room_prev_busy = self._room_prev_busy, bool(busy)
         self._room_mic_busy = any(p.input_active for p in busy)

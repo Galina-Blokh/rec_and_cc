@@ -1123,6 +1123,22 @@ def test_room_session_stops_when_an_excluded_app_starts_or_listening_is_off():
     assert h.rec.stops == 0 and h.rec.upgrades == ["zoom.us"]
 
 
+def test_a_notification_chime_neither_stops_nor_blocks_room_listening():
+    chime = AudioProcess(30, "com.apple.notificationcenter", "NotificationCenter", False, True)
+    h = _room_harness()
+    _start_room_session(h)
+    h.mon.procs = [chime]
+    h.run(3)
+    assert h.status == RECORDING and h.rec.stops == 0
+    h.eng.stop()
+    h.mon.procs, h.room.speech = [], False
+    h.run(25)
+    h.mon.procs = [chime]  # idle: a chime doesn't reset what the room said
+    h.room.speech = True
+    h.eng.tick()
+    assert len(h.rec.starts) == 2 and h.room.resets == 0
+
+
 def test_discarding_a_room_prompt_discards_the_session_after_a_call_upgrade(tmp_path):
     h = _room_harness(Mode.ASK, app_modes={"us.zoom": Mode.AUTO})
     h.run(1)

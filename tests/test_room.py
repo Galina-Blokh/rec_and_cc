@@ -93,6 +93,8 @@ def test_room_listening_is_off_by_default_and_needs_the_mic(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text('[detection]\nmode = "auto"\n', encoding="utf-8")
     assert load_config(path).detection.room_listening is False
+    path.write_text("[detection]\nroom_speech_s = 6.0\nroom_window_s = 5.0\n", encoding="utf-8")
+    assert load_config(path).detection.room_speech_s == 5.0  # could never trigger: clamped
     assert should_record_mic("calls", TriggerKind.ROOM)
     assert not should_record_mic("never", TriggerKind.ROOM)
     mon, sources = make()
@@ -324,10 +326,21 @@ def test_room_session_keeps_the_preroll_and_pads_the_other_track(tmp_path):
         mic.push(ramp[: 4 * SR])
         before = datetime.now().astimezone()
         session = rec.start(TriggerKind.ROOM, "Room", mic_source=mon.session_source)
-        assert 3.9 < (before - session.started_at).total_seconds() < 4.5  # incl. pre-roll
+        assert 3.99 < (before - session.started_at).total_seconds() < 4.05  # the pre-roll
         heard: list[tuple] = []  # live transcription attaches after start(): whole pre-roll
         rec.add_listener(lambda track, start, block: heard.append((track, start, block.size)))
-        mic.push(ramp[4 * SR :])
+        me_writer = next(w for w in rec._writers if w.track == Track.ME)
+
+        def drained():  # the writer caught up: what's left in its queue is real backlog
+            end = time.monotonic() + 10
+            while me_writer.frames_written < me_writer.frames_received:
+                assert time.monotonic() < end
+                time.sleep(0.005)
+
+        drained()  # the replayed pre-roll arrived all at once; the writer works it off
+        for i in range(4 * SR, 6 * SR, 1600):  # live audio at its own pace, block by block
+            mic.push(ramp[i : i + 1600])
+            drained()
         system.push(np.full(SR, 0.25, np.float32))
         out = rec.stop()
     finally:
@@ -340,7 +353,11 @@ def test_room_session_keeps_the_preroll_and_pads_the_other_track(tmp_path):
     np.testing.assert_allclose(me, ramp, atol=1e-4)
     # ... and the system track starts with that much silence, so both stay aligned.
     assert len(others) == 5 * SR and not others[: 4 * SR].any() and others[4 * SR :].all()
-    assert SessionInfo.load(session.directory).trigger_kind == TriggerKind.ROOM
+    loaded = SessionInfo.load(session.directory)
+    assert loaded.trigger_kind == TriggerKind.ROOM and loaded.started_as_room
+    # The replayed 4 s pre-roll arrives all at once: it is not disk backlog. Live blocks were
+    # pushed one at a time after the writer caught up, so at most one 0.1 s block waits.
+    assert out.metrics["recording"]["writer_backlog_max_s"]["me"] <= 0.2
     started = SessionInfo.load(session.directory).started_at  # when the audio begins
     assert abs((out.started_at - started).total_seconds()) < 1e-3
     me_heard = [(start, n) for track, start, n in heard if track == Track.ME]
@@ -357,6 +374,9 @@ def test_room_sessions_diarize_the_mic_track():
 
     assert diarized_track(session(TriggerKind.ROOM)) == Track.ME
     assert diarized_track(session(TriggerKind.CALL)) == Track.OTHERS
+    upgraded = session(TriggerKind.CALL)  # a room session a call upgraded: the room is on Me
+    upgraded.started_as_room = True
+    assert diarized_track(upgraded) == Track.ME
 
 
 def test_room_transcript_numbers_and_names_the_speakers_on_the_mic(tmp_path):
@@ -423,6 +443,7 @@ def test_menu_toggle_saves_warns_and_engine_owns_a_closed_room_monitor(tmp_path,
     assert cfg.detection.room_listening and saved.wait(2)
     assert load_config(path).detection.room_listening  # saved to the temporary config
     assert ctrl.events.get_nowait() == ("notice", "Room listening on", ROOM_LISTENING_NOTICE)
+    assert "screen is locked" in ROOM_LISTENING_NOTICE and "consent" in ROOM_LISTENING_NOTICE
     assert ctrl.events.get_nowait()[1] == "Room listening can't hear anything"
     saved.clear()
     ctrl.set_room_listening(False)
@@ -431,3 +452,13 @@ def test_menu_toggle_saves_warns_and_engine_owns_a_closed_room_monitor(tmp_path,
     assert ctrl.events.empty()  # no notice when off
     text = keep_prompt_text("Room", TriggerKind.ROOM, "record")
     assert "a conversation near the laptop" in text
+    # Turned on by editing config.toml: the same notice, once.
+    on = Config(output_dir=tmp_path)
+    on.detection.room_listening = True
+    monkeypatch.setattr("recandcc.ui.common.load_config", lambda *a, **k: on)
+    path.write_text("# edited by hand\n")  # changed on disk: the reload reads it
+    ctrl._maybe_reload_config()
+    assert cfg.detection.room_listening
+    assert ctrl.events.get_nowait() == ("notice", "Room listening on", ROOM_LISTENING_NOTICE)
+    ctrl._maybe_reload_config()  # unchanged file: no second notice
+    assert ctrl.events.empty()
