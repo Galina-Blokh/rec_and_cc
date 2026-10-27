@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import difflib
 import re
 from collections.abc import Iterable, Sequence
@@ -115,19 +116,50 @@ MIN_RUN_WORDS = 3  # ... and with fewer words than this is flicker, absorbed by 
 
 
 def _word_speakers(words: Sequence[tuple[float, float, str]], turns: Sequence) -> list[int]:
-    """Diarized speaker of each word: most overlap, else the turn nearest its middle."""
+    """Diarized speaker of each word: most overlap, else the turn nearest its middle.
+
+    Turns are sorted once and bisected, so a word only looks at the turns around it (ties go to
+    the turn that comes first in `turns`, as with a plain scan)."""
+    if not turns:
+        return []
+    order = sorted(range(len(turns)), key=lambda i: turns[i].start)
+    ordered = [turns[i] for i in order]
+    starts = [t.start for t in ordered]
+    reach: list[float] = []  # reach[k]: latest end among ordered[: k + 1]
+    for t in ordered:
+        reach.append(max(reach[-1], t.end) if reach else t.end)
+    first_by_end: dict[float, int] = {}  # earliest index in `turns` per end / start value
+    first_by_start: dict[float, int] = {}
+    for i, t in enumerate(turns):
+        first_by_end.setdefault(t.end, i)
+        first_by_start.setdefault(t.start, i)
     out = []
     for ws, we, _ in words:
-        overlap: dict[int, float] = {}
-        for t in turns:
-            o = min(we, t.end) - max(ws, t.start)
-            if o > 0:
+        hi = bisect.bisect_left(starts, we)  # turns from `hi` on start at/after the word ends
+        hits: list[int] = []
+        for k in range(hi - 1, -1, -1):
+            if reach[k] <= ws:  # nothing earlier reaches the word
+                break
+            if min(we, ordered[k].end) - max(ws, ordered[k].start) > 0:
+                hits.append(order[k])
+        if hits:
+            overlap: dict[int, float] = {}
+            for i in sorted(hits):  # input order, so ties resolve like a plain scan
+                t = turns[i]
+                o = min(we, t.end) - max(ws, t.start)
                 overlap[t.speaker] = overlap.get(t.speaker, 0.0) + o
-        if overlap:
             out.append(max(overlap, key=lambda k: overlap[k]))
-        else:
-            mid = (ws + we) / 2
-            out.append(min(turns, key=lambda t: max(t.start - mid, mid - t.end, 0.0)).speaker)
+            continue
+        mid = (ws + we) / 2
+        cands = []  # nothing overlaps: the nearest turn ends before the word or starts after it
+        if hi > 0 and reach[hi - 1] > ws:  # zero-length word inside a turn: rare, scan all
+            cands = list(range(len(turns)))
+        elif hi > 0:
+            cands.append(first_by_end[reach[hi - 1]])
+        if hi < len(starts):
+            cands.append(first_by_start[starts[hi]])
+        best = min(cands, key=lambda i: (max(turns[i].start - mid, mid - turns[i].end, 0.0), i))
+        out.append(turns[best].speaker)
     return out
 
 
@@ -145,12 +177,26 @@ def _runs(
         def length(r):
             return words[r[2] - 1][1] - words[r[1]][0]
 
-        weak = [r for r in runs if length(r) < MIN_RUN_S and r[2] - r[1] < MIN_RUN_WORDS]
-        if not weak:
+        def is_weak(r):
+            return length(r) < MIN_RUN_S and r[2] - r[1] < MIN_RUN_WORDS
+
+        # a weak run is absorbed only into a strong neighbour, never into another weak run
+        # ("Yes." / "No." from two speakers stay apart); each pass removes a run, so it ends
+        absorbable = [
+            r
+            for r in runs
+            if length(r) < MIN_RUN_S
+            and r[2] - r[1] < MIN_RUN_WORDS
+            and any(
+                0 <= n < len(runs) and not is_weak(runs[n])
+                for n in (runs.index(r) - 1, runs.index(r) + 1)
+            )
+        ]
+        if not absorbable:
             break
-        r = min(weak, key=length)
+        r = min(absorbable, key=length)
         i = runs.index(r)
-        nbrs = [j for j in (i - 1, i + 1) if 0 <= j < len(runs)]
+        nbrs = [j for j in (i - 1, i + 1) if 0 <= j < len(runs) and not is_weak(runs[j])]
         j = max(nbrs, key=lambda n: length(runs[n]))
         runs[j][1], runs[j][2] = min(runs[j][1], r[1]), max(runs[j][2], r[2])
         del runs[i]

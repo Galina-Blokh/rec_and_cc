@@ -506,6 +506,7 @@ class Transcriber:
         for start, end, raw, ws in pieces:
             text = raw.strip()
             if text:
+                kept = [w for w in ws if offset + w.start < end_cap]
                 out.append(
                     Segment(
                         start=round(offset + start, 3),
@@ -519,9 +520,10 @@ class Transcriber:
                                 round(min(offset + w.end, end_cap), 3),
                                 w.word,
                             )
-                            for w in ws
-                            if offset + w.start < end_cap
-                        ],
+                            for w in kept
+                        ]
+                        if len(kept) == len(ws)
+                        else [],  # words were cut off: the text is whole, so never split it
                     )
                 )
         return out

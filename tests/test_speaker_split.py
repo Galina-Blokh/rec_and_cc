@@ -61,6 +61,21 @@ def test_a_b_a_with_long_b_splits_into_three():
     assert [(o.start, o.end) for o in out] == [(0.0, 2.0), (2.0, 4.0), (4.0, 6.0)]
 
 
+def test_adjacent_weak_runs_are_absorbed_by_strong_neighbours_not_each_other():
+    # "Yes." (B) / "No." (C) between a strong A (2 s) and a longer strong D (3 s)
+    ws = words(4) + [(2.0, 2.4, " Yes."), (2.4, 2.8, " No.")] + words(6, t0=2.8)
+    turns = [Turn(0, 2, 0), Turn(2, 2.4, 1), Turn(2.4, 2.8, 2), Turn(2.8, 5.8, 3)]
+    out = split_on_speaker_change([seg(ws)], turns)
+    # Yes goes to A (its only strong neighbour), then No goes to the longer D; they never fuse
+    assert [o.text for o in out] == ["w0 w1 w2 w3 Yes.", "No. w0 w1 w2 w3 w4 w5"]
+
+
+def test_weak_runs_without_a_strong_neighbour_are_left_alone_and_it_terminates():
+    ws = [(i * 0.2, (i + 1) * 0.2, f" w{i}") for i in range(4)]  # four one-word runs
+    out = split_on_speaker_change([seg(ws)], [Turn(i * 0.2, (i + 1) * 0.2, i) for i in range(4)])
+    assert [o.text for o in out] == ["w0", "w1", "w2", "w3"]
+
+
 def test_flicker_tie_is_absorbed_by_one_neighbour():
     s = seg(words(8))  # equal-length neighbours (1.5 s each) around a 1-word flicker
     out = split_on_speaker_change([s], [Turn(0, 2, 0), Turn(2, 2.5, 1), Turn(2.5, 4, 2)])
@@ -205,6 +220,16 @@ def test_word_times_are_clamped_to_the_chunk_end():
         np.zeros(2 * SAMPLE_RATE, np.float32), 10.0, "Others", "en", max_end=11.0, words=True
     )
     assert out[0].end == 11.0
+    # a word was cut off, so the words no longer cover the text: unsplittable, nothing is lost
+    assert out[0].text == "a b c" and out[0].words == []
+    assert split_on_speaker_change(out, [Turn(0, 10.5, 0), Turn(10.5, 12, 1)]) == out
+
+
+def test_words_are_kept_when_nothing_is_cut():
+    t = _transcriber(_Model())
+    out = t.transcribe_audio(
+        np.zeros(SAMPLE_RATE, np.float32), 10.0, "Others", "en", max_end=11.0, words=True
+    )
     assert out[0].words == [(10.0, 10.5, " a"), (10.5, 11.0, " b")]
 
 
@@ -322,3 +347,61 @@ def test_each_diarized_track_is_split_with_its_own_turns(tmp_path):
     assert len(out) == 4
     labels = [s.speaker for s in out]
     assert len(set(labels)) == 4  # two per track, numbering continues across tracks
+
+
+def _naive(words_, turns):
+    out = []
+    for ws, we, _ in words_:
+        overlap = {}
+        for t in turns:
+            o = min(we, t.end) - max(ws, t.start)
+            if o > 0:
+                overlap[t.speaker] = overlap.get(t.speaker, 0.0) + o
+        if overlap:
+            out.append(max(overlap, key=lambda k: overlap[k]))
+        else:
+            mid = (ws + we) / 2
+            out.append(min(turns, key=lambda t: max(t.start - mid, mid - t.end, 0.0)).speaker)
+    return out
+
+
+def _random_case(rng, n_turns, n_words):
+    turns = []
+    t = 0.0
+    for _ in range(n_turns):
+        t += rng.choice([0.0, 0.0, 0.3, 1.5])  # gaps
+        d = rng.choice([0.0, 0.4, 2.0, 6.0])
+        turns.append(Turn(round(t, 2), round(t + d, 2), rng.randrange(4)))
+        t += rng.choice([d, d / 2, 0.0])  # sometimes overlapping
+    rng.shuffle(turns)
+    ws, x = [], -1.0
+    for _ in range(n_words):
+        x += rng.choice([0.0, 0.1, 0.5])
+        ws.append((round(x, 2), round(x + rng.choice([0.0, 0.2, 0.5]), 2), " w"))
+    return ws, turns
+
+
+def test_word_speakers_match_the_naive_scan_on_random_input():
+    import random
+
+    from recandcc.transcribe.merge import _word_speakers
+
+    rng = random.Random(1234)  # noqa: S311
+    for _ in range(200):
+        ws, turns = _random_case(rng, rng.randrange(1, 15), rng.randrange(1, 40))
+        assert _word_speakers(ws, turns) == _naive(ws, turns)
+
+
+def test_word_speakers_scale_to_an_hour_long_call():
+    import random
+    import time
+
+    from recandcc.transcribe.merge import _word_speakers
+
+    rng = random.Random(7)  # noqa: S311
+    turns = [Turn(i * 3.0, i * 3.0 + 2.8, rng.randrange(3)) for i in range(1200)]  # 1 h
+    ws = [(i * 0.36, i * 0.36 + 0.3, " w") for i in range(10_000)]
+    t0 = time.perf_counter()
+    got = _word_speakers(ws, turns)
+    assert time.perf_counter() - t0 < 1.0
+    assert len(got) == len(ws)
