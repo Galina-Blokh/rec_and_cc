@@ -23,6 +23,9 @@ class Monitor:
     def snapshot(self):
         return []
 
+    def release_thread(self):
+        pass
+
     def close(self):
         pass
 

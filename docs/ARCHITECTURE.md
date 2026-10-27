@@ -65,7 +65,7 @@ The app is built around one rule: **real-time audio threads never block**. Every
 | capture reader (per source) | Reads the pipe / PortAudio callback → `on_frames` (+ frame listeners, which only enqueue) | `queue.Queue` |
 | WAV writer (per track) | Writes PCM_16 WAV, so disk I/O never stalls capture | owns its file |
 | monitor reader | Parses JSON, keeps the latest snapshot (lock-protected) | `snapshot()` |
-| engine | `tick()` loop: the only thread that starts/stops the recorder | command queue + one lock |
+| engine | `tick()` loop: the only thread that starts/stops the recorder; on exit it calls the activity monitor's `release_thread()`, so per-thread resources (Windows COM) are released on the thread that created them; `shutdown()` then calls `close()` | command queue + one lock |
 | transcription dispatcher | Processes sessions in order, one at a time: a full transcription, or the "finalize" job of a live session (waits for `LiveTranscriber.finish()`) | `TranscriptionQueue` |
 | live worker (per recording session) | Buffers the tap's frames, VAD every 0.3 s, submits ended phrases, emits results, rewrites `transcript.md`, writes the final transcript | input `SimpleQueue`; callbacks |
 | transcription workers (N) | Whisper chunks / live phrases from **both tracks concurrently** (shared by batch and live) | `ThreadPoolExecutor` |
