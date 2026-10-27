@@ -99,8 +99,9 @@ while I decide.*
   as `Me`, live or in the final transcript.
 - **Given** `system_audio_scope = "app"` on macOS, **when** an app triggers a session,
   **then** `Others` records only that app's processes (also helpers that start later), and a
-  call joining a media session adds the call app. Manual sessions, an app without an audio
-  process, or a failing per-app tap record all system audio instead.
+  call joining a media session adds the call app. Manual sessions, FaceTime, an app without
+  an audio process, an outdated helper or a failing per-app tap record all system audio
+  instead, and session.json records which scope was used.
 
 ### US-09 English and Russian detected automatically
 - **Given** `languages = ["en", "ru"]`, **then** each speech region gets its own language,

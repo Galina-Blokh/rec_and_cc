@@ -23,12 +23,19 @@ and stop during a session. Detection already groups them under one pattern (`eng
 - Stdin lines `pid N` / `match TEXT` add targets to a running tap. Used when a call starts
   during a media session (US-07): the tap then records **both** apps, so the video's audio
   up to that point stays and the call is recorded too.
-- Falls back to the global tap, with a log line: manual sessions, no process object for
-  the target at start, the per-app tap can't be created, or the source can't be made.
-- **Default stays `"all"`.** Some apps don't play call audio from their own process: FaceTime
-  uses the `avconferenced` daemon, so a per-app tap on FaceTime would record silence. A
-  silent `Others` track in a call loses the other side, which is worse than a stray
-  notification. Switch the default once Zoom, Teams, Meet and FaceTime are verified.
+- Falls back to the global tap, with a WARNING: manual sessions, no process object for
+  the target at start, the per-app tap can't be created, the source can't be made, or
+  `bin/rcc-audiotap` predates `--pid`/`--match` (probed once per build, so a stale helper
+  doesn't leave `Others` silent). The helper prints `scope: app|all`, and session.json
+  records the effective scope (`metrics.recording.system_audio_scope`).
+- **Daemon-played call apps** (`recorder.DAEMON_PLAYED_APPS`): FaceTime's call audio comes
+  from `avconferenced`, not FaceTime.app. A FaceTime session uses the global tap; a FaceTime
+  call joining a per-app media session adds `avconferenced` to the tap. The global fallback
+  is the tested path; the `avconferenced` pattern is best effort (no FaceTime call was
+  available to verify it).
+- **Default stays `"all"`.** Zoom, Teams and Meet haven't been verified on real calls, and
+  another app may also play through a daemon. A silent `Others` track in a call loses the
+  other side, which is worse than a stray notification. Switch the default once verified.
 
 ## Alternatives considered
 - **Rebuild tap + aggregate device on every change**: a gap of tens of ms per change and more
@@ -39,11 +46,13 @@ and stop during a session. Detection already groups them under one pattern (`eng
 
 ## Consequences
 - Windows ignores the target (WASAPI loopback is global; per-app is #5).
-- Known gap: apps whose audio comes from a system daemon (FaceTime) record silence with
-  `"app"`; keep the global default for them.
+- Known gap: a call app not in `DAEMON_PLAYED_APPS` whose audio comes from a daemon would
+  record silence with `"app"`; add it to the list when one is found.
 - Measured on this Mac (macOS 26.7, `tests/test_mac_native.py`): a per-app tap on `afplay`
   playing a 1 kHz tone kept > 98 % of the energy in the tone band while `say` spoke; the
   global tap recorded both. A process added through stdin was picked up within ~1 s.
+- The IO proc copies into a preallocated, try-locked ring that a 10 ms timer drains
+  (AGENTS.md rule 1), so neither per-app re-targeting nor conversion runs on the IO thread.
 
 ## Links
 - `native/macos/AudioTap/Sources/rcc-audiotap/Capture.swift`, `src/recandcc/capture/system_mac.py`,

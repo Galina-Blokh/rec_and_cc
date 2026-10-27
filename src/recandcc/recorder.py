@@ -64,6 +64,11 @@ DIGITAL_SILENCE = 1e-5
 
 TRACK_FILES = {Track.OTHERS: "others.wav", Track.ME: "me.wav"}
 
+# Call apps whose audio a system daemon plays, not the app: a per-app tap on the app alone
+# would record silence. Sessions they start use the global tap; added to a running per-app
+# tap (a call upgrading a media session), the daemon is added too. Pattern -> daemon name.
+DAEMON_PLAYED_APPS = {"com.apple.facetime": "avconferenced"}
+
 SourceFactory = Callable[[], AudioSource]
 # Called with no argument (all system audio) or with an AppTarget (only that app's audio).
 SystemSourceFactory = Callable[..., AudioSource]
@@ -294,6 +299,10 @@ class Recorder:
         scope = str(self.cfg.detection.system_audio_scope or "all").lower()
         return target if scope == "app" else None
 
+    @staticmethod
+    def _daemons(target: AppTarget) -> list[str]:
+        return [d for p, d in DAEMON_PLAYED_APPS.items() for m in target.match if p in m.lower()]
+
     def _system_source(self, target: AppTarget | None) -> AudioSource:
         if target is None:
             return self.system_factory()
@@ -326,8 +335,13 @@ class Recorder:
                 else record_mic
             )
             per_app = self._per_app(target)
+            if per_app is not None and self._daemons(per_app):
+                log.info("system audio: %s plays calls via a daemon; recording everything", app)
+                per_app = None
             if per_app is not None:
-                log.info("system audio: only %s", ", ".join(per_app.match) or per_app.pids)
+                log.info(
+                    "system audio: asking for only %s", ", ".join(per_app.match) or per_app.pids
+                )
             plan: list[tuple[Track, SourceFactory]] = [
                 (Track.OTHERS, lambda: self._system_source(per_app))
             ]
@@ -391,6 +405,8 @@ class Recorder:
             session.trigger_kind = TriggerKind.CALL
             session.trigger_app = app or session.trigger_app
             if (per_app := self._per_app(target)) is not None:
+                if daemons := self._daemons(per_app):
+                    per_app = AppTarget((*per_app.match, *daemons), per_app.pids)
                 for w in self._writers:
                     if w.track == Track.OTHERS and not w.source.add_target(per_app):
                         log.info("Others track: could not add %s to the per-app tap", app)
@@ -439,6 +455,10 @@ class Recorder:
                 "recording",
                 {
                     "audio_s": round(longest, 1),
+                    # Effective: "all" also when a per-app tap fell back to the global one.
+                    "system_audio_scope": next(
+                        (w.source.scope for w in writers if w.track == Track.OTHERS), None
+                    ),
                     "writer_backlog_max_s": {
                         str(w.track): round(w.backlog_max / SAMPLE_RATE, 3) for w in writers
                     },

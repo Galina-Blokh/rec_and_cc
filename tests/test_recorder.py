@@ -376,6 +376,7 @@ class TargetSource(FakeSource):
     def __init__(self, target=None):
         super().__init__(sine(1))
         self.target, self.added = target, []
+        self.scope = "app" if target else "all"
 
     def add_target(self, target):
         self.added.append(target)
@@ -391,7 +392,8 @@ def _target_recorder(cfg, fail_per_app=False):
         made.append(TargetSource(*args))
         return made[-1]
 
-    return Recorder(cfg, mic_factory=lambda: FakeSource(sine(1)), system_factory=sysf), made
+    mic = lambda: FakeSource(sine(1))  # noqa: E731
+    return Recorder(cfg, mic_factory=mic, system_factory=sysf, min_session_s=0.5), made
 
 
 @pytest.mark.parametrize(
@@ -407,8 +409,11 @@ def test_system_source_gets_the_target_only_in_app_scope(cfg, scope, target, exp
     cfg.detection.system_audio_scope = scope
     rec, made = _target_recorder(cfg)
     rec.start(TriggerKind.CALL, "zoom.us", target=target)
-    rec.stop()
+    made[0].done.wait(5)
+    s = rec.stop()
     assert [m.target for m in made] == [expected]
+    # The session records what was actually captured: the source's effective scope.
+    assert s.metrics["recording"]["system_audio_scope"] == ("app" if expected else "all")
 
 
 def test_per_app_source_failure_falls_back_to_all_system_audio(cfg):
@@ -426,3 +431,17 @@ def test_upgrade_extends_a_per_app_tap_to_the_call_app(cfg):
     assert rec.upgrade_to_call("zoom.us", target=ZOOM_TARGET) is True
     rec.stop()
     assert made[0].added == [ZOOM_TARGET]
+
+
+def test_facetime_uses_the_global_tap_and_upgrades_add_its_daemon(cfg):
+    """FaceTime's call audio comes from avconferenced, not FaceTime.app."""
+    cfg.detection.system_audio_scope = "app"
+    facetime = AppTarget(("com.apple.facetime",), (30,))
+    rec, made = _target_recorder(cfg)
+    rec.start(TriggerKind.CALL, "FaceTime", target=facetime)
+    rec.stop()
+    assert made[0].target is None
+    rec.start(TriggerKind.MEDIA, "Google Chrome", target=AppTarget(("com.google.chrome",)))
+    rec.upgrade_to_call("FaceTime", target=facetime)
+    rec.stop()
+    assert made[1].added == [AppTarget(("com.apple.facetime", "avconferenced"), (30,))]

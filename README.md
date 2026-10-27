@@ -178,8 +178,8 @@ System audio (`Others`) is everything the Mac plays, so a notification sound or 
 another tab ends up in the recording too. On macOS, `system_audio_scope = "app"` records only
 the app that started the session (Zoom, the browser tab's browser…) and its helper
 processes; if a call starts during a video, both apps are recorded. Manual recordings always
-take everything. It is off by default because FaceTime plays calls through a system process,
-which a per-app recording would miss.
+take everything, and so does FaceTime (its calls play through a system process). It is off
+by default until it has been checked with Zoom, Teams and Meet calls.
 
 ## Settings
 
