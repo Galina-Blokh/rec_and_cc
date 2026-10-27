@@ -68,7 +68,7 @@ def test_language_id_is_restricted_to_the_configured_languages():
 
 @pytest.mark.slow
 @pytest.mark.skipif(sys.platform != "darwin", reason="needs macOS say")
-def test_language_id_accuracy_on_the_synthetic_mixed_set(tmp_path):
+def test_language_id_accuracy_on_the_synthetic_mixed_set(tmp_path, monkeypatch):
     from recandcc.transcribe import Transcriber
     from recandcc.transcribe.chunking import find_speech, load_track
     from recandcc.transcribe.gpu import hf_cache_folder
@@ -87,7 +87,7 @@ def test_language_id_accuracy_on_the_synthetic_mixed_set(tmp_path):
         "rcc_synth_lid", ROOT / "scripts" / "make_synthetic_evalset.py"
     )
     mk = importlib.util.module_from_spec(spec)
-    sys.modules["rcc_synth_lid"] = mk
+    monkeypatch.setitem(sys.modules, "rcc_synth_lid", mk)  # removed after the test
     spec.loader.exec_module(mk)
     out = subprocess.run(["say", "-v", "?"], capture_output=True, text=True).stdout
     clips, skipped = mk.plan(mk.parse_voices(out))
