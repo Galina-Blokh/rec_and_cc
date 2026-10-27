@@ -13,7 +13,7 @@ import threading
 
 import numpy as np
 import pytest
-from test_search import make_session, seg
+from test_search import _corrupt, make_session, seg
 from test_semantic import DIM, FakeEmbedder, sync
 
 from recandcc import search, semantic
@@ -350,3 +350,19 @@ def test_other_models_rows_do_not_count_against_the_cap(tmp_path, out, monkeypat
     monkeypatch.setattr(search, "CACHE_MAX_ROWS", 2)  # 4 rows stored, 2 of this model
     assert idx.search("payment")
     assert idx._cache is not None and len(idx._cache.meta) == 2
+
+
+def test_recovering_a_corrupt_index_drops_the_cache(tmp_path, out):
+    make_session(out, 1, [seg(1, "Please send the invoice"), seg(9, "Lunch at noon")])
+    idx = make(tmp_path, FakeEmbedder())
+    sync(idx, out)
+    assert idx.search("payment")
+    assert idx._cache is not None
+    _corrupt(idx.path, "garbage")
+    assert idx._recover()  # deletes the file and must drop the in-memory matrix too
+    assert idx._cache is None and idx._no_cache is None
+    assert idx.search("payment") == []  # no stale text from the deleted index
+    sync(idx, out)  # the rebuild re-embeds from the transcripts
+    hits = idx.search("payment")
+    assert hits and "invoice" in hits[0].snippet
+    assert idx._cache is not None
