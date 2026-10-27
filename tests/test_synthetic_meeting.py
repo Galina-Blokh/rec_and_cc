@@ -40,8 +40,9 @@ def test_writes_json_and_refuses_repo_and_documents(tmp_path, capsys):
     out = tmp_path / "m"
     assert mk.main([str(out)]) == 0
     assert json.loads((out / "transcript.json").read_text())["segments"]
-    if (ROOT / ".git").exists():  # not in a source tarball
-        assert mk.main([str(ROOT / "x")]) == 2
+    checkout = tmp_path / "checkout"
+    (checkout / ".git").mkdir(parents=True)  # a fake checkout: works in a source tarball too
+    assert mk.main([str(checkout / "sub")]) == 2
     afile = tmp_path / "f"
     afile.write_text("x")
     assert mk.main([str(afile)]) == 2
