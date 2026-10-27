@@ -195,6 +195,27 @@ def test_speaker_hints_are_respected():
     assert _k(emb[:4], max_speakers=1) == 1  # few windows: threshold cut, still clamped
 
 
+def test_hint_override_is_logged_with_counts_only(caplog):
+    emb, _ = _voices(np.random.default_rng(7), 6, 15)
+    with caplog.at_level("INFO", logger="recandcc.transcribe.diarize"):
+        _k(emb)
+        assert not caplog.records
+        _k(emb, max_speakers=3)
+    assert caplog.messages == [
+        "speaker count hint (min 0, max 3): 3 speakers instead of 6 estimated"
+    ]
+
+
+def test_non_finite_embeddings_do_not_break_clustering():
+    emb, truth = _voices(np.random.default_rng(12), 3, 15)
+    emb[[0, 5]] = np.nan
+    emb[9, 3] = np.inf
+    got = cluster_embeddings(emb, np.full(len(emb), 2.0), max_speakers=3)
+    ok = np.isfinite(emb).all(axis=1)
+    assert len(set(got.tolist())) <= 3 and _same_partition(got[ok], truth[ok])
+    assert cluster_embeddings(np.full((3, 8), np.nan), np.full(3, 2.0)).tolist() == [0, 0, 0]
+
+
 def test_few_windows_keep_the_threshold_behaviour():
     emb, truth = _voices(np.random.default_rng(9), 2, 4)  # 8 < MIN_ADAPTIVE_UNITS
     assert _same_partition(cluster_embeddings(emb, np.full(len(emb), 2.0)), truth)

@@ -194,16 +194,20 @@ def cluster_embeddings(
     n = len(embeddings)
     if n == 0:
         return np.zeros(0, dtype=int)
-    x = np.asarray(embeddings, dtype=np.float32)
+    x = np.array(embeddings, dtype=np.float32)
+    finite = np.isfinite(x).all(axis=1)  # a NaN/inf row would break the linkage
+    x[~finite] = 0.0  # not clustered; takes speaker 0
     x = x / np.maximum(np.linalg.norm(x, axis=1, keepdims=True), 1e-9)
     durations = np.asarray(durations, dtype=np.float64)
-    units = np.flatnonzero(durations >= min_unit_s)
+    units = np.flatnonzero((durations >= min_unit_s) & finite)
     if len(units) == 0:
-        units = np.arange(n)
+        units = np.flatnonzero(finite)
+    if len(units) == 0:
+        return np.zeros(n, dtype=int)
     if len(units) > max_units:
         units = units[np.linspace(0, len(units) - 1, max_units).astype(int)]
     min_speakers, max_speakers = max(0, min_speakers), max(0, max_speakers)
-    cap = max_speakers or max(MAX_AUTO_SPEAKERS, min_speakers)
+    cap = max(MAX_AUTO_SPEAKERS, min_speakers, max_speakers)  # scores for the free estimate too
     merges, scores = _dendrogram(x[units], cap)
     k = _pick_k(len(units), merges, scores, threshold, min_speakers, max_speakers)
     groups = [units[g] for g in _cut(len(units), merges, k)]
@@ -229,8 +233,22 @@ def _pick_k(
     hi = min(max_speakers or n, n)
     lo = min(max(1, min_speakers), hi)
     if n < MIN_ADAPTIVE_UNITS:
-        k = n - sum(1 for *_, sim in merges if sim >= 1.0 - threshold)
-        return min(max(k, lo), hi)
+        free = n - sum(1 for *_, sim in merges if sim >= 1.0 - threshold)
+        k = min(max(free, lo), hi)
+    else:
+        free, k = _best_k(scores, 1, n), _best_k(scores, lo, hi)
+    if k != free:
+        log.info(
+            "speaker count hint (min %d, max %d): %d speakers instead of %d estimated",
+            min_speakers,
+            max_speakers,
+            k,
+            free,
+        )
+    return k
+
+
+def _best_k(scores: dict[int, float], lo: int, hi: int) -> int:
     cand = {k: s for k, s in scores.items() if lo <= k <= hi}
     if not cand:
         return lo
