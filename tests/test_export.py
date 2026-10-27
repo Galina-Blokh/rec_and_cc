@@ -487,3 +487,63 @@ def test_a_session_folder_swapped_for_a_link_is_not_written_through(tmp_path):
     with pytest.raises(export.ExportError, match="link"):
         export._write(link / "x.bin", b"data")
     assert not list(real.iterdir())
+
+
+SUMMARY_MD = (
+    "# Summary\n\nWe agreed to ship on Friday.\n\n## Action items\n\n"
+    "- Anna sends the release notes\n\n_Generated on this computer by m; it can be wrong._\n"
+)
+SUMMARY_HE = (
+    "# סיכום\n\n\u2067סיכמנו לשחרר ביום שישי\u2069\n\n## משימות\n\n- \u2067לשלוח הערות\u2069\n"
+)
+
+
+def test_docx_without_summary_is_unchanged_in_structure(session):
+    plain = [p.text for p in Document(str(export.export_docx(session))).paragraphs]
+    assert "Transcript" not in plain and "Summary" not in plain
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    with_summary = [p.text for p in Document(str(export.export_docx(session))).paragraphs]
+    assert with_summary[:2] == plain[:2]  # title and meta line
+    assert with_summary[-len(plain[2:]) :] == plain[2:]  # transcript paragraphs untouched
+
+
+def test_docx_puts_summary_and_action_items_before_the_transcript(session):
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    texts = [p.text for p in Document(str(export.export_docx(session))).paragraphs]
+    for needle in ("Summary", "Action items", "Anna sends the release notes", "Transcript"):
+        assert needle in texts
+    assert texts.index("Action items") < texts.index("Transcript")
+    assert texts.index("Transcript") < texts.index("[00:00:00] Me: Hello team")
+
+
+def test_docx_hebrew_summary_is_bidi_without_isolates(session):
+    (session / "summary.md").write_text(SUMMARY_HE, "utf-8")
+    doc = Document(str(export.export_docx(session)))
+    by_text = {p.text: p for p in doc.paragraphs}
+    p = by_text["סיכמנו לשחרר ביום שישי"]
+    assert p._p.pPr.find(qn("w:bidi")) is not None
+    assert "לשלוח הערות" in by_text and "\u2067" not in "".join(by_text)
+
+
+@pytest.mark.skipif(not have_font(), reason="no system font with Latin/Cyrillic/Hebrew")
+def test_pdf_has_summary_first_and_hebrew_survives(session):
+    from pypdf import PdfReader
+
+    def pdf_text() -> str:
+        return "\n".join(
+            pg.extract_text() for pg in PdfReader(str(export.export_pdf(session))).pages
+        )
+
+    assert "Action items" not in pdf_text()
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    text = pdf_text()
+    assert "Action items" in text and "Anna sends the release notes" in text
+    assert text.index("Action items") < text.index("Hello team")
+    (session / "summary.md").write_text(SUMMARY_HE, "utf-8")
+    assert export.export_pdf(session).read_bytes().startswith(b"%PDF")
+
+
+def test_an_unreadable_summary_is_ignored(session):
+    (session / "summary.md").write_bytes(b"\xff\xfe not utf-8 \x80")
+    assert export.load_summary(session) == []
+    assert export.export_docx(session).is_file()
