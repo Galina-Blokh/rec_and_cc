@@ -192,6 +192,19 @@ sentences counted as speech) except on ru+he: Milena and Carmit, two female voic
 into one speaker (DER 0.64 there; 0.13 on the other three `others` clips). Diarization takes
 ~0.08 s per clip. Both backends give the same WER and language ID on this set.
 
+### Language-ID tuning for he/en/ru (#6)
+
+Interim, **synthetic TTS (macOS say), not the consented set**: per-region language ID by the
+small `base` model among `en,ru,he`, on the 7-clip set (40 speech regions, 2.0-4.6 s).
+Whole regions: 40/40 correct, lowest confidence 0.96 (Hebrew 0.97-1.00; no he-vs-en/ru
+confusion). Artificially cut to the first 1.0 s of each utterance: 40/40, 4 below the 0.75
+re-check threshold (all correct); 0.6 s: 36/40 (the 4 errors are Hebrew, 2 of them below
+0.75 and so re-checked by the main model); 1.5 s: 39/40 (one Hebrew, at 0.68, re-checked).
+Conclusion: `MIN_LANGUAGE_CONFIDENCE = 0.75` and the short-region smoothing (< 2 s, gap <=
+2 s) stay as they are; no code change, and en/ru behaviour is untouched. Checked by
+`tests/test_language_id_he.py` (slow, >= 95% on the mixed set). Re-measure on real Hebrew
+speech once the consented set has it.
+
 To regenerate: `uv run python scripts/make_synthetic_evalset.py "$TMPDIR/rcc-synth"`, then
 `uv run python scripts/eval.py "$TMPDIR/rcc-synth" --languages en,ru,he --backend mlx --json
 "$TMPDIR/mlx.json"` (and `--backend cpu`, and `--backend mlx --live`).

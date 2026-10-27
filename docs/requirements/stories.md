@@ -207,6 +207,9 @@ while I decide.*
 - **Given** a Hebrew segment, **then** `transcript.md` wraps its text in a right-to-left
   isolate and `transcript.srt` starts its line with RLM, so editors and players render mixed
   Hebrew/English correctly; en/ru lines and `transcript.json` are unchanged.
+- **Given** the three languages, **then** per-region language ID is at least 95% correct on the
+  synthetic he/en/ru set, and a short region with low confidence takes its neighbour's
+  language (en/ru behaviour is the same with or without `he`).
 - **Given** `"iw"` or an unknown code in `languages`, **then** it is mapped to `he` or
   dropped with a log warning.
 - **Given** the menu **Languages** (English, Russian, Hebrew, Any language), **when** I tick
