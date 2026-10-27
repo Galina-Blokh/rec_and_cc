@@ -124,7 +124,8 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   stays on (macOS shows the orange dot the whole time; it costs some battery, and Bluetooth
   headsets switch to their call profile) and about 6 s of speech within 15 s near the laptop
   starts a recording, as in Auto/Ask mode, including the 15 s before it (system audio is
-  recorded too, as for calls). It stops after 90 s without speech. Apps take precedence:
+  recorded too, all of it: there is no app to follow; with `system_audio_scope = "app"` only
+  the call app once a call joins). It stops after 90 s without speech. Apps take precedence:
   nothing starts while another app plays or uses the mic (music too), and a room recording
   stops if an app you switched off, stopped or ignore starts. The people in the room become
   `Speaker 1`, `Speaker 2`, … in the transcript (one person alone stays `Me`); if a call joins,
@@ -147,7 +148,7 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   to be transcribed. macOS menu only for now.
 - **Export latest transcript (DOCX + PDF)** (*macOS only*; on Windows use `recandcc export`): writes `transcript.docx` and `transcript.pdf`
   next to the newest transcript. Same as `recandcc export`. If the session has a
-  `summary.md`, the summary and action items come first. The export renders the summary's
+  `summary.md`, the summary and action items come first (their freshness follows the transcript text, start/end/text, not file times, so speaker renames and call-app names keep them; deleting `.summary-source` falls back to the file-time rule, which also applies to sessions summarised before this version). The export renders the summary's
   headings, bullets, numbered items and notes (Hebrew headings follow the text, right to left).
 - **Meeting notes…**: your past sessions, newest first, with title (the app that triggered
   it, or one you gave it), date and time, duration, speakers, languages and whether it is
@@ -270,14 +271,21 @@ enabled = false              # true = summary.md with action items after each me
 
 With `[summary] enabled = true` (Apple silicon), each finished transcript also gets a
 `summary.md` in its folder: a few sentences about the meeting and an **Action items** list
-(who does what, by when), written in the meeting's main language (English, Russian or
-Hebrew). A small local model (Qwen2.5 3B, 4-bit, ~1.7 GB) does it in the background after
-the transcript is final, and waits while you are recording, so captions are never slowed; it is downloaded once, pinned to an exact version, and nothing is
-sent anywhere. It is a draft: check names and dates against the transcript. On Windows, or
+(who does what, by when), written in the meeting's main language (English or Russian).
+Summaries support English and Russian only: the Qwen models tried write unusable Hebrew
+summaries, and a Hebrew-capable model is being researched in #6. A small local model (Qwen2.5 1.5B Instruct, 4-bit, ~0.9 GB, Apache-2.0) does it
+in the background after the transcript is final, and waits while you are recording, so
+captions are never slowed; it is downloaded once, pinned to an exact version, and nothing is
+sent anywhere. It is a draft: check names and dates against the transcript. The larger
+`model = "mlx-community/Qwen2.5-3B-Instruct-4bit"` (~1.7 GB, also pinned) is under the Qwen
+Research licence: non-commercial use only. It was the default before, and older settings
+files hold it without anyone choosing it, so it is replaced by the default (saved to `config.toml`, with a one-time notice) unless
+you also set `accept_qwen_research_licence = true` under `[summary]`. If the 3B is already
+downloaded and the new default isn't, it is kept for now, so offline summaries keep working. On Windows, or
 offline before the model is downloaded, the summary is skipped with a notice. It waits for
 the speaker labels (a slow diarization delays it), a summary cut short by quitting is redone
-at the next start (a `.summary-pending` marker in the session folder), and after
-`recandcc name-speaker` the app redoes an existing `summary.md` with the new name once idle.
+at the next start (a `.summary-pending` marker in the session folder; a `.summary-source` file records a fingerprint of the transcript text the summary was made from), and after
+`recandcc name-speaker` the app redoes an existing `summary.md` with the new name once idle. Renaming a speaker in the menu, or call-app names, keeps the existing summary, whose text may still mention the old label. Old summaries are not given a fingerprint afterwards: one computed now could describe a transcript that already differs from what the summary was made from.
 
 ## Command line
 
@@ -362,7 +370,8 @@ models load from disk without contacting anything (tested with all network acces
 | Each session's speaker voices (only with `speaker_names = true`) | `…/RecAndCC/voices/sessions/` | `%LOCALAPPDATA%\RecAndCC\voices\sessions\` |
 | Speaker-diarization model | `~/Library/Caches/RecAndCC/models/` | `%LOCALAPPDATA%\RecAndCC\Cache\models\` |
 | Whisper models (shared Hugging Face cache) | `~/.cache/huggingface/hub/models--*whisper*` | `%USERPROFILE%\.cache\huggingface\hub\` |
-| Summary model (only with summaries on) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-3B-Instruct-4bit` | not used |
+| Summary model (only with summaries on) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-*-Instruct-4bit` | not used |
+| Old summary model, unused after the switch to the 1.5B default (~1.7 GB, safe to delete unless you kept the 3B with `accept_qwen_research_licence = true`) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-3B-Instruct-4bit` | not used |
 | Launch at login | `~/Library/LaunchAgents/com.gblokh.recandcc.plist` | registry `HKCU\…\CurrentVersion\Run\RecAndCC` |
 
 The folders RecAndCC creates for recordings (the transcripts folder, each day and each
