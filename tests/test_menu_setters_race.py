@@ -235,3 +235,87 @@ def test_mode_click_survives_a_reload_while_its_save_is_blocked(tmp_path, monkey
     assert ctrl.engine.state.mode == Mode.AUTO
     assert 'mode = "auto"' in path.read_text()
     assert not ctrl._dirty
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="rumps menu")
+def test_failed_retention_save_keeps_a_newer_click_marked_before_its_thread_runs(
+    tmp_path, monkeypatch
+):
+    """Audit repro: two quick retention clicks, both set before either save thread runs. The
+    first save fails; it must not restore the old value over the second click (which has to
+    hold its mark already), so the second save writes the second click."""
+    from recandcc.config import ConfigLockTimeout
+    from recandcc.ui import mac
+
+    ctrl, path = _ctrl(tmp_path, monkeypatch, "[transcription]\naudio_retention_days = 0\n")
+    app = mac.MacApp.__new__(mac.MacApp)
+    app.ctrl, app.cfg = ctrl, ctrl.cfg
+    app._render_retention = lambda: None
+    monkeypatch.setattr(common, "purge_old_audio", lambda *_a: None)
+    fails = [True]
+    real = common.save_keys
+
+    def flaky(p, values):
+        if fails and fails.pop(0):
+            raise ConfigLockTimeout("held")
+        return real(p, values)
+
+    monkeypatch.setattr(common, "save_keys", flaky)
+    deferred: list[threading.Thread] = []
+    real_start = threading.Thread.start
+    monkeypatch.setattr(threading.Thread, "start", lambda self: deferred.append(self))
+    app._set_retention(types.SimpleNamespace(retention_days=7))
+    app._set_retention(types.SimpleNamespace(retention_days=30))
+    monkeypatch.setattr(threading.Thread, "start", real_start)
+    assert len(deferred) == 2
+    for t in deferred:  # the saves run one after the other: the first fails, then the second
+        t.start()
+        t.join(5)
+    assert ctrl.cfg.transcription.audio_retention_days == 30
+    assert load_config(path).transcription.audio_retention_days == 30
+    assert not ctrl._dirty
+
+
+def test_reload_keeps_a_click_made_after_its_snapshot(tmp_path, monkeypatch):
+    """Audit repro: a reload takes its in-memory snapshot, then a tray Captions click lands
+    before the reload applies the file. The click must survive, in memory and on disk."""
+    stubs = {
+        "pystray": types.SimpleNamespace(Icon=None, MenuItem=None, Menu=None),
+        "PIL": types.SimpleNamespace(Image=None, ImageDraw=None),
+    }
+    for name, mod in stubs.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+    monkeypatch.delitem(sys.modules, "recandcc.ui.tray", raising=False)
+    from recandcc.ui import tray
+
+    try:
+        ctrl, path = _ctrl(tmp_path, monkeypatch, "live_captions = true\n")
+        app = tray.TrayApp.__new__(tray.TrayApp)
+        app.ctrl, app.cfg, app._live_id = ctrl, ctrl.cfg, None
+        app.captions = types.SimpleNamespace(post=lambda *_a: None)
+        path.write_text('live_captions = true\nhotkey = ""\n[detection]\nmode = "off"\n')
+        ctrl._config_mtime = -1.0  # an unrelated hand edit to reload
+        orig = Controller._reloadable
+        calls, clicks = [0], []
+
+        def spy(cfg):
+            calls[0] += 1
+            out = orig(cfg)
+            if calls[0] == 2:  # the reload's "now" snapshot is taken: the user clicks
+                click = threading.Thread(target=app._toggle_captions)
+                click.start()
+                click.join(0.3)  # lets a set-then-mark click change memory meanwhile
+                clicks.append(click)
+            return out
+
+        monkeypatch.setattr(Controller, "_reloadable", staticmethod(spy))
+        ctrl._maybe_reload_config()
+        for click in clicks:
+            click.join(5)
+        _join_saves()
+        assert clicks
+        assert ctrl.cfg.live_captions is False
+        assert load_config(path).live_captions is False
+        assert not ctrl._dirty
+    finally:
+        sys.modules.pop("recandcc.ui.tray", None)  # don't leak the module built on stubs

@@ -9,6 +9,7 @@ import threading
 import tomllib
 
 import numpy as np
+import pytest
 
 from recandcc.config import load_config
 from recandcc.models import Mode
@@ -383,3 +384,19 @@ def test_failed_language_save_keeps_a_newer_queued_toggle(tmp_path, monkeypatch)
     assert calls == [["en", "ru"], ["en", "ru", "de"]]
     assert ctrl.cfg.transcription.languages == ["en", "ru", "de"]
     assert load_config(path).transcription.languages == ["en", "ru", "de"]
+
+
+def test_toggle_language_unmarks_once_when_its_save_thread_cannot_start(tmp_path, monkeypatch):
+    """Audit repro: a failed thread start used to drop both the click's mark and the mark of
+    an earlier click whose save is still pending."""
+    ctrl, _ = _ctrl(tmp_path, monkeypatch, '["en"]')
+    key = "transcription.languages"
+    ctrl._dirty[key] = 1  # an earlier language click's save is still pending
+
+    def boom(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", boom)
+    with pytest.raises(RuntimeError):
+        ctrl.toggle_language("he")
+    assert ctrl._dirty.get(key) == 1  # the pending save still holds its mark
