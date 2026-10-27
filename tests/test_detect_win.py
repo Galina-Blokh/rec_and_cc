@@ -289,18 +289,38 @@ def test_helper_playing_audio_does_not_take_over_the_sticky_key(fakes, mon):
     assert mon._chosen == {}
 
 
-def test_app_replaces_a_helper_that_was_on_the_mic_first(fakes, mon):
-    """Cold start: only the autostarter runs at first. Once ms-teams.exe is up, it owns the
-    key, even though the helper was the sticky choice and stays alive."""
+def test_app_replaces_a_helper_that_was_on_the_mic_first(fakes, mon, monkeypatch):
+    """Cold start: only the autostarter runs at first. The table is re-walked quickly while
+    the package has no exe of its own, so ms-teams.exe takes the key within the engine's
+    debounce, even though the helper was the sticky choice and stays alive."""
+    now = [0.0]
+    monkeypatch.setattr(win, "time", ns(monotonic=lambda: now[0]))
     teams_on_mic(fakes)
     fakes.procs = [STARTER]
     assert [p.bundle_id for p in mon.snapshot()] == ["msteams_autostarter.exe"]
     fakes.procs = [STARTER, TEAMS]
-    mon._table = None  # the process set changed (in real use: on the next TTL walk)
-    fakes.sessions = [FakeSession(proc("MSTeams_autostarter.exe", 299))]
+    now[0] += 1
+    assert [p.bundle_id for p in mon.snapshot()] == ["msteams_autostarter.exe"]  # cached
+    now[0] += win._UNSETTLED_TTL_S
+    fakes.sessions = [FakeSession(proc("MSTeams_autostarter.exe", 299))]  # helper plays
     snap = by_name(mon.snapshot())
     assert snap["ms-teams.exe"].input_active and snap["ms-teams.exe"].pid == 300
     assert not snap["msteams_autostarter.exe"].input_active
+    assert fakes.walks == 2
+    now[0] += win._UNSETTLED_TTL_S
+    mon.snapshot()
+    assert fakes.walks == 2  # settled on the app: back to the long TTL
+
+
+def test_package_playing_audio_maps_without_a_walk(fakes, mon):
+    """A typical Teams call: ms-teams.exe has a WASAPI session, so no process walk."""
+    teams_on_mic(fakes)
+    fakes.procs = [STARTER]  # stale table contents must not matter
+    fakes.sessions = [FakeSession(proc("ms-teams.exe", 300))]
+    assert by_name(mon.snapshot()) == {
+        "ms-teams.exe": AudioProcess(300, "ms-teams.exe", "ms-teams.exe", True, True)
+    }
+    assert fakes.walks == 0
 
 
 def test_unlisted_package_keeps_its_key(fakes, mon, monkeypatch):

@@ -42,6 +42,9 @@ _MIC_KEY = (
 )
 _STATE_ACTIVE = 1
 _TABLE_TTL_S = 10.0  # re-walk the process list at most this often while the mic set is stable
+# ... and this often while a package is not yet mapped to its own exe (only a helper, or
+# nothing, seen so far), so the app is picked up within the engine's min_active_s debounce.
+_UNSETTLED_TTL_S = 2.0
 _HELPER_WORDS = ("autostart", "update", "crash", "helper")
 
 
@@ -143,7 +146,7 @@ class WinActivityMonitor(ActivityMonitor):
         return users
 
     def _process_table(
-        self, key: frozenset[str]
+        self, key: frozenset[str], ttl: float = _TABLE_TTL_S
     ) -> tuple[dict[str, list[tuple[str, int]]], dict[str, int]]:
         """One psutil walk -> (package family -> [(exe_lower, pid)], exe_lower -> pid).
 
@@ -151,10 +154,10 @@ class WinActivityMonitor(ActivityMonitor):
         WASAPI sessions and the app lists use exe names (``ms-teams.exe``). Packaged apps run
         from ``...\\WindowsApps\\<Name>_<Version>_<Arch>_<ResourceId>_<PublisherId>\\``, and
         the family name is ``<Name>_<PublisherId>``. Cached until the set of mic users
-        (``key``) changes or ``_TABLE_TTL_S`` passes, so polling does not walk every second.
+        (``key``) changes or ``ttl`` passes, so polling does not walk every second.
         """
         now = time.monotonic()
-        if self._table and self._table[0] == key and now - self._table[1] < _TABLE_TTL_S:
+        if self._table and self._table[0] == key and now - self._table[1] < ttl:
             return self._table[2], self._table[3]
         by_family: dict[str, list[tuple[str, int]]] = {}
         by_name: dict[str, int] = {}
@@ -220,14 +223,33 @@ class WinActivityMonitor(ActivityMonitor):
             mic = []
         mic = [(exe, full) for exe, full in mic if os.path.normcase(full) != self._own_exe]
         key = frozenset(full.lower() for _, full in mic)
-        # Walk only to map a package to its exe or to find a mic-only app's pid; an app that
-        # also plays audio (a typical call) already has its pid from the WASAPI session.
-        walk = any("\\" not in full or exe not in procs for exe, full in mic)
-        by_family, by_name = self._process_table(key) if walk else ({}, {})
+        # A package whose own exe plays audio (a typical Teams call) maps to it directly.
+        live = {
+            full.lower(): e
+            for _, full in mic
+            if "\\" not in full
+            and (e := next((e for e in sorted(procs) if _named_after(e, full)), None))
+        }
+        # Walk only to map the other packages to an exe or to find a mic-only app's pid; an
+        # app that also plays audio already has its pid from the WASAPI session.
+        need = [
+            (exe, full)
+            for exe, full in mic
+            if full.lower() not in live and ("\\" not in full or exe not in procs)
+        ]
+        unsettled = any(
+            "\\" not in full and not _named_after(self._chosen.get(full.lower(), ""), full)
+            for _, full in need
+        )
+        ttl = _UNSETTLED_TTL_S if unsettled else _TABLE_TTL_S
+        by_family, by_name = self._process_table(key, ttl) if need else ({}, {})
         for exe, full in mic:
             if "\\" not in full:
                 family = full.lower()
-                if cands := by_family.get(family):
+                if family in live:
+                    exe = self._chosen[family] = live[family]
+                    pid = procs[exe].pid
+                elif cands := by_family.get(family):
                     exe, pid = self._choose(family, cands, procs)
                 else:
                     exe = self._resolve_unlisted(family, by_name) or exe
