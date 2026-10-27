@@ -47,6 +47,7 @@ across platforms.
 | `ui/captions*.py` | Live captions window: `captions.py` (pure logic: ordering, trimming, header, panel frame, speaker colours) + `captions_mac.py` (floating non-activating NSPanel); Windows uses a Tk window in `tray.py` |
 | `autostart.py` | LaunchAgent (macOS) / HKCU Run key (Windows) |
 | `logging_setup.py`, `metrics.py` | Log file + crash reporting (`sys`/`threading.excepthook` → log with traceback, thread crash → `notice` toast at most once per thread name per minute; `faulthandler` → `<log dir>/faults.log`); per-session pipeline metrics in `session.json` `metrics` + one INFO summary line |
+| `transcribe/summary.py` | Opt-in `summary.md` (summary + action items) with a local LLM via mlx-lm: prompts in the meeting's main language, map-reduce over chunks, pinned offline-first model load (`gpu.local_model_path`) |
 | `search.py` | Transcript search: incremental SQLite FTS5 index of `transcript.json` segments in the app-data dir (owner-only, never in `output_dir`); `LIKE` fallback without FTS5 |
 | `cli.py` | `recandcc` command line |
 | `native/macos/AudioTap` | SwiftPM package: `rcc-audiotap` helper + `RecAndCC` app launcher |
@@ -73,6 +74,7 @@ The app is built around one rule: **real-time audio threads never block**. Every
 | UI main thread | rumps/AppKit; drains an event queue every 0.5 s | event queue |
 | UI workers | Permission checks, recent-transcript scan, `osascript` dialogs, transcript search (syncs the index, posts a `search` event) | event queue |
 | search indexer (per finished transcript) | `TranscriptIndex.index_session` after `on_done`; errors logged | own SQLite connection |
+| summary (1, only with `summary.enabled`) | Loads the summary LLM, writes `summary.md`, frees the model; one session at a time. Takes `gpu.MLX_LOCK` per generated token, which every MLX Whisper call also holds, so the GPU is never driven from two threads at once and live captions keep flowing | `SummaryQueue` |
 
 - The engine holds one lock and never makes a blocking call while holding it. UI actions
   (`start_manual`, `stop`, `respond`) are queued as commands, so only the engine thread

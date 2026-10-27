@@ -4,7 +4,8 @@ On an M-series Mac one Whisper pass on the GPU takes ~0.12 s (large-v3-turbo) ve
 on the CPU, which is what keeps live captions close to the speech. MLX isn't safe to drive
 from several threads at once, so every GPU call goes through one dedicated thread; callers on
 the CPU worker pool (VAD, language ID with the small CPU model, bookkeeping) just wait for
-their result, so CPU and GPU work overlap.
+their result, so CPU and GPU work overlap. ``MLX_LOCK`` serialises those calls with the
+other MLX user, the local summary model (summary.py), which takes it once per token.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import importlib.util
 import logging
 import platform
 import sys
+import threading
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -27,6 +29,9 @@ from .merge import language_confidence
 from .revisions import check_download_allowed, revision
 
 log = logging.getLogger("recandcc.transcribe")
+
+# Held around every MLX call, so Whisper and the summary model never run on the GPU at once.
+MLX_LOCK = threading.Lock()
 
 # faster-whisper model names -> MLX conversions on Hugging Face.
 MLX_REPOS = {
@@ -122,7 +127,8 @@ class MlxWhisper:
         def _load():
             t0 = time.monotonic()
             self.repo = local_model_path(self.repo, self.allow_unpinned)
-            self._model = self._get_model()
+            with MLX_LOCK:
+                self._model = self._get_model()
             log.info("loaded MLX whisper %s on the GPU in %.1fs", self.repo, time.monotonic() - t0)
 
         self._thread.submit(_load).result()
@@ -133,13 +139,14 @@ class MlxWhisper:
         def run():
             import mlx_whisper  # pyright: ignore[reportMissingImports]
 
-            result = mlx_whisper.transcribe(
-                np.ascontiguousarray(audio, dtype=np.float32),
-                path_or_hf_repo=self.repo,
-                language=language,
-                condition_on_previous_text=False,
-                verbose=None,
-            )
+            with MLX_LOCK:
+                result = mlx_whisper.transcribe(
+                    np.ascontiguousarray(audio, dtype=np.float32),
+                    path_or_hf_repo=self.repo,
+                    language=language,
+                    condition_on_previous_text=False,
+                    verbose=None,
+                )
             segments = cast(list[dict[str, Any]], result["segments"])  # untyped in mlx_whisper
             return [(s["start"], s["end"], s["text"]) for s in segments]
 
@@ -157,14 +164,15 @@ class MlxWhisper:
                 pad_or_trim,
             )
 
-            model = self._model or self._get_model()
-            mel = log_mel_spectrogram(
-                np.ascontiguousarray(audio, dtype=np.float32),
-                n_mels=model.dims.n_mels,
-                padding=N_SAMPLES,
-            )
-            segment = pad_or_trim(mel, N_FRAMES, axis=-2).astype(mx.float16)
-            _, probs = model.detect_language(segment)
+            with MLX_LOCK:
+                model = self._model or self._get_model()
+                mel = log_mel_spectrogram(
+                    np.ascontiguousarray(audio, dtype=np.float32),
+                    n_mels=model.dims.n_mels,
+                    padding=N_SAMPLES,
+                )
+                segment = pad_or_trim(mel, N_FRAMES, axis=-2).astype(mx.float16)
+                _, probs = model.detect_language(segment)
             return list(probs.items())
 
         return language_confidence(self._thread.submit(run).result(), allowed)

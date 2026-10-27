@@ -179,6 +179,22 @@ def cmd_transcribe(args) -> int:
     return 0
 
 
+def cmd_summarize(args) -> int:
+    setup_logging(to_file=False)
+    from .transcribe.summary import SummaryUnavailable, summarize_session
+
+    try:
+        path = summarize_session(Path(args.session_dir).expanduser(), load_config())
+    except SummaryUnavailable as e:
+        print(f"No summary: {e}.", file=sys.stderr)
+        return 1
+    except (OSError, ValueError) as e:
+        print(f"Can't read the transcript: {type(e).__name__}", file=sys.stderr)
+        return 1
+    print(path)
+    return 0
+
+
 # ---------------------------------------------------------------------- monitor
 def cmd_monitor(args) -> int:
     setup_logging(to_file=False, level=logging.WARNING)
@@ -386,6 +402,10 @@ def build_parser() -> argparse.ArgumentParser:
     t = sub.add_parser("transcribe", help="transcribe a recorded session directory")
     t.add_argument("session_dir")
     t.set_defaults(func=cmd_transcribe)
+
+    u = sub.add_parser("summarize", help="write summary.md (local LLM) for a transcribed session")
+    u.add_argument("session_dir")
+    u.set_defaults(func=cmd_summarize)
 
     m = sub.add_parser("monitor", help="print live audio activity + how rules classify it")
     m.add_argument("--interval", type=float, default=1.0)

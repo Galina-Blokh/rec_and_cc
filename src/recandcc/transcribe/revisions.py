@@ -40,6 +40,8 @@ HF_REVISIONS: dict[str, str] = {
     "Systran/faster-whisper-small": "536b0662742c02347bc0e980a01041f333bce120",
     "Systran/faster-whisper-base": "ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66",
     "Systran/faster-whisper-tiny": "d90ca5fe260221311c53c58e660288d3deb8d356",
+    # Local summary LLM (mlx-lm, Apple silicon), see summary.py
+    "mlx-community/Qwen2.5-3B-Instruct-4bit": "4f83f8f146fdf28b512a06562b671d7af4fab457",
 }
 
 # faster-whisper model names -> their repos (same mapping as faster_whisper.utils._MODELS,
