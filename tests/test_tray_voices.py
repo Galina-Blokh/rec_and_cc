@@ -158,7 +158,10 @@ def test_forget_all_voices_needs_an_explicit_confirmation(tray, monkeypatch, ans
     app, calls, asked = _voices_app(tray, monkeypatch, [answer])
     _top_items(app)["Forget all voices…"][1]()
     _wait(lambda: asked)
-    time.sleep(0.05)
+    if forgets:
+        _wait(lambda: calls)
+    else:
+        time.sleep(0.05)
     assert asked == [(tray.FORGET_VOICES_TEXT, {"ok": "Forget all voices", "danger": True})]
     assert calls == ([("forget",)] if forgets else [])
     app.ctrl.events.put(("forgot", 2))

@@ -277,7 +277,7 @@ class TkSearch:
             win.title("Search transcripts")
             win.geometry("720x360")
             win.protocol("WM_DELETE_WINDOW", win.withdraw)
-            query = tk.StringVar()
+            query = tk.StringVar(master=root)
             top = tk.Frame(win, padx=8, pady=8)
             top.pack(fill="x")
             entry = tk.Entry(top, textvariable=query)
@@ -488,8 +488,13 @@ def tk_dialog(
             field = tk.Entry(root, width=40)
             field.pack(padx=16, fill="x")
 
+        finished = False
+
         def done(accept: bool) -> None:
-            nonlocal result
+            nonlocal result, finished
+            if finished:
+                return
+            finished = True
             if accept and box is not None:
                 result = sel[0] if (sel := box.curselection()) else None
             elif accept and field is not None:
@@ -912,12 +917,20 @@ class TrayApp:
         if not self.ctrl.missing_permissions():
             return
         try:
+            import tkinter as tk
             from tkinter import messagebox
 
-            if messagebox.askyesno(
-                "Welcome to RecAndCC", ONBOARDING_TEXT + "\n\nOpen microphone privacy settings now?"
-            ):
-                os.startfile("ms-settings:privacy-microphone")  # type: ignore[attr-defined]
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                if messagebox.askyesno(
+                    "Welcome to RecAndCC",
+                    ONBOARDING_TEXT + "\n\nOpen microphone privacy settings now?",
+                    parent=root,
+                ):
+                    os.startfile("ms-settings:privacy-microphone")  # type: ignore[attr-defined]
+            finally:
+                root.destroy()
         except Exception:
             log.debug("onboarding dialog failed", exc_info=True)
 
