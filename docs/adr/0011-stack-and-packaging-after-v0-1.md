@@ -144,10 +144,13 @@ already cached and the network blocked.
    consented set exists and has a baseline). AC: `eval.py --backend` and `--hypotheses` exist
    with tests; peak memory and wall time are in `eval-results.json`; a table for MLX,
    faster-whisper CPU, whisper.cpp Metal and WhisperKit on one machine is added to
-   EVALUATION.md (scores only); a verdict against the gate above.
+   EVALUATION.md (scores only); a verdict against the gate above. **Code part done:**
+   `eval.py --backend mlx|cpu`, `--hypotheses DIR` (`<clip-id>.json` segments or `.txt`),
+   wall time and peak memory (plus MLX's peak GPU memory) in `eval-results.json`, with tests;
+   the empty comparison table is in EVALUATION.md. The runs and the verdict wait for the set.
 2. **Measure live caption latency on the eval set**. AC: real-time replay through
    `LiveTranscriber`; median/p90 phrase end → caption reported by `eval.py`; no transcript
-   text in its output.
+   text in its output. **Done** (#83): `eval.py --live`.
 3. **Spike: self-contained, Developer-ID-signed RecAndCC.app**. AC (pass/fail): the app runs
    from `/Applications` with the repo and `.venv` deleted; the helper is inside the bundle;
    notarization passes; TCC grants survive installing a rebuilt bundle; warm start to the menu

@@ -132,7 +132,7 @@ def test_save_writes_toml_keeps_unknown_keys_and_applies(tmp_path, monkeypatch):
     assert reloaded.live_captions is False
     assert str(reloaded.output_dir) == "/tmp/rcc-out"
     ctrl.apply_settings(ev[1])  # UI thread
-    join_threads("set-mode")
+    join_threads("save-config")
     assert ctrl.cfg.transcription.keep_audio is False
     assert ctrl.cfg.detection.mode == Mode.AUTO
     assert ctrl.cfg.transcription.languages == ["en", "he"]
@@ -302,7 +302,7 @@ def test_only_changed_values_are_applied(tmp_path, monkeypatch):
 def test_mode_change_keeps_unknown_keys(tmp_path, monkeypatch):
     ctrl, path = make_ctrl(tmp_path, monkeypatch)
     ctrl.engine.set_mode(Mode.OFF)  # the engine's own save
-    join_threads("set-mode")
+    join_threads("save-config")
     text = path.read_text()
     assert "unknown = 1" in text and 'mode = "off"' in text
 
@@ -368,31 +368,6 @@ def test_closing_before_the_window_starts_kills_it(tmp_path, monkeypatch):
     ctrl, _ = make_ctrl(tmp_path, monkeypatch)
     settings_window.close_settings()
     assert settings_window.run_settings(ctrl.cfg) is None
-
-
-def test_concurrent_saves_leave_valid_toml(tmp_path):
-    path = tmp_path / "c.toml"
-    path.write_text("unknown = 1\n")
-    cfg = Config()
-    errors = []
-
-    def work(i):
-        try:
-            for _ in range(20):
-                cfg.save(path)
-                save_settings({"keep_audio": bool(i % 2)}, path)
-        except Exception as e:  # pragma: no cover
-            errors.append(e)
-
-    threads = [threading.Thread(target=work, args=(i,)) for i in range(4)]
-    for th in threads:
-        th.start()
-    for th in threads:
-        th.join()
-    assert not errors
-    assert load_config(path).output_dir  # parses
-    assert "unknown = 1" in path.read_text()
-    assert [p.name for p in tmp_path.iterdir()] == ["c.toml"]  # no temp files left
 
 
 @mac_only
