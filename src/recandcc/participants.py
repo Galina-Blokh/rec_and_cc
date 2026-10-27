@@ -266,8 +266,12 @@ def store(session: SessionInfo, names: list[str]) -> None:
     from .transcribe import voices
 
     try:
-        voices.write_session_names(session, names)
+        # not after a "Forget all voices" that came since the session began
+        kept = voices.write_session_names(session, names, since=session.voices_generation)
     except OSError:
         log.warning("session %s: could not keep the participant names", session.id)
+        return
+    if not kept:
+        log.info("session %s: voices were forgotten meanwhile; names not kept", session.id)
         return
     log.info("session %s: saw %d participant name(s)", session.id, len(names))
