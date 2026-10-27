@@ -165,9 +165,11 @@ engine closes the monitor's mic (the recorder opens its own) and reopens it when
 diarization and UI differ: there is no app, so a room session stops after
 `room_stop_after_silence_s` without speech (VAD on the session's own mic stream) or by the
 level rule (`stop_after_silence_s`), and the `calls` mic policy includes it. Everyone in the
-room is on the mic, so diarization numbers the speakers of the `Me` track in room sessions,
-also after a call upgraded one (`SessionInfo.started_as_room`; `transcribe/engine.py:
-diarized_track`). The replayed pre-roll is not counted as writer backlog.
+room is on the mic, so diarization numbers the speakers of the `Me` track in room sessions.
+After a call upgraded one (`SessionInfo.started_as_room`) both tracks are diarized, each on
+its own: the room on `Me`, then the call on `Others`, whose numbers continue after the
+room's (`transcribe/engine.py: diarized_tracks`). The replayed pre-roll is not counted as
+writer backlog.
 
 **Precedence.** In `tick()` sustained room speech is a candidate `@room`, appended *after*
 the app candidates and only when nothing records or asks and **no other process is doing
@@ -208,7 +210,8 @@ and has similar text (`difflib` ratio ≥ 0.6).
 ### Speaker diarization: `Others` → `Speaker 1`, `Speaker 2`, …
 The system-audio track mixes everyone else on the call. Only the **final** transcript splits
 it; live captions keep `Others`, and `Me` is never touched (`diarize.py`), except in a
-room session, where the `Me` track is the one split:
+room session, where the `Me` track is the one split (both tracks, numbered one after the
+other, when a call upgraded the room session):
 
 1. Silero VAD (the one used for chunking) finds speech in `others.wav`. With the opt-in
    `diarize_overlap` ([ADR 0014](adr/0014-overlap-aware-segmentation.md)), pyannote
