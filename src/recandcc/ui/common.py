@@ -57,6 +57,7 @@ from ..sensitivity import apply_preset, current_preset, room_trigger
 from ..settings_window import (
     SettingsUnavailable,
     close_settings,
+    offered_models,
     raise_settings,
     run_settings,
 )
@@ -343,6 +344,9 @@ RETENTION_KEY = "transcription.audio_retention_days"
 # Settings-window fields that are NO_ROLLBACK_KEYS: a successful window save writes them.
 WINDOW_KEYS = {"live_captions": "live_captions", "mode": "detection.mode"}
 RELOADED_TRANSCRIPTION_KEYS = ("keep_audio", "audio_retention_days", "speaker_names")
+MODEL_CHANGE_NOTICE = (
+    "Applies after RecAndCC restarts; a model not on disk yet is downloaded once then."
+)
 
 
 class Controller:
@@ -1121,6 +1125,11 @@ class Controller:
                         if key == ("top", "hotkey") and value != now[key]:
                             hotkey_changed = True
                         setattr(self._reload_target(owner), name, value)
+            # transcription.model is not reloaded (the loaded model stays until a restart), but
+            # the Settings window shows what is on disk, a hand edit included
+            tr = self.cfg.transcription
+            on_disk = new.transcription.model
+            tr._pending_model = None if on_disk == tr.model else on_disk  # type: ignore[attr-defined]
             if self.cfg.detection.room_listening and not was_listening:  # turned on by hand
                 self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
         if hotkey_changed:  # re-registering the listener may block: outside the lock
@@ -1410,7 +1419,7 @@ class Controller:
                     return
                 if not raw:  # cancelled, closed, or nothing changed
                     return
-                updates = validate_settings(raw)
+                updates = validate_settings(raw, offered_models())
                 if "output_dir" in updates:
                     _privatize_new_folder(updates["output_dir"])
                     make_private_dir(updates["output_dir"])
@@ -1426,6 +1435,8 @@ class Controller:
                         "keep_audio": tr.keep_audio,
                         "speaker_names": tr.speaker_names,
                         "languages": list(tr.languages),
+                        "live": tr.live,
+                        "model": getattr(tr, "_pending_model", None),
                     }
                     old = {k: v for k, v in old.items() if k in fields}
                     old_raw = getattr(tr, "_raw_languages", None)
@@ -1454,6 +1465,9 @@ class Controller:
                         self.apply_settings({"mode": updates["mode"]})
                 if "output_dir" in updates:
                     self.refresh_async(force=True)  # cloud-sync warning for the new folder
+                if "model" in updates and updates["model"] != self.cfg.transcription.model:
+                    # the loaded model is kept until the app restarts
+                    self.post_notice("Model saved", MODEL_CHANGE_NOTICE)
                 self.events.put(("settings_saved", updates))
             except SettingsUnavailable as e:
                 log.info("native settings unavailable: %s", e)
@@ -1489,6 +1503,11 @@ class Controller:
             tr.keep_audio = updates["keep_audio"]
         if "speaker_names" in updates:
             tr.speaker_names = updates["speaker_names"]
+        if "live" in updates:  # read at each session start
+            tr.live = updates["live"]
+        if "model" in updates:  # written to config.toml; loaded at the next app start
+            pending = None if updates["model"] == tr.model else updates["model"]
+            tr._pending_model = pending  # type: ignore[attr-defined]
         if "languages" in updates:
             with self._lang_lock:
                 tr._raw_languages = None  # type: ignore[attr-defined]
