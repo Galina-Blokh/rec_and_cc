@@ -32,6 +32,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
 | US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
+| US-28 | Browse past meetings | 🟡 Windows window untested on hardware (#5) |
 | US-29 | Right-to-left text readable in the Windows captions | 🟡 unit-tested, no hardware check (#6) |
 
 ---
@@ -135,6 +136,10 @@ while I decide.*
 - **Given** several people on the `Others` track, **then** the final transcript labels them
   `Speaker 1`, `Speaker 2`… in order of first appearance; `Me` is never relabelled.
 - **Given** one speaker, or no speaker model, **then** the label stays `Others`.
+- **Given** a large meeting (up to 20 other speakers, some with similar voices) or one speaker
+  with noisy audio, **then** the number of speakers is estimated per session instead of fixed
+  by a threshold, within `min_speakers` / `max_speakers` if set, and an hour still
+  diarizes in seconds.
 
 ### US-13 Readable transcripts in private folders
 - **Then** each session is saved under `<output_dir>/<date>/<time>_<app>/` with
@@ -224,7 +229,7 @@ open transcripts one by one.*
   transcript is re-indexed and a deleted or discarded session leaves the index.
 - **Then** the index is local and owner-only, outside `output_dir` (never synced), and logs
   never contain the searched or found text.
-- **Not yet:** summaries and action items with a local LLM, DOCX/PDF export, a notes window
+- **Not yet:** summaries and action items with a local LLM, DOCX/PDF export
   (#4).
 
 ### US-21 Speaker names remembered across sessions
@@ -278,8 +283,7 @@ its transcript, so that I know what was decided and who does what without reread
 - **Then** logs never contain transcript or summary text.
 - **Given** a 1-hour en/ru meeting on an M-series Mac, **then** the summary is ready within
   ~1–2 min, offline.
-- **Not yet:** Windows/CPU backend (llama.cpp), a quality evaluation on real meetings,
-  summaries in the meeting-notes window (#4).
+- **Not yet:** Windows/CPU backend (llama.cpp), a quality evaluation on real meetings (#4).
 
 ### US-22 Room listening (opt-in)
 *As the owner, I want a conversation next to the laptop (an in-person meeting) recorded
@@ -313,6 +317,31 @@ without pressing anything, like a call, and only when I have turned that on.* (#
 - **Then** speech detection runs on its own thread (the audio thread only copies frames);
   nothing about the room audio is logged beyond on/off states, and nothing leaves the device.
 - **Not yet:** verified with the screen locked; idle CPU and battery impact measured.
+
+### US-28 Browse past meetings
+*As the owner, I want to see my past meetings in one place and open, rename or delete them,
+so that I don't have to dig through dated folders.*
+
+- **When** I choose **Meeting notes…** (macOS menu or Windows tray), **then** I see the
+  sessions in `output_dir`, newest first, each with its title (the triggering app, "Manual
+  recording", or the title I gave it), date and time, duration, speakers, languages and
+  whether it is transcribed; discarded sessions are not listed. The folder is read off the
+  UI thread.
+- **Given** a session folder with a `summary.md`, **then** its first lines show as an
+  excerpt and I can open it; without one the listing works the same, minus that action.
+- **When** I pick a session, **then** I can open its transcript, reveal its folder, rename
+  it or delete it. A rename is stored as `title` in `session.json` (older files without it
+  still load) and an empty title goes back to the default.
+- **When** I delete a session and confirm, **then** its folder goes to the Trash / Recycle
+  Bin (permanently via `discard_session` where there is none), it leaves the search index,
+  the recent list and the stored speaker voices (those don't come back from the Trash).
+  If the Trash refuses it, nothing is deleted and I am told. If the Trash takes only part
+  of it, the rest is deleted for good (files in use: at the next start) and I am told. A
+  folder that is a link, or not inside `output_dir`, is never deleted.
+- **Given** a session from its start until its transcription is done, **then** rename and
+  delete are refused with a notice.
+- **Then** logs never contain titles, excerpts or transcript text.
+- **Not yet:** a native macOS window (it is a pair of dialogs) (#4).
 
 ### US-29 Right-to-left text readable in the Windows captions
 *As a Hebrew speaker on Windows, I want mixed Hebrew/English/number captions to read

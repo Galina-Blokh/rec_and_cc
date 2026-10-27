@@ -36,6 +36,9 @@ All notable changes to RecAndCC are documented here. The format is based on
 - This changelog.
 - Search across all transcripts with a local SQLite FTS5 index: `recandcc search` and a
   menu item (#59).
+- "Meeting notes…" in the menu and the Windows tray: past sessions newest first, with
+  open transcript / summary, reveal, rename (`title` in `session.json`) and delete to the
+  Trash (#4).
 - Opt-in local meeting summaries (`[summary] enabled = true`, Apple silicon): `summary.md`
   with a short summary and action items after each transcript, from a pinned Qwen2.5 3B
   model via mlx-lm; `recandcc summarize <session_dir>` (#4).
@@ -47,7 +50,8 @@ All notable changes to RecAndCC are documented here. The format is based on
 - Record only the app that triggered a session with `detection.system_audio_scope = "app"`
   (macOS per-app audio tap) (#63, #65).
 - `scripts/eval.py`: WER per language, language-ID accuracy, DER and RTF on a local,
-  consented speech set; see `docs/EVALUATION.md` (#34).
+  consented speech set; see `docs/EVALUATION.md` (#34). `--live` adds live caption latency
+  (p50 / p90 / max) by replaying each clip through the live transcriber (#13).
 - Requirements docs: intent, user stories with acceptance criteria, and a traceability table
   from stories to modules and tests, checked by a test (#33, #35).
 - ADR 0011: stack and packaging after v0.1 (Proposed) (#57).
