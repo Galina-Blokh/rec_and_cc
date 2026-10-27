@@ -141,7 +141,8 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   double-click a match (time, speaker, snippet) to open it.
 - **Export latest transcript (DOCX + PDF)** (*macOS only*; on Windows use `recandcc export`): writes `transcript.docx` and `transcript.pdf`
   next to the newest transcript. Same as `recandcc export`. If the session has a
-  `summary.md`, the summary and action items come first.
+  `summary.md`, the summary and action items come first. The export renders the summary's
+  headings, bullets, numbered items and notes (Hebrew headings follow the text, right to left).
 - **Meeting notes…**: your past sessions, newest first, with title (the app that triggered
   it, or one you gave it), date and time, duration, speakers, languages and whether it is
   transcribed. Pick one to open its transcript or `summary.md` (if there is one; its first

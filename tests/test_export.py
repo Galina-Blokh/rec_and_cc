@@ -309,7 +309,7 @@ def test_concurrent_exports_of_one_session_are_serialised(session):
 
 
 def test_a_pdf_failure_other_than_the_font_keeps_the_docx(session, monkeypatch):
-    def boom(folder, loaded=None):
+    def boom(folder, loaded=None, summary=None):
         raise RuntimeError("Привет, секрет")
 
     monkeypatch.setattr(export, "export_pdf", boom)
@@ -591,8 +591,8 @@ def test_markdown_variants(session):
     assert export.load_summary(session) == [
         ("bullet", "star"),
         ("bullet", "plus"),
-        ("bullet", "one"),
-        ("bullet", "two"),
+        ("num", "1. one"),
+        ("num", "2. two"),
         ("h2", "Sub"),
         ("note", "a_b_c"),
         ("p", "text"),
@@ -690,3 +690,66 @@ def test_docx_bidi_is_in_schema_order(session):
     tags = [c.tag.split("}")[1] for c in bullet._p.pPr]
     assert tags[:2] == ["pStyle", "numPr"] or tags[0] == "pStyle"
     assert tags.index("bidi") > tags.index("pStyle")
+
+
+def test_numbered_items_keep_their_numbers(session):
+    (session / "summary.md").write_text("# s\n\n1. first\n2) second\n", "utf-8")
+    texts = [p.text for p in Document(str(export.export_docx(session))).paragraphs]
+    assert "1. first" in texts and "2. second" in texts
+
+
+def test_numbered_hebrew_item_is_bidi(session):
+    (session / "summary.md").write_text("# s\n\n1. \u05dc\u05e9\u05dc\u05d5\u05d7\n", "utf-8")
+    p = next(
+        p for p in Document(str(export.export_docx(session))).paragraphs if p.text.startswith("1.")
+    )
+    assert p._p.pPr.find(qn("w:bidi")) is not None
+
+
+def test_both_formats_make_the_same_summary_decision(session, monkeypatch, caplog):
+    import os
+
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    real = export.export_docx
+
+    def docx_then_retranscribe(*a, **kw):
+        out = real(*a, **kw)
+        t = (session / "transcript.json").stat().st_mtime + 100
+        os.utime(session / "transcript.json", (t, t))  # transcript redone mid-export
+        return out
+
+    monkeypatch.setattr(export, "export_docx", docx_then_retranscribe)
+    seen = []
+    real_pdf = export.export_pdf
+    monkeypatch.setattr(
+        export,
+        "export_pdf",
+        lambda f, loaded=None, summary=None: seen.append(summary) or real_pdf(f, loaded, summary),
+    )
+    export.export_session(session)
+    assert seen and seen[0]  # the PDF got the same, non-empty summary as the DOCX
+    assert any(
+        p.text == "Action items" for p in Document(str(session / "transcript.docx")).paragraphs
+    )
+
+
+def test_a_stale_summary_is_logged_with_the_reason_only(session, caplog):
+    import logging
+    import os
+
+    summary = session / "summary.md"
+    summary.write_text(SUMMARY_MD, "utf-8")
+    t = (session / "transcript.json").stat().st_mtime
+    os.utime(summary, (t - 10, t - 10))
+    with caplog.at_level(logging.DEBUG, logger="recandcc.transcribe.export"):
+        assert export.load_summary(session) == []
+    assert "older than the transcript" in caplog.text
+    assert "Action items" not in caplog.text
+
+
+def test_a_year_is_not_a_numbered_item(session):
+    (session / "summary.md").write_text("2026. The budget was approved\n12. real item\n", "utf-8")
+    assert export.load_summary(session) == [
+        ("p", "2026. The budget was approved"),
+        ("num", "12. real item"),
+    ]
