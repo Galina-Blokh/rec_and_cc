@@ -85,6 +85,8 @@ def load_template(setting: str | Path | None) -> Template | None:
     if not path.is_absolute():
         path = CONFIG_DIR / path
     try:
+        if not path.is_file():  # a directory or a FIFO must not be opened (it could block)
+            raise ValueError("not a file")
         with path.open("rb") as f:
             blob = f.read(_MAX_BYTES + 1)
         if len(blob) > _MAX_BYTES:

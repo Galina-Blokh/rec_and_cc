@@ -348,6 +348,10 @@ don't have to name them myself, without the app ever asking for more permission 
   (unchanged without a template).
 - **Then** export needs no network, the files are owner-only and logs never contain the
   transcript text.
+- **Given** the session folder (or a parent) is swapped for a link or junction during the
+  export, **then** nothing is written through it: the folder is pinned once before anything
+  is read, and both files go to that folder or the export is refused (#129). A folder that
+  was already a link when the export started is exported as usual.
 - **Not yet:** the Windows tray entry; the PDF needs a system font with
   Latin, Cyrillic and Hebrew (Arial, DejaVu Sans), otherwise only DOCX is produced (#4).
 

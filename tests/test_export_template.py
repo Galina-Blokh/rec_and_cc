@@ -112,6 +112,16 @@ def test_section_order_and_custom_headings(session, tmp_path):
     ]
 
 
+def test_transcript_heading_needs_a_rendered_summary_part(session, tmp_path):
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    tpl = write_tpl(tmp_path, 'sections = ["transcript"]\n')
+    assert texts(session, str(tpl)) == PLAIN  # summary left out: no "Transcript" heading
+    tpl = write_tpl(tmp_path, 'sections = ["transcript", "summary"]\n')
+    assert "Transcript" not in texts(session, str(tpl))[:3]  # nothing rendered before it
+    tpl = write_tpl(tmp_path, 'sections = ["transcript"]\n[headings]\ntranscript = "Text"\n')
+    assert texts(session, str(tpl))[2] == "Text"  # explicit heading is always shown
+
+
 def test_sections_can_be_left_out(session, tmp_path):
     (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
     tpl = write_tpl(tmp_path, 'sections = ["summary"]\n')
@@ -170,3 +180,18 @@ def test_config_key_defaults_and_loads(tmp_path):
     assert load_config(cfg_path).export.template == "~/t.toml"
     cfg_path.write_text("[export]\ntemplate = 3\n", "utf-8")
     assert load_config(cfg_path).export.template == ""
+
+
+def test_a_sub_heading_stays_in_the_summary(session, tmp_path):
+    (session / "summary.md").write_text(
+        "# Summary\n\nIntro.\n\n### Details\n\nMore.\n\n## Action items\n\n- Do it\n", "utf-8"
+    )
+    tpl = write_tpl(tmp_path, 'sections = ["action_items"]\n')
+    out = texts(session, str(tpl))
+    assert "Details" not in out and "More." not in out and "Do it" in out
+
+
+def test_a_template_that_is_not_a_file_is_ignored(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING):
+        assert export_template.load_template(str(tmp_path)) is None  # a directory
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1

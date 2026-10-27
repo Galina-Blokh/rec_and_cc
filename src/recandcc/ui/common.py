@@ -1023,7 +1023,8 @@ class Controller:
 
     def _maybe_reload_config(self) -> None:
         """Apply edits made to config.toml by hand (detection settings, output dir, hotkey,
-        languages, keep_audio, audio_retention_days, speaker_names, live_captions, [summary]).
+        languages, keep_audio, audio_retention_days, speaker_names, live_captions, [summary],
+        [export]).
         Read and apply are one step under ``_save_lock``: a menu write never interleaves."""
         hotkey_changed = False
         with self._save_lock:
