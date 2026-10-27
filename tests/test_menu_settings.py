@@ -358,6 +358,7 @@ def test_retention_is_not_purged_when_the_save_fails(tmp_path, monkeypatch):
     _join("retention-set")
     assert path.read_text() == "[summary\n"
     assert purged == []  # no audio deleted under a setting that was not saved
+    assert ctrl.cfg.transcription.audio_retention_days == 0  # the menu shows what is saved
 
 
 def test_superseded_retention_choice_does_not_purge(tmp_path, monkeypatch):
@@ -373,6 +374,27 @@ def test_superseded_retention_choice_does_not_purge(tmp_path, monkeypatch):
     ctrl.set_retention(1)
     _join("retention-set")
     assert purged == []  # the stale "1 day" purge is skipped; Never's own call decides
+
+
+def test_retention_click_survives_a_reload_before_its_save(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda: None)
+    go, real = threading.Event(), ctrl.write_settings
+
+    def blocked_save(*keys, **kw):  # the worker hasn't written yet
+        assert go.wait(5)
+        return real(*keys, **kw)
+
+    monkeypatch.setattr(ctrl, "write_settings", blocked_save)
+    path.write_text(path.read_text() + "[transcription]\naudio_retention_days = 0\n")
+    ctrl._config_mtime = -1.0  # config.toml changed on disk, still with the old value
+    ctrl.set_retention(7)
+    ctrl._maybe_reload_config()
+    assert ctrl.cfg.transcription.audio_retention_days == 7  # the click is kept
+    go.set()
+    _join("retention-set")
+    assert _kept(path)["transcription"]["audio_retention_days"] == 7
+    assert ctrl._dirty == {}
 
 
 def _fake_autostart(monkeypatch, module) -> None:

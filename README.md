@@ -158,8 +158,9 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
 - **Use names from the call app** (*macOS only*, off by default): see
   [Names from the call app](#names-from-the-call-app).
 - **Delete audio after**: Never / 1 / 7 / 30 / 90 days. Audio of transcribed recordings is
-  deleted after that many days; transcripts are always kept. Any number of days can be set as
-  `audio_retention_days` in the settings.
+  deleted after that many days; transcripts are always kept. Choosing a value deletes at once
+  the transcribed audio already older than that ("1 day" deletes transcribed audio more than
+  a day old). Any number of days can be set as `audio_retention_days` in the settings.
 - **Settings…** (*macOS only*; needs the rebuilt helper, `./native/macos/build.sh`): a window for mode,
   transcripts folder, languages, keep audio, live captions and speaker names. Saved values
   apply at once. Without it, the app opens `config.toml` instead.

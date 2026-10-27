@@ -1283,20 +1283,32 @@ class Controller:
     def set_retention(self, days: int) -> None:
         """ "Delete audio after" menu (both shells): apply ``days`` in memory at once (the menu
         check reads it), then save only this key and purge expired audio on a worker. Audio
-        is deleted only once the choice is saved (a failed save reverts at the next start) and
-        only if it is still the current choice (a quick second click supersedes this one)."""
-        days = int(days)
+        is deleted only once the choice is saved (a failed save restores the previous value,
+        as the next start would) and only if it is still the current choice (a quick second
+        click supersedes this one)."""
+        days, key = int(days), "transcription.audio_retention_days"
+        self._mark_dirty((key,), 1)  # a config reload before the write must not undo the click
+        previous = self.cfg.transcription.audio_retention_days
         self.cfg.transcription.audio_retention_days = days
 
         def apply() -> None:
-            key = "transcription.audio_retention_days"
-            if not self.write_settings(key, title="Delete audio after"):
-                return
+            try:
+                saved = self.write_settings(key, title="Delete audio after")
+            finally:
+                self._mark_dirty((key,), -1)
             with self._retention_lock:  # serialises menu purges; the check sees the latest
-                if self.cfg.transcription.audio_retention_days == days:
+                if self.cfg.transcription.audio_retention_days != days:
+                    return  # a newer click owns the setting now
+                if saved:
                     self.purge_audio_now()
+                else:  # not in config.toml: show what the next start will use
+                    self.cfg.transcription.audio_retention_days = previous
 
-        threading.Thread(target=apply, daemon=True, name="retention-set").start()
+        try:
+            threading.Thread(target=apply, daemon=True, name="retention-set").start()
+        except Exception:
+            self._mark_dirty((key,), -1)
+            raise
 
     def sensitivity_preset(self) -> str | None:
         return current_preset(self.cfg.detection)
