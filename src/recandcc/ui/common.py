@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from .. import hotkey as hotkey_mod
-from ..cloudsync import cloud_sync_provider, warning_text
+from ..cloudsync import cloud_sync_provider, network_volume, network_warning_text, warning_text
 from ..config import (
     CONFIG_PATH,
     LOG_DIR,
@@ -63,6 +63,8 @@ CFG_HOTKEY = object()  # apply_hotkey(): use cfg.hotkey
 RECENT_COUNT = 10
 SEARCH_LIMIT = 20
 HOTKEY_DEBOUNCE_S = 0.5
+NET_PROBE_WAIT_S = 2.0  # how long a refresh waits for the network-volume probe
+NET_PROBE_RETRY_S = 300.0  # after a hung or failed probe
 REFRESH_EVERY_S = 10.0
 PERM_KINDS = ("microphone", "system_audio")
 PERM_TITLES = {"microphone": "Microphone", "system_audio": "System audio"}
@@ -311,6 +313,9 @@ class Controller:
         self._lang_lock = threading.Lock()  # transcription.languages + its raw spelling
         self._summaries = None  # SummaryQueue, created on the first summary
         self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
+        self._net_probe: threading.Thread | None = None
+        self._net_retry: dict[Path, float] = {}  # folder -> earliest next probe (monotonic)
+        self._net_warned: set[Path] = set()  # network-volume output dirs already warned about
         # global shortcut
         self._hotkey_lock = threading.Lock()
         # Serializes whole apply_hotkey calls (startup and a config reload can overlap), and
@@ -809,6 +814,7 @@ class Controller:
     def _refresh(self) -> None:
         try:
             self._maybe_reload_config()
+            self._check_network_volume()
             self._check_cloud_sync()  # before listing output_dir, which may stall on a cloud mount
             perm = permission_status()
             recent = recent_transcripts(self.cfg.output_dir)
@@ -820,6 +826,48 @@ class Controller:
             with self._lock:
                 self._refreshing = False
         self.events.put(("refreshed",))
+
+    def _check_network_volume(self) -> None:
+        """Warn once per output folder on a network share (SMB/NFS/UNC...): audio and
+        transcripts would leave the device. The path is in the notice, never in the log.
+        The probe (stat/statfs) can hang forever on a dead hard mount, so it runs on its own
+        daemon thread and is waited for briefly; a late answer still posts the notice."""
+        out = Path(self.cfg.output_dir)
+        with self._lock:
+            if out in self._net_warned:
+                return
+            if self._net_probe is not None and self._net_probe.is_alive():
+                return  # a previous probe is still stuck: don't pile up threads
+            if time.monotonic() < self._net_retry.get(out, 0.0):
+                return  # a recent probe of this folder hung or failed
+            self._net_probe = t = threading.Thread(
+                target=self._probe_network_volume, args=(out,), daemon=True, name="ui-netprobe"
+            )
+        t.start()
+        t.join(NET_PROBE_WAIT_S)
+        if t.is_alive():  # hung (dead hard mount): retry only after a while
+            with self._lock:
+                self._net_retry[out] = time.monotonic() + NET_PROBE_RETRY_S
+
+    def _probe_network_volume(self, out: Path) -> None:
+        try:
+            if cloud_sync_provider(out) is not None:
+                return  # the cloud-sync notice already covers it
+            kind = network_volume(out)
+        except Exception:  # noqa: BLE001 - best effort
+            with self._lock:
+                self._net_retry[out] = time.monotonic() + NET_PROBE_RETRY_S
+            return
+        if kind is None:
+            return
+        with self._lock:
+            if out in self._net_warned:
+                return
+            self._net_warned.add(out)
+        log.warning("output folder is on %s; use a local folder to keep it", kind)
+        self.events.put(
+            ("notice", "Transcripts folder is on the network", network_warning_text(out, kind))
+        )
 
     def _check_cloud_sync(self) -> None:
         """Warn once per output folder if it is synced to iCloud / OneDrive / ...: recordings
