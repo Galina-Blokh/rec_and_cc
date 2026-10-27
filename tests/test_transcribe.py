@@ -1,4 +1,7 @@
-"""Unit tests for recandcc.transcribe (no Whisper model needed)."""
+"""Unit tests for recandcc.transcribe (no Whisper model needed).
+
+Stories: US-08, US-09, US-10, US-13.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +10,7 @@ import threading
 from datetime import datetime, timedelta
 
 import numpy as np
+import pytest
 import soundfile as sf
 
 from recandcc.config import TranscriptionConfig
@@ -302,3 +306,141 @@ def test_queue_order_and_errors(tmp_path):
     assert [d[0] for d in done] == ["a", "bad", "b"]
     assert isinstance(done[1][1], ValueError)
     assert q.pending() == 0
+
+
+def test_queue_finalize_replaces_transcription_and_falls_back_on_failure(tmp_path):
+    stub, done = StubTranscriber(), []
+    q = TranscriptionQueue(stub, on_done=lambda s, r: done.append((s.id, r)))
+    q.submit(_s("live", tmp_path), finalize=lambda: [seg(0, 1, "from live")])
+
+    def broken():
+        raise RuntimeError("live failed")
+
+    q.submit(_s("fallback", tmp_path), finalize=broken)
+    q.shutdown(wait=True)
+    assert stub.order == ["fallback"]  # only the failed live session was transcribed
+    assert done[0][1][0].text == "from live"
+    assert done[1][1][0].text == "fallback"
+
+
+def test_queue_survives_a_failing_callback_and_rejects_work_after_shutdown(tmp_path):
+    stub, calls = StubTranscriber(), []
+
+    def on_done(s, r):
+        calls.append(s.id)
+        raise RuntimeError("UI gone")
+
+    q = TranscriptionQueue(stub, on_done=on_done)
+    q.submit(_s("a", tmp_path))
+    q.submit(_s("b", tmp_path))
+    q.shutdown(wait=True)
+    assert calls == ["a", "b"]
+    with pytest.raises(RuntimeError):
+        q.submit(_s("c", tmp_path))
+
+
+def test_queue_shutdown_without_wait_drops_sessions_not_started(tmp_path):
+    started, release = threading.Event(), threading.Event()
+
+    class Slow(StubTranscriber):
+        def transcribe_session(self, session, progress=None):
+            started.set()
+            release.wait(5)
+            return super().transcribe_session(session, progress)
+
+    stub = Slow()
+    q = TranscriptionQueue(stub)
+    for sid in ["a", "b", "c"]:
+        q.submit(_s(sid, tmp_path))
+    assert started.wait(5)
+    q.shutdown(wait=False)
+    assert q.pending() == 1  # only the session in progress is left
+    release.set()
+    q._thread.join(5)
+    assert stub.order == ["a"] and q.pending() == 0
+    assert not q._thread.is_alive()  # the stop marker reached the dispatcher
+
+
+def test_queue_submit_racing_shutdown_is_never_stranded(monkeypatch, tmp_path):
+    """shutdown() runs exactly while submit() is enqueueing: the session must still run."""
+    import queue as queue_mod
+
+    from recandcc.transcribe import queue as tq
+
+    stopper: list[threading.Thread] = []
+    progressed = threading.Event()  # shutdown() is waiting for the lock, or queued _STOP
+    holder = {}
+
+    class SpyLock:
+        def __init__(self):
+            self._lock = threading.Lock()
+
+        def __enter__(self):
+            if stopper and threading.current_thread() is stopper[0]:
+                progressed.set()
+            return self._lock.__enter__()
+
+        def __exit__(self, *exc):
+            return self._lock.__exit__(*exc)
+
+    class RacingQueue(queue_mod.Queue):
+        def put(self, item, *a, **k):
+            if item is tq._STOP:
+                progressed.set()
+            elif not stopper:  # the submit: let shutdown() run as far as it can first
+                stopper.append(threading.Thread(target=holder["q"].shutdown))
+                stopper[0].start()
+                assert progressed.wait(5)
+            super().put(item, *a, **k)
+
+    # The dispatcher must block on the racing queue from the start.
+    monkeypatch.setattr(tq.queue, "Queue", RacingQueue)
+    stub, done = StubTranscriber(), []
+    q = holder["q"] = TranscriptionQueue(stub, on_done=lambda s, r: done.append(s.id))
+    q._lock = SpyLock()
+    q.submit(_s("a", tmp_path))
+    stopper[0].join(5)
+    q._thread.join(5)
+    assert done == ["a"] and q.pending() == 0
+    assert not q._thread.is_alive()
+
+
+def test_queue_second_shutdown_still_waits_for_the_running_session(tmp_path):
+    started, release = threading.Event(), threading.Event()
+
+    class Slow(StubTranscriber):
+        def transcribe_session(self, session, progress=None):
+            started.set()
+            release.wait(5)
+            return super().transcribe_session(session, progress)
+
+    stub = Slow()
+    q = TranscriptionQueue(stub)
+    q.submit(_s("a", tmp_path))
+    assert started.wait(5)
+    q.shutdown(wait=False)
+    threading.Timer(0.2, release.set).start()
+    q.shutdown(wait=True)  # joins the dispatcher even though it was already closed
+    assert stub.order == ["a"] and not q._thread.is_alive()
+
+
+def test_queue_repeated_shutdown_without_wait_keeps_the_stop_marker(tmp_path):
+    started, release = threading.Event(), threading.Event()
+
+    class Slow(StubTranscriber):
+        def transcribe_session(self, session, progress=None):
+            started.set()
+            release.wait(5)
+            return super().transcribe_session(session, progress)
+
+    stub = Slow()
+    q = TranscriptionQueue(stub)
+    q.submit(_s("a", tmp_path))
+    q.submit(_s("b", tmp_path))
+    assert started.wait(5)
+    q.shutdown(wait=False)  # drops "b", queues the stop marker
+    q.shutdown(wait=False)  # drains that marker again: it must be put back
+    release.set()
+    q._thread.join(5)
+    assert stub.order == ["a"] and q.pending() == 0
+    assert not q._thread.is_alive()

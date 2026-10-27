@@ -252,8 +252,9 @@ models load from disk without contacting anything (tested with all network acces
 The folders RecAndCC creates for recordings (the transcripts folder, each day and each
 session) are readable only by you (`0700` on macOS). A transcripts folder that already
 existed keeps its permissions; tighten it with `chmod 700 ~/Documents/Transcribes`.
-`~/Documents` may be synced by iCloud Drive ("Desktop & Documents Folders"); set
-`output_dir` to a folder outside it if recordings must stay on this Mac only.
+`~/Documents` may be synced by iCloud Drive ("Desktop & Documents Folders") on macOS, and
+`Documents` by OneDrive folder backup on Windows; set `output_dir` to a folder outside it if
+recordings must stay on this computer only.
 
 ### Retention
 
@@ -313,6 +314,8 @@ Windows needs no system-audio permission. The microphone is controlled in
   data flow, design decisions
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md): every setting explained
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): building, testing, project layout, contributing
+- [docs/requirements/](docs/requirements/intent.md): intent, goals and non-goals, and
+  user stories with acceptance criteria
 - [docs/ROADMAP.md](docs/ROADMAP.md): what's next
 - [CHANGELOG.md](CHANGELOG.md): what changed in each version
 - [SECURITY.md](SECURITY.md): reporting security issues, threat model
