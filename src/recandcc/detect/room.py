@@ -138,6 +138,7 @@ class RoomMonitor:
         self._processed = 0  # samples analysed by the VAD in this generation
         self._last_speech = 0  # sample index where speech was last heard
         self._last_frame_clock = clock()
+        self._frame_at = float("-inf")  # clock() of this stream's last frame (not reset())
         self._q: SimpleQueue = SimpleQueue()
         self._worker: threading.Thread | None = None
         self._closed = False
@@ -164,6 +165,7 @@ class RoomMonitor:
                 self._worker.start()
             self._stream += 1
             self._reset_locked()
+            self._frame_at = float("-inf")
             stream = self._stream
         try:
             src = self.source_factory()
@@ -192,6 +194,7 @@ class RoomMonitor:
             src, self._source = self._source, None
             self._stream += 1
             self._reset_locked()
+            self._frame_at = float("-inf")
         if src is not None:
             self._stop_source(src)
             log.info("room listening: microphone closed")
@@ -255,6 +258,12 @@ class RoomMonitor:
         with self._lock:
             return self.clock() - self._last_frame_clock
 
+    def last_frame_at(self) -> float:
+        """``clock()`` time the current mic stream last delivered frames; ``-inf`` if it
+        hasn't (unlike ``seconds_since_frame``, ``reset()`` doesn't move it)."""
+        with self._lock:
+            return self._frame_at
+
     def session_source(self) -> AudioSource:
         """An ``AudioSource`` for the room session's mic track: the pre-roll (last
         ``max(room_preroll_s, room_window_s)`` seconds), then the live frames. When it is
@@ -289,7 +298,7 @@ class RoomMonitor:
         with self._lock:
             if stream != self._stream:
                 return
-            self._last_frame_clock = self.clock()
+            self._last_frame_clock = self._frame_at = self.clock()
             self._ring.append(block)
             self._ring_size += block.size
             while self._ring and self._ring_size - self._ring[0].size >= keep:

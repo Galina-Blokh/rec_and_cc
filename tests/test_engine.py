@@ -999,6 +999,9 @@ class FakeRoom:
     def seconds_since_frame(self):
         return self.stall
 
+    def last_frame_at(self):
+        return float("inf")  # always delivering
+
     def session_source(self):  # only its identity is checked: the fake recorder opens nothing
         raise AssertionError("not opened by the fake recorder")
 
@@ -1272,6 +1275,45 @@ def test_an_idle_room_mic_that_stalls_is_reopened_and_backs_off():
         h.run(3600)  # the new one stalls too: retry with back-off, not every few seconds
         assert 10 < len(sources) <= 3600 / ROOM_RETRY_S + 2
         assert h.status == IDLE
+    finally:
+        h.eng.shutdown()
+
+
+def test_a_dead_room_mic_that_opens_slowly_still_backs_off():
+    """A slow open (Bluetooth, helper) of a dead device whose one block arrives just after
+    start() returns: that block is no proof of health, so the second stall backs off."""
+    from recandcc.detect.room import RoomMonitor
+
+    h = _room_harness()
+    sources: list[_StallingSource] = []
+
+    class SlowSource(_StallingSource):
+        def start(self, on_frames):
+            self.cb, self.pending = on_frames, True
+            h.clock.t += 2  # the open takes 2 s; the device's one block comes after it
+
+    def factory():
+        sources.append(SlowSource())
+        return sources[-1]
+
+    silent = lambda audio: np.zeros(len(audio) // 512, dtype=np.float32)  # noqa: E731
+    h.room = h.eng.room = RoomMonitor(h.cfg.detection, factory, vad=silent, clock=h.clock)
+
+    def run(seconds):
+        end = h.clock.t + seconds
+        while h.clock.t < end:
+            h.eng.tick()
+            h.clock.t += 1
+            src = sources[-1] if sources else None
+            if src is not None and src.cb is not None and src.pending:
+                src.pending = False
+                src.cb(np.zeros(1600, dtype=np.float32))
+
+    try:
+        run(30)  # the first stall reopens at once; the second one backs off
+        assert len(sources) == 2
+        run(3600)
+        assert len(sources) <= 3600 / ROOM_RETRY_S + 3
     finally:
         h.eng.shutdown()
 

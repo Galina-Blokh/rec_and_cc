@@ -683,8 +683,10 @@ class Engine:
                 if self._room_stalled:  # stalled again right after a reopen: back off
                     self._room_retry_at = now + ROOM_RETRY_S
                 self._room_stalled = True
-            elif now - self._room_opened_at >= ROOM_STALL_S:
-                self._room_stalled = False  # it has delivered frames since it opened
+            elif room.last_frame_at() >= self._room_opened_at + ROOM_STALL_S:
+                # Healthy only if frames kept coming well after the open: a dead device can
+                # deliver one block while a slow start() runs, and must still back off.
+                self._room_stalled = False
         if want and not room.running and now >= self._room_retry_at:
             if room.start():
                 self._room_opened_at = self.clock()  # start() may be slow (helper, prompt)
