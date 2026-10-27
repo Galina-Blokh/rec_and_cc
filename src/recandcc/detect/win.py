@@ -27,10 +27,8 @@ from __future__ import annotations
 import logging
 import ntpath
 import os
-import re
 import sys
 import threading
-import time
 
 from ..models import AudioProcess
 from .base import ActivityMonitor
@@ -41,28 +39,12 @@ _MIC_KEY = (
     r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
 )
 _STATE_ACTIVE = 1
-_TABLE_TTL_S = 10.0  # re-walk the process list at most this often while the mic set is stable
-# ... and this often while a package is not yet mapped to its own exe (only a helper, or
-# nothing, seen so far), so the app is picked up within the engine's min_active_s debounce.
-_UNSETTLED_TTL_S = 2.0
-_HELPER_WORDS = ("autostart", "update", "crash", "helper")
-
-
-def _alnum(s: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", s.lower())
-
-
-def _named_after(exe: str, family: str) -> bool:
-    """``ms-teams.exe`` is named after package ``MSTeams_8wekyb3d8bbwe``."""
-    return _alnum(exe.rsplit(".", 1)[0]) == _alnum(family.split("_")[0])
 
 
 class WinActivityMonitor(ActivityMonitor):
     def __init__(self) -> None:
         self._tls = threading.local()
         self._own_exe = os.path.normcase(os.path.abspath(sys.executable))
-        self._table: tuple | None = None  # (mic key, time, by_family, by_name)
-        self._chosen: dict[str, str] = {}  # package family -> exe reported last time
 
     def _ensure_com(self) -> None:
         if getattr(self._tls, "com", False):
@@ -145,69 +127,18 @@ class WinActivityMonitor(ActivityMonitor):
         walk(_MIC_KEY + r"\NonPackaged", packaged=False)
         return users
 
-    def _process_table(
-        self, key: frozenset[str], ttl: float = _TABLE_TTL_S
-    ) -> tuple[dict[str, list[tuple[str, int]]], dict[str, int]]:
-        """One psutil walk -> (package family -> [(exe_lower, pid)], exe_lower -> pid).
-
-        The consent store names packaged apps by family (``MSTeams_8wekyb3d8bbwe``) while
-        WASAPI sessions and the app lists use exe names (``ms-teams.exe``). Packaged apps run
-        from ``...\\WindowsApps\\<Name>_<Version>_<Arch>_<ResourceId>_<PublisherId>\\``, and
-        the family name is ``<Name>_<PublisherId>``. Cached until the set of mic users
-        (``key``) changes or ``ttl`` passes, so polling does not walk every second.
-        """
-        now = time.monotonic()
-        if self._table and self._table[0] == key and now - self._table[1] < ttl:
-            return self._table[2], self._table[3]
-        by_family: dict[str, list[tuple[str, int]]] = {}
-        by_name: dict[str, int] = {}
+    def _pid_for_exe(self, exe_lower: str) -> int:
         try:
-            import psutil  # pyright: ignore[reportMissingModuleSource] - pycaw dependency, Windows only
+            import psutil  # pycaw dependency  # pyright: ignore[reportMissingModuleSource]
 
             # ad_value=None: protected processes yield None, not an AccessDenied instance
-            for p in psutil.process_iter(["name", "exe"], ad_value=None):
-                name, exe = p.info.get("name"), p.info.get("exe")
-                name = name.lower() if isinstance(name, str) else ""
-                if name:
-                    by_name.setdefault(name, p.pid)
-                if not isinstance(exe, str):
-                    continue
-                parts = exe.lower().split("\\")
-                if "windowsapps" not in parts[:-2]:
-                    continue
-                fields = parts[parts.index("windowsapps") + 1].split("_")
-                family = f"{fields[0]}_{fields[-1]}"
-                by_family.setdefault(family, []).append((name or parts[-1], p.pid))
+            for p in psutil.process_iter(["name"], ad_value=None):
+                name = p.info.get("name")
+                if isinstance(name, str) and name.lower() == exe_lower:
+                    return p.pid
         except Exception:
-            log.debug("process lookup failed", exc_info=True)
-            return by_family, by_name  # partial: use it this poll, but don't cache it
-        self._table = (key, now, by_family, by_name)
-        return by_family, by_name
-
-    def _choose(self, family: str, cands: list[tuple[str, int]], procs: dict) -> tuple[str, int]:
-        """Pick one process per package, deterministically and stable across polls: a key
-        that flips between polls looks like a new app to the engine and ends the session."""
-        cands = sorted(cands)
-        sticky = self._chosen.get(family)
-        pick = (
-            # The exe named after the package is the app itself (a helper seen first must not
-            # keep the key once the app starts).
-            next((c for c in cands if _named_after(c[0], family)), None)
-            # Then sticky: a helper briefly playing audio must not take over the key.
-            or next((c for c in cands if c[0] == sticky), None)
-            or next((c for c in cands if c[0] in procs), None)  # has the WASAPI session
-            or next((c for c in cands if not any(w in c[0] for w in _HELPER_WORDS)), None)
-            or cands[0]
-        )
-        self._chosen[family] = pick[0]
-        return pick
-
-    def _resolve_unlisted(self, family: str, by_name: dict[str, int]) -> str | None:
-        """A packaged mic user missing from the walk (failed walk, exe path unreadable):
-        keep last poll's choice, else an exe named after the package. ``None``: unknown."""
-        if sticky := self._chosen.get(family):
-            return sticky
-        return next((n for n in sorted(by_name) if _named_after(n, family)), None)
+            log.debug("process lookup for %s failed", exe_lower, exc_info=True)
+        return 0
 
     def snapshot(self) -> list[AudioProcess]:
         self._ensure_com()
@@ -221,48 +152,9 @@ class WinActivityMonitor(ActivityMonitor):
         except Exception:
             log.exception("reading microphone consent store failed")
             mic = []
-        mic = [(exe, full) for exe, full in mic if os.path.normcase(full) != self._own_exe]
-        key = frozenset(full.lower() for _, full in mic)
-        # A package whose own exe plays audio (a typical Teams call) maps to it directly.
-        live = {
-            full.lower(): e
-            for _, full in mic
-            if "\\" not in full
-            and (e := next((e for e in sorted(procs) if _named_after(e, full)), None))
-        }
-        # Walk only to map the other packages to an exe or to find a mic-only app's pid; an
-        # app that also plays audio already has its pid from the WASAPI session.
-        need = [
-            (exe, full)
-            for exe, full in mic
-            if full.lower() not in live and ("\\" not in full or exe not in procs)
-        ]
-        unsettled = any(
-            "\\" not in full and not _named_after(self._chosen.get(full.lower(), ""), full)
-            for _, full in need
-        )
-        ttl = _UNSETTLED_TTL_S if unsettled else _TABLE_TTL_S
-        by_family, by_name = self._process_table(key, ttl) if need else ({}, {})
         for exe, full in mic:
-            if "\\" not in full:
-                family = full.lower()
-                sticky = self._chosen.get(family, "")
-                if family in live:
-                    exe = self._chosen[family] = live[family]
-                    pid = procs[exe].pid
-                elif _named_after(sticky, family) and sticky in by_name:
-                    # The app still runs, even if its exe path was unreadable this walk and
-                    # only helpers are listed under the package: don't demote it to one.
-                    exe, pid = sticky, by_name[sticky]
-                elif cands := by_family.get(family):
-                    exe, pid = self._choose(family, cands, procs)
-                else:
-                    exe = self._resolve_unlisted(family, by_name) or exe
-                    if exe != full.split("_")[0].lower():
-                        self._chosen[family] = exe
-                    pid = by_name.get(exe, 0)
-            else:
-                pid = by_name.get(exe, 0)
+            if os.path.normcase(full) == self._own_exe:
+                continue
             existing = procs.get(exe)
             if existing:
                 procs[exe] = AudioProcess(
@@ -274,13 +166,12 @@ class WinActivityMonitor(ActivityMonitor):
                 )
             else:
                 procs[exe] = AudioProcess(
-                    pid=pid,
+                    pid=self._pid_for_exe(exe),
                     bundle_id=exe,
                     name=exe,
                     input_active=True,
                     output_active=False,
                 )
-        self._chosen = {f: e for f, e in self._chosen.items() if f in key}  # off the mic
         return list(procs.values())
 
     def release_thread(self) -> None:
