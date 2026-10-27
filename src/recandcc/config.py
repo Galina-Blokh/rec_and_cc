@@ -620,6 +620,11 @@ def _migrate_summary_model(summary: SummaryConfig, path: Path, *, persist: bool)
     config.toml (that key only), and with summaries on ``summary._notice`` is set for a
     one-time notice (ui.common.Controller): after the switch, or the first time the 3B is
     kept (remembered by a marker file next to config.toml)."""
+    if not isinstance(summary.accept_qwen_research_licence, bool):  # e.g. "false": not consent
+        log.warning(
+            "config: [summary] accept_qwen_research_licence must be true or false; using false"
+        )
+        summary.accept_qwen_research_licence = False
     if summary.model != QWEN_RESEARCH_SUMMARY_MODEL or summary.accept_qwen_research_licence:
         return
     if summary_model_on_disk(QWEN_RESEARCH_SUMMARY_MODEL) and not summary_model_on_disk(

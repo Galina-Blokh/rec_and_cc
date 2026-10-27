@@ -376,12 +376,11 @@ class SummaryQueue:
         owned = None
         gen = self.generate
         if gen is None:
+            model = self.cfg.summary.model  # a config reload may change it while we wait
             gen = owned = MlxGenerator(
-                self.cfg.summary.model,
+                model,
                 self.cfg.transcription.allow_unpinned_models,
-                on_download=lambda: self.notify(
-                    "Summary model", download_notice(self.cfg.summary.model)
-                ),
+                on_download=lambda: self.notify("Summary model", download_notice(model)),
             )
 
         def gated(messages: Messages, max_tokens: int) -> str:

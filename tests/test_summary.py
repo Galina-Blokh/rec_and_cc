@@ -263,6 +263,19 @@ def test_config_does_not_import_transcribe():
         assert gpu.revision(model) == rev
 
 
+@pytest.mark.parametrize("value", ['"false"', '"yes"', "1"])
+def test_non_boolean_licence_acceptance_is_not_consent(tmp_path, value):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        f'[summary]\nmodel = "{QWEN_RESEARCH_SUMMARY_MODEL}"\n'
+        f"accept_qwen_research_licence = {value}\n",
+        "utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.summary.model == DEFAULT_SUMMARY_MODEL
+    assert cfg.summary.accept_qwen_research_licence is False
+
+
 def test_only_the_pinned_snapshot_counts_for_a_pinned_repo():
     cache = config_mod.HF_CACHE_DIR
     _cache_model(cache, QWEN_RESEARCH_SUMMARY_MODEL, rev="0" * 40)  # some other commit
