@@ -177,7 +177,8 @@ def mlx_word_timestamps() -> bool:
     if "mlx_whisper.transcribe" not in sys.modules:
         try:
             import_mlx_whisper()
-        except ImportError:
+        except Exception:  # any setup failure just means no words, never a crash
+            log.debug("mlx_whisper import failed: no MLX word timestamps", exc_info=True)
             return False
     # What mlx_whisper.transcribe really calls.
     owner = sys.modules.get("mlx_whisper.transcribe")

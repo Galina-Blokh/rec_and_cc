@@ -123,16 +123,31 @@ def test_alignment_heads_are_capped_but_turbo_is_unchanged():
 
 
 def test_installed_upstream_timing_is_the_vendored_version():
-    """If this fails, mlx-whisper's timing.py changed: review mlx_timing.py against it."""
+    """Pins upstream timing.py on purpose: mlx_timing.py is a copy of it, so any change
+    upstream needs a review of the copy before the pin moves."""
     import hashlib
 
     spec = gpu.importlib.util.find_spec("mlx_whisper")
     if spec is None or not spec.submodule_search_locations:
         pytest.skip("mlx-whisper is not installed")
     path = gpu.Path(next(iter(spec.submodule_search_locations))) / "timing.py"
+    if gpu._mlx_whisper_version() != gpu.VENDORED_TIMING_VERSION:
+        pytest.skip("another mlx-whisper version: the version guard keeps MLX words off")
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    assert gpu._mlx_whisper_version() == gpu.VENDORED_TIMING_VERSION
-    assert digest == "2736c2bf19f2ebbaa521dae9deb3748c6b5d5f319af729f4078dc2b0769822cd"
+    assert digest == "2736c2bf19f2ebbaa521dae9deb3748c6b5d5f319af729f4078dc2b0769822cd", (
+        f"{path} differs from the mlx-whisper {gpu.VENDORED_TIMING_VERSION} it was vendored "
+        "from. Diff it against src/recandcc/transcribe/mlx_timing.py, port any change, then "
+        f"re-pin this test with: shasum -a 256 {path}"
+    )
+
+
+def test_aligner_setup_failure_means_no_words(monkeypatch):
+    def broken():
+        raise RuntimeError("Metal device unavailable")
+
+    monkeypatch.delitem(sys.modules, "mlx_whisper.transcribe", raising=False)
+    monkeypatch.setattr(gpu, "import_mlx_whisper", broken)
+    assert gpu.mlx_word_timestamps() is False
 
 
 @pytest.fixture

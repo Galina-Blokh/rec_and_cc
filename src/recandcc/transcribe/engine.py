@@ -96,7 +96,6 @@ def _gather(futures: dict[Track, Future]) -> Future:
 
 LANGUAGE_ID_MODEL = "base"  # small multilingual model used only for per-region language ID
 MIN_LANGUAGE_CONFIDENCE = 0.75  # below this a chunk's language is re-checked with the main model
-WORD_FAILURE_LIMIT = 2  # word-timestamp failures per session before words are turned off
 # How long writing the final transcript waits for speaker diarization. If it takes longer, the
 # transcript is written with "Others" right away and rewritten with speaker labels when ready.
 DIARIZE_WAIT_S = 5.0
@@ -146,7 +145,7 @@ class Transcriber:
         self._init_lock = threading.Lock()
         self._run_lock = threading.Lock()
         # Word-timestamp failures in the current session (reset per session in _run); after
-        # WORD_FAILURE_LIMIT the session's remaining chunks are transcribed without words.
+        # the first one the session's remaining chunks are transcribed without words.
         self._word_failures = 0
         self._word_failures_lock = threading.Lock()
         self._diarizer: Diarizer | None = None
@@ -494,8 +493,8 @@ class Transcriber:
         still loading (live). ``words``: keep word timings in ``Segment.words`` (on MLX only
         when ``mlx_word_timestamps()``: mlx-whisper 0.4.3 with our numpy aligner)."""
         model = self._model_for(language, wait_for_model)
-        if words and self._word_failures >= WORD_FAILURE_LIMIT:
-            words = False  # circuit breaker: this session's word pass keeps failing
+        if words and self._word_failures:
+            words = False  # circuit breaker: this session's word pass already failed
         failure = None
         try:
             pieces = self._pieces(model, audio, language, beam_size, words)
@@ -534,22 +533,18 @@ class Transcriber:
         return out
 
     def _note_word_failure(self, backend: str, error: str, offset: float) -> None:
-        """Warn (no transcript text) and count; at the limit, say once that words are off."""
+        """Count, and warn once per session (no transcript text); chunks already running
+        in parallel may fail too, and only log at DEBUG."""
         with self._word_failures_lock:
             self._word_failures += 1
-            n = self._word_failures
-        log.warning(
-            "word timestamps failed (%s, %s) for the chunk at %.1f s; kept without words",
+            first = self._word_failures == 1
+        (log.warning if first else log.debug)(
+            "word timestamps failed (%s, %s) for the chunk at %.1f s; kept without words, "
+            "and off for the rest of this session",
             backend,
             error,
             offset,
         )
-        if n == WORD_FAILURE_LIMIT:
-            log.warning(
-                "word timestamps failed %d times (%s): off for the rest of this session",
-                n,
-                backend,
-            )
 
     @staticmethod
     def _pieces(

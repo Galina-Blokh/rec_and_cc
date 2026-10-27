@@ -474,7 +474,7 @@ def test_a_failing_word_pass_keeps_the_session_and_the_chunk_whole(tmp_path, mon
     monkeypatch.setattr(eng, "find_speech", lambda a: regions)
     monkeypatch.setattr(eng, "mlx_word_timestamps", lambda: True)
     s = make_session(tmp_path, {eng.Track.ME: "me.wav", eng.Track.OTHERS: "others.wav"})
-    t = eng.Transcriber(TranscriptionConfig(model="fake", workers=2, split_on_speaker_change=True))
+    t = eng.Transcriber(TranscriptionConfig(model="fake", workers=1, split_on_speaker_change=True))
     model = Flaky()
     monkeypatch.setattr(t, "_ensure_loaded", lambda: _install(t, model, FakeModel()))
     monkeypatch.setattr(t, "_word_tracks", lambda _s: (eng.Track.OTHERS,))
@@ -482,16 +482,16 @@ def test_a_failing_word_pass_keeps_the_session_and_the_chunk_whole(tmp_path, mon
         segs = t.transcribe_session(s)
     others = [x for x in segs if x.speaker == "Others"]
     assert others and all(x.text == "secret words" and x.words == [] for x in others)
-    assert len([c for c in model.calls if c]) == 2 < len(others)  # breaker after 2 failures
+    # one worker, so chunks run in order: the first failure turns words off for the session
+    assert len([c for c in model.calls if c]) == 1 < len(others)
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert sum("kept without words" in m for m in warnings) == 2
     assert sum("off for the rest of this session" in m for m in warnings) == 1
     assert not any("secret" in m for m in warnings)
     # a new session starts with words on again
     model.calls.clear()
     t2_segs = t.transcribe_session(s)
     t.close()
-    assert t2_segs and len([c for c in model.calls if c]) == 2
+    assert t2_segs and len([c for c in model.calls if c]) == 1
 
 
 def test_failed_lazy_word_pass_is_closed_before_the_retry():
