@@ -14,7 +14,7 @@ pipeline on a small set of real, consented speech, so that model, VAD and diariz
 | **DER** | missed + false-alarm + wrong-speaker time / reference speech time; 10 ms frames, no collar, best one-to-one speaker mapping (exact up to 12 speakers on the smaller side, greedy above) |
 | **RTF** | total transcription time / total audio duration (batch pipeline) |
 | **Diarization time** | seconds per clip |
-| **Live latency** (`--live`) | per live caption: seconds from the moment the capture block holding the segment's end reached the live transcriber to the moment the caption was emitted; p50, p90 and max per clip and overall |
+| **Live latency** (`--live`) | per live caption: seconds from the nominal capture time of the 100 ms block holding the segment's end (the moment that audio ended) to the moment the caption was emitted; p50, p90 (linear interpolation) and max per clip and over all captions |
 
 ## The eval set
 
@@ -74,11 +74,14 @@ uv run python scripts/eval.py ~/RecAndCC-eval --live                # + live cap
 
 With `--live`, each clip is also replayed through the live transcriber (`LiveTranscriber`,
 the same one that drives captions in the app) after the batch run, on the same models. The
-audio is fed in 100 ms blocks, each one when its audio would have been captured. While a
-region is being transcribed, the replay runs in real time, so the model's speed counts in
-full; while nothing is in flight, idle time is skipped, so a clip usually takes much less than
-its own length. The models and the VAD are loaded before the replay starts, as in the running
-app. The tail of a clip is emitted when the replay stops, like captions when a recording ends.
+audio is fed in 100 ms blocks. Latency counts from each block's nominal capture time, so a
+step that runs late is counted, not hidden. While a region is being transcribed, the replay
+runs in real time, so the model's speed counts in full. While nothing is in flight, idle time
+is skipped, so a clip usually takes much less than its own length. The models and the VAD are
+loaded before the replay starts, as in the running app. A region still open when the clip ends
+is cut and emitted without waiting for the trailing silence, like captions when a recording
+stops. End clips with a second or two of silence, or that last caption looks faster than the
+rest. A clip whose replay fails is counted in `clips_without_live` and left out of the latency.
 
 Each clip is copied to a temporary session folder and run through the session pipeline
 (`Transcriber.transcribe_session`), and the diarizer runs on the same copy. The copies go in

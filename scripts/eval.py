@@ -17,8 +17,9 @@ speaker turns come from the real diarizer. Reported per language and overall:
 - speed: transcription real-time factor (total time / total audio) and diarization
   seconds per clip.
 - live caption latency (``--live``): the clip is replayed through ``LiveTranscriber`` as
-  capture feeds it (100 ms blocks, each arriving when its audio ends); per emitted segment,
-  seconds from the arrival of the block holding its end to its emission. p50 / p90 / max.
+  capture feeds it (100 ms blocks); per emitted segment, seconds from the nominal capture
+  time of the block holding its end (when that audio ended) to its emission. p50 / p90 / max
+  (linear interpolation).
 
 Runs offline once the models are on disk. Prints scores only, never transcript text.
 """
@@ -255,7 +256,11 @@ class ReplayClock:
     def __call__(self) -> float:
         return time.monotonic() - self.t0 + self.skipped
 
-    def wait(self, seconds: float, pending: list[Future]) -> None:
+    def wait(self, seconds: float, heads: list[Future], pending: list[Future]) -> None:
+        """`heads`: each track's oldest uncollected region (results are emitted in order);
+        `pending`: all regions still being transcribed."""
+        if any(f.done() for f in heads):
+            return  # finished during the step: the worker's done-callback wakes it at once
         if pending:  # like the live worker: wake up early when a region is done
             futures_wait(pending, timeout=seconds, return_when=FIRST_COMPLETED)
         else:
@@ -282,7 +287,13 @@ def replay_live(
     def on_segments(segs: list[Segment]) -> None:
         emitted.extend((s.end, clock()) for s in segs)
 
-    live = LiveTranscriber(transcriber, session, on_segments, clock=clock, start=False)
+    # Drives the worker's private step and reads its job queues, as tests/test_live.py does;
+    # test_replay_live_measures_caption_latency breaks if those internals change.
+    live = LiveTranscriber(
+        transcriber, session, on_segments, clock=clock, start=False, md_interval_s=math.inf
+    )
+    # Only the captions are measured: the batch run already wrote this session's transcript.
+    live._start_diarization = live._write_final = lambda: None
     pos, n = 0, len(audio)
     while pos < n:  # one iteration per live worker step, driven here instead of its thread
         now = clock() * SAMPLE_RATE
@@ -290,9 +301,12 @@ def replay_live(
         for i in range(pos, upto, BLOCK):
             live.feed(track, i, audio[i : min(i + BLOCK, upto)])
         pos = max(pos, upto)
+        if pos >= n:
+            break  # recording stops: flush() wakes the worker at once, no idle step first
         live._step(False)
-        jobs = [j.future for tb in live._tracks.values() for j in tb.jobs if j.future]
-        clock.wait(live.step_s, [f for f in jobs if not f.done()])
+        queues = [[j.future for j in tb.jobs if j.future] for tb in live._tracks.values()]
+        heads = [q[0] for q in queues if q]
+        clock.wait(live.step_s, heads, [f for q in queues for f in q if not f.done()])
     live._step(True)  # recording stopped: the tail is transcribed and emitted
     return [round(t - arrival(end, n), 3) for end, t in emitted]
 
@@ -337,8 +351,14 @@ def run_clip(
         if live:
             from recandcc.transcribe.chunking import load_track
 
-            lat = replay_live(load_track(clip.audio), clip.track, transcriber, session)
-            result["live"] = {**latency_summary(lat), "latencies_s": lat}
+            try:  # e.g. every live region failed: keep the other clips' results
+                lat = replay_live(load_track(clip.audio), clip.track, transcriber, session)
+            except Exception as e:  # noqa: BLE001 - reported as clips_without_live
+                print(f"  warning: live replay of clip {clip.id} failed ({type(e).__name__})")
+                result["live_ok"] = False
+            else:
+                result["live_ok"] = True
+                result["live"] = {**latency_summary(lat), "latencies_s": lat}
     return result
 
 
@@ -368,9 +388,10 @@ def summarize(results: list[dict]) -> dict:
         "languages": per_lang,
         "der": round(errors / speech, 4) if speech else None,
         "rtf": round(sum(r["elapsed_s"] for r in timed) / audio, 3) if audio else None,
-        "live": latency_summary(live) if any("live" in r for r in results) else None,
+        "live": latency_summary(live) if any("live_ok" in r for r in results) else None,
         "clips": len(results),
         "clips_without_der": sum(1 for r in results if r.get("diarization_ok") is False),
+        "clips_without_live": sum(1 for r in results if r.get("live_ok") is False),
     }
 
 
@@ -420,8 +441,11 @@ def main(argv: list[str] | None = None) -> int:
     for lang, v in s["languages"].items():
         print(f"  {lang:<4} WER {v['wer']}  language-ID {v['lid_accuracy']}  ({v['words']} words)")
     if s["live"] is not None:
-        for name, v in [("all", s["live"])] + [(r["id"], r["live"]) for r in results]:
+        clips = [(r["id"], r["live"]) for r in results if "live" in r]
+        for name, v in [("all", s["live"]), *clips]:
             print(f"  live {name}: {live_line(v)}")
+        if s["clips_without_live"]:
+            print(f"  warning: live replay failed on {s['clips_without_live']} clip(s)")
     print(f"details: {args.json}")
     return 0
 

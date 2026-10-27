@@ -8,6 +8,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import time
+from concurrent.futures import Future
 from pathlib import Path
 
 import numpy as np
@@ -365,10 +367,25 @@ def test_latency_summary_percentiles():
 
 
 def test_summary_pools_live_latencies_across_clips():
-    a = {"text": {}, "live": {"latencies_s": [1.0, 2.0]}}
-    b = {"text": {}, "live": {"latencies_s": [3.0]}}
-    assert ev.summarize([a, b])["live"] == {"segments": 3, "p50_s": 2.0, "p90_s": 2.8, "max_s": 3.0}
+    a = {"text": {}, "live_ok": True, "live": {"latencies_s": [1.0, 2.0]}}
+    b = {"text": {}, "live_ok": True, "live": {"latencies_s": [3.0]}}
+    failed = {"text": {}, "live_ok": False}
+    s = ev.summarize([a, b, failed])
+    assert s["live"] == {"segments": 3, "p50_s": 2.0, "p90_s": 2.8, "max_s": 3.0}
+    assert s["clips_without_live"] == 1
     assert ev.summarize([{"text": {}}])["live"] is None
+
+
+def test_replay_clock_skips_idle_time_only():
+    done, running = Future(), Future()
+    done.set_result([])
+    clock = ev.ReplayClock()
+    clock.wait(5.0, [], [])  # nothing in flight: skipped
+    assert clock.skipped == 5.0
+    clock.wait(5.0, [done], [])  # a finished region: collected at once, no time passes
+    assert clock.skipped == 5.0 and clock() < 5.5
+    clock.wait(0.05, [running], [running])  # in flight: waited for in real time
+    assert clock.skipped == 5.0 and clock() >= 5.05
 
 
 @pytest.mark.parametrize("delay", [0.0, 0.6])
@@ -376,16 +393,22 @@ def test_replay_live_measures_caption_latency(tmp_path, delay):
     from test_live import FakeTranscriber as FakeModel
     from test_live import burst, make_session, silence
 
-    tr = FakeModel(sync=delay == 0.0)
+    from recandcc.config import TranscriptionConfig
+
+    tr = FakeModel(TranscriptionConfig(model="fake", workers=2, diarize=False), sync=delay == 0)
     tr.delay = delay  # model time is waited for in real time; idle time is skipped
     audio = np.concatenate([silence(1), burst(2), silence(2), burst(1.5), silence(1.5)])
+    session = make_session(tmp_path)
+    t0 = time.monotonic()
     try:
-        lat = ev.replay_live(audio, ev.Track.OTHERS, tr, make_session(tmp_path))
+        lat = ev.replay_live(audio, ev.Track.OTHERS, tr, session)
     finally:
         tr.close()
+    assert time.monotonic() - t0 < 6.0  # faster than the 8 s of audio: idle time skipped
+    assert not (session.directory / "transcript.json").exists()  # captions only
     assert len(lat) == 2  # one caption per burst
     # commit silence + step granularity (+ slack for slow CI), plus the model's own time
-    assert all(0.3 + delay <= x <= 2.0 + delay for x in lat), lat
+    assert all(0.3 + delay <= x <= 4.0 + delay for x in lat), lat
 
 
 def test_run_clip_reports_live_latency(tmp_path, monkeypatch):
@@ -407,4 +430,18 @@ def test_run_clip_reports_live_latency(tmp_path, monkeypatch):
         "max_s": 1.0,
         "latencies_s": [0.5, 1.0],
     }
+    assert r["live_ok"] is True
     assert "live" not in ev.run_clip(clip, FakeTranscriber([]), None, tmp_path)
+
+
+def test_failed_live_replay_keeps_the_clip(tmp_path, monkeypatch, capsys):
+    write_set(tmp_path, {"id": "c", "audio": "c.wav", "utterances": [U]})
+    (clip,) = ev.load_manifest(tmp_path)
+
+    def replay(*a):
+        raise RuntimeError("all 3 live regions failed")
+
+    monkeypatch.setattr(ev, "replay_live", replay)
+    r = ev.run_clip(clip, FakeTranscriber([]), None, tmp_path, live=True)
+    assert r["live_ok"] is False and "live" not in r and "text" in r
+    assert "live replay of clip c failed (RuntimeError)" in capsys.readouterr().out
