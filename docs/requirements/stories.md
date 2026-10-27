@@ -37,6 +37,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
 | US-23 | Sensitivity: room vs system audio | 🟡 presets and keys shipped (#7, #102); live level meters not yet |
 | US-28 | Browse past meetings | 🟡 Windows window untested on Windows hardware (none available) |
+| US-32 | Find transcripts by meaning | 🟡 opt-in; no accuracy measurement on real transcripts yet (#4) |
 | US-29 | Right-to-left text readable in the Windows captions | 🟡 unit-tested, no hardware check (#6) |
 | US-30 | Change common settings in a window | 🟡 claimed (#3): macOS spike, not on Windows |
 | US-34 | Warn when recordings go to a network volume | 🟡 claimed (#3): detection is fake-tested, no real share or Windows drive checked |
@@ -467,6 +468,28 @@ so that I don't have to dig through dated folders.*
   delete are refused with a notice.
 - **Then** logs never contain titles, excerpts or transcript text.
 - **Not yet:** a native macOS window (it is a pair of dialogs) (#4).
+
+### US-32 Find transcripts by meaning
+*As the owner, I want a search for "payment" to also find "we need to settle the invoice",
+so that I find a discussion without remembering its exact words.*
+
+- **Given** `[search] semantic = false` (default), **then** nothing is downloaded, embedded
+  or stored, and search results are exactly the full-text ones (US-20).
+- **Given** `semantic = true`, **then** a small multilingual sentence-embedding model
+  (English and Russian) is downloaded once, pinned to an exact revision and sha256, and runs
+  offline afterwards (US-14); no other network access.
+- **When** a transcript is indexed, **then** its segments are embedded in the background
+  (off the UI and audio threads) into the same local, owner-only index; unchanged sessions are
+  not re-embedded and deleted sessions leave the vectors with their text.
+- **When** I search, **then** the full-text ranking and the meaning ranking are merged
+  (reciprocal rank fusion): a segment found by both comes first, then exact word matches,
+  then meaning-only matches (only above a similarity floor), and words are still
+  highlighted. Search never waits for embedding: while the model is downloading or loading,
+  or part of the archive is not embedded yet, I get the full-text (plus already embedded)
+  results.
+- **When** I switch it off again, **then** the stored vectors are deleted at the next sync (the text index stays).
+- **Not yet:** an accuracy measurement on real transcripts, multi-segment chunks, and
+  summaries (#4).
 
 ### US-29 Right-to-left text readable in the Windows captions
 *As a Hebrew speaker on Windows, I want mixed Hebrew/English/number captions to read
