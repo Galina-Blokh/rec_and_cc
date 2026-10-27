@@ -156,7 +156,13 @@ EOF ends it, so it never outlives the app. The Windows backend uses `RegisterHot
 
 ### Settings window: a helper subcommand, validation stays in Python
 `rcc-audiotap settings --config <snapshot.json>` shows a small SwiftUI window (mode, output
-folder, languages, keep audio, live captions, speaker names; the hotkey is shown read-only).
+folder, languages, keep audio, live transcription, live captions, speaker names, Whisper
+model; the hotkey is shown read-only). The model picker offers only
+`transcribe/revisions.OFFERED_MODELS` (every name pinned), passed in the snapshot as `models`;
+`validate_settings` rejects any other name, so the helper can't introduce an unpinned repo.
+The saved model is written to `config.toml` but not loaded: the shared `Transcriber` keeps
+its model until the app restarts, when the usual lazy load (and, if missing, the one-time
+pinned download) runs on a transcription worker, never on the UI thread. A notice says so.
 `--config` is a JSON snapshot that Python writes to a private temp file, **not** `config.toml`:
 Swift would need a TOML parser, and an unvalidated second writer. On close the helper prints
 one line, `{"settings":"saved","values":{...}}` or `{"settings":"cancelled"}`. Python
