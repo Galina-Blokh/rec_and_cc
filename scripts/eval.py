@@ -444,7 +444,11 @@ def run_clip(
             result["diarization_ok"] = turns is not None
             if turns is not None:
                 ref = [(u.start, u.end, u.speaker) for u in clip.utterances]
-                result["diarization"] = der(ref, [(t.start, t.end, str(t.speaker)) for t in turns])
+                hyp = [(t.start, t.end, str(t.speaker)) for t in turns]
+                result["diarization"] = der(ref, hyp) | {
+                    "speakers": len({h[2] for h in hyp}),
+                    "ref_speakers": len({r[2] for r in ref}),
+                }
         segs = transcriber.transcribe_session(session)
         result["text"] = text_scores(clip.utterances, segs)
         m = session.metrics.get("transcription", {})
@@ -542,6 +546,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("root", type=Path, help="eval set folder containing manifest.json")
     p.add_argument("--model", help="Whisper model (default: from config)")
     p.add_argument("--no-diarize", action="store_true", help="skip DER")
+    p.add_argument(
+        "--diarize-overlap",
+        action="store_true",
+        help="diarize with the segmentation model (config diarize_overlap; must be on disk)",
+    )
     p.add_argument("--live", action="store_true", help="also measure live caption latency")
     p.add_argument(
         "--backend",
@@ -599,8 +608,17 @@ def main(argv: list[str] | None = None) -> int:
         cfg.backend, cfg.device = "mlx", "auto"
     elif args.backend == "cpu":
         cfg.backend, cfg.device = "faster-whisper", "cpu"
+    if args.diarize_overlap and not args.no_diarize:
+        from recandcc.transcribe.diarize import SEGMENTATION_MODEL, model_path
+
+        if (
+            model_path(SEGMENTATION_MODEL, download=False) is None
+        ):  # never download, never fall back
+            p.error(
+                "--diarize-overlap: the segmentation model is not on disk (nothing is downloaded)"
+            )
     transcriber = Transcriber(cfg)
-    diarizer = None if args.no_diarize else Diarizer()
+    diarizer = None if args.no_diarize else Diarizer(segmentation=args.diarize_overlap)
     try:
         if diarizer is not None:  # load the model now, not in the first clip's time
             diarizer.diarize(np.zeros(SAMPLE_RATE, dtype=np.float32))

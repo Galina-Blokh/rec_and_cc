@@ -26,16 +26,16 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-15 | Delete old audio automatically | ✅ |
 | US-16 | Permissions set up from the app | ✅ |
 | US-17 | Always on, visible state | ✅ |
-| US-18 | Runs on Windows | 🟡 untested on hardware (#5) |
+| US-18 | Runs on Windows | 🟡 untested on Windows hardware (none available; #5 not planned) |
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 no Hebrew test set, ivrit.ai routing not evaluated (#6) |
-| US-20 | Search my transcripts | 🟡 search only; summaries, export planned (#4) |
+| US-20 | Search my transcripts | ✅ search (summaries and export: see US-27, US-25) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
 | US-31 | Speaker names from the call app's participant list | 🟡 claimed (#1 A.3): opt-in, macOS, one-to-one only |
 | US-25 | Export a transcript to DOCX and PDF | 🟡 CLI and macOS menu; Windows tray, templates planned (#4) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
 | US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
-| US-23 | Sensitivity: room vs system audio | 🟡 presets only, no live meters (#7) |
-| US-28 | Browse past meetings | 🟡 Windows window untested on hardware (#5) |
+| US-23 | Sensitivity: room vs system audio | 🟡 presets and keys shipped (#7, #102); live level meters not yet |
+| US-28 | Browse past meetings | 🟡 Windows window untested on Windows hardware (none available) |
 | US-29 | Right-to-left text readable in the Windows captions | 🟡 unit-tested, no hardware check (#6) |
 | US-30 | Change common settings in a window | 🟡 claimed (#3): macOS spike, not on Windows |
 
@@ -144,6 +144,11 @@ while I decide.*
   with noisy audio, **then** the number of speakers is estimated per session instead of fixed
   by a threshold, within `min_speakers` / `max_speakers` if set, and an hour still
   diarizes in seconds.
+- **Given** `split_on_speaker_change = true` (opt-in) and a batch transcription
+  (`live = false`, `recandcc transcribe`, re-queued session; not live sessions) on the
+  faster-whisper backend, with a segment in which the speaker changes mid-way, **then** it is split at that word boundary and each part gets its
+  own speaker label, with flicker under about 1 s / 3 words ignored, the text kept word for
+  word, `Me` never split, and segments without word timings (live, MLX backend, option off) unchanged.
 - **Given** `diarize_overlap = true` and a speaker change without a pause, or two speakers
   at once, **then** the turn
   boundary follows the change (segmentation model), overlapped speech gets the dominant
@@ -196,7 +201,8 @@ while I decide.*
 ### US-18 Runs on Windows
 - **Then** WASAPI loopback capture, pycaw detection, a tray icon and registry autostart
   implement the same interfaces; CI runs the fast suite on Windows.
-- **Not yet:** a real-hardware test pass, per-app capture, installer (#5).
+- **Not yet:** a real-hardware test pass, per-app capture, installer; no Windows hardware is
+  available, and #5 was closed as not planned.
 
 ### US-19 Hebrew transcripts and right-to-left captions
 - **Given** `languages = ["en", "ru", "he"]`, **then** each speech region gets one of the
@@ -242,8 +248,8 @@ open transcripts one by one.*
   transcript is re-indexed and a deleted or discarded session leaves the index.
 - **Then** the index is local and owner-only, outside `output_dir` (never synced), and logs
   never contain the searched or found text.
-- **Not yet:** summaries and action items with a local LLM, DOCX/PDF export
-  (#4).
+- **See also:** local summaries and action items (US-27) and DOCX/PDF export (US-25), both
+  shipped under #4.
 
 ### US-21 Speaker names remembered across sessions
 *As the owner, I want to name a speaker once and see that name in later transcripts, so that
