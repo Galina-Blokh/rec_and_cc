@@ -48,7 +48,7 @@ from ..models import Mode, SessionInfo, TriggerKind, discard_session
 from ..recorder import make_private_dir
 from ..retention import purge_old_audio, purge_transcribed_audio
 from ..sensitivity import PRESETS as SENSITIVITY_PRESETS
-from ..sensitivity import SENSITIVITY_KEYS, apply_preset, current_preset, room_trigger
+from ..sensitivity import SENSITIVITY_KEYS, current_preset, room_trigger
 
 if TYPE_CHECKING:
     from ..transcribe.live import LiveTranscriber
@@ -263,6 +263,10 @@ class Controller:
         self._last_refresh = 0.0
         self._config_sig = file_signature(CONFIG_PATH)
         self._lang_lock = LANG_LOCK  # transcription.languages + its raw spelling
+        # Menu values set in memory but not saved yet: field -> (value, click number).
+        self._pending: dict[str, tuple[object, int]] = {}
+        self._pending_lock = threading.Lock()
+        self._pending_seq = 0
         self._summaries = None  # SummaryQueue, created on the first summary
         self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
         # global shortcut
@@ -587,9 +591,9 @@ class Controller:
 
     def _maybe_reload_config(self) -> None:
         """Apply edits made to config.toml by hand (detection settings, output dir, hotkey,
-        languages). Our own
-        saves are recognised and skipped; the read and apply hold the config lock, so a
-        menu click saving at the same time is neither lost nor read half-written."""
+        languages). Our own saves are recognised and skipped; the read and apply hold the
+        config lock, so a menu click saving at the same time is neither lost nor read
+        half-written, and menu values not saved yet are re-applied on top."""
         with CONFIG_LOCK:
             sig = file_signature(CONFIG_PATH)
             if sig == self._config_sig:
@@ -609,6 +613,7 @@ class Controller:
                 return
             for f in fields(new.detection):
                 setattr(self.cfg.detection, f.name, getattr(new.detection, f.name))
+            self._reapply_pending()
             self.cfg.output_dir = new.output_dir
             tr, new_tr = self.cfg.transcription, new.transcription
             with self._lang_lock:  # both together: save() pairs them
@@ -720,19 +725,34 @@ class Controller:
             return f"Waiting for answer: record {st.app}?"
         return f"Idle — {str(st.mode).capitalize()} mode"
 
-    def _save_settings(self, keep: tuple[str, ...] = ()) -> None:
-        """Save the settings on a worker thread (the UI thread never waits on CONFIG_LOCK).
-        Under the lock: a hand edit not yet reloaded is applied first, keeping the in-memory
-        `keep` detection fields (what the menu just set); a config.toml that doesn't parse
-        is left alone."""
-        threading.Thread(
-            target=self._save_settings_now, args=(keep,), daemon=True, name="settings-save"
-        ).start()
+    def _menu_set(self, **values) -> None:
+        """A menu click (UI thread): set detection fields in memory at once, remember them as
+        pending until saved, and save on a worker (the UI thread never waits on CONFIG_LOCK).
+        """
+        with self._pending_lock:
+            for k, v in values.items():
+                self._pending_seq += 1
+                self._pending[k] = (v, self._pending_seq)
+                setattr(self.cfg.detection, k, v)
+        self._save_settings()
 
-    def _save_settings_now(self, keep: tuple[str, ...] = ()) -> None:
-        det = self.cfg.detection
+    def _reapply_pending(self) -> None:
+        """After a reload: menu values not saved yet win over the file."""
+        with self._pending_lock:
+            for k, (v, _seq) in self._pending.items():
+                setattr(self.cfg.detection, k, v)
+
+    def _save_settings(self) -> None:
+        threading.Thread(target=self._save_settings_now, daemon=True, name="settings-save").start()
+
+    def _save_settings_now(self) -> None:
+        """Under CONFIG_LOCK: a hand edit not yet reloaded is applied first (with every pending
+        menu value on top), a config.toml that doesn't parse is left alone, then the settings
+        are saved and the pending values this save wrote are cleared."""
         try:
             with CONFIG_LOCK:
+                with self._pending_lock:
+                    snapshot = dict(self._pending)
                 sig = file_signature(CONFIG_PATH)
                 if sig is not None and sig != self._config_sig and not written_by_us(CONFIG_PATH):
                     try:
@@ -741,12 +761,14 @@ class Controller:
                         log.warning("config.toml could not be parsed; settings not saved")
                         self.post_notice("Settings not saved", "config.toml could not be parsed")
                         return
-                    mine = {k: getattr(det, k) for k in keep}
-                    self._maybe_reload_config()
-                    for k, v in mine.items():
-                        setattr(det, k, v)
+                    self._maybe_reload_config()  # re-applies the pending values
+                self._reapply_pending()
                 self.cfg.save(CONFIG_PATH)
                 self._config_sig = file_signature(CONFIG_PATH)
+                with self._pending_lock:  # a newer click keeps its entry for its own save
+                    for k, entry in snapshot.items():
+                        if self._pending.get(k) == entry:
+                            del self._pending[k]
         except Exception:
             log.exception("saving settings failed")
             self.post_notice("Settings not saved", "config.toml could not be written")
@@ -756,8 +778,7 @@ class Controller:
         its next tick. Turning it on explains the always-on mic indicator and the consent
         question. Saved by the settings worker (the UI thread never waits on CONFIG_LOCK);
         it saves the latest in-memory value, so quick toggles can't race."""
-        self.cfg.detection.room_listening = bool(on)
-        self._save_settings(keep=("room_listening",))
+        self._menu_set(room_listening=bool(on))
         if on:
             self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
             if self.permissions.get("microphone") == "denied":
@@ -770,8 +791,7 @@ class Controller:
         """Sensitivity menu (any thread): apply a preset from ``sensitivity.PRESETS``. The
         engine picks the new thresholds up on its next tick. The save worker applies a hand
         edit not yet reloaded first, so saving the preset doesn't overwrite it."""
-        apply_preset(self.cfg.detection, preset, lock=False)  # in memory; UI never blocks
-        self._save_settings(keep=SENSITIVITY_KEYS)
+        self._menu_set(**dict(zip(SENSITIVITY_KEYS, SENSITIVITY_PRESETS[preset], strict=True)))
 
     def sensitivity_preset(self) -> str | None:
         return current_preset(self.cfg.detection)

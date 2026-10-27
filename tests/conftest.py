@@ -30,3 +30,19 @@ def _private_voices_dir(tmp_path_factory, monkeypatch):
     from recandcc.transcribe import voices
 
     monkeypatch.setattr(voices, "VOICES_DIR", tmp_path_factory.mktemp("voices"))
+
+
+@pytest.fixture(autouse=True)
+def _private_config(tmp_path_factory, monkeypatch):
+    """No test reads or writes the user's real config.toml: CONFIG_PATH (looked up at call
+    time by Config.save / load_config) and every module-level copy of it point at a temp file.
+    """
+    import sys
+
+    from recandcc import config
+
+    path = tmp_path_factory.mktemp("config") / "config.toml"
+    monkeypatch.setattr(config, "CONFIG_PATH", path)
+    for name, mod in list(sys.modules.items()):  # `from .config import CONFIG_PATH` copies
+        if name.startswith("recandcc.") and hasattr(mod, "CONFIG_PATH"):
+            monkeypatch.setattr(mod, "CONFIG_PATH", path)

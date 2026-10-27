@@ -195,9 +195,11 @@ class Config:
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
     summary: SummaryConfig = field(default_factory=SummaryConfig)
 
-    def save(self, path: Path = CONFIG_PATH) -> None:
-        """Write the settings. Serialized (the snapshot is taken under the lock, so the last
-        save writes the current values) and atomic where the OS allows it."""
+    def save(self, path: Path | None = None) -> None:
+        """Write the settings (to CONFIG_PATH, looked up at call time). Serialized (the
+        snapshot is taken under the lock, so the last save writes the current values) and
+        atomic where the OS allows it."""
+        path = CONFIG_PATH if path is None else path
         with CONFIG_LOCK:
             data = asdict(self)
             data["output_dir"] = str(self.output_dir)
@@ -303,17 +305,20 @@ def normalize_languages(value) -> list[str]:
     return out
 
 
-def save_languages(languages: list, path: Path = CONFIG_PATH) -> None:
+def save_languages(languages: list, path: Path | None = None) -> None:
     """Write only `transcription.languages` into config.toml, leaving every other key as it is
     on disk (it may have been edited by hand since the app loaded it). Raises
     FileNotFoundError if there is no file yet, ValueError if it is not valid TOML."""
+    path = CONFIG_PATH if path is None else path
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     data.setdefault("transcription", {})["languages"] = list(languages)
     path.write_bytes(tomli_w.dumps(data).encode())
 
 
-def load_config(path: Path = CONFIG_PATH) -> Config:
-    """Load config, creating a default file on first run. Unknown keys are ignored."""
+def load_config(path: Path | None = None) -> Config:
+    """Load config (CONFIG_PATH, looked up at call time, so tests can redirect it), creating
+    a default file on first run. Unknown keys are ignored."""
+    path = CONFIG_PATH if path is None else path
     if not path.exists():
         cfg = Config()
         cfg.save(path)
