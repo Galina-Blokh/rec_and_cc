@@ -110,6 +110,9 @@ class SessionInfo:
     # Pipeline measurements, by stage ("recording", "live", "transcription", ...): plain
     # JSON values. Absent in session.json files written before it existed.
     metrics: dict[str, dict] = field(default_factory=dict)
+    # Started by room listening, even if a call upgraded it later: everyone in the room is on
+    # the mic track. Absent (False) in older session.json files.
+    started_as_room: bool = False
 
     FILENAME = "session.json"
     # Present in a folder the user discarded: never transcribe or list it (discard_session).
@@ -160,6 +163,7 @@ class SessionInfo:
             tracks={Track(k): v for k, v in data.get("tracks", {}).items()},
             transcribed=data.get("transcribed", False),
             metrics=data.get("metrics") or {},
+            started_as_room=data.get("started_as_room", False),
         )
 
 

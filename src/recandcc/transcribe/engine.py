@@ -42,9 +42,10 @@ SPEAKERS = {Track.ME: ME, Track.OTHERS: OTHERS}
 
 
 def diarized_track(session: SessionInfo) -> Track:
-    """The track whose speakers get numbered: "Others", except in a room session, where
-    everyone in the room is on the mic ("Me")."""
-    return Track.ME if session.trigger_kind == TriggerKind.ROOM else Track.OTHERS
+    """The track whose speakers get numbered: "Others", except in a room session (also one
+    a call upgraded later), where everyone in the room is on the mic ("Me")."""
+    room = session.trigger_kind == TriggerKind.ROOM or session.started_as_room
+    return Track.ME if room else Track.OTHERS
 
 
 LANGUAGE_ID_MODEL = "base"  # small multilingual model used only for per-region language ID

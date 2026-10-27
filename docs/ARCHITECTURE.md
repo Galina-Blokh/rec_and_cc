@@ -163,8 +163,9 @@ engine closes the monitor's mic (the recorder opens its own) and reopens it when
 diarization and UI differ: there is no app, so a room session stops after
 `room_stop_after_silence_s` without speech (VAD on the session's own mic stream) or by the
 level rule (`stop_after_silence_s`), and the `calls` mic policy includes it. Everyone in the
-room is on the mic, so diarization numbers the speakers of the `Me` track in room sessions
-(`transcribe/engine.py: diarized_track`).
+room is on the mic, so diarization numbers the speakers of the `Me` track in room sessions,
+also after a call upgraded one (`SessionInfo.started_as_room`; `transcribe/engine.py:
+diarized_track`). The replayed pre-roll is not counted as writer backlog.
 
 **Precedence.** In `tick()` sustained room speech is a candidate `@room`, appended *after*
 the app candidates and only when nothing records or asks and **no other process is doing

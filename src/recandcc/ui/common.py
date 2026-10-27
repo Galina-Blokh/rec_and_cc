@@ -784,8 +784,8 @@ class _LiveAwareQueue:
 ROOM_ITEM = "Listen for conversations in the room"
 ROOM_LISTENING_NOTICE = (
     "While idle, the microphone stays on (orange dot) to notice conversations near the "
-    "laptop, which costs some battery; nothing leaves the device. Recording people may "
-    "need their consent: tell them."
+    "laptop, also while the screen is locked, which costs some battery; nothing leaves the "
+    "device. Recording people may need their consent: tell them."
 )
 
 
