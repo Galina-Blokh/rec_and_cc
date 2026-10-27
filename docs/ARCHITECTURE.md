@@ -52,7 +52,7 @@ across platforms.
 | `permissions.py` | Query, request and open settings for mic and system-audio permissions |
 | `native.py` | Locates the native helper binary (`rcc-audiotap`) |
 | `settings_window.py` | Native settings window: runs `rcc-audiotap settings` with a JSON snapshot and saves the values it returns through `config` validation |
-| `retention.py` | Audio retention: deletes the WAV files of fully transcribed sessions (`audio_retention_days`); transcripts are kept |
+| `retention.py` | Audio retention: deletes the WAV files of fully transcribed sessions (`audio_retention_days`); transcripts are kept. A session whose slow diarization still needs its WAVs (a fresh `.labels-pending` marker, written by the transcriber until the late relabel ends) keeps them |
 | `ui/` | `common.Controller` (platform-independent glue) + `present.py` (pure presenter logic: menu titles and check marks, notice texts, the ask dialog script and its answers, toast placement) + `mac.py` (rumps) / `tray.py` (pystray) / `toast_mac.py`, thin shells that only apply it |
 | `ui/notes.py` | Meeting notes (pure logic, no UI imports): scan session folders newest first, row texts, `summary.md` excerpt, rename (`title` in `session.json`), delete to the Trash (Foundation / `SHFileOperationW`) or via `discard_session`, the macOS dialog scripts; the Windows window is `TkNotes` in `tray.py` |
 | `ui/captions*.py` | Live captions window: `captions.py` (pure logic: ordering, trimming, header, panel frame, speaker colours) + `captions_mac.py` (floating non-activating NSPanel); Windows uses a Tk window in `tray.py` |
@@ -180,7 +180,13 @@ EOF ends it, so it never outlives the app. The Windows backend uses `RegisterHot
 
 ### Settings window: a helper subcommand, validation stays in Python
 `rcc-audiotap settings --config <snapshot.json>` shows a small SwiftUI window (mode, output
-folder, languages, keep audio, live captions, speaker names; the hotkey is shown read-only).
+folder, languages, keep audio, live transcription, live captions, speaker names, Whisper
+model; the hotkey is shown read-only). The model picker offers only
+`transcribe/revisions.OFFERED_MODELS` (every name pinned), passed in the snapshot as `models`;
+`validate_settings` rejects any other name, so the helper can't introduce an unpinned repo.
+The saved model is written to `config.toml` but not loaded: the shared `Transcriber` keeps
+its model until the app restarts, when the usual lazy load (and, if missing, the one-time
+pinned download) runs on a transcription worker, never on the UI thread. A notice says so.
 `--config` is a JSON snapshot that Python writes to a private temp file, **not** `config.toml`:
 Swift would need a TOML parser, and an unvalidated second writer. On close the helper prints
 one line, `{"settings":"saved","values":{...}}` or `{"settings":"cancelled"}`. Python
@@ -376,8 +382,12 @@ name can take a session's centroid out again) and the session centroids (`sessio
 by session id, with the session folder: pruned once it is deleted) live in the owner-only (0700/0600)
 `platformdirs.user_data_dir("RecAndCC")/voices`, never in `output_dir`, which may be synced
 to a cloud drive. A transcript written without labels or with the option off deletes its
-session's centroids. `name-speaker` marks the session as folded into the profile before it
-changes the profile, so a failure partway can't count one session twice. All of it runs on the diarizer / writer threads, after the audio threads.
+session's centroids. `name-speaker` rewrites the transcript first, then re-keys the session
+voices and saves the profile (into the new name first, then out of the old one); on any
+failure, even a partial transcript write, the old label, the session voices and the profile
+files are put back, so the speaker stays nameable. A retry after a kill between the two steps
+completes the store step. Within the store step it marks the session as folded
+into the profile before it changes the profile, so a failure partway can't count one session twice. All of it runs on the diarizer / writer threads, after the audio threads.
 Locking: `voices.NAMING_LOCK` (in-process) serialises everything that changes a session's
 speaker labels — finalize/relabel, `name-speaker`, the call-app rename and "Forget all
 voices" (`forget_all`, so a forget comes after any of them and no forgotten name is written
@@ -438,8 +448,13 @@ store (`voices/sessions/<hash>.names.json`; not in `session.json`, because the s
 sync to a cloud). After the transcript is written the transcriber relabels one speaker only
 when it is certain (`callnames.plan`: name count equals non-`Me` speaker count, voice-matched
 speakers match names by shared word, one `Speaker N` and one name left, no disagreeing
-self-introduction). It rewrites the transcript only and never creates a voice profile from a
-call-app name. The menu toggle checks Accessibility trust on a worker thread and writes only
+self-introduction). In a room session a call upgraded (`started_as_room`) the mic track is
+numbered too, so the owner can be a `Speaker N`: `_labelled` records each label's track on its
+segments (`Segment.track`, `"track"` in `transcript.json`; renames keep it), and
+`callnames.call_side` counts and offers only the "others" track's labels. A transcript without
+that (written before it, or a label of unknown/mixed track) fails closed, and `_rename`
+re-checks the track under `NAMING_LOCK`. It rewrites the transcript only and never creates a
+voice profile from a call-app name. The menu toggle checks Accessibility trust on a worker thread and writes only
 its own key to `config.toml`. Helper runs are killed (and waited for) when the session stops. Only Zoom, new Teams and browser windows titled as a Meet/Teams/Zoom page are walked; a name must be in two samples in a row before it is kept (and kept after it scrolls out of view). With more than one call-titled browser window nothing is read from browsers (fail closed).
 
 Whose Accessibility grant is used? Checked on a Mac with `rcc-audiotap ax-status` started from
@@ -499,7 +514,21 @@ discard / too short ─► cancel() (nothing written) ─► live_end ─► dir
 ```
 
 At startup, sessions with `transcribed = false` (for example after quitting mid-queue) are
-queued again. Discarding a session drops a `.discarded` marker in its folder before
+queued again. A session an earlier run never stopped (crash, force-quit, power loss:
+`session.json` still has no `ended_at`) is finished first, on the same worker thread: its
+`ended_at` becomes `started_at` plus its longest track (`soundfile` reads a WAV whose header
+was never finalised), tracks without frames leave `tracks` (the files stay), and
+`metrics.recording.recovered = true`. Left alone (and retried at the next start): a session
+with no frames at all or with a track that can't be read now (held open, evicted by a sync
+client); one that began after this start, or whose WAVs were written less than
+`RECOVER_QUIET_S` (120 s) before it, since another writer may own it (a folder synced from
+another Mac); the live session and those in flight, asked again just before each write; and
+one holding a `.recording.lock` whose pid is alive (`recandcc record` keeps one while it
+records; a lock whose process is gone, or written before the last boot so that its pid may
+now be another process, is deleted). `recorder.stop()` saves `ended_at` before the recording
+metrics, so a full disk can't orphan a session.
+
+Discarding a session drops a `.discarded` marker in its folder before
 `recorder.stop()` (or, if that fails, renames `session.json` to it); the files are then
 deleted one by one on a background thread, the marker last. If some file can't be deleted
 (Windows locks an open WAV) the user gets a notice, the leftover is never transcribed or

@@ -24,8 +24,10 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
+from collections.abc import Callable, Iterable
 from dataclasses import fields
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -49,7 +51,14 @@ from ..config import (
     validate_settings,
 )
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
-from ..models import Mode, SessionInfo, TriggerKind, discard_session, still_writing
+from ..models import (
+    Mode,
+    SessionInfo,
+    TriggerKind,
+    discard_session,
+    recording_lock_held,
+    still_writing,
+)
 from ..recorder import make_private_dir
 from ..retention import purge_old_audio, purge_transcribed_audio
 from ..sensitivity import PRESETS as SENSITIVITY_PRESETS
@@ -57,6 +66,7 @@ from ..sensitivity import apply_preset, current_preset, room_trigger
 from ..settings_window import (
     SettingsUnavailable,
     close_settings,
+    offered_models,
     raise_settings,
     run_settings,
 )
@@ -233,6 +243,78 @@ def untranscribed_sessions(output_dir: Path) -> list[SessionInfo]:
     return out
 
 
+# A track written this recently may belong to another writer (``recandcc record``, a
+# folder synced from another Mac): recovery waits until it has been quiet this long.
+RECOVER_QUIET_S = 120.0
+
+
+def recover_interrupted_sessions(
+    output_dir: Path,
+    *,
+    started_before: datetime,
+    busy: Callable[[], Iterable[Path | str]] = tuple,
+) -> list[SessionInfo]:
+    """Finish sessions a crash, force-quit or power loss cut off (session.json still has no
+    ``ended_at``), so ``untranscribed_sessions`` re-queues them; returns those finished.
+
+    ``ended_at`` becomes ``started_at`` plus the longest track's length (``sf.info`` reads
+    WAVs whose header was never finalised). Tracks with no frames leave ``tracks`` but stay
+    on disk; a session with no frames at all, or with a track that can't be read now (held
+    open, evicted by a sync client), is left as it is and retried at the next start.
+
+    Never touched: sessions that began at or after ``started_before`` (this app's start),
+    whose WAVs were written less than ``RECOVER_QUIET_S`` before it, that a live process
+    records into (``RECORDING_LOCK``), or that ``busy()`` lists (the live session and those
+    in flight; asked again just before each write). Blocking I/O: call it on a worker
+    thread."""
+    import soundfile as sf
+
+    def is_busy(d: Path) -> bool:
+        return d.resolve() in {Path(p).resolve() for p in busy()}
+
+    cutoff = started_before.timestamp()
+    out = []
+    for f in sorted(Path(output_dir).glob(f"*/*/{SessionInfo.FILENAME}")):
+        d = f.parent
+        try:
+            if (d / SessionInfo.DISCARD_MARKER).exists():
+                continue
+            s = SessionInfo.load(d)
+            if s.ended_at is not None or s.transcribed or s.started_at.timestamp() >= cutoff:
+                continue
+            if is_busy(d) or recording_lock_held(d):
+                continue
+        except Exception:  # noqa: BLE001 - unreadable: left alone
+            continue
+        longest, newest, kept = 0.0, float("-inf"), {}
+        try:
+            for track, name in s.tracks.items():
+                p = d / name
+                newest = max(newest, p.stat().st_mtime)
+                info = sf.info(str(p))
+                if info.frames > 0:
+                    kept[track] = name
+                    longest = max(longest, info.frames / info.samplerate)
+        except Exception:  # noqa: BLE001 - unreadable now (or deleted): retried next start
+            log.debug("interrupted session %s: a track can't be read; left alone", d.name)
+            continue
+        if not kept or newest >= cutoff - RECOVER_QUIET_S:  # no audio, or written lately
+            continue
+        try:
+            if is_busy(d):  # it may have become the live session meanwhile
+                continue
+            s.tracks = kept
+            s.ended_at = s.started_at + timedelta(seconds=longest)
+            s.update_metrics("recording", {"audio_s": round(longest, 1), "recovered": True})
+            s.save()
+        except Exception:
+            log.exception("could not save recovered session %s", d)
+            continue
+        log.info("recovered interrupted session %s (%.1fs)", d, longest)
+        out.append(s)
+    return out
+
+
 def purge_discarded_sessions(output_dir: Path) -> int:
     """Retry deleting sessions the user discarded but whose files were in use (session.json
     may be unreadable there); returns how many are still left."""
@@ -318,11 +400,38 @@ def chooser_script(labels: list[str], prompt: str, button: str) -> str:
     )
 
 
-def name_dialog_script(label: str) -> str:
+PLAY_SAMPLE = "Play sample"
+
+
+def name_dialog_script(label: str, sample: bool = False, answer: str = "") -> str:
+    """The name prompt; with `sample` a "Play sample" button too, after which the dialog is
+    shown again with the text typed so far (`answer`)."""
+    buttons = f'{{"Cancel", {as_str(PLAY_SAMPLE)}, "Save"}}' if sample else '{"Cancel", "Save"}'
     return (
-        f'display dialog {as_str(f"Name for {label}:")} default answer "" '
-        'with title "RecAndCC" buttons {"Cancel", "Save"} default button "Save"'
+        f"display dialog {as_str(f'Name for {label}:')} default answer {as_str(answer)} "
+        f'with title "RecAndCC" buttons {buttons} default button "Save"'
     )
+
+
+def name_dialog_answer(output: str) -> tuple[bool, str]:
+    """(play the sample?, typed text) from a ``name_dialog_script`` result; "" = cancelled."""
+    button, _, text = output.partition(", text returned:")
+    return button.strip() == f"button returned:{PLAY_SAMPLE}", text.strip()
+
+
+def ask_speaker_name(label: str, clip, ask: Callable[[str], str], play) -> str:
+    """Ask for `label`'s name on a dialog worker thread (``ask`` runs the AppleScript). With a
+    `clip` the dialog can play it (``play(clip)`` returns at once) and comes back with the
+    text typed so far, as often as the user likes; without one it is the plain prompt.
+    Returns the name, "" if cancelled or timed out."""
+    answer = ""
+    while True:
+        replay, answer = name_dialog_answer(
+            ask(name_dialog_script(label, clip is not None, answer))
+        )
+        if not (replay and clip is not None):
+            return answer
+        play(clip)
 
 
 # ----------------------------------------------------------------------- controller
@@ -340,9 +449,19 @@ def _privatize_new_folder(path: Path) -> None:
 
 # transcription keys a hand edit applies live (models and device need a restart)
 RETENTION_KEY = "transcription.audio_retention_days"
+
+
+def _is_days(value: object) -> bool:
+    """A usable ``audio_retention_days``: a whole number (``True`` is not one)."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 # Settings-window fields that are NO_ROLLBACK_KEYS: a successful window save writes them.
 WINDOW_KEYS = {"live_captions": "live_captions", "mode": "detection.mode"}
 RELOADED_TRANSCRIPTION_KEYS = ("keep_audio", "audio_retention_days", "speaker_names")
+MODEL_CHANGE_NOTICE = (
+    "Applies after RecAndCC restarts; a model not on disk yet is downloaded once then."
+)
 
 
 class Controller:
@@ -367,6 +486,7 @@ class Controller:
         self._perm: dict[str, str] = {}
         self._recent: list[Path] = []
         self._export_lock = threading.Lock()
+        self._retention_lock = threading.Lock()  # one menu purge at a time
         self._refreshing = False
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
@@ -725,6 +845,21 @@ class Controller:
     def speaker_names_enabled(self) -> bool:
         return self.cfg.transcription.speaker_names
 
+    @property
+    def sample_allowed(self) -> bool:
+        """A speaker sample plays only while nothing records: system capture leaves out only
+        our own process, so ``afplay`` would end up in the recording."""
+        return self.engine.state.status == IDLE
+
+    def speaker_clip(self, directory: Path, label: str):
+        """The label's audio sample (``ui.sample.Clip``) for the name dialog, or None while
+        recording or when the audio is gone. Call it on a worker thread (reads the WAV)."""
+        if not self.sample_allowed:
+            return None
+        from . import sample
+
+        return sample.find_clip(directory, label)
+
     def speakers_async(self, directory: Path) -> None:
         """List the session's speakers that have voice data, with their first lines; posts
         ``("speakers", directory, [(label, lines)])`` (the exception if it failed)."""
@@ -809,7 +944,9 @@ class Controller:
                         raise ExportError("No finished transcripts yet")
                     if not inside(target.parent, self.cfg.output_dir):
                         raise ExportError("That session is outside the transcripts folder")
-                    paths = export_session(target.parent, fmt, skipped)
+                    paths = export_session(
+                        target.parent, fmt, skipped, template=self.cfg.export.template
+                    )
                     if not all(p.is_file() for p in paths):  # e.g. the session was deleted
                         raise ExportError("The session folder changed during the export")
                     names = " and ".join(p.name for p in paths)
@@ -896,7 +1033,10 @@ class Controller:
         """Delete expired audio at startup and then hourly (audio_retention_days); sync the
         search index hourly too (half an hour in, clear of the startup sync)."""
         while not getattr(self, "_shut", False):
-            self.purge_audio_now()
+            try:  # one failure must not end the hourly purge and index sync for good
+                self.purge_audio_now()
+            except Exception:
+                log.exception("audio retention failed")
             for i in range(3600):  # sleep 1 h, but notice shutdown promptly
                 if i == 1800:
                     self._sync_index()
@@ -904,26 +1044,40 @@ class Controller:
                     return
                 time.sleep(1)
 
-    def purge_audio_now(self, days: int | None = None) -> None:
-        """Delete expired audio. Without ``days``, use the in-memory retention, but not while
-        a menu save of it is pending: a value that may never be saved must not delete audio
-        (the save's own purge, or the next hourly run, follows)."""
-        if days is None:
-            with self._dirty_lock:
-                if RETENTION_KEY in self._dirty:
-                    return
-            days = self.cfg.transcription.audio_retention_days
+    def purge_audio_now(self, days: int | None = None) -> list[Path]:
+        """Delete audio older than ``days`` now; the deleted WAVs (none if it failed or was
+        skipped). A menu click passes its own saved value: memory may already hold a newer,
+        unsaved click. Without ``days`` (startup, the hourly loop) use the in-memory retention,
+        but only when config.toml holds that same value: not while a menu save of it is pending
+        or pinned unsaved, and not after a failed save left an unsaved click in memory (e.g.
+        config.toml was unreadable, so nothing could be restored). A value that was never
+        saved must not delete audio; the save's own purge, or the next hourly run, follows."""
         try:
-            purge_old_audio(self.cfg.output_dir, days)
+            if days is None:
+                with self._dirty_lock:
+                    if RETENTION_KEY in self._dirty or RETENTION_KEY in self._unsaved:
+                        return []
+                days = self.cfg.transcription.audio_retention_days
+                if not _is_days(days):  # e.g. a hand-written "7": treated as not on disk
+                    log.warning("audio_retention_days is not a whole number; purge skipped")
+                    return []
+                if days > 0 and self._retention_on_disk() != days:
+                    log.info("retention: the current value is not in config.toml; purge skipped")
+                    return []
+            return purge_old_audio(self.cfg.output_dir, days)
         except Exception:
             log.exception("audio retention failed")
+            return []
 
-    def save_retention(self) -> None:
-        """Menu "Delete audio after" (worker thread): save the in-memory retention, then purge
-        with the value that was written, only if the write succeeded."""
-        saved = self.write_settings(RETENTION_KEY)
-        if saved is not None:
-            self.purge_audio_now(saved[RETENTION_KEY])
+    def _retention_on_disk(self) -> int | None:
+        """``audio_retention_days`` as config.toml holds it, or None when the file is missing
+        or unreadable. A plain parse: no lock, no default file, no config warnings."""
+        try:
+            raw = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            value = raw.get("transcription", {}).get("audio_retention_days", 0)
+            return value if _is_days(value) else None
+        except Exception:  # missing, mid-edit TOML, unreadable
+            return None
 
     def _purge_leftover_audio(self) -> None:
         """keep_audio = false: delete WAVs left behind by transcribed sessions (e.g. the app
@@ -935,12 +1089,31 @@ class Controller:
         except Exception:
             log.exception("deleting leftover audio failed")
 
+    def _recover_interrupted(self) -> None:
+        """Give sessions an earlier run never stopped (crash, force-quit, power loss) an end
+        time, so they are re-queued. Never the live one: it started after this controller
+        (and is skipped by folder too, in case a room pre-roll moved its start earlier)."""
+
+        def busy() -> set[Path]:
+            live = self.engine.state.session_dir  # engine lock taken and released here
+            with self._lock:
+                out = set(self._in_flight)
+            return out | {Path(live)} if live else out
+
+        try:
+            recover_interrupted_sessions(
+                self.cfg.output_dir, started_before=self._started_at, busy=busy
+            )
+        except Exception:
+            log.exception("recovering interrupted sessions failed")
+
     def _resubmit_unfinished(self) -> None:
         # Purge first, on this same thread: once a re-queued session is transcribed, its
         # diarization may still need the WAVs, and the purge must not see it as leftover.
         self._resubmitting = True  # note_busy: untranscribed sessions may be about to queue
         try:
             self._purge_leftover_audio()
+            self._recover_interrupted()
             for s in untranscribed_sessions(self.cfg.output_dir):
                 log.info("re-queueing untranscribed session %s", s.directory)
                 self.tq.submit(s)
@@ -1084,7 +1257,8 @@ class Controller:
 
     def _maybe_reload_config(self) -> None:
         """Apply edits made to config.toml by hand (detection settings, output dir, hotkey,
-        languages, keep_audio, audio_retention_days, speaker_names, live_captions, [summary]).
+        languages, keep_audio, audio_retention_days, speaker_names, live_captions, [summary],
+        [export]).
         Read and apply are one step under ``_save_lock``: a menu write never interleaves."""
         hotkey_changed = False
         with self._save_lock:
@@ -1103,8 +1277,10 @@ class Controller:
             # "file read" and "memory updated", so it can't write half-applied values. A field
             # a menu click changed meanwhile keeps the click (its queued save writes it).
             was_listening = self.cfg.detection.room_listening
-            # _dirty_lock spans snapshot and apply: a click marks + sets under it too, so it
-            # lands either before the snapshot (seen) or after the apply (kept), never between.
+            # _dirty_lock spans snapshot and apply. Menu/tray setters (menu_set, menu_apply,
+            # set_mode, toggle_language) mark + set under it too, so their click lands either
+            # before the snapshot (seen as dirty) or after the apply (kept), never between.
+            # The Settings window applies and writes under _save_lock, which this holds too.
             with self._dirty_lock:
                 now = self._reloadable(self.cfg)
                 # changed in the menu, save not written yet (or failed: _unsaved)
@@ -1123,6 +1299,11 @@ class Controller:
                         if key == ("top", "hotkey") and value != now[key]:
                             hotkey_changed = True
                         setattr(self._reload_target(owner), name, value)
+            # transcription.model is not reloaded (the loaded model stays until a restart), but
+            # the Settings window shows what is on disk, a hand edit included
+            tr = self.cfg.transcription
+            on_disk = new.transcription.model
+            tr._pending_model = None if on_disk == tr.model else on_disk  # type: ignore[attr-defined]
             if self.cfg.detection.room_listening and not was_listening:  # turned on by hand
                 self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
         if hotkey_changed:  # re-registering the listener may block: outside the lock
@@ -1143,6 +1324,7 @@ class Controller:
             out[("summary", f.name)] = getattr(cfg.summary, f.name)
         for f in fields(cfg.search):  # [search] semantic: applies from the next search
             out[("search", f.name)] = getattr(cfg.search, f.name)
+        out[("export", "template")] = cfg.export.template  # read at each export
         for name in RELOADED_TRANSCRIPTION_KEYS:
             out[("transcription", name)] = getattr(cfg.transcription, name)
         tr = cfg.transcription
@@ -1183,6 +1365,7 @@ class Controller:
             "detection": self.cfg.detection,
             "summary": self.cfg.summary,
             "search": self.cfg.search,
+            "export": self.cfg.export,
             "transcription": self.cfg.transcription,
         }[owner]
 
@@ -1194,24 +1377,32 @@ class Controller:
 
         tr = self.cfg.transcription
         key = "transcription.languages"
-        try:
-            # mark + set together under _dirty_lock (a leaf lock; only _lang_lock nests in it)
-            with self._dirty_lock:
-                self._dirty[key] = self._dirty.get(key, 0) + 1
+        # mark + set together under _dirty_lock (a leaf lock; only _lang_lock nests in it)
+        new = None
+        with self._dirty_lock:
+            self._dirty[key] = self._dirty.get(key, 0) + 1
+            try:
                 with self._lang_lock:
                     new = toggle_languages(tr.languages, getattr(tr, "_raw_languages", None), code)
                     if new is not None:
                         langs = normalize_languages(new)
                         tr._raw_languages = new if new != langs else None  # type: ignore[attr-defined]
                         tr.languages = langs  # a new list: other threads never see it half-built
-            if new is not None:
-                self.save_settings(key, title="Languages", marked=True)
-        except BaseException:
-            self._mark_dirty((key,), -1)  # the save thread never started: don't leak the mark
-            raise
+            except BaseException:
+                new = None
+                raise
+            finally:
+                if new is None:  # raised or refused: nothing to save, drop our mark right here
+                    n = self._dirty[key] - 1
+                    if n > 0:
+                        self._dirty[key] = n
+                    else:
+                        del self._dirty[key]
         if new is None:
-            self._mark_dirty((key,), -1)
             self.post_notice("Languages", LANGUAGES_KEEP_ONE)
+            return
+        # from here save_settings owns the unmark (exactly once, even if its thread can't start)
+        self.save_settings(key, title="Languages", marked=True)
 
     def toggle_call_app_names(self) -> None:
         """Menu "Use names from the call app" (macOS), from the main thread; never blocks.
@@ -1249,14 +1440,67 @@ class Controller:
         threading.Thread(target=run, daemon=True, name="ax-settings").start()
 
     def _set_call_app_names(self, on: bool) -> None:
-        self.cfg.transcription.names_from_call_app = on
-        self.save_settings("transcription.names_from_call_app", title="Names from the call app")
+        self.menu_set("transcription.names_from_call_app", on, title="Names from the call app")
+
+    def menu_set(self, key: str, value: object, *, title: str = "Settings") -> None:
+        """A menu/tray setter: set dotted ``key`` in memory and save it (see ``menu_apply``)."""
+        owner, _, name = key.rpartition(".")
+        target = self.cfg
+        for part in filter(None, owner.split(".")):
+            target = getattr(target, part)
+        self.menu_apply((key,), lambda: setattr(target, name, value), title=title)
+
+    def set_mode(self, mode: Mode | str) -> None:
+        """Menu/tray "Mode": mark ``detection.mode`` and switch the engine in one step (see
+        ``menu_apply``), so a config reload can't revert the click between set and mark. Lock
+        order is ``_dirty_lock`` then the engine's lock, as in the reload."""
+        self.menu_apply(
+            ("detection.mode",),
+            lambda: self.engine.set_mode(mode, save=False),
+            title="Mode",
+        )
+
+    def menu_apply(
+        self,
+        keys: tuple[str, ...],
+        change: Callable[[], None],
+        *,
+        title: str = "Settings",
+    ) -> None:
+        """Mark ``keys`` dirty and run ``change`` (a quick in-memory update) in one step (see
+        ``_mark_and_apply``), then queue their save. Never blocks: no file I/O and no
+        ``_save_lock`` here."""
+        self._mark_and_apply(keys, change)
+        self.save_settings(*keys, title=title, marked=True)
+
+    def _mark_and_apply(self, keys: tuple[str, ...], change: Callable[[], None]) -> None:
+        """Mark ``keys`` dirty and run ``change`` together under ``_dirty_lock``. A config
+        reload holds ``_dirty_lock`` across its snapshot and apply, so the click lands wholly
+        before (seen as dirty) or after (kept), and can never be reverted by a hand edit read
+        meanwhile. On success the caller owns exactly one mark per key, which its pending save
+        drops (``_restore_from_disk`` counts on one mark per pending save); if ``change``
+        raises, the mark is dropped here. ``change`` must not take ``_dirty_lock``."""
+        with self._dirty_lock:
+            for k in keys:
+                self._dirty[k] = self._dirty.get(k, 0) + 1
+            try:
+                change()
+            except BaseException:
+                for k in keys:
+                    n = self._dirty[k] - 1
+                    if n > 0:
+                        self._dirty[k] = n
+                    else:
+                        del self._dirty[k]
+                raise
 
     def save_settings(self, *keys: str, title: str = "Settings", marked: bool = False) -> None:
         """Save the in-memory value of each dotted key ("live_captions",
         "transcription.audio_retention_days") to config.toml on a worker thread. Menu
-        callbacks use this instead of ``cfg.save()``, which would overwrite hand edits.
-        ``marked``: the caller already marked ``keys`` dirty (before changing memory)."""
+        callbacks use ``menu_set``/``menu_apply`` (which call this) instead of ``cfg.save()``,
+        which would overwrite hand edits. ``marked``: the caller already marked ``keys`` dirty
+        (before changing memory); from then on this unmarks them exactly once, whether or not
+        the thread starts."""
         if not marked:
             self._mark_dirty(keys, 1)  # a config reload before the write must not undo the change
 
@@ -1412,7 +1656,7 @@ class Controller:
                     return
                 if not raw:  # cancelled, closed, or nothing changed
                     return
-                updates = validate_settings(raw)
+                updates = validate_settings(raw, offered_models())
                 if "output_dir" in updates:
                     _privatize_new_folder(updates["output_dir"])
                     make_private_dir(updates["output_dir"])
@@ -1428,6 +1672,8 @@ class Controller:
                         "keep_audio": tr.keep_audio,
                         "speaker_names": tr.speaker_names,
                         "languages": list(tr.languages),
+                        "live": tr.live,
+                        "model": getattr(tr, "_pending_model", None),
                     }
                     old = {k: v for k, v in old.items() if k in fields}
                     old_raw = getattr(tr, "_raw_languages", None)
@@ -1456,6 +1702,9 @@ class Controller:
                         self.apply_settings({"mode": updates["mode"]})
                 if "output_dir" in updates:
                     self.refresh_async(force=True)  # cloud-sync warning for the new folder
+                if "model" in updates and updates["model"] != self.cfg.transcription.model:
+                    # the loaded model is kept until the app restarts
+                    self.post_notice("Model saved", MODEL_CHANGE_NOTICE)
                 self.events.put(("settings_saved", updates))
             except SettingsUnavailable as e:
                 log.info("native settings unavailable: %s", e)
@@ -1491,6 +1740,11 @@ class Controller:
             tr.keep_audio = updates["keep_audio"]
         if "speaker_names" in updates:
             tr.speaker_names = updates["speaker_names"]
+        if "live" in updates:  # read at each session start
+            tr.live = updates["live"]
+        if "model" in updates:  # written to config.toml; loaded at the next app start
+            pending = None if updates["model"] == tr.model else updates["model"]
+            tr._pending_model = pending  # type: ignore[attr-defined]
         if "languages" in updates:
             with self._lang_lock:
                 tr._raw_languages = None  # type: ignore[attr-defined]
@@ -1559,8 +1813,7 @@ class Controller:
         """Menu toggle: the engine opens or closes the room mic (and stops a room session) on
         its next tick. Turning it on explains the always-on mic indicator and the consent
         question. Saves only this key, like the other toggles (the last toggle wins)."""
-        self.cfg.detection.room_listening = bool(on)
-        self.save_settings("detection.room_listening")
+        self.menu_set("detection.room_listening", bool(on))
         if on:
             self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
             if self.permissions.get("microphone") == "denied":
@@ -1572,10 +1825,51 @@ class Controller:
     def set_sensitivity(self, preset: str) -> None:
         """Sensitivity menu: apply a preset from ``sensitivity.PRESETS`` in memory (the engine
         and the room monitor read it on their next tick) and save only these two keys."""
-        apply_preset(self.cfg.detection, preset)
-        self.save_settings(
-            "detection.outside_sensitivity", "detection.inside_sensitivity", title="Sensitivity"
+        self.menu_apply(
+            ("detection.outside_sensitivity", "detection.inside_sensitivity"),
+            lambda: apply_preset(self.cfg.detection, preset),
+            title="Sensitivity",
         )
+
+    def set_retention(self, days: int) -> None:
+        """ "Delete audio after" menu (both shells): apply ``days`` in memory at once (the menu
+        check reads it), then save only this key and purge expired audio on a worker, with
+        this click's value. Audio is deleted only once the choice is saved and only if it is
+        still the current choice (a quick second click supersedes this one). A failed save is
+        rolled back by ``_restore_from_disk`` alone (this save holds the key's only pending
+        mark, as ``save_settings`` does); this method only asks the menus to re-render."""
+        days = int(days)
+        tr = self.cfg.transcription
+        # mark + set in one step under _dirty_lock: a reload can't revert the click between
+        # them; from here this save holds the key's one pending mark, dropped once in apply()
+        self._mark_and_apply((RETENTION_KEY,), lambda: setattr(tr, "audio_retention_days", days))
+
+        def apply() -> None:
+            try:
+                saved = self._write_settings(RETENTION_KEY, title="Delete audio after")
+            finally:
+                self._mark_dirty((RETENTION_KEY,), -1)
+            if saved is None:  # rolled back (or kept for a newer click): the shells re-render
+                self.events.put(("retention_changed",))  # on the UI thread (cached tray menu)
+                return
+            # purge by the value actually written: an earlier worker may have written a newer
+            # click's value, and memory may already hold a later, still unsaved one
+            value = saved.get(RETENTION_KEY)
+            with self._retention_lock:  # serialises menu purges; the check sees the latest
+                if not _is_days(value) or self.cfg.transcription.audio_retention_days != value:
+                    return  # a newer click owns the setting now
+                if self._retention_on_disk() != value:
+                    return  # a later save wrote another value; memory may be an unsaved click
+                if n := len({wav.parent for wav in self.purge_audio_now(value) or ()}):
+                    # count only: a mis-click is visible, no session names or text
+                    what = f"{n} session" + ("s" if n != 1 else "")
+                    self.post_notice("Delete audio after", f"Deleted audio of {what}")
+
+        try:
+            threading.Thread(target=apply, daemon=True, name="retention-set").start()
+        except BaseException:
+            self._mark_dirty((RETENTION_KEY,), -1)  # apply() will never unmark
+            raise
 
     def sensitivity_preset(self) -> str | None:
         return current_preset(self.cfg.detection)

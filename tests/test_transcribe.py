@@ -165,6 +165,50 @@ def test_format_srt():
     assert fmt_srt_time(0) == "00:00:00,000"
 
 
+def test_srt_blank_line_in_text_does_not_split_the_cue():
+    srt = format_srt([seg(0, 1, "one\n\n\ntwo"), seg(1, 2, "next")])
+    assert "Others: one\ntwo\n\n2\n" in srt
+    assert "\n\n\n" not in srt
+
+
+def test_write_outputs_survive_lone_surrogates_and_noncharacters(tmp_path):
+    from recandcc.transcribe.output import write_outputs
+
+    s = make_session(tmp_path)
+    paths = write_outputs(s, [seg(0, 1, "bad \ud83d and \uffff here")], 1.0, "m")
+    assert [p.name for p in paths] == ["transcript.md", "transcript.json", "transcript.srt"]
+    for p in paths:
+        text = p.read_text("utf-8")
+        assert "bad \ufffd and \ufffd here" in text.replace("\\ufffd", "\ufffd")
+
+
+def test_srt_collapses_bare_carriage_returns():
+    srt = format_srt([seg(0, 1, "one\r\r\rtwo\r\n\r\nthree")])
+    assert "Others: one\ntwo\nthree\n" in srt
+
+
+def test_atomic_write_warns_with_file_name_only(tmp_path, caplog):
+    from recandcc.transcribe.output import atomic_write
+
+    atomic_write(tmp_path / "f.txt", "secret\ud83d")
+    assert [r.getMessage() for r in caplog.records if r.levelname == "WARNING"] == [
+        "f.txt: unencodable characters replaced with '?'"
+    ]
+
+
+def test_session_metadata_write_survives_a_bad_name(tmp_path):
+    s = make_session(tmp_path)
+    s.trigger_app = "bad\ud83dname"
+    s.save()
+    assert (tmp_path / s.FILENAME).exists()
+
+
+def test_atomic_write_replaces_unencodable_text_as_last_resort(tmp_path):
+    from recandcc.transcribe.output import atomic_write
+
+    assert atomic_write(tmp_path / "f.txt", "a\ud83db").read_text("utf-8") == "a?b"
+
+
 # -- Hebrew / right to left ------------------------------------------------------------------
 
 

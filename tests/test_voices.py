@@ -237,6 +237,97 @@ def test_a_failure_partway_never_counts_a_session_twice(tmp_path, monkeypatch):
     assert "Carl" not in (tmp_path / "transcript.md").read_text(encoding="utf-8")
 
 
+def test_failed_transcript_write_leaves_the_speaker_nameable(tmp_path, monkeypatch):
+    _final(tmp_path, monkeypatch, speaker_names=True)
+
+    def boom(*_a, **_k):
+        raise OSError("cloud folder")
+
+    with monkeypatch.context() as m:
+        m.setattr(voices, "write_outputs", boom)
+        with pytest.raises(OSError):
+            voices.name_speaker(tmp_path, "Speaker 2", "Carl")
+    assert voices.load_profiles() == []
+    assert set(voices.read_session_voices("s1")) == {"Speaker 1", "Speaker 2"}
+    assert "Speaker 2" in dict(voices.session_speakers(tmp_path))
+    assert voices.name_speaker(tmp_path, "Speaker 2", "Dora").count == 1  # any name works
+
+
+def test_partial_transcript_write_is_reverted_in_all_files(tmp_path, monkeypatch):
+    from recandcc.transcribe import output
+
+    _final(tmp_path, monkeypatch, speaker_names=True)
+    real = output.atomic_write
+
+    def srt_fails(path, *a, **k):
+        if str(path).endswith(".srt"):
+            raise PermissionError("held open by a player")
+        return real(path, *a, **k)
+
+    with monkeypatch.context() as m:
+        m.setattr(output, "atomic_write", srt_fails)
+        with pytest.raises(PermissionError):
+            voices.name_speaker(tmp_path, "Speaker 2", "Carl")
+    for f in ("transcript.md", "transcript.json", "transcript.srt"):
+        assert "Carl" not in (tmp_path / f).read_text(encoding="utf-8")
+    assert voices.load_profiles() == []
+    assert set(voices.read_session_voices("s1")) == {"Speaker 1", "Speaker 2"}
+    assert voices.name_speaker(tmp_path, "Speaker 2", "Carl").count == 1
+
+
+def test_failed_rename_keeps_the_old_profile_untouched(tmp_path, monkeypatch):
+    _final(tmp_path, monkeypatch, speaker_names=True)
+    voices.name_speaker(tmp_path, "Speaker 2", "Anna")
+    voices.save_profile("Anna", BOB)  # a second session, so Anna survives losing this one
+    before = {p.name: (p.count, p.total.tolist()) for p in voices.load_profiles()}
+    real = voices.save_profile
+
+    def boom(name, *a, **k):
+        if name == "Bob":
+            raise OSError("disk full")
+        return real(name, *a, **k)
+
+    with monkeypatch.context() as m:
+        m.setattr(voices, "save_profile", boom)
+        with pytest.raises(OSError):
+            voices.name_speaker(tmp_path, "Anna", "Bob")
+    assert {p.name: (p.count, p.total.tolist()) for p in voices.load_profiles()} == before
+    assert "Anna:** hi" in (tmp_path / "transcript.md").read_text(encoding="utf-8")
+    assert voices.name_speaker(tmp_path, "Anna", "Bob").count == 1
+    assert {p.name: p.count for p in voices.load_profiles()} == {"Anna": 1, "Bob": 1}
+
+
+def test_retry_completes_when_the_store_step_never_ran(tmp_path, monkeypatch):
+    from recandcc.models import SessionInfo
+
+    _final(tmp_path, monkeypatch, speaker_names=True)
+    segs = json.loads((tmp_path / "transcript.json").read_text(encoding="utf-8"))
+    renamed = [  # a kill hit after the transcript was rewritten, before the voices were
+        Segment(**{**x, "speaker": "Carl" if x["speaker"] == "Speaker 2" else x["speaker"]})
+        for x in segs["segments"]
+    ]
+    voices.write_outputs(SessionInfo.load(tmp_path), renamed, segs["duration"], segs["model"])
+    assert voices.name_speaker(tmp_path, "Speaker 2", "Carl").count == 1
+    assert set(voices.read_session_voices("s1")) == {"Speaker 1", "Carl"}
+    assert "Carl:** hi" in (tmp_path / "transcript.md").read_text(encoding="utf-8")
+
+
+def test_failed_store_step_restores_label_and_voices(tmp_path, monkeypatch):
+    _final(tmp_path, monkeypatch, speaker_names=True)
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    with monkeypatch.context() as m:
+        m.setattr(voices, "save_profile", boom)
+        with pytest.raises(OSError):
+            voices.name_speaker(tmp_path, "Speaker 2", "Carl")
+    assert "Carl" not in (tmp_path / "transcript.md").read_text(encoding="utf-8")
+    assert set(voices.read_session_voices("s1")) == {"Speaker 1", "Speaker 2"}
+    assert voices.load_profiles() == []
+    assert voices.name_speaker(tmp_path, "Speaker 2", "Dora").count == 1
+
+
 def test_windows_replace_retries_when_the_file_is_held_open(tmp_path, monkeypatch):
     real, calls = os.replace, []
 
@@ -369,3 +460,22 @@ def test_real_diarization_attaches_speaker_centroids():
     assert abs(float(np.linalg.norm(first)) - 1) < 1e-5
     assert float(first @ ANNA) > 0.95 and float(last @ CARL) > 0.95
     assert voices.match_profiles(turns.centroids, profiles(Anna=ANNA)) == {turns[0].speaker: "Anna"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_lock_file_is_owner_only_even_when_it_pre_exists_loose(tmp_path):
+    d = tmp_path / "voices"
+    d.mkdir()
+    lock = d / voices.LOCK_FILE
+    lock.write_bytes(b"")
+    lock.chmod(0o644)
+    old = os.umask(0o022)
+    try:
+        with voices._file_lock(d):
+            pass
+        lock.unlink()
+        with voices._file_lock(d):
+            pass
+    finally:
+        os.umask(old)
+    assert lock.stat().st_mode & 0o777 == 0o600

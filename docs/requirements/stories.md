@@ -29,10 +29,11 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-18 | Runs on Windows | 🟡 untested on Windows hardware (none available; #5 not planned) |
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 language ID checked on a synthetic he/en/ru set; no real Hebrew recordings, ivrit.ai routing not evaluated (#6) |
 | US-20 | Search my transcripts | ✅ search (summaries and export: see US-27, US-25) |
-| US-21 | Speaker names remembered across sessions | 🟡 CLI (#62) and macOS menu (US-26, #76); self-intro hints (#81) and overlap segmentation (#96) shipped (#1) |
-| US-26 | Name speakers and forget voices from the menu | 🟡 macOS menu, first lines instead of an audio sample; Windows tray not yet (#1) |
+| US-21 | Speaker names remembered across sessions | 🟡 CLI (#62), macOS menu and Windows tray (US-26, #76); self-intro hints (#81) and overlap segmentation (#96) shipped (#1) |
+| US-26 | Name speakers and forget voices from the menu | 🟡 macOS menu (first lines and an audio sample) and Windows tray (tray untested on Windows hardware) (#1) |
 | US-31 | Speaker names from the call app's participant list | 🟡 shipped (#80, #1 A.3): opt-in, macOS, one-to-one only |
-| US-25 | Export a transcript to DOCX and PDF | 🟡 CLI and macOS menu; Windows tray, templates planned (#4) |
+| US-35 | Call-app names in a room recording a call joined | 🟡 claimed (#1): fake-tested; older transcripts stay unnamed |
+| US-25 | Export a transcript to DOCX and PDF | 🟡 CLI, macOS menu and Windows tray, custom templates (#4) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
 | US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
 | US-23 | Sensitivity: room vs system audio | 🟡 presets and keys shipped (#7, #102); live level meters not yet |
@@ -181,7 +182,8 @@ while I decide.*
 - **Then** logs contain events, app names and paths, never transcript text or audio.
 
 ### US-15 Delete old audio automatically
-- **Given** `audio_retention_days = N` (menu: Never / 1 / 7 / 30 / 90), **then** WAVs of
+- **Given** `audio_retention_days = N` (macOS menu or Windows tray: Never / 1 / 7 / 30 /
+  90; the current choice is checked), **then** WAVs of
   transcribed sessions older than N days are deleted; transcripts are always kept.
 - **Given** `keep_audio = false`, **then** WAVs are deleted right after transcription. WAVs
   left behind (the app quit before a slow diarization finished, or a delete failed) are
@@ -295,7 +297,8 @@ I don't have to work out who `Speaker 2` was every time.*
 don't need the command line for it.*
 
 - **Given** `speaker_names = true`, **when** I choose "Recent transcripts → Name speakers…",
-  pick a session and a `Speaker N` (shown with their first lines), and type a name, **then**
+  pick a session and a `Speaker N` (shown with their first lines; on macOS the name dialog
+  can play a short sample of their voice), and type a name, **then**
   the result is exactly that of `recandcc name-speaker` (same function): transcript files and
   the voice profile are updated.
 - **Given** `speaker_names = false` (default), **then** "Name speakers…" is greyed out and
@@ -306,8 +309,16 @@ don't need the command line for it.*
   the forget keeps no voices or call-app names either, even if it is transcribed after it.
 - **Then** dialogs run off the menu thread, disk work on worker threads, and neither names
   nor transcript text are logged at INFO or above.
-- **Not yet:** a short audio sample (the first lines are shown instead), the Windows tray
-  items (#1).
+- **Given** the session's audio is still kept, **when** I press "Play sample" (macOS),
+  **then** a few seconds of that speaker (their first segment of at least 2 s, else the
+  longest, at most 6 s) play from the session's own WAV, cut into a private temp file that
+  is deleted after playback (its folder on quit), off the menu thread. **Given** the audio
+  was purged or is missing, or a session is recording (it would record the sample), **then**
+  there is no "Play sample" button, only the first lines. A label from a call is never
+  played from the user's own mic track.
+- **Given** Windows, **then** the tray has the same two items; its dialogs are small tkinter
+  windows on worker threads and time out as Cancel (unit-tested with fake dialogs, not yet
+  checked on Windows hardware).
 
 ### US-31 Speaker names from the call app's participant list
 *As the owner, I want `Speaker 2` named after the person shown in Zoom/Teams/Meet, so that I
@@ -334,11 +345,31 @@ don't have to name them myself, without the app ever asking for more permission 
   tested layouts for each app version (see ARCHITECTURE). Shipped: the participant-list names
   (#80); the self-introduction hints (A.4, #81) are under US-21.
 
+### US-35 Call-app names in a room recording a call joined
+*As the owner, I want the remote speaker of a call that joined a room recording named after the
+call app's participant, like in any other call, without ever being renamed myself.*
+
+- **Given** a room recording that a call upgraded (both tracks diarized), **when** the
+  transcript is written, **then** every speaker label records the track it came from
+  (`"track": "me"` or `"others"` on its segments in `transcript.json`), and naming a speaker
+  later keeps it.
+- **Given** `names_from_call_app` and `speaker_names` are on, **when** the call app's names are
+  applied, **then** only labels from the call's (system audio) track are counted and can be
+  named, under the US-31 rules (as many names as call-side speakers, voice-matched speakers
+  match names, one `Speaker N` and one name left, a disagreeing self-introduction wins).
+  People in the room, including the owner numbered `Speaker N`, are never named or counted.
+- **Given** a transcript written before labels carried their track, or a label whose track is
+  unknown or mixed, **then** nothing is assigned and the kept names are deleted (fail closed).
+- **Then** the rename checks the label's track again under `NAMING_LOCK`, a "forget all" since
+  the session began names nobody, and names appear nowhere in logs at INFO or above.
+- **Not yet:** a lone remote speaker keeps `Others`, which is never named (as in US-31).
+
 ### US-25 Export a transcript to DOCX and PDF
 *As the owner, I want a transcript as a Word or PDF file, so that I can share or print it.*
 
 - **Given** a session with a `transcript.json`, **when** I run `recandcc export <session>
-  [--format docx|pdf|both]` (or choose **Export latest transcript** on macOS), **then**
+  [--format docx|pdf|both]` (or choose **Export latest transcript** in the macOS menu or
+  the Windows tray), **then**
   `transcript.docx` and/or `transcript.pdf` are written next to it: title, date, speakers,
   and one paragraph per segment with its timestamp.
 - **Given** English, Russian and Hebrew segments, **then** all are readable; Hebrew segments
@@ -346,13 +377,18 @@ don't have to name them myself, without the app ever asking for more permission 
 - **Given** the session folder also has a `summary.md` (US-27), **then** its summary and
   action items come first in the DOCX and PDF, under their own headings and before a
   "Transcript" heading (Hebrew right to left); without `summary.md` the files are unchanged.
+- **Given** `export.template` names a local TOML file, **then** its title format
+  (`{date}` `{time}` `{duration}` `{title}` ...), section order and headings (summary, action
+  items, transcript) and header/footer line shape the DOCX and PDF; unknown placeholders stay
+  literal; a missing or invalid file logs one warning and the default layout is used
+  (unchanged without a template).
 - **Then** export needs no network, the files are owner-only and logs never contain the
   transcript text.
 - **Given** the session folder (or a parent) is swapped for a link or junction during the
   export, **then** nothing is written through it: the folder is pinned once before anything
   is read, and both files go to that folder or the export is refused (#129). A folder that
   was already a link when the export started is exported as usual.
-- **Not yet:** the Windows tray entry, custom templates; the PDF needs a system font with
+- **Not yet:** the PDF needs a system font with
   Latin, Cyrillic and Hebrew (Arial, DejaVu Sans), otherwise only DOCX is produced (#4).
 
 ### US-27 Meeting summaries and action items
@@ -374,6 +410,14 @@ its transcript, so that I know what was decided and who does what without reread
   skipped with an INFO log line and a one-time **Summary skipped** notice.
 - **When** I run `recandcc summarize <session_dir>`, **then** that session's `summary.md` is
   (re)written, also with `summary.enabled = false`.
+- **Given** `summary.language_models = { he = "mlx-community/Qwen3.5-4B-MLX-4bit" }`
+  (Apache-2.0), **when** a meeting's main spoken language (most speech time) is Hebrew,
+  **then** that pinned model writes its summary in Hebrew, loaded only then and freed
+  afterwards (one summary model in memory at a time), with thinking off and any thought
+  block stripped; other
+  meetings, and everyone with the default `{}`, keep `summary.model`. If the routed model
+  can't be downloaded or loaded, `summary.model` writes that summary instead. The same
+  measure (most speech time) picks the summary's language and headings.
 - **Then** logs never contain transcript or summary text.
 - **Given** a 1-hour en/ru meeting on an M-series Mac, **then** the summary is ready within
   ~1–2 min, offline. Checked by the slow `test_summary_timing.py` (hard bound 120 s, a

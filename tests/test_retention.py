@@ -7,10 +7,17 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from recandcc import retention
 from recandcc.models import SessionInfo, Track, TriggerKind
 from recandcc.retention import purge_old_audio, purge_transcribed_audio
 
 NOW = datetime(2026, 10, 26, 12, 0).astimezone()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_outside_warnings(monkeypatch):
+    """The once-per-folder warning set lives for the app run: start each test with none."""
+    monkeypatch.setattr(retention, "_warned_outside", set())
 
 
 def make_session(root, name, ended_days_ago, transcribed=True):
@@ -50,6 +57,31 @@ def test_disabled_and_missing_dir(tmp_path):
     make_session(tmp_path, "old", 100)
     assert purge_old_audio(tmp_path, 0, now=NOW) == []
     assert purge_old_audio(tmp_path / "nope", 7, now=NOW) == []
+
+
+def _symlink(link, target, is_dir=False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=is_dir)
+    except OSError:  # Windows without symlink rights
+        pytest.skip("symlinks not available")
+
+
+def test_never_deletes_audio_outside_the_transcripts_folder(tmp_path, caplog):
+    root, outside = tmp_path / "out", tmp_path / "elsewhere"
+    root.mkdir()
+    real = make_session(outside, "real", 10)  # a session folder outside output_dir ...
+    _symlink(root / "2026-10-02", real.parent, is_dir=True)  # ... linked into it
+    kept = make_session(root, "kept", 10)
+    victim = outside / "victim.wav"
+    victim.write_bytes(b"x")
+    (kept / "me.wav").unlink()
+    _symlink(kept / "me.wav", victim)  # a WAV that is a link to a file elsewhere
+    with caplog.at_level("WARNING", logger="recandcc.retention"):
+        deleted = purge_old_audio(root, 7, now=NOW)
+        purge_old_audio(root, 7, now=NOW)  # the hourly run: no second warning
+    assert [p.name for p in deleted] == ["others.wav"]
+    assert len(list(real.glob("*.wav"))) == 2 and victim.exists()
+    assert sum("linked from outside" in r.message for r in caplog.records) == 1
 
 
 def test_ignores_unreadable_sessions(tmp_path):
@@ -175,3 +207,23 @@ def test_startup_purge_skips_discarded_sessions(tmp_path):
     (d / SessionInfo.DISCARD_MARKER).write_bytes(b"")  # owned by purge_discarded_sessions
     assert purge_transcribed_audio(tmp_path) == []
     assert len(list(d.glob("*.wav"))) == 2
+
+
+def test_retention_spares_sessions_waiting_for_speaker_labels(tmp_path):
+    """A slow diarization still reads the WAVs: the hourly purge waits for its labels."""
+    import os
+    import time
+
+    d = make_session(tmp_path, "diarizing", 10)
+    marker = d / SessionInfo.LABELS_PENDING_MARKER
+    marker.touch()
+    assert purge_old_audio(tmp_path, 7, now=NOW) == []
+    assert len(list(d.glob("*.wav"))) == 2
+
+    stale = time.time() - SessionInfo.LABELS_PENDING_MAX_S - 60  # left by a crash
+    os.utime(marker, (stale, stale))
+    assert len(purge_old_audio(tmp_path, 7, now=NOW)) == 2
+
+    d2 = make_session(tmp_path, "labelled", 10)  # labels done: marker gone, purged
+    assert len(purge_old_audio(tmp_path, 7, now=NOW)) == 2
+    assert not list(d2.glob("*.wav"))

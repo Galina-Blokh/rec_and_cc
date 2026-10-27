@@ -21,6 +21,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -101,7 +102,7 @@ MIN_LANGUAGE_CONFIDENCE = 0.75  # below this a chunk's language is re-checked wi
 DIARIZE_WAIT_S = 5.0
 # A summary waiting this long for a diarization that never ends is dropped from memory; its
 # .summary-pending marker gets it summarised (with "Others") by the app's idle re-scan.
-LABEL_WAIT_MAX_S = 3600.0
+LABEL_WAIT_MAX_S = SessionInfo.LABELS_PENDING_MAX_S
 
 
 def _dir_key(directory) -> str:
@@ -751,6 +752,7 @@ class Transcriber:
                 turns = diarization.result(timeout=self.diarize_wait_s)
             except TimeoutError:
                 log.info("session %s: speaker labels follow when diarization ends", session.id)
+                _set_labels_pending(session.directory, True)  # before transcribed is saved
                 with voices.NAMING_LOCK:
                     self._write(session, segments, duration)
                 with self._init_lock:  # before the callback, which may run right away
@@ -873,6 +875,13 @@ class Transcriber:
                 out, labels = label_speakers(
                     out, track_turns or [], SPEAKERS[track], names=names, reserved=taken
                 )
+                # Remember the track of each label (labels never repeat across tracks): call-app
+                # names may only go to the call's side, never to a numbered owner on "Me".
+                mine = {*labels.values(), SPEAKERS[track]}
+                out = [
+                    replace(s, track=str(track)) if not s.track and s.speaker in mine else s
+                    for s in out
+                ]
                 # A lone speaker in a room session keeps "Me", which is never renamed: no voice.
                 speakers |= {
                     lbl: centroids[k] for k, lbl in labels.items() if k in centroids and lbl != ME
@@ -942,7 +951,12 @@ class Transcriber:
                     labelled = segments
                 else:
                     labelled = self._labelled_now(session, segments, turns, gen)
-                if labelled != segments and Path(session.directory).exists():
+                # `track` is compare=False: compare it too, so a track-only change (a lone "Me"
+                # or "Others" kept its label) still reaches transcript.json
+                changed = labelled != segments or [s.track for s in labelled] != [
+                    s.track for s in segments
+                ]
+                if changed and Path(session.directory).exists():
                     write_outputs(session, labelled, duration, self.cfg.model)
                     log.info("session %s: transcript rewritten with speaker labels", session.id)
             self._prune_voices()
@@ -955,9 +969,28 @@ class Transcriber:
         except Exception:  # noqa: BLE001 - runs on the diarizer thread; must not raise
             log.exception("session %s: could not add speaker labels", session.id)
         finally:
-            if Path(session.directory).exists():
-                self._drop_audio(session)
+            _set_labels_pending(session.directory, False)  # first: _drop_audio can raise
+            try:
+                if Path(session.directory).exists():
+                    self._drop_audio(session)
+            except Exception as e:  # noqa: BLE001 - e.g. a WAV still open on Windows
+                log.warning(
+                    "session %s: could not delete the audio (%s)", session.id, type(e).__name__
+                )
             self._labels_final(session)
+
+
+def _set_labels_pending(directory: Path, pending: bool) -> None:
+    """Create or remove the marker that keeps retention off a session's audio. Best effort:
+    without it retention may delete the audio early, which only costs the speaker labels."""
+    marker = Path(directory) / SessionInfo.LABELS_PENDING_MARKER
+    try:
+        if pending:
+            marker.touch()
+        else:
+            marker.unlink(missing_ok=True)
+    except OSError as e:
+        log.warning("could not update %s: %s", marker.name, e)
 
 
 def transcribe_directory(path: Path, cfg: TranscriptionConfig) -> list[Segment]:
