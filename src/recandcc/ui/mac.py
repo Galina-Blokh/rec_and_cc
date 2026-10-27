@@ -19,7 +19,6 @@ import contextlib
 import logging
 import subprocess
 import threading
-from pathlib import Path
 
 import rumps  # pyright: ignore[reportMissingImports] - macOS-only dependency
 
@@ -29,11 +28,8 @@ from ..engine import RECORDING
 from ..models import Mode, TriggerKind
 from ..retention import RETENTION_CHOICES
 from .common import (
-    ONBOARDING_TEXT,
     PERM_KINDS,
-    PERM_LABELS,
     PERM_TITLES,
-    PROMPT_BUTTONS,
     ROOM_ITEM,
     SENSITIVITY_ITEM,
     SENSITIVITY_PRESETS,
@@ -42,8 +38,25 @@ from .common import (
     keep_prompt_text,
     open_output_folder,
     open_path,
+    osascript,
     reveal_logs,
+    search_hit_label,
     transcript_label,
+)
+from .present import (
+    MODE_LABELS,
+    check,
+    dialog_timeout,
+    live_transcript_target,
+    onboarding_accepted,
+    onboarding_script,
+    permission_title,
+    prompt_dialog_choice,
+    prompt_dialog_script,
+    prompt_notice,
+    record_item_title,
+    retention_label,
+    transcribed_notice,
 )
 
 try:
@@ -75,8 +88,7 @@ class MacApp(rumps.App):
 
         self.status_item = rumps.MenuItem("Starting…")
         self.mode_items = {
-            m: rumps.MenuItem(label, callback=self._set_mode_cb(m))
-            for m, label in ((Mode.OFF, "Off"), (Mode.ASK, "Ask"), (Mode.AUTO, "Auto"))
+            m: rumps.MenuItem(label, callback=self._set_mode_cb(m)) for m, label in MODE_LABELS
         }
         self.mode_menu = rumps.MenuItem("Mode")
         for item in self.mode_items.values():
@@ -102,16 +114,15 @@ class MacApp(rumps.App):
         self.login_item = rumps.MenuItem("Launch at login", callback=self._toggle_login)
         self.retention_menu = rumps.MenuItem("Delete audio after")
         for days in RETENTION_CHOICES:
-            label = "Never (keep audio)" if days == 0 else f"{days} day" + ("s" if days > 1 else "")
-            item = rumps.MenuItem(label, callback=self._set_retention)
+            item = rumps.MenuItem(retention_label(days), callback=self._set_retention)
             # ad-hoc attribute on rumps.MenuItem, read back by the menu callback
             item.retention_days = days  # pyright: ignore[reportAttributeAccessIssue]
             self.retention_menu.add(item)
         self._render_retention()
         self.captions_item = rumps.MenuItem("Show live captions", callback=self._toggle_captions)
-        self.captions_item.state = 1 if self.cfg.live_captions else 0
+        self.captions_item.state = check(self.cfg.live_captions)
         self.room_item = rumps.MenuItem(ROOM_ITEM, callback=self._toggle_room)
-        self.room_item.state = 1 if self.cfg.detection.room_listening else 0
+        self.room_item.state = check(self.cfg.detection.room_listening)
         self.sensitivity_menu = rumps.MenuItem(SENSITIVITY_ITEM)
         self._sensitivity_shown: str | None = None
         for name in SENSITIVITY_PRESETS:
@@ -131,6 +142,7 @@ class MacApp(rumps.App):
             None,
             rumps.MenuItem("Open transcripts folder", callback=self._open_folder),
             self.recent_menu,
+            rumps.MenuItem("Search transcripts…", callback=self._search),
             None,
             self.perm_menu,
             self.login_item,
@@ -181,11 +193,7 @@ class MacApp(rumps.App):
             elif kind == "notice":
                 self._notify(ev[1], ev[2])
             elif kind == "transcribed":
-                _, session, result = ev
-                if isinstance(result, Exception):
-                    self._notify("Transcription failed", f"{session.directory.name}: {result}")
-                else:
-                    self._notify("Transcript ready", session.trigger_app or session.directory.name)
+                self._notify(*transcribed_notice(ev[1], ev[2]))
             elif kind == "live_start":
                 self._live_started(ev[1], ev[2])
             elif kind == "live":
@@ -198,6 +206,8 @@ class MacApp(rumps.App):
                     self._live_id = None
                     if self.captions is not None:
                         self.captions.end()
+            elif kind == "search":
+                self._show_hits(ev[1], ev[2])
             elif kind == "refreshed":
                 self._render_recent()
                 self._render_permissions()
@@ -210,14 +220,12 @@ class MacApp(rumps.App):
             self.title = title
         self.status_item.title = self.ctrl.status_line(st)
         for m, item in self.mode_items.items():
-            item.state = 1 if st.mode == m else 0
-        rec_title = "Stop recording" if st.status == RECORDING else "Start recording"
-        if shortcut := self.ctrl.hotkey_label:
-            rec_title += f"  {shortcut}"
+            item.state = check(st.mode == m)
+        rec_title = record_item_title(st.status == RECORDING, self.ctrl.hotkey_label)
         if self.rec_item.title != rec_title:
             self.rec_item.title = rec_title
-        self.login_item.state = 1 if autostart.is_enabled() else 0
-        self.room_item.state = 1 if self.cfg.detection.room_listening else 0  # hand edits too
+        self.login_item.state = check(autostart.is_enabled())
+        self.room_item.state = check(self.cfg.detection.room_listening)  # hand edits too
         if self.ctrl.sensitivity_preset() != self._sensitivity_shown:
             self._render_sensitivity()  # hand edits and config reloads too
         self._render_live(st)
@@ -264,8 +272,7 @@ class MacApp(rumps.App):
     def _render_permissions(self) -> None:
         perm = self.ctrl.permissions
         for k, item in self.perm_status_items.items():
-            st = perm.get(k, "unknown")
-            item.title = f"{PERM_TITLES[k]}: {PERM_LABELS.get(st, st)}"
+            item.title = permission_title(k, perm.get(k, "unknown"))
 
     def _install_menu_delegate(self) -> None:
         """Refresh permissions when the menu opens (NSMenuDelegate.menuWillOpen:)."""
@@ -315,7 +322,7 @@ class MacApp(rumps.App):
     def _render_retention(self) -> None:
         days = self.cfg.transcription.audio_retention_days
         for item in self.retention_menu.values():
-            item.state = 1 if getattr(item, "retention_days", None) == days else 0
+            item.state = check(getattr(item, "retention_days", None) == days)
 
     def _set_retention(self, sender) -> None:
         self.cfg.transcription.audio_retention_days = sender.retention_days
@@ -341,12 +348,12 @@ class MacApp(rumps.App):
 
     def _toggle_room(self, sender) -> None:
         self.ctrl.set_room_listening(not self.cfg.detection.room_listening)
-        sender.state = 1 if self.cfg.detection.room_listening else 0
+        sender.state = check(self.cfg.detection.room_listening)
 
     def _render_sensitivity(self) -> None:
         preset = self._sensitivity_shown = self.ctrl.sensitivity_preset()
         for name, item in self.sensitivity_menu.items():
-            item.state = 1 if name == preset else 0
+            item.state = check(name == preset)
 
     def _set_sensitivity(self, sender) -> None:
         self.ctrl.set_sensitivity(sender.title)
@@ -355,9 +362,7 @@ class MacApp(rumps.App):
     def _open_live(self, _sender) -> None:
         if not self._live_dir:
             return
-        d = Path(self._live_dir)
-        md = d / "transcript.md"
-        open_path(md if md.exists() else d)
+        open_path(live_transcript_target(self._live_dir))
 
     def _open_folder(self, _sender) -> None:
         if err := open_output_folder(self.cfg.output_dir):
@@ -376,16 +381,10 @@ class MacApp(rumps.App):
 
     # ------------------------------------------------------------------ dialogs (workers)
     def _show_prompt(self, app: str, kind: TriggerKind, prompt_id: int | None) -> None:
-        what = "a call" if kind == TriggerKind.CALL else "audio"
         msg = keep_prompt_text(app, kind, self.cfg.detection.ask_timeout_action)
-        self._notify("Recording — keep it?", f"{app}: {what} detected")
-        timeout = max(5, int(self.cfg.detection.ask_timeout_s))
-        buttons = ", ".join(f'"{label}"' for label, _ in PROMPT_BUTTONS)
-        script = (
-            f'display dialog {as_str(msg)} with title "RecAndCC" '
-            f'buttons {{{buttons}}} default button "Keep" '
-            f"with icon note giving up after {timeout}"
-        )
+        self._notify(*prompt_notice(app, kind))
+        timeout = dialog_timeout(self.cfg.detection.ask_timeout_s)
+        script = prompt_dialog_script(msg, timeout)
 
         def run():
             proc = subprocess.Popen(
@@ -400,16 +399,51 @@ class MacApp(rumps.App):
             with self._dialog_lock:
                 if self._dialog and self._dialog[1] is proc:
                     self._dialog = None
-            out = out or ""
-            if "gave up:true" in out:
-                return  # the engine expires the prompt itself
-            for label, choice in PROMPT_BUTTONS:
-                if f"button returned:{label}" in out:
-                    self.ctrl.engine.respond(choice, prompt_id)
-                    return
-            # cancelled/killed: leave it to the engine's timeout
+            # gave up / cancelled / killed: the engine expires the prompt itself
+            if choice := prompt_dialog_choice(out):
+                self.ctrl.engine.respond(choice, prompt_id)
 
         threading.Thread(target=run, daemon=True, name="prompt-dialog").start()
+
+    def _search(self, _sender) -> None:
+        """Ask for a query (osascript, worker thread); the search itself runs on another
+        worker and its hits come back as a ``search`` event."""
+        script = (
+            'display dialog "Search transcripts for:" default answer "" with title "RecAndCC" '
+            'buttons {"Cancel", "Search"} default button "Search"'
+        )
+
+        def run():
+            query = osascript(script).partition("text returned:")[2].strip()
+            if query:
+                self.ctrl.search_async(query)
+
+        threading.Thread(target=run, daemon=True, name="search-dialog").start()
+
+    def _show_hits(self, query: str, hits) -> None:
+        if isinstance(hits, Exception):
+            self._notify("Search failed", str(hits))
+            return
+        if not hits:
+            self._notify("Search", "No matches")  # not the query: _notify may log it
+            return
+        labels = [f"{i}. {search_hit_label(h)}"[:200] for i, h in enumerate(hits, 1)]
+        script = (
+            f'choose from list {{{", ".join(map(as_str, labels))}}} with title "RecAndCC" '
+            f'with prompt {as_str(f"Matches for “{query}”:")} OK button name "Open"'
+        )
+
+        def run():
+            number = osascript(script).partition(".")[0]
+            if number.isdigit() and 0 < int(number) <= len(hits):
+                hit = hits[int(number) - 1]
+                try:
+                    found = hit.transcript.exists()
+                except OSError:  # e.g. an unreachable volume
+                    found = False
+                open_path(hit.transcript if found else hit.folder)
+
+        threading.Thread(target=run, daemon=True, name="search-results").start()
 
     def _maybe_onboard(self) -> None:
         if self._onboarded:
@@ -418,15 +452,11 @@ class MacApp(rumps.App):
         missing = self.ctrl.missing_permissions()
         if not missing:
             return
-        script = (
-            f'display dialog {as_str(ONBOARDING_TEXT)} with title "Welcome to RecAndCC" '
-            f'buttons {{"Later", "Grant now"}} default button "Grant now" '
-            f"with icon note"
-        )
+        script = onboarding_script()
 
         def run():
             r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
-            if "button returned:Grant now" in r.stdout:
+            if onboarding_accepted(r.stdout):
                 self.ctrl.grant_all_missing()
 
         threading.Thread(target=run, daemon=True, name="onboarding").start()

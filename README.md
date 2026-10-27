@@ -11,7 +11,8 @@ account, nothing uploaded.
   `Speaker 1`, `Speaker 2`, … in the final transcript (offline speaker diarization, a few
   seconds per hour of audio). Live captions keep showing `Others`.
 - 🌍 **English and Russian** are detected automatically, even when the language switches
-  mid-meeting.
+  mid-meeting. **Hebrew** can be added (`languages = ["en", "ru", "he"]`): captions and
+  transcripts show it right to left. Hebrew accuracy with the stock model is not yet tuned.
 - 🧠 Local Whisper (`large-v3-turbo`) on the **Apple-silicon GPU** (MLX), with CPU threads
   working alongside: a 1-hour meeting transcribes in about 2–3 minutes. Windows uses the CPU.
   and the final transcript is ready a moment after the recording stops.
@@ -121,6 +122,8 @@ Menu items:
   `inside_sensitivity` in the settings.
 - **Open live transcript**: opens the current (or last) live session's `transcript.md`.
 - **Recent transcripts**: the last 10, click to open.
+- **Search transcripts…**: full-text search across all your transcripts (English, Russian,
+  any language); pick a match to open its transcript. Same as `recandcc search`.
 - **Open transcripts folder**
 - **Permissions**: status and "Grant…" actions.
 - **Launch at login**: starts RecAndCC every time you log in. Turn it on once.
@@ -204,7 +207,7 @@ record_mic = "calls"         # always | calls | never
 
 [transcription]
 model = "large-v3-turbo"     # tiny | base | small | medium | large-v3 | large-v3-turbo
-languages = ["en", "ru"]     # auto-detect among these ([] = any language)
+languages = ["en", "ru"]     # auto-detect among these, e.g. ["en", "ru", "he"] ([] = any)
 keep_audio = true            # false = delete WAVs after transcription (~115 MB per track-hour)
 live = true                  # transcribe while recording (false = after the session stops)
 ```
@@ -220,6 +223,7 @@ repo):
 | `recandcc record --seconds 60 [--no-mic]` | Record now without the UI; prints the text live as it is spoken, then the transcript path |
 | `recandcc transcribe <session_dir>` | (Re-)transcribe a recorded session |
 | `recandcc monitor` | Live view of which apps do audio and how the rules classify them. Use it to tune the app lists |
+| `recandcc search "<words>" [--limit N]` | Search all transcripts; prints each match's date, time in the recording, speaker, the text and the transcript path |
 | `recandcc devices` | List audio devices |
 | `recandcc autostart on\|off\|status` | Launch at login |
 | `recandcc config` | Show the config path and contents |
@@ -257,6 +261,7 @@ models load from disk without contacting anything (tested with all network acces
 |---|---|---|
 | Recordings (`*.wav`), transcripts (`transcript.md/.json/.srt`), `session.json` | `~/Documents/Transcribes/` (or your `output_dir`) | `Documents\Transcribes\` |
 | Settings (`config.toml`) | `~/Library/Application Support/RecAndCC/` | `%LOCALAPPDATA%\RecAndCC\` |
+| Search index (`search.sqlite3`: a copy of the transcript text, owner-only) | `~/Library/Application Support/RecAndCC/` | `%LOCALAPPDATA%\RecAndCC\` |
 | Logs (events, app names, file paths) | `~/Library/Logs/RecAndCC/` | `%LOCALAPPDATA%\RecAndCC\Logs\` |
 | Speaker-diarization model | `~/Library/Caches/RecAndCC/models/` | `%LOCALAPPDATA%\RecAndCC\Cache\models\` |
 | Whisper models (shared Hugging Face cache) | `~/.cache/huggingface/hub/models--*whisper*` | `%USERPROFILE%\.cache\huggingface\hub\` |
@@ -271,10 +276,15 @@ recordings must stay on this computer only.
 
 ### Retention
 
-- `keep_audio = false` deletes a session's WAVs as soon as it is transcribed.
+- `keep_audio = false` deletes a session's WAVs as soon as it is transcribed (any left behind
+  by a quit are deleted at the next startup).
 - `audio_retention_days = N` (menu → **Delete audio after**: Never / 1 / 7 / 30 / 90 days)
   deletes the audio N days after transcription; `0` keeps it forever.
 - Transcripts are never deleted automatically. Delete a session by deleting its folder.
+  Its text leaves the search index at the next search, the next app start, or the app's
+  hourly check, whichever comes first. Removed or replaced text is overwritten in
+  `search.sqlite3`, so it can't be recovered from the file. To remove the whole index at
+  once, delete `search.sqlite3`; it is rebuilt from the transcripts on the next search.
 
 ### Delete everything
 
@@ -283,7 +293,8 @@ macOS:
 
 ```bash
 rm -rf ~/Documents/Transcribes                    # recordings + transcripts (or your output_dir)
-rm -rf ~/Library/Application\ Support/RecAndCC    # settings
+rm -f  ~/Library/Application\ Support/RecAndCC/search.sqlite3  # search index
+rm -rf ~/Library/Application\ Support/RecAndCC    # settings (and the search index)
 rm -rf ~/Library/Logs/RecAndCC                    # logs
 rm -rf ~/Library/Caches/RecAndCC                  # speaker model
 rm -rf ~/.cache/huggingface/hub/models--*whisper* # Whisper models (if no other app uses them)
