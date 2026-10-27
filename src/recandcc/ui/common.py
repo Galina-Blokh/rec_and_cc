@@ -440,7 +440,13 @@ class Controller:
             log.exception("scanning for pending summaries failed")
 
     def _recording_busy(self) -> bool:
-        return self.engine.state.status != IDLE
+        """Background indexing yields to a recording and to the transcription backlog."""
+        tq = getattr(self, "tq", None)
+        return (
+            self.engine.state.status != IDLE
+            or (tq is not None and tq.pending() > 0)
+            or bool(getattr(self, "_resubmitting", 0))
+        )
 
     def _summarize(self, directory: Path) -> None:
         """Queue summary.md for a final transcript (local LLM, own background thread)."""
@@ -554,7 +560,11 @@ class Controller:
                 from ..search import search_transcripts
 
                 hits = search_transcripts(
-                    self.cfg.output_dir, query, SEARCH_LIMIT, self.cfg.search.semantic
+                    self.cfg.output_dir,
+                    query,
+                    SEARCH_LIMIT,
+                    self.cfg.search.semantic,
+                    busy=self._recording_busy,
                 )
             except Exception as e:  # noqa: BLE001
                 # the type only: an FTS5 syntax error quotes the query

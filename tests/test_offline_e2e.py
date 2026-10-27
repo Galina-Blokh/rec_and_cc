@@ -76,6 +76,7 @@ class Attempt:
 class NetworkGuard:
     def __init__(self) -> None:
         self.attempts: list[Attempt] = []
+        self.allow_semantic = False  # only tests with [search] semantic on may download
 
     def deny(self, api: str, target) -> OSError:
         frames = traceback.extract_stack()
@@ -112,7 +113,9 @@ class NetworkGuard:
         return self._downloads(SEMANTIC_HOST, "semantic")
 
     def unexpected(self) -> list[Attempt]:
-        allowed = self.model_downloads() + self.semantic_downloads()
+        allowed = self.model_downloads()
+        if self.allow_semantic:
+            allowed += self.semantic_downloads()
         return [a for a in self.attempts if a not in allowed]
 
 
@@ -185,6 +188,8 @@ def net(monkeypatch):
     monkeypatch.setattr(subprocess.Popen, "__init__", popen_init)
     monkeypatch.setattr(os, "system", system)
     yield guard
+    if not guard.allow_semantic:
+        assert guard.semantic_downloads() == []  # semantic off: no model download at all
     # let worker threads the test started finish, so a late attempt is still seen
     for th in set(threading.enumerate()) - before:
         th.join(timeout=5)
@@ -410,6 +415,7 @@ def test_semantic_model_not_cached_allows_one_download_attempt(
     tmp_path, net, no_speaker_model, search_model
 ):
     """Stories: US-32."""
+    net.allow_semantic = True
     index = _session_with_semantic_search(tmp_path)
     assert len(net.semantic_downloads()) == 1  # one attempt, then the backoff holds
     index.sync(tmp_path / "out")

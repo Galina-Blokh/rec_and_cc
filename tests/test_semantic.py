@@ -17,6 +17,7 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -502,7 +503,7 @@ def _urlopen(monkeypatch, data: bytes | None):
             raise OSError("network is unreachable")
         return io.BytesIO(data)
 
-    monkeypatch.setattr(semantic.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(semantic, "_opener", lambda: SimpleNamespace(open=urlopen))
     return calls
 
 
@@ -571,7 +572,9 @@ def test_oversized_download_is_aborted_and_deleted(model_dir, monkeypatch):
             reads.append(n)
             return b"x" * n if len(reads) < 1000 else b""
 
-    monkeypatch.setattr(semantic.urllib.request, "urlopen", lambda url, timeout=None: Endless())
+    monkeypatch.setattr(
+        semantic, "_opener", lambda: SimpleNamespace(open=lambda url, timeout=None: Endless())
+    )
     assert semantic.model_path(_fake_model(data)) is None
     assert len(reads) == 1  # stopped at the first block over the expected size
     assert list(model_dir.iterdir()) == []
@@ -730,7 +733,7 @@ def _fake_onnx(monkeypatch, tmp_path, tracker):
         (),
         {
             "SessionOptions": type("O", (), {}),
-            "InferenceSession": staticmethod(lambda path, opts: Session()),
+            "InferenceSession": staticmethod(lambda path, opts, **kw: Session()),
         },
     )
     tokmod = type(
@@ -747,13 +750,14 @@ def test_close_unloads_the_model_and_a_later_embed_reloads_it(tmp_path, monkeypa
     _fake_onnx(monkeypatch, tmp_path, lambda name: contextlib.nullcontext())
     real = sys.modules["onnxruntime"].InferenceSession
     sys.modules["onnxruntime"].InferenceSession = staticmethod(
-        lambda p, o: (loads.append(1), real(p, o))[1]
+        lambda p, o, **k: (loads.append(1), real(p, o, **k))[1]
     )
     emb = semantic.OnnxEmbedder()
     assert emb.embed(["a"]).shape == (1, semantic.DIM) and emb.ready()
     emb.close()
     assert not emb.ready() and emb._loaded is None
-    assert emb.embed(["b"]) is not None and emb.ready() and len(loads) == 2
+    assert emb.embed(["b"]) is None and not emb.ready() and len(loads) == 1  # no reload
+    assert emb.prepare() is True and emb.ready() and len(loads) == 2  # only prepare() does
 
 
 def test_switching_off_unloads_the_default_model(tmp_path, monkeypatch):
@@ -767,8 +771,8 @@ def test_switching_off_unloads_the_default_model(tmp_path, monkeypatch):
     search.default_index(False)
     assert not emb.ready() and emb._loaded is None
     assert search.default_index(True).embedder is emb
-    emb.embed(["a"])
-    assert emb.ready()  # enabling again reloads
+    assert emb.embed(["a"]) is None and not emb.ready()  # a straggler doesn't reload
+    assert emb.prepare() and emb.ready()  # the worker's prepare() after enabling again does
 
 
 def test_embed_calls_never_overlap_in_the_tokenizer_or_session(tmp_path, monkeypatch):
@@ -936,7 +940,7 @@ def _resumable(monkeypatch, data, ranges=True):
         start = int(rng.split("=")[1].rstrip("-"))
         return _Resp(data[start:], 206, f"bytes {start}-{len(data) - 1}/{len(data)}")
 
-    monkeypatch.setattr(semantic.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(semantic, "_opener", lambda: SimpleNamespace(open=urlopen))
     return opened
 
 
@@ -1104,10 +1108,10 @@ def test_close_during_a_slow_load_deadlocks_nothing_and_later_calls_work(tmp_pat
     entered, release = threading.Event(), threading.Event()
     real = sys.modules["onnxruntime"].InferenceSession
 
-    def slow(path, opts):
+    def slow(path, opts, **kw):
         entered.set()
         assert release.wait(10)
-        return real(path, opts)
+        return real(path, opts, **kw)
 
     sys.modules["onnxruntime"].InferenceSession = staticmethod(slow)
     result = []
@@ -1154,7 +1158,7 @@ def test_close_while_embedding_and_loading_concurrently_never_deadlocks(tmp_path
     real_session = ort.InferenceSession
     real_run = semantic.OnnxEmbedder._run
 
-    def slow_session(path, opts):
+    def slow_session(path, opts, **kw):
         time.sleep(0.005)  # loads and embeds overlap with close() instead of finishing instantly
         return real_session(path, opts)
 
@@ -1188,11 +1192,11 @@ def _failing_session(monkeypatch, exc, times):
     real = sys.modules["onnxruntime"].InferenceSession
     state = {"n": 0}
 
-    def session(path, opts):
+    def session(path, opts, **kw):
         state["n"] += 1
         if state["n"] <= times:
             raise exc
-        return real(path, opts)
+        return real(path, opts, **kw)
 
     sys.modules["onnxruntime"].InferenceSession = staticmethod(session)
     return state
@@ -1228,7 +1232,7 @@ def test_a_permanently_invalid_model_is_broken_until_close(tmp_path, monkeypatch
     assert emb.embed(["a"]) is None and state["n"] == 1  # not retried per search
     emb.close()
     assert not emb._broken
-    assert emb.embed(["a"]) is not None and emb.ready()  # switching semantic off and on retries
+    assert emb.prepare() and emb.ready()  # switching semantic off and on retries
 
 
 @pytest.mark.parametrize(
@@ -1271,7 +1275,7 @@ def test_a_load_failing_after_close_records_no_failure(tmp_path, monkeypatch, so
     sys_ort = sys.modules["onnxruntime"]
     exc = PermissionError("locked") if soft else RuntimeError("invalid protobuf")
 
-    def session(path, opts):
+    def session(path, opts, **kw):
         emb.close()  # switched off while the load is running
         raise exc
 
@@ -1285,3 +1289,150 @@ def test_close_forgets_the_download_backoff(tmp_path, monkeypatch):
     monkeypatch.setattr(semantic, "_last_failure", time.monotonic())
     emb.close()
     assert semantic._last_failure == 0.0
+
+
+# ------------------------------------------------------------------ round 6
+def test_cli_search_returns_meaning_matches(out, monkeypatch, capsys):
+    """US-32: a one-shot `recandcc search` loads the model, indexes and waits for it."""
+    make_session(out, 1, [seg(1, "please send the invoice")])
+    emb = PrepEmbedder()
+    monkeypatch.setattr(semantic, "default_embedder", lambda: emb)
+    notes = []
+    hits = search.search_transcripts(out, "оплата", semantic=True, wait_s=30, notify=notes.append)
+    assert emb.prepared == 1 and [h.snippet for h in hits] == ["please send the invoice"]
+    assert any("Downloading" in n for n in notes)
+    assert not any("invoice" in n for n in notes)  # never transcript text
+
+
+def test_cli_search_says_when_indexing_is_unfinished(out, monkeypatch):
+    make_session(out, 1, [seg(1, "the invoice")])
+    emb = SlowEmbedder()
+    monkeypatch.setattr(semantic, "default_embedder", lambda: emb)
+    notes = []
+    search.search_transcripts(out, "invoice", semantic=True, wait_s=0.01, notify=notes.append)
+    assert "still indexing; showing what's ready" in notes
+    search.default_index(True).wait_embedded(30)
+
+
+def test_query_and_segments_are_yo_folded_alike(tmp_path, out):
+    make_session(out, 1, [seg(1, "всё про перелёт"), seg(2, "ещё обед")])
+    emb = FakeEmbedder()
+    idx = TranscriptIndex(tmp_path / "idx" / "s.sqlite3", embedder=emb)
+    sync(idx, out)
+    assert emb.calls[0] == ["все про перелет", "еще обед"]
+    idx._semantic("перелёт", 5)
+    idx._semantic("ПЕРЕЛЕТ", 5)
+    assert emb.calls[-2][0] == "перелет"  # ё folded like the stored text
+
+
+def test_embed_after_close_does_not_reload(tmp_path, monkeypatch):
+    import contextlib
+
+    loads = []
+    _fake_onnx(monkeypatch, tmp_path, lambda name: contextlib.nullcontext())
+    real = sys.modules["onnxruntime"].InferenceSession
+    sys.modules["onnxruntime"].InferenceSession = staticmethod(
+        lambda p, o, **k: (loads.append(1), real(p, o, **k))[1]
+    )
+    emb = semantic.OnnxEmbedder()
+    emb.close()  # switched off before an in-flight chunk reaches embed()
+    assert emb.embed(["a"]) is None and loads == [] and not emb.ready()
+
+
+def test_download_refuses_a_redirect_to_http():
+    import urllib.error
+    import urllib.request
+
+    h = semantic._HttpsOnlyRedirect()
+    req = urllib.request.Request("https://example.invalid/m.onnx")
+    with pytest.raises(urllib.error.URLError, match="non-https"):
+        h.redirect_request(req, None, 302, "Found", {}, "http://example.invalid/m.onnx")
+    ok = h.redirect_request(req, None, 302, "Found", {}, "https://cdn.example.invalid/m.onnx")
+    assert ok is not None and ok.full_url.startswith("https://cdn.")
+
+
+def test_recording_busy_includes_the_transcription_backlog():
+    from recandcc.ui.common import IDLE, Controller
+
+    class Q:
+        n = 0
+
+        def pending(self):
+            return self.n
+
+    q = Q()
+    ctrl = SimpleNamespace(engine=SimpleNamespace(state=SimpleNamespace(status=IDLE)), tq=q)
+    assert Controller._recording_busy(ctrl) is False
+    q.n = 1
+    assert Controller._recording_busy(ctrl) is True  # Whisper backlog: don't compete
+    q.n = 0
+    ctrl._resubmitting = True
+    assert Controller._recording_busy(ctrl) is True
+    ctrl._resubmitting = False
+    ctrl.engine.state.status = "recording"
+    assert Controller._recording_busy(ctrl) is True
+
+
+def test_a_reused_rowid_between_scan_and_materialise_is_not_shown(tmp_path, out, monkeypatch):
+    make_session(out, 1, [seg(1, "the invoice is due")])
+    idx = TranscriptIndex(tmp_path / "idx" / "s.sqlite3", embedder=FakeEmbedder())
+    sync(idx, out)
+    real = np.lexsort
+
+    def lexsort_then_swap(keys, *a, **k):
+        with idx._connect() as db:  # delete + insert reuses the rowid with another segment
+            rid, folder = db.execute("SELECT rowid, folder FROM seg_vec").fetchone()
+            db.execute("DELETE FROM seg_vec WHERE rowid = ?", (rid,))
+            db.execute(
+                "INSERT INTO seg_vec(rowid, folder, start, speaker, language, text, vec) "
+                "VALUES (?, ?, 9, 'Me', 'en', 'lunch pizza', ?)",
+                (rid, folder, np.eye(len(CONCEPTS), dtype=np.float32)[2].tobytes()),
+            )
+        return real(keys, *a, **k)
+
+    monkeypatch.setattr(search.np, "lexsort", lexsort_then_swap)
+    assert idx._semantic("payment", 5) == []  # not the wrong segment under the old score
+
+
+def test_search_first_call_keeps_busy_aware_pausing(out, monkeypatch):
+    make_session(out, 1, [seg(1, "the invoice")])
+    emb = PrepEmbedder()
+    monkeypatch.setattr(semantic, "default_embedder", lambda: emb)
+    state = {"busy": True}
+    busy = lambda: state["busy"]  # noqa: E731
+    search.search_transcripts(out, "invoice", semantic=True, busy=busy)  # search first
+    idx = search.default_index(True)  # a later caller without busy must not clear it
+    assert idx.busy is busy
+    idx.busy_poll_s = 0.01
+    time.sleep(0.2)
+    assert emb.prepared == 0 and emb.calls == []  # paused during the "recording"
+    state["busy"] = False
+    assert idx.wait_embedded(30) and emb.prepared == 1
+
+
+def test_a_cancelled_wait_stops_the_load_before_the_session(tmp_path, monkeypatch):
+    import contextlib
+
+    loads = []
+    _fake_onnx(monkeypatch, tmp_path, lambda name: contextlib.nullcontext())
+    real = sys.modules["onnxruntime"].InferenceSession
+    sys.modules["onnxruntime"].InferenceSession = staticmethod(
+        lambda p, o, **k: (loads.append(1), real(p, o, **k))[1]
+    )
+    emb = semantic.OnnxEmbedder()
+    calls = iter([True, True, True, False])  # a recording starts after the files are checked
+    assert emb.prepare(lambda: next(calls, False)) is False
+    assert loads == [] and not emb.ready()
+
+
+def test_the_session_is_cpu_only(tmp_path, monkeypatch):
+    import contextlib
+
+    seen = []
+    _fake_onnx(monkeypatch, tmp_path, lambda name: contextlib.nullcontext())
+    real = sys.modules["onnxruntime"].InferenceSession
+    sys.modules["onnxruntime"].InferenceSession = staticmethod(
+        lambda p, o, **k: (seen.append(k), real(p, o, **k))[1]
+    )
+    assert semantic.OnnxEmbedder().prepare() is True
+    assert seen == [{"providers": ["CPUExecutionProvider"]}]

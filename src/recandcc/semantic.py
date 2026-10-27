@@ -19,6 +19,7 @@ import logging
 import re
 import threading
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -142,11 +143,23 @@ def model_path(
     return path
 
 
+class _HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse a redirect to anything but https (the checksum would catch tampering, but the
+    request itself must not leave over plain http)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, ANN201
+        if not newurl.lower().startswith("https://"):
+            raise urllib.error.URLError(f"refusing redirect to non-https URL {newurl!r}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_HttpsOnlyRedirect)
+
+
 def _open(url: str, offset: int) -> Any:
-    if offset == 0:
-        return urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT_S)  # noqa: S310 - https only
-    req = urllib.request.Request(url, headers={"Range": f"bytes={offset}-"})  # noqa: S310
-    return urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT_S)  # noqa: S310 - https only
+    req = urllib.request.Request(url, headers={"Range": f"bytes={offset}-"}) if offset else url  # noqa: S310
+    return _opener().open(req, timeout=DOWNLOAD_TIMEOUT_S)  # https only (checked by the caller)
 
 
 def _resumes_at(r: Any, offset: int) -> bool:
@@ -230,6 +243,7 @@ class OnnxEmbedder:
         self._load_lock = threading.Lock()
         self._loaded: tuple[Any, Any] | None = None
         self._gen = 0  # bumped by close(): cancels loads and downloads in flight
+        self._reload_ok = True  # False after close(): only prepare() loads again
         self._broken = False  # verified files the runtime can't load: don't retry per search
         self._retry_at = 0.0  # soft load failure (locked file ...): no new attempt before this
 
@@ -246,6 +260,7 @@ class OnnxEmbedder:
         _last_failure = 0.0  # the download backoff too: switching off and on retries at once
         with self._lock:
             self._gen += 1
+            self._reload_ok = False  # a straggling embed() must not reload ~120 MB
             self._loaded = None
             self._broken = False
             self._retry_at = 0.0
@@ -261,7 +276,9 @@ class OnnxEmbedder:
                 return True
             if self._blocked():
                 return False
-            gen = self._gen
+            with self._lock:
+                gen = self._gen
+                self._reload_ok = True  # an explicit request (the embed worker) loads again
             paths: list[Path] = []
             for m in (MODEL, TOKENIZER):
                 if self._cancelled(gen) or (wait is not None and not wait()):
@@ -272,7 +289,7 @@ class OnnxEmbedder:
                 paths.append(p)
             if self._cancelled(gen) or (wait is not None and not wait()):
                 return False
-            return self._build(paths[0], paths[1], gen)
+            return self._build(paths[0], paths[1], gen, wait)
 
     def _cancelled(self, gen: int) -> bool:
         return self._gen != gen
@@ -286,7 +303,7 @@ class OnnxEmbedder:
         if not self._load_lock.acquire(blocking=False):
             return None
         try:
-            if self._loaded is None and not self._blocked():
+            if self._loaded is None and self._reload_ok and not self._blocked():
                 gen = self._gen
                 m, t = model_path(MODEL, download=False), model_path(TOKENIZER, download=False)
                 if m is not None and t is not None:
@@ -295,23 +312,33 @@ class OnnxEmbedder:
         finally:
             self._load_lock.release()
 
-    def _build(self, m: Path, t: Path, gen: int) -> bool:
+    def _build(self, m: Path, t: Path, gen: int, wait: Callable[[], bool] | None = None) -> bool:
+        """Open the tokenizer and session. ``wait`` (the worker's) is polled between the steps
+        and the retries; False cancels without publishing."""
         global _last_failure
         import onnxruntime as ort  # lazy: only when semantic search is on
         from tokenizers import Tokenizer
 
         for attempt in range(LOAD_ATTEMPTS):
             try:
+                if self._cancelled(gen) or not _ok(wait):
+                    return False
                 tok = Tokenizer.from_file(str(t))
                 tok.enable_truncation(MAX_TOKENS)
                 tok.enable_padding()
                 opts = ort.SessionOptions()
                 opts.intra_op_num_threads = 2  # background work: leave cores to transcription
-                loaded = (ort.InferenceSession(str(m), opts), tok)
+                if self._cancelled(gen) or not _ok(wait):
+                    return False
+                # CPU only: never CoreML or the GPU, which would run outside MLX_LOCK
+                session = ort.InferenceSession(str(m), opts, providers=["CPUExecutionProvider"])
+                loaded = (session, tok)
             except Exception as e:  # noqa: BLE001 - unreadable model files
                 if _is_soft(e):
                     if attempt + 1 < LOAD_ATTEMPTS and not self._cancelled(gen):
                         time.sleep(LOAD_RETRY_PAUSE_S)
+                        if not _ok(wait):
+                            return False
                         continue
                     log.warning("search model can't be opened now (%s); retrying later", e)
                     with self._lock:

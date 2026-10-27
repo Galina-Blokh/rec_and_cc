@@ -1127,6 +1127,7 @@ dependencies = [
     { name = "sherpa-onnx-core" },
     { name = "sounddevice" },
     { name = "soundfile" },
+    { name = "tokenizers" },
     { name = "tomli-w" },
 ]
 
@@ -1157,6 +1158,7 @@ requires-dist = [
     { name = "sherpa-onnx-core", specifier = "==2.0.0" },
     { name = "sounddevice", specifier = ">=0.5.6" },
     { name = "soundfile", specifier = ">=0.14.0" },
+    { name = "tokenizers", specifier = ">=0.23.3" },
     { name = "tomli-w", specifier = ">=1.2.0" },
 ]
 

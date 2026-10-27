@@ -412,13 +412,14 @@ class TranscriptIndex:
         if ready is not None and not ready():
             self._kick_embed()  # never wait for a download or a model load here
             return []
-        q = embedder.embed([query])
+        q = embedder.embed([_yo(query)])
         if q is None or not len(q):
             return []
         model, dim, q0 = self._model_id(), q.shape[1], q[0]
         top_ids = np.zeros(0, dtype=np.int64)
         top_sims = np.zeros(0, dtype=np.float32)
         last = 0
+        blobs: dict[int, bytes] = {}  # the scored vector of each survivor (rowid reuse check)
         while True:
             with contextlib.closing(self._connect()) as db:  # not held while scoring
                 rows = db.execute(
@@ -438,10 +439,12 @@ class TranscriptIndex:
             top_ids = np.concatenate(
                 [top_ids, np.array([r[0] for r in rows], dtype=np.int64)[keep]]
             )
+            blobs.update((r[0], r[1]) for r, k in zip(rows, keep, strict=True) if k)
             top_sims = np.concatenate([top_sims, sims[keep]])
             if len(top_ids) > limit:  # running top-k
                 part = np.argpartition(-top_sims, limit - 1)[:limit]
                 top_ids, top_sims = top_ids[part], top_sims[part]
+                blobs = {int(i): blobs[int(i)] for i in top_ids}
             if len(rows) < SCAN_CHUNK:
                 break
         order = np.lexsort((top_ids, -top_sims))  # best first; ties by insertion order
@@ -455,11 +458,13 @@ class TranscriptIndex:
                 marks = ",".join("?" * len(chunk))
                 sql = (  # only placeholders are interpolated
                     "SELECT v.rowid, v.folder, s.session_id, s.started_at, v.start, v.speaker, "  # noqa: S608
-                    "v.language, v.text FROM seg_vec v JOIN sessions s ON s.folder = v.folder "
+                    "v.language, v.text, v.vec FROM seg_vec v "
+                    "JOIN sessions s ON s.folder = v.folder "
                     f"WHERE v.rowid IN ({marks})"
                 )
                 for r in db.execute(sql, chunk):
-                    found[r[0]] = r
+                    if r[8] == blobs.get(r[0]):  # a reused rowid holds another segment now
+                        found[r[0]] = r
         return [
             Hit(Path(r[1]), r[2], r[3], float(r[4]), r[5], r[6], _plain_snippet(r[7]))
             for i in ids
@@ -642,11 +647,29 @@ def default_index(
 
 
 def search_transcripts(
-    output_dir: Path, query: str, limit: int = 20, semantic: bool = False
+    output_dir: Path,
+    query: str,
+    limit: int = 20,
+    semantic: bool = False,
+    wait_s: float = 0.0,
+    notify: Callable[[str], None] | None = None,
+    busy: Callable[[], bool] | None = None,
 ) -> list[Hit]:
     """Sync the default index with ``output_dir`` (incremental: only changed sessions are
     read), then search it. Blocking: call it off the UI thread. Embedding runs in the
-    background and is never waited for: meaning matches cover what is embedded so far."""
-    index = default_index(semantic)
+    background and is not waited for (meaning matches cover what is embedded so far), unless
+    ``wait_s`` > 0: a one-shot process (the CLI) loads the model (the one-time download, with
+    a ``notify`` notice), indexes, and waits up to ``wait_s`` seconds for it, because it would
+    otherwise exit before the daemon worker produced anything."""
+    index = default_index(semantic, busy)
+    if semantic and wait_s > 0 and index.embedder is not None:
+        prepare = getattr(index.embedder, "prepare", None)
+        ready = getattr(index.embedder, "ready", None)
+        if prepare is not None and ready is not None and not ready():
+            if notify:
+                notify("Downloading the semantic search model (once)...")
+            prepare()  # no `wait`: a CLI search has no recording to yield to
     index.sync(output_dir)
+    if semantic and wait_s > 0 and not index.wait_embedded(wait_s) and notify:
+        notify("still indexing; showing what's ready")
     return index.search(query, limit)

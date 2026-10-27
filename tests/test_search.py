@@ -221,7 +221,7 @@ def test_controller_indexes_after_transcription_and_searches_off_thread(tmp_path
 def test_failed_search_never_logs_the_query(out, monkeypatch, caplog):
     from recandcc.ui.common import Controller
 
-    def fail(output_dir, query, limit, semantic=False):
+    def fail(output_dir, query, limit, semantic=False, **kw):
         raise sqlite3.OperationalError(f'fts5: syntax error near "{query}"')
 
     monkeypatch.setattr(search, "search_transcripts", fail)
