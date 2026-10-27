@@ -94,8 +94,10 @@ def good(tmp_path):
         "output_dir": str(tmp_path / "out"),
         "languages": ["en", "he"],
         "keep_audio": False,
+        "live": False,
         "live_captions": False,
         "speaker_names": True,
+        "model": "small",
     }
 
 
@@ -109,9 +111,13 @@ def test_save_writes_toml_keeps_unknown_keys_and_applies(tmp_path, monkeypatch):
         "import json,sys\n"
         "snap=json.load(open(sys.argv[sys.argv.index('--config')+1]))\n"
         "assert snap['mode']=='ask' and 'hotkey' in snap\n"
+        "assert snap['live'] is True and snap['model']=='large-v3-turbo'\n"
+        "assert 'small' in snap['models'] and 'turbo' in snap['models']\n"
         f"print(json.dumps({{'settings':'saved','values':{good(tmp_path)!r}}}))\n",
     )
     ctrl.open_settings_async()
+    ev = next_event(ctrl, {"settings_saved", "settings_fallback", "notice"})
+    assert ev[:2] == ("notice", "Model saved")  # a model change: applies after a restart
     ev = next_event(ctrl, {"settings_saved", "settings_fallback", "notice"})
     assert ev[0] == "settings_saved"
     text = path.read_text()
@@ -121,12 +127,18 @@ def test_save_writes_toml_keeps_unknown_keys_and_applies(tmp_path, monkeypatch):
     assert reloaded.transcription.keep_audio is False
     assert reloaded.transcription.speaker_names is True
     assert reloaded.live_captions is False
+    assert reloaded.transcription.live is False
+    assert reloaded.transcription.model == "small"
     assert reloaded.output_dir == tmp_path / "out"
     # applied in memory by the worker before the event: nothing for the UI thread to redo
     assert ctrl.cfg.output_dir == tmp_path / "out"
     assert ctrl.cfg.transcription.keep_audio is False
     assert ctrl.cfg.detection.mode == Mode.AUTO
     assert ctrl.cfg.transcription.languages == ["en", "he"]
+    assert ctrl.cfg.transcription.live is False  # read at the next session start
+    # the loaded model stays until a restart; the window shows the saved choice
+    assert ctrl.cfg.transcription.model == "large-v3-turbo"
+    assert settings_window.snapshot(ctrl.cfg)["model"] == "small"
     # the engine's own save (set_mode) merged into the file: unknown keys survive
     assert "unknown = 1" in path.read_text()
 
@@ -165,6 +177,8 @@ def test_invalid_values_are_rejected(tmp_path, monkeypatch):
         {"languages": "en"},
         {"keep_audio": "yes"},
         {"output_dir": "relative/dir"},
+        {"live": "on"},
+        {"model": "small"},  # no offered models given: nothing is accepted
     ],
 )
 def test_validate_rejects(bad):
@@ -217,13 +231,13 @@ def test_window_never_blocks_the_caller(tmp_path, monkeypatch):
     fake_helper(
         tmp_path,
         monkeypatch,
-        "import signal,time\nsignal.signal(signal.SIGUSR1, signal.SIG_IGN)\ntime.sleep(1.0)\n"
+        "import signal,time\nsignal.signal(signal.SIGUSR1, signal.SIG_IGN)\ntime.sleep(3.0)\n"
         'print(\'{"settings": "cancelled"}\')\n',
     )
     start = time.monotonic()
     ctrl.open_settings_async()
-    # returns at once; a blocking call would take the helper's full 1 s
-    assert time.monotonic() - start < 0.9
+    # returns at once; a blocking call would take the helper's full 3 s
+    assert time.monotonic() - start < 1.5
     # the helper runs on a worker thread
     assert any(t.name == "settings-window" for t in threading.enumerate())
     ctrl.open_settings_async()  # a second click while open is ignored
@@ -246,11 +260,94 @@ def test_snapshot_has_no_content(tmp_path):
         "output_dir",
         "languages",
         "keep_audio",
+        "live",
         "live_captions",
         "speaker_names",
         "hotkey",
+        "model",
+        "models",
     }
     json.dumps(snap)
+
+
+def test_validate_model_only_from_the_offered_list():
+    from recandcc.transcribe.revisions import OFFERED_MODELS
+
+    assert validate_settings({"model": "turbo"}, OFFERED_MODELS) == {"model": "turbo"}
+    for bad in ("evil/whisper-large", "/tmp/model", "", 3):
+        with pytest.raises(ValueError, match="model"):
+            validate_settings({"model": bad}, OFFERED_MODELS)
+
+
+@mac_only
+def test_unknown_model_is_rejected_with_a_notice(tmp_path, monkeypatch):
+    ctrl, path = make_ctrl(tmp_path, monkeypatch)
+    before = path.read_text()
+    bad = dict(good(tmp_path), model="someone/unpinned-whisper")
+    fake_helper(tmp_path, monkeypatch, reply({"settings": "saved", "values": bad}))
+    ctrl.open_settings_async()
+    ev = next_event(ctrl, {"settings_saved", "settings_fallback", "notice"})
+    assert ev[:2] == ("notice", "Settings not saved") and "model" in ev[2]
+    assert path.read_text() == before  # nothing written, nothing applied
+    assert ctrl.cfg.transcription.live is True
+    assert settings_window.snapshot(ctrl.cfg)["model"] == "large-v3-turbo"
+
+
+@mac_only
+@pytest.mark.parametrize("live", [False, True])
+def test_live_on_off_is_saved_and_applied(tmp_path, monkeypatch, live):
+    ctrl, path = make_ctrl(tmp_path, monkeypatch)
+    ctrl.cfg.transcription.live = not live
+    values = dict(settings_window.snapshot(ctrl.cfg), live=live)
+    fake_helper(tmp_path, monkeypatch, reply({"settings": "saved", "values": values}))
+    ctrl.open_settings_async()
+    ev = next_event(ctrl, {"settings_saved", "settings_fallback", "notice"})
+    assert ev == ("settings_saved", {"live": live})  # only the changed key
+    assert load_config(path).transcription.live is live
+    assert ctrl.cfg.transcription.live is live
+    assert "live_captions" not in path.read_text()  # captions stay a separate setting
+
+
+@mac_only
+def test_model_change_says_it_applies_after_a_restart(tmp_path, monkeypatch):
+    ctrl, path = make_ctrl(tmp_path, monkeypatch)
+    values = dict(settings_window.snapshot(ctrl.cfg), model="medium")
+    fake_helper(tmp_path, monkeypatch, reply({"settings": "saved", "values": values}))
+    ctrl.open_settings_async()
+    ev = next_event(ctrl, {"settings_saved", "settings_fallback", "notice"})
+    assert ev[:2] == ("notice", "Model saved") and "restart" in ev[2]
+    assert next_event(ctrl, {"settings_saved"}) == ("settings_saved", {"model": "medium"})
+    assert load_config(path).transcription.model == "medium"
+    assert ctrl.cfg.transcription.model == "large-v3-turbo"  # no load, no download now
+
+
+@mac_only
+def test_switching_back_to_the_loaded_model_needs_no_restart(tmp_path, monkeypatch):
+    ctrl, path = make_ctrl(tmp_path, monkeypatch)
+    ctrl.apply_settings({"model": "medium"})  # saved earlier, not loaded yet
+    assert settings_window.snapshot(ctrl.cfg)["model"] == "medium"
+    values = dict(settings_window.snapshot(ctrl.cfg), model="large-v3-turbo")
+    fake_helper(tmp_path, monkeypatch, reply({"settings": "saved", "values": values}))
+    ctrl.open_settings_async()
+    ev = next_event(ctrl, {"settings_saved", "settings_fallback", "notice"})
+    assert ev == ("settings_saved", {"model": "large-v3-turbo"})  # no "Model saved" notice
+    assert ctrl.events.empty()
+    assert settings_window.snapshot(ctrl.cfg)["model"] == "large-v3-turbo"
+    assert load_config(path).transcription.model == "large-v3-turbo"
+
+
+def test_hand_edited_model_shows_in_the_window_but_is_not_loaded(tmp_path, monkeypatch):
+    ctrl, path = make_ctrl(tmp_path, monkeypatch)
+    ctrl.apply_settings({"model": "medium"})  # a Settings-window choice, not loaded yet
+    path.write_text('[transcription]\nmodel = "small"\n')
+    ctrl._config_mtime = -1.0
+    ctrl._maybe_reload_config()
+    assert settings_window.snapshot(ctrl.cfg)["model"] == "small"  # the hand edit wins
+    assert ctrl.cfg.transcription.model == "large-v3-turbo"  # still the loaded model
+    path.write_text('[transcription]\nmodel = "large-v3-turbo"\n')
+    ctrl._config_mtime = -1.0
+    ctrl._maybe_reload_config()
+    assert settings_window.snapshot(ctrl.cfg)["model"] == "large-v3-turbo"
 
 
 @mac_only
@@ -383,6 +480,8 @@ def test_failed_write_rolls_back_and_keeps_the_mode(tmp_path, monkeypatch):
     assert str(tmp_path) not in ev[2]
     assert ctrl.cfg.detection.mode == Mode.ASK  # not applied: the file was not written
     assert ctrl.cfg.transcription.keep_audio is True and ctrl.cfg.live_captions is True
+    assert ctrl.cfg.transcription.live is True  # rolled back
+    assert settings_window.snapshot(ctrl.cfg)["model"] == "large-v3-turbo"
 
 
 @mac_only
@@ -493,3 +592,15 @@ def test_hand_edited_unknown_languages_still_degrade_gracefully(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text('[transcription]\nlanguages = ["xx"]\n')
     assert load_config(path).transcription.languages == ["en", "ru"]  # defaults, with a warning
+
+
+def test_run_settings_oserror_is_not_blamed_on_the_folder(tmp_path, monkeypatch):
+    ctrl, _ = make_ctrl(tmp_path, monkeypatch)
+
+    def boom(_cfg):
+        raise OSError(28, "no space")
+
+    monkeypatch.setattr(common, "run_settings", boom)
+    ctrl.open_settings_async()
+    ev = next_event(ctrl, {"notice"})
+    assert ev[2] == "couldn't open settings: OSError"

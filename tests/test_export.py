@@ -493,6 +493,61 @@ def test_a_session_folder_swapped_for_a_link_is_not_written_through(tmp_path):
     assert not list(real.iterdir())
 
 
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_pdf_safe_text_placeholder_bidi_and_scripts():
+    font = export.find_font()
+    cmap = export._font_cmap(font)
+    if 0xE000 in cmap:
+        pytest.skip("font covers the private-use probe")
+    out = export.pdf_safe_text("ab‫c⁦d؜", font)
+    assert out[0] == "a" and out[1] in "?�" and out[2:] == "bcd"
+    kept = "Привет שלום\n"
+    assert export.pdf_safe_text(kept, font) == kept
+    # LRM/RLM survive only where the font has a glyph; never a placeholder
+    marks = export.pdf_safe_text("x‏y‎z", font)
+    assert marks.replace("‏", "").replace("‎", "") == "xyz"
+    assert ("‏" in marks) == (0x200F in cmap)
+
+
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_pdf_safe_text_collapses_emoji_sequences():
+    font = export.find_font()
+    cmap = export._font_cmap(font)
+    if any(o in cmap for o in (0x1F468, 0x1F469, 0x1F466, 0x1F44D, 0x1F3FD)):
+        pytest.skip("font covers emoji")
+    family = "\U0001f468‍\U0001f469‍\U0001f466"
+    thumbs = "\U0001f44d\U0001f3fd"
+    out = export.pdf_safe_text(f"{family} {thumbs}", font)
+    assert out.count("?") + out.count("�") == 2 and " " in out
+
+
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_pdf_with_emoji_and_bidi_marks_reads_back(tmp_path):
+    from pypdf import PdfReader
+
+    text = "hi ‏ Привет שלום there"
+    seg = {"start": 0, "end": 1, "text": text, "speaker": "Me"}
+    (tmp_path / "transcript.json").write_text(json.dumps({"segments": [seg]}), "utf-8")
+    pdf = export.export_pdf(tmp_path)
+    got = "\n".join(pg.extract_text() for pg in PdfReader(str(pdf)).pages)
+    he = "שלום"
+    assert "Привет" in got and (he in got or he[::-1] in got)
+    assert "?" in got or "�" in got
+    assert "\ue000" not in got
+
+
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_pdf_safe_text_keeps_a_placeholder_after_zwj_and_normalises_controls():
+    font = export.find_font()
+    cmap = export._font_cmap(font)
+    if 0x1F468 in cmap or 0x4E2D in cmap or 0xE000 in cmap:
+        pytest.skip("font covers the probes")
+    # a lone ZWJ after an uncovered emoji must not swallow the next, non-emoji character
+    out = export.pdf_safe_text("\U0001f468‍中", font)
+    assert [c in "?�" for c in out] == [True, True]
+    assert export.pdf_safe_text("a\r\nb\rc\x00d\x07e", font) == "a\nb\ncde"
+
+
 def test_a_parent_swapped_for_a_link_during_rendering_is_refused(tmp_path):
     if sys.platform == "win32":
         pytest.skip("symlinks need privileges")
@@ -922,3 +977,178 @@ def test_a_year_is_not_a_numbered_item(session):
         ("p", "2026. The budget was approved"),
         ("num", "12. real item"),
     ]
+
+
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_pdf_summary_text_also_gets_a_placeholder(session):
+    from pypdf import PdfReader
+
+    if 0xE000 in export._font_cmap(export.find_font()):
+        pytest.skip("font covers the private-use probe")
+    (session / "summary.md").write_text("# Summary\n\nShip on Friday  ok.\n", "utf-8")
+    pdf = export.export_pdf(session)
+    got = "\n".join(pg.extract_text() for pg in PdfReader(str(pdf)).pages)
+    assert "" not in got and ("Friday ? ok" in got or "Friday � ok" in got)
+
+
+def _summary_texts(session):
+    return [t for _, t in export.load_summary(session)]
+
+
+def _rewrite_transcript(session, edit):
+    path = session / "transcript.json"
+    data = json.loads(path.read_text("utf-8"))
+    edit(data["segments"])
+    path.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+    os.utime(path, (9e9, 9e9))  # a rewrite is always newer than the summary
+
+
+def _with_fingerprint(session):
+    from recandcc.transcribe.summary import SOURCE_NAME, transcript_fingerprint
+
+    segs = json.loads((session / "transcript.json").read_text("utf-8"))["segments"]
+    (session / SOURCE_NAME).write_text(transcript_fingerprint(segs), "utf-8")
+
+
+def test_summary_survives_a_speaker_rename_rewrite(session):
+    """Stories: US-25."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+
+    def rename(segs):
+        for s in segs:
+            s["speaker"] = "Anna"  # name-speaker / call-app names relabel in place
+
+    _rewrite_transcript(session, rename)
+    assert _summary_texts(session)
+
+
+def test_summary_is_dropped_when_the_text_changed(session):
+    """Stories: US-25."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    _rewrite_transcript(session, lambda segs: segs[0].update(text="something else entirely"))
+    assert _summary_texts(session) == []
+
+
+def test_summary_without_a_fingerprint_keeps_the_mtime_rule(session):
+    """Stories: US-25."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    os.utime(session / "summary.md", (9e9, 9e9))
+    assert _summary_texts(session)  # newer than the transcript
+    os.utime(session / "summary.md", (1, 1))
+    assert _summary_texts(session) == []
+
+
+def test_summarize_session_records_the_fingerprint(session):
+    """Stories: US-25."""
+    from recandcc.config import Config
+    from recandcc.transcribe import summary
+
+    gen = lambda messages, max_tokens: "- do it"  # noqa: E731
+    summary.summarize_session(session, Config(), gen)
+
+    def rename(segs):
+        segs[0]["speaker"] = "Zed"
+
+    _rewrite_transcript(session, rename)
+    assert _summary_texts(session)
+
+
+def test_a_null_segments_list_is_a_stale_fingerprint_not_a_crash(session):
+    """Stories: US-25. ``"segments": null`` makes the fingerprint raise TypeError."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    _rewrite_transcript_data(session, lambda d: d.update(segments=None))
+    os.utime(session / "summary.md", (9e9 + 1, 9e9 + 1))
+    assert _summary_texts(session)  # falls back to the mtime rule (summary is newer)
+
+
+def _rewrite_transcript_data(session, edit):
+    path = session / "transcript.json"
+    data = json.loads(path.read_text("utf-8"))
+    edit(data)
+    path.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+    os.utime(path, (9e9, 9e9))
+
+
+@pytest.mark.parametrize("garbage", [b"\xff\xfe\x00 not utf8", b"", b"deadbeef"])
+def test_an_unreadable_summary_source_falls_back_to_the_mtime_rule(session, garbage):
+    """Stories: US-25."""
+    from recandcc.transcribe.summary import SOURCE_NAME
+
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    (session / SOURCE_NAME).write_bytes(garbage)
+    if garbage == b"deadbeef":  # readable but wrong: the text "changed"
+        assert _summary_texts(session) == []
+        return
+    os.utime(session / "summary.md", (9e9, 9e9))
+    assert _summary_texts(session)
+    os.utime(session / "summary.md", (1, 1))
+    assert _summary_texts(session) == []
+
+
+def test_a_timing_only_change_makes_the_summary_stale(session):
+    """Stories: US-25."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    _rewrite_transcript(session, lambda segs: segs[1].update(start=3.5, end=5.5))
+    assert _summary_texts(session) == []
+
+
+def test_summary_survives_a_rename_through_write_outputs(session):
+    """Stories: US-25. The real rewrite path (what name-speaker and the menu use)."""
+    from dataclasses import replace
+    from datetime import datetime
+
+    from recandcc.models import TriggerKind
+    from recandcc.transcribe import output
+
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    info = SessionInfo(
+        id="x",
+        directory=session,
+        started_at=datetime(2026, 10, 26, 14, 3, 12),
+        trigger_kind=TriggerKind.CALL,
+        trigger_app="zoom-us",
+    )
+    segs = [replace(Segment(**s), speaker="Anna") for s in SEGS]
+    output.write_outputs(info, segs, 9.0, "test-model")
+    assert (
+        json.loads((session / "transcript.json").read_text("utf-8"))["segments"][0]["speaker"]
+        == "Anna"
+    )
+    os.utime(session / "transcript.json", (9e9, 9e9))  # newer than the summary
+    assert _summary_texts(session)
+
+
+def test_the_pending_marker_wins_over_a_matching_fingerprint(session):
+    """Stories: US-25."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    assert _summary_texts(session)
+    (session / ".summary-pending").touch()
+    assert _summary_texts(session) == []
+
+
+def test_a_failed_sidecar_write_leaves_no_old_fingerprint(session, monkeypatch):
+    """Stories: US-25. The old fingerprint must not drop the fresh summary."""
+    from recandcc.config import Config
+    from recandcc.transcribe import summary
+
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    _rewrite_transcript(session, lambda segs: segs[0].update(text="new words"))
+    real = summary.atomic_write
+
+    def fail_sidecar(path, text):
+        if path.name == summary.SOURCE_NAME:
+            raise OSError("disk full")
+        return real(path, text)
+
+    monkeypatch.setattr(summary, "atomic_write", fail_sidecar)
+    summary.summarize_session(session, Config(), lambda messages, max_tokens: "- do it")
+    assert not (session / summary.SOURCE_NAME).exists()
+    os.utime(session / "summary.md", (9e9 + 1, 9e9 + 1))  # fresh: newer than the transcript
+    assert _summary_texts(session)  # mtime rule

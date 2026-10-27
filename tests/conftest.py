@@ -15,21 +15,30 @@ def _no_diarization_model(request, monkeypatch):
         monkeypatch.setattr(diarize, "model_path", lambda *a, **k: None)
 
 
+# The guards below patch through their own MonkeyPatch, not the test's `monkeypatch`
+# fixture: a test calling `monkeypatch.undo()` must never point a path back at the user's
+# real data (it once did, writing a test voice profile into the real voices folder).
+
+
 @pytest.fixture(autouse=True)
-def _private_search_index(tmp_path, monkeypatch):
+def _private_search_index(tmp_path):
     """Tests never touch the user's real search index (the Controller updates it after
     every transcription)."""
     from recandcc import search
 
-    monkeypatch.setattr(search, "INDEX_PATH", tmp_path / "search-index" / "search.sqlite3")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(search, "INDEX_PATH", tmp_path / "search-index" / "search.sqlite3")
+        yield
 
 
 @pytest.fixture(autouse=True)
-def _private_voices_dir(tmp_path_factory, monkeypatch):
+def _private_voices_dir(tmp_path_factory):
     """No test reads or writes the user's real voice profiles."""
     from recandcc.transcribe import voices
 
-    monkeypatch.setattr(voices, "VOICES_DIR", tmp_path_factory.mktemp("voices"))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(voices, "VOICES_DIR", tmp_path_factory.mktemp("voices"))
+        yield
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -41,7 +50,7 @@ def _import_path_modules():
     import sys
 
     names = ["recandcc.config", "recandcc.autostart", "recandcc.logging_setup", "recandcc.cli"]
-    names += ["recandcc.ui.common", "recandcc.transcribe.diarize"]
+    names += ["recandcc.ui.common", "recandcc.transcribe.diarize", "recandcc.semantic"]
     if sys.platform == "darwin":
         names.append("recandcc.ui.mac")
     for name in names:
@@ -100,10 +109,10 @@ def _undo_setup_logging(before) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _private_config(request, tmp_path, monkeypatch, _import_path_modules):
+def _private_config(request, tmp_path, _import_path_modules):
     """No test reads or writes the user's real config, logs, LaunchAgent plist, lock file or
-    default output folder, even through a bare `Config().save()` or a module that imported
-    the constant by name."""
+    default output folder (nor, in fast tests, the model caches), even through a bare
+    `Config().save()` or a module that imported the constant by name."""
     import sys
 
     before = _logging_state()
@@ -118,11 +127,13 @@ def _private_config(request, tmp_path, monkeypatch, _import_path_modules):
     }
     if request.node.get_closest_marker("slow") is None:  # slow tests need the real model cache
         private["MODELS_DIR"] = tmp_path / "private-models"
-    for name, module in list(sys.modules.items()):
-        if name.split(".")[0] != "recandcc":
-            continue
-        for const, value in private.items():
-            if hasattr(module, const):
-                monkeypatch.setattr(module, const, value)
-    yield
+        private["HF_CACHE_DIR"] = tmp_path / "private-hf-cache"
+    with pytest.MonkeyPatch.context() as mp:
+        for name, module in list(sys.modules.items()):
+            if name.split(".")[0] != "recandcc":
+                continue
+            for const, value in private.items():
+                if hasattr(module, const):
+                    mp.setattr(module, const, value)
+        yield
     _undo_setup_logging(before)

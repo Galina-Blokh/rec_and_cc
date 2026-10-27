@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import json
 import logging
+import math
 import os
+import re
 import sys
 import tempfile
 import time
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
@@ -191,17 +194,83 @@ class TranscriptionConfig:
     allow_unpinned_models: bool = False
 
 
-DEFAULT_SUMMARY_MODEL = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+# Apache-2.0 (commercial use allowed), ~0.9 GB download.
+DEFAULT_SUMMARY_MODEL = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+# The previous default, still pinned and selectable: a larger model (~1.7 GB), but under the
+# Qwen Research licence, which allows non-commercial use only.
+QWEN_RESEARCH_SUMMARY_MODEL = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+# Their pinned commits, part of transcribe/revisions.py's HF_REVISIONS. Kept here so the
+# load-time migration below can check the cache without config.py importing transcribe/.
+SUMMARY_MODEL_REVISIONS = {
+    # model.safetensors sha256 0979f33d1bc58afcf696d13f57977644e7b11a6f0eec3e631d8e9463d18c0717
+    DEFAULT_SUMMARY_MODEL: "8b403126fc14f14cfc99bb4cfa72ecbc129ea677",
+    # model.safetensors sha256 f212cf6fb9923281a09c135e05d43a052ee5ef7121f5b1dc0b0fb2de80f97cfd
+    QWEN_RESEARCH_SUMMARY_MODEL: "4f83f8f146fdf28b512a06562b671d7af4fab457",
+}
+# Hugging Face hub cache that summary_model_on_disk() looks in; None = huggingface_hub's own
+# (HF_HUB_CACHE / HF_HOME). Tests point it at a tmp folder.
+HF_CACHE_DIR: Path | None = None
+SUMMARY_MODEL_SWITCHED = (
+    "Summary model switched to Qwen2.5 1.5B (Apache-2.0); to keep the 3B, set summary.model "
+    f'= "{QWEN_RESEARCH_SUMMARY_MODEL}" and summary.accept_qwen_research_licence = true '
+    "in config.toml"
+)
+SUMMARY_LICENCE_NOT_BOOL = "accept_qwen_research_licence must be a TOML boolean true, not {kind}"
+# Next to config.toml once the "kept the cached 3B" notice was shown.
+SUMMARY_KEPT_MARKER = ".summary-3b-kept-noticed"
+SUMMARY_MODEL_KEPT = (
+    "Keeping the cached Qwen2.5 3B summary model, which is non-commercial; set summary.model "
+    f'= "{DEFAULT_SUMMARY_MODEL}" in config.toml to switch to the Apache-2.0 1.5B'
+)
+
+
+def summary_model_on_disk(repo: str) -> bool:
+    """Whether the snapshot of ``repo`` that would be loaded, with its weights, is in the
+    local Hugging Face cache: the pinned commit's (SUMMARY_MODEL_REVISIONS), or any snapshot
+    for another repo. Only looks at the disk (never the network), and never raises."""
+    cache = HF_CACHE_DIR
+    if cache is None:
+        try:
+            from huggingface_hub.constants import HF_HUB_CACHE
+        except ImportError:  # huggingface_hub's default, as in transcribe/gpu.hf_cache_folder
+            HF_HUB_CACHE = Path.home() / ".cache" / "huggingface" / "hub"
+        cache = Path(HF_HUB_CACHE)
+    snapshots = Path(cache).expanduser() / ("models--" + repo.replace("/", "--")) / "snapshots"
+    rev = SUMMARY_MODEL_REVISIONS.get(repo)
+    try:
+        # .exists() follows the symlink to the blob, so an interrupted download doesn't count
+        # Both pinned summary models ship their weights as one model.safetensors (no
+        # sharded *.safetensors index). HF links a file into the snapshot only once its blob is
+        # complete, and config.json is the other file a load needs first.
+        if rev is not None:
+            return _snapshot_complete(snapshots / rev)
+        return any(_snapshot_complete(snap) for snap in snapshots.iterdir())
+    except OSError:
+        return False
+
+
+def _snapshot_complete(snap: Path) -> bool:
+    return (snap / "model.safetensors").exists() and (snap / "config.json").exists()
 
 
 @dataclass
 class SummaryConfig:
     # Write summary.md (short summary + action items) after each final transcript, with a
-    # local LLM (mlx-lm, Apple silicon only). Off by default: it costs ~2 GB of RAM and a
-    # one-time ~1.7 GB model download.
+    # local LLM (mlx-lm, Apple silicon only). Off by default: it costs ~1.1-1.4 GB of RAM
+    # (measured peak) and a one-time ~0.9 GB model download.
     enabled: bool = False
     model: str = DEFAULT_SUMMARY_MODEL  # pinned in transcribe/revisions.py, or a local path
+    # Keep `model = QWEN_RESEARCH_SUMMARY_MODEL` (non-commercial licence). Without it, that
+    # model is read as the old default that save() wrote to every config.toml, and replaced.
+    accept_qwen_research_licence: bool = False
     max_tokens: int = 400  # longest generated answer (summary, action list, chunk notes)
+    # Per-language summary model, e.g. {he = "mlx-community/Qwen3.5-4B-MLX-4bit"}: a transcript
+    # whose main language (most speech time) is listed is summarised by that model, all others
+    # by `model`. {} = `model` for every language.
+    language_models: dict[str, str] = field(default_factory=dict)
+    # Set by load_config(migrate=True) for a one-time notice about the summary model (shown
+    # by ui.common.Controller). Runtime only: not read from or saved to config.toml.
+    notice: str | None = field(default=None, init=False, repr=False, compare=False)
 
 
 @dataclass
@@ -243,12 +312,13 @@ class Config:
         # fields today; add any new section with an Optional field here.
         for section in ("detection", "transcription"):
             data[section] = {k: v for k, v in data[section].items() if v is not None}
+        data["summary"].pop("notice", None)  # runtime only
         with _file_lock(path.with_name(f".{path.name}.lock")):  # shared with save_keys / CLI
             _write_atomic(path, tomli_w.dumps(data).encode())
 
 
 def _build(cls, data: dict):
-    known = {f.name for f in fields(cls)}
+    known = {f.name for f in fields(cls) if f.init}
     return cls(**{k: v for k, v in data.items() if k in known})
 
 
@@ -285,19 +355,20 @@ def normalize_languages(value) -> list[str]:
     return out
 
 
-def normalize_language_models(value) -> dict[str, str]:
-    """`transcription.language_models` with clean Whisper codes as keys ("iw" -> "he").
-    Unknown language codes and empty or non-string model names are dropped with a warning."""
+def normalize_language_models(value, key: str = "transcription.language_models") -> dict[str, str]:
+    """`transcription.language_models` (or `summary.language_models`, named by ``key``) with
+    clean Whisper codes as keys ("iw" -> "he"). Unknown language codes and empty or non-string
+    model names are dropped with a warning."""
     if not isinstance(value, dict):
-        log.warning("transcription.language_models must be a table; ignoring it")
+        log.warning("%s must be a table; ignoring it", key)
         return {}
     out: dict[str, str] = {}
-    for key, model in value.items():
-        code = language_code(key)
+    for lang, model in value.items():
+        code = language_code(lang)
         if code not in WHISPER_LANGUAGES:
-            log.warning("ignoring unknown language %r in transcription.language_models", key)
+            log.warning("ignoring unknown language %r in %s", lang, key)
         elif not isinstance(model, str) or not model.strip():
-            log.warning("ignoring transcription.language_models.%s: not a model name", key)
+            log.warning("ignoring %s.%s: not a model name", key, lang)
         else:
             out[code] = model.strip()
     return out
@@ -337,6 +408,37 @@ def save_keys(path: Path | None, updates: dict[str, Any]) -> float:
         if not changed:  # only absent keys were removed: leave the file as it is
             return path.stat().st_mtime
         return _write_atomic(path, tomli_w.dumps(data).encode())
+
+
+_TABLE_RE = re.compile(r"^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$")
+
+
+def set_string_line(path: Path | None, table: str, key: str, value: str) -> float:
+    """Set ``key = "value"`` in ``[table]`` by rewriting only that one line, so a hand-edited
+    config.toml keeps its comments and layout. Falls back to save_keys (which drops comments)
+    when the line isn't a plain one-line string (or is missing). Returns the new mtime."""
+    path = (CONFIG_PATH if path is None else path).resolve()
+    if not path.exists():
+        raise FileNotFoundError(path)
+    line_re = re.compile(
+        rf"^(\s*{re.escape(key)}\s*=\s*)(\"(?:[^\"\\]|\\.)*\"|'[^']*')(\s*(?:#.*)?)$"
+    )
+    with _file_lock(path.with_name(f".{path.name}.lock")):
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines(keepends=True)
+        current = None
+        for i, line in enumerate(lines):
+            body = line.rstrip("\r\n")
+            if m := _TABLE_RE.match(body):
+                current = m.group(1)
+                continue
+            if current == table and (m := line_re.match(body)):
+                lines[i] = f"{m.group(1)}{json.dumps(value)}{m.group(3)}{line[len(body) :]}"
+                new = "".join(lines)
+                if tomllib.loads(new).get(table, {}).get(key) == value:  # it parsed as meant
+                    return _write_atomic(path, new.encode())
+                break
+    return save_keys(path, {f"{table}.{key}": value})
 
 
 LOCK_TIMEOUT = 10.0  # seconds a writer waits for the config lock before giving up
@@ -465,15 +567,17 @@ SETTINGS_KEYS = {
     "languages": "transcription.languages",
     "keep_audio": "transcription.keep_audio",
     "speaker_names": "transcription.speaker_names",
+    "live": "transcription.live",
     "live_captions": "live_captions",
+    "model": "transcription.model",
 }
 
 
-def validate_settings(values) -> dict:
+def validate_settings(values, models: Collection[str] = ()) -> dict:
     """Check values sent by the settings window (untrusted JSON) and return them cleaned:
     ``mode`` as a Mode, ``output_dir`` as an expanded Path, ``languages`` normalised
-    ([] = any language), the rest as bools. Unknown names are ignored. Raises ValueError on a
-    bad value."""
+    ([] = any language), ``model`` one of ``models`` (the pinned names the app offers), the
+    rest as bools. Unknown names are ignored. Raises ValueError on a bad value."""
     if not isinstance(values, dict):
         raise ValueError("settings must be an object")
     out: dict = {}
@@ -496,6 +600,10 @@ def validate_settings(values) -> dict:
             if any(c not in WHISPER_LANGUAGES for c in langs) or len(clean) != len(langs):
                 raise ValueError("languages: unknown language code")
             out[name] = clean
+        elif name == "model":
+            if not isinstance(value, str) or value not in models:
+                raise ValueError("model: not one of the offered models")
+            out[name] = value
         elif isinstance(value, bool):
             out[name] = value
         else:
@@ -519,8 +627,17 @@ def save_settings(updates: dict, path: Path | None = None) -> float:
     )
 
 
-def load_config(path: Path | None = None) -> Config:
-    """Load config, creating a default file on first run. Unknown keys are ignored."""
+def _positive(v: object) -> bool:
+    """A finite number above zero (not a bool)."""
+    return not isinstance(v, bool) and isinstance(v, int | float) and math.isfinite(v) and v > 0
+
+
+def load_config(path: Path | None = None, *, migrate: bool = False) -> Config:
+    """Load config, creating a default file on first run. Unknown keys are ignored.
+
+    ``migrate=True`` (only the app's startup load) also saves one-time setting migrations
+    to the file and flags them for a notice; other loads (CLI commands, config reloads)
+    apply them in memory only, so the app still shows the notice when it next starts."""
     path = CONFIG_PATH if path is None else path
     if not path.exists():
         cfg = Config()
@@ -535,6 +652,17 @@ def load_config(path: Path | None = None) -> Config:
         if v is not None and (isinstance(v, bool) or not isinstance(v, int | float)):
             log.warning("config: [detection] %s must be a number 0-100; ignoring it", key)
             setattr(det, key, None)
+    # Zero would start a room session the moment the mic opens: fall back to the defaults.
+    bad = [key for key in ("room_speech_s", "room_window_s") if not _positive(getattr(det, key))]
+    if bad:
+        defaults = DetectionConfig()
+        log.warning(
+            "config: [detection] %s must be positive; using the default%s",
+            " and ".join(f"{k} ({getattr(det, k)!r})" for k in bad),
+            "s" if len(bad) > 1 else "",
+        )
+        for key in bad:
+            setattr(det, key, getattr(defaults, key))
     # Could never trigger: say so. Clamped where it is used (the file keeps the value); with
     # an outside sensitivity the window widens instead.
     if det.outside_sensitivity is None and det.room_speech_s > det.room_window_s:
@@ -558,9 +686,74 @@ def load_config(path: Path | None = None) -> Config:
                 code,
             )
     summary = _build(SummaryConfig, data.pop("summary", {}))
+    summary.language_models = normalize_language_models(
+        summary.language_models, "summary.language_models"
+    )
+    _migrate_summary_model(summary, path, persist=migrate)
     search = _build(SearchConfig, data.pop("search", {}))
     cfg = _build(Config, data)
     cfg.search = search
     cfg.output_dir = Path(cfg.output_dir).expanduser()
     cfg.detection, cfg.transcription, cfg.summary = det, tr, summary
     return cfg
+
+
+def _migrate_summary_model(summary: SummaryConfig, path: Path, *, persist: bool) -> None:
+    """Replace the old default 3B (non-commercial; Config.save wrote it into every
+    config.toml) with the current default, unless its licence was accepted. Kept when the 3B
+    is on disk and the new default isn't, so an offline user's summaries keep working (and
+    nothing downloads the new default, so it stays until the user picks it). The switch
+    applies in memory; with ``persist`` (the app's startup load) it is also written to
+    config.toml (that key only), and with summaries on ``summary.notice`` is set for a
+    one-time notice (ui.common.Controller): after the switch, or the first time the 3B is
+    kept (remembered by a marker file next to config.toml)."""
+    accepted = summary.accept_qwen_research_licence
+    invalid = None
+    if not isinstance(accepted, bool):  # e.g. "true" or 1: not consent, and say so
+        invalid = SUMMARY_LICENCE_NOT_BOOL.format(kind=_toml_kind(accepted))
+        log.warning("config: [summary] %s; using false", invalid)
+        summary.accept_qwen_research_licence = False
+    if summary.model != QWEN_RESEARCH_SUMMARY_MODEL or summary.accept_qwen_research_licence:
+        return
+    if summary_model_on_disk(QWEN_RESEARCH_SUMMARY_MODEL) and not summary_model_on_disk(
+        DEFAULT_SUMMARY_MODEL
+    ):
+        log.info(
+            "summary.model %s (non-commercial licence) kept: it is on disk and %s is not; "
+            "set summary.model to switch, or summary.accept_qwen_research_licence = true",
+            summary.model,
+            DEFAULT_SUMMARY_MODEL,
+        )
+        marker = path.with_name(SUMMARY_KEPT_MARKER)
+        if persist and summary.enabled and not marker.exists():
+            try:
+                marker.touch()
+            except OSError as e:
+                log.warning("could not write %s: %s", marker, type(e).__name__)
+            summary.notice = SUMMARY_MODEL_KEPT
+        return
+    log.info(
+        "summary.model %s (the old default, non-commercial licence) -> %s; to keep it, set "
+        "summary.model back to it and summary.accept_qwen_research_licence = true",
+        summary.model,
+        DEFAULT_SUMMARY_MODEL,
+    )
+    summary.model = DEFAULT_SUMMARY_MODEL
+    if not persist:
+        return
+    if invalid is not None:  # they meant to keep the 3B: tell them why it didn't count
+        summary.notice = f"{invalid}; {SUMMARY_MODEL_SWITCHED}"
+    elif summary.enabled:
+        summary.notice = SUMMARY_MODEL_SWITCHED
+    try:
+        set_string_line(path, "summary", "model", DEFAULT_SUMMARY_MODEL)  # keeps comments
+    except (OSError, ValueError) as e:
+        log.warning("could not write summary.model to %s: %s", path, type(e).__name__)
+
+
+def _toml_kind(value: Any) -> str:
+    if isinstance(value, str):
+        return f"a string ({value!r})"
+    if isinstance(value, int | float):
+        return f"a number ({value!r})"
+    return f"a {type(value).__name__}"

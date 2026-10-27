@@ -27,7 +27,6 @@ from .. import autostart
 from ..config import CONFIG_PATH
 from ..engine import IDLE, RECORDING
 from ..models import Mode, TriggerKind
-from ..retention import RETENTION_CHOICES
 from . import notes as notes_ui
 from . import sample
 from .common import (
@@ -65,7 +64,7 @@ from .present import (
     prompt_dialog_script,
     prompt_notice,
     record_item_title,
-    retention_label,
+    retention_menu,
     search_notice,
     search_open_target,
     speaker_choice_label,
@@ -134,11 +133,7 @@ class MacApp(rumps.App):
         )
         self.login_item = rumps.MenuItem("Launch at login", callback=self._toggle_login)
         self.retention_menu = rumps.MenuItem("Delete audio after")
-        for days in RETENTION_CHOICES:
-            item = rumps.MenuItem(retention_label(days), callback=self._set_retention)
-            # ad-hoc attribute on rumps.MenuItem, read back by the menu callback
-            item.retention_days = days  # pyright: ignore[reportAttributeAccessIssue]
-            self.retention_menu.add(item)
+        self._retention_sig: list | None = None
         self._render_retention()
         self.lang_menu = rumps.MenuItem("Languages")
         self._lang_sig: list | None = None
@@ -263,6 +258,8 @@ class MacApp(rumps.App):
                 self._notify(*forgot_notice(ev[1]))
             elif kind == "notes":
                 self._show_notes(ev[1])
+            elif kind == "retention_changed":
+                self._render_retention()
             elif kind == "refreshed":
                 self._render_recent()
                 self._render_permissions()
@@ -366,7 +363,7 @@ class MacApp(rumps.App):
     # ------------------------------------------------------------------ callbacks
     def _set_mode_cb(self, mode: Mode):
         def cb(_sender):
-            self.ctrl.engine.set_mode(mode)
+            self.ctrl.set_mode(mode)
             self._render()
 
         return cb
@@ -399,20 +396,30 @@ class MacApp(rumps.App):
         try:
             if autostart.is_enabled():
                 autostart.disable()
-                self.cfg.autostart = False
+                self.ctrl.menu_set("autostart", False)
             else:
                 autostart.enable()
-                self.cfg.autostart = True
-            self.ctrl.save_settings("autostart")
+                self.ctrl.menu_set("autostart", True)
         except Exception as e:
             log.exception("autostart toggle failed")
             self._notify("Launch at login", f"Failed: {e}")
         sender.state = 1 if autostart.is_enabled() else 0
 
     def _render_retention(self) -> None:
-        days = self.cfg.transcription.audio_retention_days
-        for item in self.retention_menu.values():
-            item.state = check(getattr(item, "retention_days", None) == days)
+        """(Re)build "Delete audio after" when the setting changed (menu or config.toml)."""
+        rows = retention_menu(self.cfg.transcription.audio_retention_days)
+        if rows == self._retention_sig:
+            return
+        if self._retention_sig is not None:
+            self.retention_menu.clear()
+        self._retention_sig = rows
+        for days, title, on in rows:
+            # rumps greys out an item without a callback: the "(from settings)" row
+            item = rumps.MenuItem(title, callback=None if days is None else self._set_retention)
+            # ad-hoc attribute on rumps.MenuItem, read back by the menu callback
+            item.retention_days = days  # pyright: ignore[reportAttributeAccessIssue]
+            item.state = check(on)
+            self.retention_menu.add(item)
 
     def _render_languages(self) -> None:
         """(Re)build the Languages submenu when the setting changed (menu or config.toml)."""
@@ -434,16 +441,12 @@ class MacApp(rumps.App):
         self._render_languages()
 
     def _set_retention(self, sender) -> None:
-        self.cfg.transcription.audio_retention_days = sender.retention_days
+        self.ctrl.set_retention(sender.retention_days)
         self._render_retention()
 
-        # saves, then purges with the saved value only if the save succeeded
-        threading.Thread(target=self.ctrl.save_retention, daemon=True, name="retention-set").start()
-
     def _toggle_captions(self, sender) -> None:
-        self.cfg.live_captions = not self.cfg.live_captions
+        self.ctrl.menu_set("live_captions", not self.cfg.live_captions)
         sender.state = 1 if self.cfg.live_captions else 0
-        self.ctrl.save_settings("live_captions")
         self._apply_captions()
 
     def _apply_captions(self) -> None:
