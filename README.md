@@ -113,15 +113,11 @@ Menu items:
 - **Open live transcript**: opens the current (or last) live session's `transcript.md`.
 - **Recent transcripts**: the last 10, click to open.
 - **Search transcripts…**: full-text search across all your transcripts (English, Russian,
-<<<<<<< HEAD
-  any language); pick a match to open its transcript. Same as `recandcc search`.
-- **Export latest transcript (DOCX + PDF)**: writes `transcript.docx` and `transcript.pdf`
-  next to the newest transcript. Same as `recandcc export`.
-=======
   any language); pick a match to open its transcript. Same as `recandcc search`. On
   Windows the tray item opens a small window: type the words, press Enter, and
   double-click a match (time, speaker, snippet) to open it.
->>>>>>> origin/main
+- **Export latest transcript (DOCX + PDF)**: writes `transcript.docx` and `transcript.pdf`
+  next to the newest transcript. Same as `recandcc export`.
 - **Open transcripts folder**
 - **Permissions**: status and "Grant…" actions.
 - **Launch at login**: starts RecAndCC every time you log in. Turn it on once.
@@ -252,7 +248,7 @@ repo):
 | `recandcc devices` | List audio devices |
 | `recandcc autostart on\|off\|status` | Launch at login |
 | `recandcc config` | Show the config path and contents |
-| `recandcc speakers <session_dir>` | List a transcript's speakers with their first lines |
+| `recandcc speakers <session_dir>` | List a transcript's speakers with their first lines. A speaker who introduces themself in their first 2 minutes ("I'm Anna", "Меня зовут Анна", "קוראים לי דנה") gets a hint, `suggested: Anna (said: …)`. Only a hint: nothing is renamed or saved until you run `name-speaker` |
 | `recandcc name-speaker <session_dir> "Speaker 2" "Anna"` | Name a speaker: rewrites that transcript and saves Anna's voice profile, so later sessions say `Anna` (needs `speaker_names = true`) |
 | `recandcc voices list\|delete <name>\|delete --all` | List or delete saved voice profiles |
 

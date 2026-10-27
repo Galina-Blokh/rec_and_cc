@@ -14,9 +14,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 import threading
 import time
+import unicodedata
 from pathlib import Path
 
 from ..models import Segment, is_rtl
@@ -45,6 +45,11 @@ def rtl_segment(seg: Segment) -> bool:
     return is_rtl(seg.language, seg.text)
 
 
+def _clean(text: str) -> str:
+    """Control characters (they are invalid in DOCX XML) become spaces."""
+    return "".join(" " if unicodedata.category(c) == "Cc" else c for c in text).strip()
+
+
 def load_session(folder: Path) -> tuple[dict, list[Segment]]:
     path = Path(folder) / JSON_NAME
     try:
@@ -53,8 +58,8 @@ def load_session(folder: Path) -> tuple[dict, list[Segment]]:
             Segment(
                 float(s["start"]),
                 float(s["end"]),
-                str(s["text"]).strip(),
-                str(s.get("speaker", "")),
+                _clean(str(s["text"])),
+                _clean(str(s.get("speaker", ""))),
                 str(s.get("language", "")),
             )
             for s in data["segments"]
@@ -82,21 +87,22 @@ def _meta(data: dict, segments: list[Segment]) -> str:
     )
 
 
-_REPLACE_TRIES, _REPLACE_WAIT_S = 5, 0.05
+_REPLACE_TRIES, _REPLACE_WAIT_S = 20, 0.1  # ~2 s: Word, a viewer or sync may hold the file
 _export_lock = threading.Lock()  # one export at a time in this process
 
 
 def _write(path: Path, render) -> Path:
-    """``render(tmp_path)`` writes the file; then it is made owner-only and renamed into
-    place. The temp name is unique per process and thread; Windows may hold the target open
-    (Word, a PDF viewer, sync), so the rename is retried. Only the exception type of a
-    library failure is kept: those messages can quote the transcript."""
+    """``render(tmp_path)`` writes the file, which is then renamed into place. The temp file
+    is created owner-only (0600) up front, with a name unique per process and thread, so the
+    content is never readable by others (on Windows the output ACLs are inherited from the
+    owner-only session folder, #42). Windows may hold the target open, so the rename is
+    retried. Only the exception type of a library failure is kept: those messages can quote
+    the transcript."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         try:
-            render(tmp)
-            if sys.platform != "win32":
-                os.chmod(tmp, 0o600)  # owner-only, like the other session outputs
+            os.close(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            render(tmp)  # the library truncates and rewrites the existing file: mode kept
             for attempt in range(_REPLACE_TRIES):
                 try:
                     os.replace(tmp, path)
@@ -107,6 +113,10 @@ def _write(path: Path, render) -> Path:
                     time.sleep(_REPLACE_WAIT_S)
         except ExportError:
             raise
+        except PermissionError:
+            raise ExportError(
+                f"{path.name} may be open in another app; close it and try again"
+            ) from None
         except Exception as e:
             raise ExportError(f"could not write {path.name} ({type(e).__name__})") from None
         return path
@@ -127,22 +137,39 @@ def export_docx(folder: Path, loaded=None) -> Path:
     if not segments:
         doc.add_paragraph("No speech detected.")
     for seg in segments:
-        p = doc.add_paragraph()
-        label = p.add_run(f"[{fmt_hms(seg.start)}] {seg.speaker}: ")
-        label.bold = True
-        body = p.add_run(seg.text)
-        p.paragraph_format.space_after = Pt(6)
+        label = f"[{fmt_hms(seg.start)}] {seg.speaker}:"
         if rtl_segment(seg):
-            p._p.get_or_add_pPr().append(OxmlElement("w:bidi"))
-            for run in (label, body):
-                run._r.get_or_add_rPr().append(OxmlElement("w:rtl"))
+            # the LTR label gets its own paragraph, or the bidi paragraph would mirror it
+            lp = doc.add_paragraph()
+            lp.add_run(label).bold = True
+            lp.paragraph_format.space_after = Pt(0)
+            p = doc.add_paragraph()
+            p._p.get_or_add_pPr().append(OxmlElement("w:bidi"))  # before w:spacing (schema)
+            p.add_run(seg.text)._r.get_or_add_rPr().append(OxmlElement("w:rtl"))
+        else:
+            p = doc.add_paragraph()
+            p.add_run(label + " ").bold = True
+            p.add_run(seg.text)
+        p.paragraph_format.space_after = Pt(6)
     return _write(Path(folder) / DOCX_NAME, lambda tmp: doc.save(str(tmp)))
+
+
+def _covers_scripts(path: Path) -> bool:
+    """True if the font has glyphs for Latin, Cyrillic and Hebrew (fontTools comes with fpdf2)."""
+    try:
+        from fontTools.ttLib import TTFont
+
+        with TTFont(str(path), lazy=True, fontNumber=0) as f:
+            cmap = f.getBestCmap() or {}
+        return all(ord(c) in cmap for c in "a\u0416\u05d0")
+    except Exception:  # noqa: BLE001 - an unreadable font is just not a candidate
+        return False
 
 
 def find_font() -> Path:
     windir = Path(os.environ.get("WINDIR", "C:/Windows"))
     for c in (*map(Path, _FONT_CANDIDATES), windir / "Fonts" / "arial.ttf"):
-        if c.is_file():
+        if c.is_file() and _covers_scripts(c):
             return c
     raise ExportError(
         "no system font with Latin, Cyrillic and Hebrew found for the PDF (install Arial or "
@@ -152,6 +179,7 @@ def find_font() -> Path:
 
 def export_pdf(folder: Path, loaded=None) -> Path:
     from fpdf import FPDF
+    from fpdf.enums import WrapMode
 
     data, segments = loaded or load_session(folder)
     font = find_font()
@@ -168,11 +196,13 @@ def export_pdf(folder: Path, loaded=None) -> Path:
         pdf.set_font("body", size=size)
         pdf.set_text_shaping(True, direction="rtl" if rtl else "ltr")
         pdf.set_x(pdf.l_margin)
+        long_token = any(len(t) > 40 for t in text.split())
         pdf.multi_cell(
             width,
             size * 0.5,
             text,
             align="R" if rtl else "L",
+            wrapmode=WrapMode.CHAR if long_token else WrapMode.WORD,
             new_x="LMARGIN",
             new_y="NEXT",
         )

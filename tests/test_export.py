@@ -6,6 +6,7 @@ Stories: US-25.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 
@@ -55,11 +56,73 @@ def test_docx_has_text_speakers_timestamps_and_rtl(session):
     assert "Transcript 2026-10-26 14:03" in texts[0]
     assert "[00:00:00] Me: Hello team" in texts
     assert "[00:00:03] Others: Привет, давайте" in texts
-    assert "[00:00:06] Speaker 1: שלום לכולם" in texts
+    # a Hebrew segment: the LTR label has its own paragraph, the text a bidi one
+    assert texts[-2:] == ["[00:00:06] Speaker 1:", "שלום לכולם"]
     bidi = [
         p._p.pPr is not None and p._p.pPr.find(qn("w:bidi")) is not None for p in doc.paragraphs
     ]
     assert bidi[-1] and not any(bidi[:-1])
+    assert doc.paragraphs[-2].runs[0].bold
+
+
+def test_docx_bidi_comes_before_spacing_in_schema_order(session):
+    ppr = Document(str(export.export_docx(session))).paragraphs[-1]._p.pPr
+    tags = [c.tag for c in ppr]
+    assert tags.index(qn("w:bidi")) < tags.index(qn("w:spacing"))
+
+
+def test_control_characters_are_cleaned(tmp_path):
+    (tmp_path / "transcript.json").write_text(
+        json.dumps(
+            {"segments": [{"start": 0, "end": 1, "text": "a\x00b\x0bc", "speaker": "M\x01e"}]}
+        ),
+        "utf-8",
+    )
+    _data, segs = export.load_session(tmp_path)
+    assert (segs[0].text, segs[0].speaker) == ("a b c", "M e")
+    Document(str(export.export_docx(tmp_path)))  # valid XML
+
+
+def test_temp_file_is_private_from_the_start(session, monkeypatch):
+    if sys.platform == "win32":
+        pytest.skip("POSIX modes")
+    modes = []
+
+    def render(tmp):
+        modes.append(tmp.stat().st_mode & 0o777)
+        tmp.write_text("x")
+
+    export._write(session / "x.bin", render)
+    assert modes == [0o600]
+
+
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_pdf_text_reads_back_in_all_three_languages(session):
+    from pypdf import PdfReader
+
+    text = "\n".join(pg.extract_text() for pg in PdfReader(str(export.export_pdf(session))).pages)
+    assert "Transcript 2026-10-26 14:03" in text
+    assert "[00:00:00] Me: Hello team" in text and "Привет, давайте" in text
+    he = "שלום לכולם"
+    assert he in text or he[::-1] in text  # logical or visual order, depending on the extractor
+
+
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_a_very_long_unbroken_token_does_not_break_the_pdf(tmp_path):
+    (tmp_path / "transcript.json").write_text(
+        json.dumps({"segments": [{"start": 0, "end": 1, "text": "x" * 400, "speaker": "Me"}]}),
+        "utf-8",
+    )
+    assert export.export_pdf(tmp_path).read_bytes().startswith(b"%PDF")
+
+
+def test_font_without_hebrew_is_not_picked(monkeypatch, tmp_path):
+    f = tmp_path / "a.ttf"
+    f.write_bytes(b"not a font")
+    monkeypatch.setattr(export, "_FONT_CANDIDATES", (str(f),))
+    monkeypatch.setenv("WINDIR", str(tmp_path / "none"))
+    with pytest.raises(export.ExportError):
+        export.find_font()
 
 
 @pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
@@ -135,7 +198,7 @@ def test_controller_export_posts_a_notice(session, monkeypatch, fmt):
     ctrl = _controller()
     ctrl.export_async(session / "transcript.md", fmt)
     kind, title, msg = ctrl.events.get(timeout=10)
-    assert (kind, title) == ("notice", "Export") and msg.startswith("Saved transcript.docx")
+    assert (kind, title) == ("notice", "Export") and msg.startswith("Saved transcript.docx (")
     assert seen == [fmt]
 
 
@@ -280,19 +343,22 @@ def test_replace_that_never_succeeds_is_an_export_error(session, monkeypatch):
     assert not list(session.glob(".*.tmp"))
 
 
-def test_latest_finished_skips_live_sessions(tmp_path):
+def test_latest_finished_skips_live_sessions_and_ignores_mtime(tmp_path):
     from recandcc.ui.common import latest_finished
 
-    def sess(name, done):
-        d = tmp_path / name
-        d.mkdir()
+    def sess(day, name, done):
+        d = tmp_path / day / name
+        d.mkdir(parents=True)
         (d / "transcript.md").write_text("x")
         if done:
             (d / "transcript.json").write_text("{}")
         return d / "transcript.md"
 
-    live, old, older = sess("live", False), sess("old", True), sess("older", True)
-    assert latest_finished([live, old, older]) == old
+    live = sess("2026-10-27", "090000_zoom", False)
+    new = sess("2026-10-26", "140312_zoom", True)
+    old = sess("2026-10-25", "100000_meet", True)
+    os.utime(old, (9e9, 9e9))  # re-transcribed just now: newest mtime, oldest session
+    assert latest_finished([old, live, new]) == new
     assert latest_finished([live]) is None and latest_finished([]) is None
 
 
@@ -300,3 +366,13 @@ def test_controller_export_of_nothing_finished_posts_a_notice(tmp_path):
     ctrl = _controller()
     ctrl.export_async([])
     assert ctrl.events.get(timeout=10) == ("notice", "Export", "No finished transcripts yet")
+
+
+def test_a_held_open_file_gets_a_clear_notice(session, monkeypatch):
+    def locked(src, dst):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(export.os, "replace", locked)
+    monkeypatch.setattr(export.time, "sleep", lambda _s: None)
+    with pytest.raises(export.ExportError, match="open in another app"):
+        export.export_docx(session)

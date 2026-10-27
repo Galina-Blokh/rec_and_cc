@@ -129,9 +129,11 @@ def recent_transcripts(output_dir: Path, n: int = RECENT_COUNT) -> list[Path]:
 
 
 def latest_finished(recent: list[Path]) -> Path | None:
-    """The first of ``recent`` (newest first) whose session has a transcript.json: a live or
-    still-transcribing session has only transcript.md."""
-    return next((p for p in recent if (p.parent / "transcript.json").is_file()), None)
+    """The session that started last among ``recent`` and has a transcript.json (a live or
+    still-transcribing one has only transcript.md). Ordered by the <day>/<time>_<app> folder
+    name, not mtime, so a re-transcribed old session doesn't count as the latest."""
+    done = [p for p in recent if (p.parent / "transcript.json").is_file()]
+    return max(done, key=lambda p: (p.parent.parent.name, p.parent.name), default=None)
 
 
 def transcript_label(path: Path) -> str:
@@ -456,7 +458,8 @@ class Controller:
                     if target is None:
                         raise ExportError("No finished transcripts yet")
                     paths = export_session(target.parent, fmt, skipped)
-                    msg = "Saved " + " and ".join(p.name for p in paths)
+                    names = " and ".join(p.name for p in paths)
+                    msg = f"Saved {names} ({transcript_label(target)})"
                     if skipped:
                         msg += f". {skipped[0]}"
                 except ExportError as e:

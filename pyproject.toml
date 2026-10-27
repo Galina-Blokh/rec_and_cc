@@ -36,6 +36,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "pypdf>=6.21.2",
     "pyright>=1.1.414",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
