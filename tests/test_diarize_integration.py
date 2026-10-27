@@ -215,6 +215,7 @@ def test_live_final_transcript_gets_speaker_labels(track, offline, tmp_path):
         s.speaker == "Me" or s.speaker == "Others" or s.speaker.startswith("Speaker ")
         for s in shown
     )
+    assert any(s.speaker.startswith("Speaker ") for s in shown)  # live labels fired
     others = [s for s in segs if s.speaker != "Me"]
     labels = labels_per_phrase(truth, [(s.start, s.end, s.speaker) for s in others])
     check(truth, labels, min_ok=len(truth) - 1)
