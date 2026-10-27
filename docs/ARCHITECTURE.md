@@ -424,8 +424,13 @@ store (`voices/sessions/<hash>.names.json`; not in `session.json`, because the s
 sync to a cloud). After the transcript is written the transcriber relabels one speaker only
 when it is certain (`callnames.plan`: name count equals non-`Me` speaker count, voice-matched
 speakers match names by shared word, one `Speaker N` and one name left, no disagreeing
-self-introduction). It rewrites the transcript only and never creates a voice profile from a
-call-app name. The menu toggle checks Accessibility trust on a worker thread and writes only
+self-introduction). In a room session a call upgraded (`started_as_room`) the mic track is
+numbered too, so the owner can be a `Speaker N`: `_labelled` records each label's track on its
+segments (`Segment.track`, `"track"` in `transcript.json`; renames keep it), and
+`callnames.call_side` counts and offers only the "others" track's labels. A transcript without
+that (written before it, or a label of unknown/mixed track) fails closed, and `_rename`
+re-checks the track under `NAMING_LOCK`. It rewrites the transcript only and never creates a
+voice profile from a call-app name. The menu toggle checks Accessibility trust on a worker thread and writes only
 its own key to `config.toml`. Helper runs are killed (and waited for) when the session stops. Only Zoom, new Teams and browser windows titled as a Meet/Teams/Zoom page are walked; a name must be in two samples in a row before it is kept (and kept after it scrolls out of view). With more than one call-titled browser window nothing is read from browsers (fail closed).
 
 Whose Accessibility grant is used? Checked on a Mac with `rcc-audiotap ax-status` started from

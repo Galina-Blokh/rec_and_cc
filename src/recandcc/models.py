@@ -82,6 +82,10 @@ class Segment:
     speaker: str  # "Me", "Others" (later: "Speaker 1", ...)
     language: str  # ISO 639-1 code, e.g. "en", "ru", "he"
     overlap: bool = False  # diarization: two other speakers at once (json only, when True)
+    # The diarized track the label came from ("me" or "others"; json only, when set): call-app
+    # names go to "others" speakers only, since a room session numbers the mic track too.
+    # "" = not diarized, or a transcript written before tracks were recorded.
+    track: str = field(default="", compare=False)
     # (start, end, text) per word, when the backend gave word timestamps (faster-whisper, only
     # for "Others" while diarizing). In memory only: used to split at a speaker change, never
     # written to transcript.json.

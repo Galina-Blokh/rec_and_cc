@@ -514,7 +514,8 @@ def test_upgrading_to_a_call_starts_the_sampler(mac, tmp_path, monkeypatch):
 
 def test_a_room_session_assigns_nothing(tmp_path):
     # Started as a room recording, then upgraded to a call: the mic track is numbered too, so
-    # the owner may be "Speaker 1". Labels of both tracks are not told apart, so fail closed.
+    # the owner may be "Speaker 1". This transcript predates per-track labels (US-35), so the
+    # two tracks can't be told apart: fail closed.
     s = _session_with_voice(tmp_path, ["Anna"])
     s.started_as_room = True
     s.save()

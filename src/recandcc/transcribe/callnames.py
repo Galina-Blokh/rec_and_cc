@@ -3,7 +3,8 @@
 The sampler (``participants.py``) keeps the display names it saw in the owner-only voices
 store. They are only *assigned* when nothing is left to guess:
 
-* the number of names equals the number of speakers other than `Me`,
+* the number of names equals the number of speakers other than `Me` (in a session that started
+  as a room recording: the number of speakers on the call's track, see below),
 * every speaker that already has a name (a voice-profile match) matches one of the names
   (case-insensitive, by shared word, so "Anna" matches "Anna K."), and
 * exactly one `Speaker N` and one name remain, and a self-introduction ("I'm Bob") that
@@ -12,6 +13,11 @@ store. They are only *assigned* when nothing is left to guess:
 Anything else is only listed by `recandcc speakers`. Assigning only rewrites the transcript
 label: it never creates or updates a voice profile (a name read from someone else's window is
 not good enough to be remembered as a voice; confirm it with `recandcc name-speaker`).
+
+A room recording that a call joined (``started_as_room``) numbers the people at the laptop on
+the mic track too, so the owner can be a `Speaker N`. There only the labels the transcript
+marks as from the "others" (system audio) track are candidates and counted; a transcript
+written before labels carried their track names nobody (fail closed).
 """
 
 from __future__ import annotations
@@ -22,7 +28,7 @@ import re
 from dataclasses import replace
 from pathlib import Path
 
-from ..models import Segment, SessionInfo
+from ..models import Segment, SessionInfo, Track
 from . import voices
 from .intro_hints import transcript_hints
 from .merge import ME
@@ -70,6 +76,19 @@ def plan(labels: list[str], participants: list[str]) -> dict[str, str]:
     return {unnamed[0]: free[0]} if len(unnamed) == 1 and len(free) == 1 else {}
 
 
+def call_side(directory: Path) -> list[str] | None:
+    """Labels (except Me) whose every segment is marked as from the "others" track, in order of
+    first appearance; None if any label's track is unknown or mixed (an older transcript)."""
+    data = json.loads((Path(directory) / JSON_NAME).read_text(encoding="utf-8"))
+    tracks: dict[str, set[str]] = {}
+    for s in data.get("segments", []):
+        if s["speaker"] != ME:
+            tracks.setdefault(s["speaker"], set()).add(s.get("track", ""))
+    if any(len(t) != 1 or not t <= {Track.ME, Track.OTHERS} for t in tracks.values()):
+        return None
+    return [lbl for lbl, t in tracks.items() if t == {Track.OTHERS}]
+
+
 def forget(session_id: str) -> None:
     """Delete the names kept for a session. Never raises."""
     try:
@@ -82,8 +101,12 @@ def suggestions(directory: Path) -> list[str]:
     """Participant names a user could still give to unnamed speakers (for `speakers`)."""
     session = SessionInfo.load(directory)
     names = voices.read_session_names(session.id)
-    labels = [lbl for lbl, _ in voices.session_speakers(directory)]
-    return free_names(labels, names) if names else []
+    if not names:
+        return []
+    if session.started_as_room:  # only the call's side; unknown tracks: suggest nothing
+        side = call_side(directory)
+        return free_names(side, names) if side is not None else []
+    return free_names([lbl for lbl, _ in voices.session_speakers(directory)], names)
 
 
 class _Forgotten(Exception):
@@ -92,28 +115,38 @@ class _Forgotten(Exception):
 
 def _rename(directory: Path, session: SessionInfo, label: str, name: str, since: int) -> None:
     """Relabel the transcript files; keep the session's voice (if any) under the new label,
-    with no profile. Under NAMING_LOCK (``apply``), like ``voices.name_speaker``."""
+    with no profile. Under NAMING_LOCK (``apply``), like ``voices.name_speaker``. The transcript
+    is written first and the voice store only after that; if the store write fails, the
+    transcript gets its old label back (no name shown whose voice was not moved with it)."""
     name = voices.check_name(name)
     data = json.loads((directory / JSON_NAME).read_text(encoding="utf-8"))
     segments = [Segment(**s) for s in data["segments"]]
     if label not in {s.speaker for s in segments}:
         raise ValueError("that speaker was renamed meanwhile")
+    if session.started_as_room and {s.track for s in segments if s.speaker == label} != {
+        Track.OTHERS
+    }:
+        raise ValueError("that speaker is not on the call's track")  # never the room/owner
     if any(s.speaker.casefold() == name.casefold() for s in segments):
         raise ValueError("that name is already a speaker of this session")
     if since != voices.forget_generation():  # by another process (this one's waits for us)
         raise _Forgotten
-    segments = [replace(s, speaker=name) if s.speaker == label else s for s in segments]
-    write_outputs(session, segments, data["duration"], data["model"])
-    with voices.store_lock():  # read and write together; a forget since `since` drops it
-        stored = voices.read_session_voices(session.id)
-        if label in stored:
-            new = {(name if k == label else k): v for k, v in stored.items()}
-            voices.write_session_voices(
-                session,
-                {k: v["centroid"] for k, v in new.items()},
-                {k: v["profile"] for k, v in new.items() if v["profile"]},
-                since=since,
-            )
+    renamed = [replace(s, speaker=name) if s.speaker == label else s for s in segments]
+    write_outputs(session, renamed, data["duration"], data["model"])
+    try:
+        with voices.store_lock():  # read and write together; a forget since `since` drops it
+            stored = voices.read_session_voices(session.id)
+            if label in stored:
+                new = {(name if k == label else k): v for k, v in stored.items()}
+                voices.write_session_voices(
+                    session,
+                    {k: v["centroid"] for k, v in new.items()},
+                    {k: v["profile"] for k, v in new.items() if v["profile"]},
+                    since=since,
+                )
+    except BaseException:
+        write_outputs(session, segments, data["duration"], data["model"])  # the old label back
+        raise
 
 
 def apply(directory: Path, since: int | None = None) -> bool:
@@ -140,13 +173,15 @@ def _apply(directory: Path, session: SessionInfo, since: int) -> bool:
     if not names:
         return False
     if session.started_as_room:
-        # Fail closed: a room session also numbers the mic track, so with two people at the
-        # laptop the owner would be "Speaker N" and could be renamed after a call participant.
-        # Only the system-audio track's labels belong to the call; they aren't recorded per
-        # track yet.
-        forget(session.id)
-        return False
-    labels = [lbl for lbl, _ in voices.session_speakers(directory)]
+        # A room session also numbers the mic track, so with two people at the laptop the owner
+        # is a "Speaker N" too: only labels marked as from the call's (system audio) track count.
+        labels = call_side(directory)
+        if labels is None:  # an older transcript without per-track labels: fail closed
+            log.info("session %s: speaker tracks unknown; no call-app name", session.id)
+            forget(session.id)
+            return False
+    else:  # only "Others" was diarized: every label but Me is the call's
+        labels = [lbl for lbl, _ in voices.session_speakers(directory)]
     for label, name in plan(labels, names).items():
         hint = transcript_hints(directory).get(label)
         if hint is not None and not same_person(hint.name, name):

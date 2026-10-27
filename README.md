@@ -337,7 +337,9 @@ open**, through the macOS Accessibility API: it only reads what is on screen and
 opens or changes anything; only the Zoom and Teams apps and, in a browser, a window showing a Meet/Teams/Zoom call page are read (never Slack, Discord, WhatsApp, FaceTime, Telegram and the like). A name counts only if it is in two samples in a row.
 A speaker is named only when it is certain: the panel shows exactly as many people as there
 are speakers besides `Me`, every speaker recognized by voice matches one of them, and one
-`Speaker N` and one name are left (a self-introduction that disagrees wins). Otherwise nothing
+`Speaker N` and one name are left (a self-introduction that disagrees wins). In a room
+recording a call joined, only the call's speakers count: the people in the room (you
+included, even as `Speaker N`) are never named after a participant. Otherwise nothing
 is guessed (`recandcc speakers` lists the names). This only relabels the transcript: no voice
 profile is saved from it (confirm with `recandcc name-speaker` to remember the voice). A
 recognized voice or `Me` is never overridden.
