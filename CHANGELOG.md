@@ -73,6 +73,12 @@ All notable changes to RecAndCC are documented here. The format is based on
   (#36, #54, #55).
 
 ### Fixed
+- A summary stays at the top of DOCX/PDF exports after a speaker rename or call-app names:
+  freshness follows the transcript text (`.summary-source` fingerprint), not its mtime (audit
+  by rec-and-cc-7e). The CLI `recandcc name-speaker` still marks the summary pending so the app
+  redoes it; the menu rename and call-app names keep the existing summary, whose text may still
+  mention the old label. A `null` segments list or an empty/unreadable `.summary-source` falls
+  back to the mtime rule (Fable review).
 - With `keep_audio = false`, audio left behind by a quit during slow diarization or a failed
   delete is removed at the next start (#45).
 - A discarded session is never transcribed later, even if deleting it failed; the delete is
