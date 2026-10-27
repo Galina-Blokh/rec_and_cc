@@ -557,10 +557,7 @@ class TrayApp:
 
     def _toggle_captions(self) -> None:
         self.cfg.live_captions = not self.cfg.live_captions
-        try:
-            self.cfg.save()
-        except Exception:
-            log.exception("saving settings failed")
+        self.ctrl.save_settings("live_captions")
         if not self.cfg.live_captions:
             self.captions.post("hide")
         elif self._live_id is not None:
@@ -583,7 +580,7 @@ class TrayApp:
             else:
                 autostart.enable()
                 self.cfg.autostart = True
-            self.cfg.save()
+            self.ctrl.save_settings("autostart")
         except Exception:
             log.exception("autostart toggle failed")
 

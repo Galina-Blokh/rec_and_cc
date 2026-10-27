@@ -5,7 +5,8 @@ File: `~/Library/Application Support/RecAndCC/config.toml` (macOS) or
 Open it from **menu → Edit settings**, or print it with `recandcc config`. Unknown keys are
 ignored, and missing keys take their default values.
 
-Changes to `[detection]` are picked up while the app runs. Restart the app after changing
+A menu change writes only its own key, so other hand edits in the file are kept. Changes to
+`[detection]` are picked up while the app runs. Restart the app after changing
 `[transcription]` or `output_dir`.
 
 ## Top level

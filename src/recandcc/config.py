@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import sys
 import tomllib
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
+from typing import Any
 
 import platformdirs
 import tomli_w
@@ -253,13 +256,35 @@ def normalize_language_models(value) -> dict[str, str]:
     return out
 
 
-def save_languages(languages: list, path: Path = CONFIG_PATH) -> None:
-    """Write only `transcription.languages` into config.toml, leaving every other key as it is
-    on disk (it may have been edited by hand since the app loaded it). Raises
-    FileNotFoundError if there is no file yet, ValueError if it is not valid TOML."""
+def save_keys(path: Path, updates: dict[str, Any]) -> None:
+    """Write only the dotted keys in ``updates`` ("transcription.languages": [...]) into
+    config.toml, leaving every other key exactly as it is on disk (it may have been edited by
+    hand since the app loaded it). Raises FileNotFoundError if there is no file yet,
+    ValueError if it is not valid TOML or a key's parent is not a table."""
     data = tomllib.loads(path.read_text(encoding="utf-8"))
-    data.setdefault("transcription", {})["languages"] = list(languages)
-    path.write_bytes(tomli_w.dumps(data).encode())
+    for dotted, value in updates.items():
+        *parents, leaf = dotted.split(".")
+        table = data
+        for name in parents:
+            table = table.setdefault(name, {})
+            if not isinstance(table, dict):
+                raise ValueError(f"{name} in {path} is not a table")
+        table[leaf] = value
+    _write_atomic(path, tomli_w.dumps(data).encode())
+
+
+def _write_atomic(path: Path, payload: bytes) -> None:
+    """Replace ``path`` in one step, so a crash mid-write never leaves half a config."""
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_bytes(payload)
+    with contextlib.suppress(OSError):
+        os.chmod(tmp, path.stat().st_mode & 0o777)  # keep the user's file mode
+    os.replace(tmp, path)
+
+
+def save_languages(languages: list, path: Path = CONFIG_PATH) -> None:
+    """Write only `transcription.languages` (see `save_keys`)."""
+    save_keys(path, {"transcription.languages": list(languages)})
 
 
 def load_config(path: Path = CONFIG_PATH) -> Config:
