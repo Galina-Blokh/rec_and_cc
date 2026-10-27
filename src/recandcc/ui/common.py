@@ -440,7 +440,11 @@ class Controller:
                 self._export_lock.release()
             self.events.put(("notice", "Export", msg))
 
-        threading.Thread(target=run, daemon=True, name="export").start()
+        try:
+            threading.Thread(target=run, daemon=True, name="export").start()
+        except Exception:
+            self._export_lock.release()
+            raise
 
     # --- live transcription (engine thread)
     def _on_session_start(self, session: SessionInfo) -> None:

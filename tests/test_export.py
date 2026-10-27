@@ -123,12 +123,12 @@ def _controller():
     return ctrl
 
 
-def test_controller_export_posts_a_notice(session):
+def test_controller_export_posts_a_notice(session, monkeypatch):
+    monkeypatch.setattr(export, "export_session", lambda f, fmt, sk: [f / "transcript.docx"])
     ctrl = _controller()
     ctrl.export_async(session / "transcript.md")
     kind, title, msg = ctrl.events.get(timeout=10)
     assert (kind, title) == ("notice", "Export") and msg.startswith("Saved transcript.docx")
-    assert (session / "transcript.docx").exists()
 
 
 def test_controller_export_logs_only_the_error_type(session, monkeypatch, caplog):
@@ -217,4 +217,43 @@ def test_concurrent_exports_of_one_session_are_serialised(session):
         results = list(pool.map(lambda _: export.export_session(session, "docx"), range(4)))
     assert all(r == [session / "transcript.docx"] for r in results)
     Document(str(session / "transcript.docx"))  # a whole, readable file
+    assert not list(session.glob(".*.tmp"))
+
+
+def test_a_pdf_failure_other_than_the_font_keeps_the_docx(session, monkeypatch):
+    def boom(folder, loaded=None):
+        raise RuntimeError("Привет, секрет")
+
+    monkeypatch.setattr(export, "export_pdf", boom)
+    skipped: list[str] = []
+    out = export.export_session(session, "both", skipped)
+    assert [p.name for p in out] == ["transcript.docx"]
+    assert skipped == ["PDF failed (RuntimeError)"]
+
+
+def test_replace_is_retried_while_the_file_is_held_open(session, monkeypatch):
+    real, calls = export.os.replace, []
+
+    def flaky(src, dst):
+        calls.append(1)
+        if len(calls) < 3:
+            raise PermissionError("in use")
+        return real(src, dst)
+
+    monkeypatch.setattr(export.os, "replace", flaky)
+    monkeypatch.setattr(export.time, "sleep", lambda _s: None)
+    export.export_docx(session)
+    assert len(calls) == 3
+    Document(str(session / "transcript.docx"))
+    assert not list(session.glob(".*.tmp"))
+
+
+def test_replace_that_never_succeeds_is_an_export_error(session, monkeypatch):
+    def locked(src, dst):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(export.os, "replace", locked)
+    monkeypatch.setattr(export.time, "sleep", lambda _s: None)
+    with pytest.raises(export.ExportError):
+        export.export_docx(session)
     assert not list(session.glob(".*.tmp"))

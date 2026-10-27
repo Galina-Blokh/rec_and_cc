@@ -83,15 +83,7 @@ def _meta(data: dict, segments: list[Segment]) -> str:
 
 
 _REPLACE_TRIES, _REPLACE_WAIT_S = 5, 0.05
-_locks: dict[str, threading.Lock] = {}
-_locks_guard = threading.Lock()
-
-
-def _session_lock(folder: Path) -> threading.Lock:
-    """One export at a time per session folder (in this process)."""
-    key = str(Path(folder).resolve())
-    with _locks_guard:
-        return _locks.setdefault(key, threading.Lock())
+_export_lock = threading.Lock()  # one export at a time in this process
 
 
 def _write(path: Path, render) -> Path:
@@ -207,7 +199,7 @@ def export_session(folder: Path, fmt: str = "both", skipped: list[str] | None = 
     font) doesn't lose the DOCX: the reason is appended to ``skipped`` if one is given."""
     if fmt not in (*FORMATS, "both"):
         raise ExportError(f"unknown format {fmt!r}")
-    with _session_lock(folder):
+    with _export_lock:
         loaded = load_session(folder)
         out = []
         if fmt in ("docx", "both"):
@@ -215,10 +207,15 @@ def export_session(folder: Path, fmt: str = "both", skipped: list[str] | None = 
         if fmt in ("pdf", "both"):
             try:
                 out.append(export_pdf(folder, loaded))
-            except ExportError as e:
+            except Exception as e:
+                err = (
+                    e
+                    if isinstance(e, ExportError)
+                    else ExportError(f"PDF failed ({type(e).__name__})")
+                )
                 if fmt == "pdf":
-                    raise
+                    raise err from None
                 if skipped is not None:
-                    skipped.append(str(e))
+                    skipped.append(str(err))
     log.info("exported session %s (%s)", Path(folder).name, fmt)
     return out

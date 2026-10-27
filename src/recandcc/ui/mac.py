@@ -369,11 +369,12 @@ class MacApp(rumps.App):
             self._notify("Can't open transcripts folder", err)
 
     def _export(self, _sender) -> None:
-        recent = self.ctrl.recent
-        if not recent:
-            self._notify("Export", "No transcripts yet")
+        # the newest finished transcript: a live one has no transcript.json yet
+        done = [p for p in self.ctrl.recent if (p.parent / "transcript.json").is_file()]
+        if not done:
+            self._notify("Export", "No finished transcripts yet")
             return
-        self.ctrl.export_async(recent[0])
+        self.ctrl.export_async(done[0])
 
     def _open_recent(self, sender) -> None:
         open_path(sender.path)
