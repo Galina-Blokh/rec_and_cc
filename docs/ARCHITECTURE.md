@@ -307,7 +307,10 @@ labels (the offline diarization), e.g. one other voice is `Speaker 1` live but `
 the final transcript. The captions colour each `Speaker N` from a fixed palette. Room sessions (and calls that started as a room) show no live
 `Speaker N`, only `Me` / `Others`: the final transcript numbers `Me`'s speakers first, so live
 numbers would not match; this is decided at session start, so a call upgraded to a room
-mid-way keeps its live labels. The shared
+mid-way keeps its live labels (and the final numbering may then differ from them). When the
+session stops, the live worker does not wait for pending embeddings: it uses the ones already
+done and shows `Others` / the previous label for the rest, so finishing is never delayed by
+display labels. The shared
 speaker model (~28 MB) stays loaded for the app's life, by design (it was already kept until
 quit before); there is no idle unloading.
 

@@ -313,12 +313,56 @@ def test_slow_embedder_does_not_delay_captions(tmp_path, emitted):
     live = manual(tr, make_session(tmp_path), emitted, labeler=lab)
     Feeder(live, Track.OTHERS)(np.concatenate([silence(1), burst(2.5), silence(1.5)]))
     t0 = time.monotonic()
-    live._step(True)  # final: waits at most EMBED_WAIT_S for the stuck embedding
+    live._step(True)  # final: never waits for the stuck embedding
     took = time.monotonic() - t0
     gate.set()
-    assert took < EMBED_WAIT_S + 1.5
+    assert took < min(0.5, EMBED_WAIT_S)
     assert [s.speaker for s in emitted] == ["Others"]  # fallback label
     lab.close()
+
+
+def test_finish_does_not_wait_for_pending_embeddings(tmp_path, emitted):
+    gate = threading.Event()
+    lab = SpeakerLabeler(embedder=lambda a: gate.wait(10) and vec(0))
+    live = manual(FakeTranscriber(), make_session(tmp_path), emitted, labeler=lab)
+    feed = Feeder(live, Track.OTHERS)
+    for _ in range(3):  # several queued Others jobs, all with stuck embeddings
+        feed(np.concatenate([silence(1), burst(2.5), silence(1.5)]))
+    live._step(False)
+    t0 = time.monotonic()
+    live._step(True)
+    took = time.monotonic() - t0
+    gate.set()
+    assert took < 0.5
+    assert emitted and {s.speaker for s in emitted} == {"Others"}
+    lab.close()
+
+
+def test_close_racing_a_completing_compute_does_not_raise():
+    started, release = threading.Event(), threading.Event()
+    errors = []
+
+    def slow(a):
+        started.set()
+        release.wait(5)
+        return vec(0)
+
+    lab = SpeakerLabeler(embedder=slow)
+    old_hook = threading.excepthook
+    threading.excepthook = lambda args: errors.append(args.exc_value)
+    try:
+        fut = lab.submit(long_audio())
+        assert started.wait(5)
+        lab.close()  # resolves what it can while the compute is still running
+        release.set()
+        thread = lab._thread
+        assert thread is not None
+        thread.join(5)
+        assert not thread.is_alive()
+        assert fut is not None and fut.done()
+    finally:
+        threading.excepthook = old_hook
+    assert errors == []
 
 
 def test_close_with_a_full_queue_stops_the_thread():

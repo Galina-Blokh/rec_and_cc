@@ -18,7 +18,7 @@ import queue
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import Future
+from concurrent.futures import Future, InvalidStateError
 from pathlib import Path
 from typing import Any
 
@@ -227,7 +227,7 @@ class SpeakerLabeler:
                     result = self._embedder(audio)
             except BaseException as e:  # noqa: BLE001 - labels are optional; keep the thread alive
                 log.debug("live speaker embedding failed: %s", e)
-            if not fut.done():
+            with contextlib.suppress(InvalidStateError):  # close() may have resolved it
                 fut.set_result(result)
 
     def label(
@@ -258,7 +258,8 @@ class SpeakerLabeler:
                 _, fut, _, _ = self._q.get_nowait()
             except queue.Empty:
                 break
-            fut.set_result(None)
+            with contextlib.suppress(InvalidStateError):
+                fut.set_result(None)
         # The thread is a daemon and may be inside a long embedding; wait only briefly so
         # close() never stalls its caller (the live worker thread), then let it finish alone.
         if thread is not None and thread is not threading.current_thread():

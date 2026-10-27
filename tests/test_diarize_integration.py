@@ -246,7 +246,11 @@ def test_live_final_transcript_gets_speaker_labels(track, offline, tmp_path):
         print(f"finish() incl. diarization: {time.monotonic() - t0:.2f}s")
     finally:
         t.close()
-    assert shown and any(s.speaker.startswith("Speaker ") for s in shown)  # live captions
+    # live captions; the stronger "Speaker N appears" check is the dedicated labeler test below
+    # (finish() no longer waits for embeddings, so a late one may stay "Others")
+    assert shown and all(
+        s.speaker == "Me" or s.speaker.startswith(("Others", "Speaker ")) for s in shown
+    )
     others = [s for s in segs if s.speaker != "Me"]
     labels = labels_per_phrase(truth, [(s.start, s.end, s.speaker) for s in others])
     check(truth, labels, min_ok=len(truth) - 1)

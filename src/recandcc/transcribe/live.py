@@ -582,9 +582,11 @@ class LiveTranscriber:
 
     def _embeddings_settled(self, job: _Job, final: bool) -> bool:
         """True when the job's embeddings are ready or their deadline passed (then the
-        missing ones fall back to the previous label). Bounded by EMBED_WAIT_S per job."""
+        missing ones fall back to the previous label). While live, bounded by the deadline;
+        when stopping (`final`) nothing waits: labels are display only, so whatever is done
+        is used and the rest falls back, and finishing is never delayed by embeddings."""
         pending = [f for f in job.emb_futs if f is not None and not f.done()]
-        if not pending:
+        if not pending or final:
             return True
         # a cold model load is not counted against the deadline (bounded by LOAD_GRACE_S)
         deadline = (
@@ -594,9 +596,6 @@ class LiveTranscriber:
         )
         deadline = min(deadline, job.emb_submitted + EMBED_WAIT_S + LOAD_GRACE_S)
         remaining = deadline - self.clock()
-        if final and remaining > 0:
-            futures_wait(pending, timeout=min(remaining, EMBED_WAIT_S + LOAD_GRACE_S))
-            return True
         return remaining <= 0
 
     def _labelled(self, segs: list[Segment], embeddings: list[np.ndarray | None]) -> list[Segment]:
