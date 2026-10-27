@@ -96,6 +96,8 @@ NO_ROLLBACK_KEYS = frozenset(
 )
 UNSAVED_NOTE = "The change stays in effect and is saved as soon as config.toml can be written."
 NET_PROBE_RETRY_S = 300.0  # after a hung or failed probe
+NET_LOCAL_TTL_S = 600.0  # a folder probed as local is re-probed after this long
+NET_PROBE_MAX_THREADS = 4  # stuck probes (one per folder) allowed at once
 REFRESH_EVERY_S = 10.0
 PERM_KINDS = ("microphone", "system_audio")
 PERM_TITLES = {"microphone": "Microphone", "system_audio": "System audio"}
@@ -376,7 +378,8 @@ class Controller:
         self._lang_lock = threading.Lock()  # transcription.languages + its raw spelling
         self._summaries = None  # SummaryQueue, created on the first summary
         self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
-        self._net_probe: threading.Thread | None = None
+        self._net_probes: dict[Path, threading.Thread] = {}  # one in-flight probe per folder
+        self._net_local: dict[Path, float] = {}  # local folder -> when to re-probe (monotonic)
         self._net_retry: dict[Path, float] = {}  # folder -> earliest next probe (monotonic)
         self._net_warned: set[Path] = set()  # network-volume output dirs already warned about
         # global shortcut
@@ -989,16 +992,25 @@ class Controller:
         """Warn once per output folder on a network share (SMB/NFS/UNC...): audio and
         transcripts would leave the device. The path is in the notice, never in the log.
         The probe (stat/statfs) can hang forever on a dead hard mount, so it runs on its own
-        daemon thread and is waited for briefly; a late answer still posts the notice."""
+        daemon thread and is waited for briefly; a late answer still posts the notice.
+        Local results are cached per path for NET_LOCAL_TTL_S, so a share mounted over that
+        path later (or a retargeted symlink) is noticed after the TTL."""
         out = Path(self.cfg.output_dir)
         with self._lock:
             if out in self._net_warned:
                 return
-            if self._net_probe is not None and self._net_probe.is_alive():
-                return  # a previous probe is still stuck: don't pile up threads
+            if time.monotonic() < self._net_local.get(out, 0.0):
+                return  # known local: no thread, no statfs on every refresh
+            prev = self._net_probes.get(out)
+            if prev is not None and prev.is_alive():
+                return  # this folder's probe is still stuck: don't pile up threads
             if time.monotonic() < self._net_retry.get(out, 0.0):
                 return  # a recent probe of this folder hung or failed
-            self._net_probe = t = threading.Thread(
+            self._net_probes = {p: th for p, th in self._net_probes.items() if th.is_alive()}
+            if len(self._net_probes) >= NET_PROBE_MAX_THREADS:
+                log.debug("network probe skipped: too many stuck probes; retried next refresh")
+                return  # too many stuck shares already
+            self._net_probes[out] = t = threading.Thread(
                 target=self._probe_network_volume, args=(out,), daemon=True, name="ui-netprobe"
             )
         t.start()
@@ -1010,6 +1022,8 @@ class Controller:
     def _probe_network_volume(self, out: Path) -> None:
         try:
             if cloud_sync_provider(out) is not None:
+                with self._lock:
+                    self._net_local[out] = time.monotonic() + NET_LOCAL_TTL_S
                 return  # the cloud-sync notice already covers it
             kind = network_volume(out)
         except Exception:  # noqa: BLE001 - best effort
@@ -1019,6 +1033,10 @@ class Controller:
         if kind is PROBE_FAILED:  # errored, not "local": back off like a hung probe
             with self._lock:
                 self._net_retry[out] = time.monotonic() + NET_PROBE_RETRY_S
+            return
+        if kind is None:  # genuinely local (never PROBE_FAILED, which backs off above)
+            with self._lock:
+                self._net_local[out] = time.monotonic() + NET_LOCAL_TTL_S
             return
         if not isinstance(kind, str):
             return
@@ -1379,7 +1397,14 @@ class Controller:
 
         def run() -> None:
             try:
-                raw = run_settings(self.cfg)
+                try:
+                    raw = run_settings(self.cfg)
+                except OSError as e:  # temp dir / snapshot file: not the transcripts folder
+                    log.warning("could not open settings: %s (errno %s)", type(e).__name__, e.errno)
+                    self.post_notice(
+                        "Settings not saved", f"couldn't open settings: {type(e).__name__}"
+                    )
+                    return
                 if not raw:  # cancelled, closed, or nothing changed
                     return
                 updates = validate_settings(raw)
