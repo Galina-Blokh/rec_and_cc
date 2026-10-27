@@ -866,13 +866,15 @@ class Recorder:
             self.last_peaks = {w.track: w.peak for w in writers}
             session.ended_at = datetime.now().astimezone()
 
-            longest = max((w.frames_written for w in writers), default=0) / SAMPLE_RATE
-            if longest < self.min_session_s:
+            # A writer still stuck on the disk (abandoned) finishes its whole timeline later.
+            done = [w.frames_received if w.abandoned else w.frames_written for w in writers]
+            longest = max(done, default=0) / SAMPLE_RATE
+            if longest < self.min_session_s and not any(w.abandoned for w in writers):
                 log.info("discarding short session %s (%.1fs)", session.directory, longest)
                 shutil.rmtree(session.directory, ignore_errors=True)
                 return None
             for w in writers:  # drop empty tracks (e.g. a source that never delivered)
-                if w.frames_written == 0:
+                if w.frames_written == 0 and not w.abandoned:
                     w.path.unlink(missing_ok=True)
                     session.tracks.pop(w.track, None)
             session.update_metrics(

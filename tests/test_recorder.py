@@ -516,4 +516,23 @@ def test_finish_returns_while_the_writer_is_stuck_and_it_completes_later(cfg, st
     data, _ = sf.read(w.path)
     assert len(data) == len(sig)  # full length: the bound kept 8000, the rest is silence
     assert np.allclose(data[:8000], sig[:8000], atol=1e-3)
-    rec.stop()  # finish() again only waits; the 1 s session is discarded as too short
+    assert rec.stop() is not None  # finish() again only waits; abandoned: kept
+
+
+def test_stop_keeps_a_session_whose_writer_is_stuck_from_the_start(cfg, stalled_disk):
+    sig = sine(3)
+    rec, src = make(cfg, sig, min_session_s=2.0)
+    rec.start(TriggerKind.MEDIA, "Music")
+    assert src["sys"].done.wait(5)
+    w = rec._writers[0]
+    t0 = time.monotonic()
+    out = rec.stop()  # nothing written yet: frames_written alone would discard it as short
+    assert time.monotonic() - t0 < 2 and w.abandoned
+    assert out is not None and out.tracks == {Track.OTHERS: "others.wav"}
+    assert out.metrics["recording"]["audio_s"] == 3.0  # the full timeline, still to come
+    assert (out.directory / "others.wav").exists()
+
+    stalled_disk.set()
+    w.thread.join(5)
+    data, _ = sf.read(out.directory / "others.wav")
+    assert len(data) == len(sig)

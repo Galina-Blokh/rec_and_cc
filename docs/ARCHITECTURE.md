@@ -110,7 +110,8 @@ The app is built around one rule: **real-time audio threads never block**. Every
   If the writer is still stuck it logs a WARNING and returns, so the engine thread is never
   frozen; the daemon writer finishes and closes the WAV itself when the disk recovers (a quit
   before that leaves the file without a final header). Session folders are unique, so a later
-  session never shares a file with it.
+  session never shares a file with it. `stop()` judges such a track by the samples it received
+  (its full timeline), never discards it as short or empty, and never deletes its folder.
 - AppKit objects are touched only on the main thread. Worker threads post events that the
   main-thread timer applies.
 - Engine → Controller: `on_session_start(session)` / `on_session_end(session | None, kept)`
