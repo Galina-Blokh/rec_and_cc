@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import fields
 from pathlib import Path
 
 from ..models import Segment, SessionInfo, is_rtl
@@ -120,8 +120,10 @@ def format_json(session: SessionInfo, segments: list[Segment], duration: float, 
 
 
 def _segment_json(s: Segment) -> dict:
-    data = asdict(s)
-    if not s.overlap:  # only where diarization found overlapped speech
+    """Segment fields for JSON: never the in-memory word timings (no deep copy of them), and
+    `overlap` only where diarization found overlapped speech."""
+    data = {f.name: getattr(s, f.name) for f in fields(s) if f.name != "words"}
+    if not s.overlap:
         del data["overlap"]
     return data
 

@@ -695,3 +695,24 @@ def test_shared_extractor_does_not_hold_its_lock_during_a_download(monkeypatch):
     finally:
         gate.set()
         diarize.reset_shared_extractor()
+
+
+def test_live_transcription_never_requests_word_timestamps(tmp_path):
+    """Words cost live latency: a live session never asks for them, even with the opt-in on.
+    Stories: US-12."""
+    asked: list[dict] = []
+
+    class Spy(FakeTranscriber):
+        def transcribe_audio(self, audio, offset, speaker, language, **kw):
+            asked.append(kw)
+            return super().transcribe_audio(audio, offset, speaker, language, **kw)
+
+    tr = Spy(TranscriptionConfig(model="fake", split_on_speaker_change=True))
+    session = make_session(tmp_path)
+    tr.start_diarization = lambda sess: _done([Turn(0, 2.5, 5), Turn(2.5, 10, 1)])
+    live = LiveTranscriber(tr, session, lambda _s: None, step_s=0.02)
+    Feeder(live, Track.OTHERS)(np.concatenate([silence(1), burst(1), silence(1.5), burst(1.5)]))
+    session.ended_at = session.started_at + timedelta(seconds=6)
+    live.finish(session, timeout=10)
+    assert asked  # the live path did transcribe
+    assert not any(kw.get("words") for kw in asked)
