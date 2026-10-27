@@ -118,6 +118,9 @@ class TkCaptions:
         text.tag_configure("Others", foreground="#85bdff", font=("Segoe UI", 10, "bold"))
         text.tag_configure("other", foreground="#d9bf80", font=("Segoe UI", 10, "bold"))
         text.tag_configure("line", lmargin2=64, tabs=(64,))
+        # Right-to-left (Hebrew) lines: right-justified, label then text separated by spaces
+        # (tab stops don't mirror in Tk); the OS text renderer orders the Hebrew glyphs.
+        text.tag_configure("rtl", justify="right", rmargin=10)
         text.pack(fill="both", expand=True)
         text.configure(state="disabled")
 
@@ -130,8 +133,9 @@ class TkCaptions:
             text.delete("1.0", "end")
             for i, ln in enumerate(buf.lines):
                 tag = ln.label if ln.label in ("Me", "Others") else "other"
-                text.insert("end", ln.label + "\t", (tag, "line"))
-                text.insert("end", ln.text + ("\n" if i < len(buf) - 1 else ""), ("line",))
+                para = ("rtl",) if ln.rtl else ("line",)
+                text.insert("end", ln.label + ("  " if ln.rtl else "\t"), (tag, *para))
+                text.insert("end", ln.text + ("\n" if i < len(buf) - 1 else ""), para)
             text.configure(state="disabled")
             if follow:
                 text.see("end")
