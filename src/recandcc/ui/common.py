@@ -843,7 +843,8 @@ class Controller:
         value = self.cfg
         for name in key.split("."):
             value = getattr(value, name)
-        return value
+        # a copy: the engine thread may add to app_modes while another thread serializes it
+        return dict(value) if isinstance(value, dict) else value
 
     def open_settings_async(self) -> None:
         """Menu "Settings…": the native window runs on a worker thread (it blocks until it is
