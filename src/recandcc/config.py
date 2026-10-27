@@ -156,6 +156,10 @@ class TranscriptionConfig:
     # Split "Others" into "Speaker 1", "Speaker 2", ... in the final transcript (offline
     # speaker diarization). Live captions keep showing "Others".
     diarize: bool = True
+    # Split an "Others" segment at the word where the diarized speaker changes. Opt-in: it needs
+    # word timestamps (extra CPU time), so it applies to batch transcription on the
+    # faster-whisper backend only; not to live sessions or the MLX backend.
+    split_on_speaker_change: bool = False
     # Hints for diarization when you know how many other people are on the call: the number of
     # speakers is picked automatically within [min_speakers, max_speakers]. 0 = no hint.
     min_speakers: int = 0
