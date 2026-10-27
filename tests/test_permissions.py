@@ -13,10 +13,11 @@ from recandcc import permissions as perms
 @pytest.fixture
 def helper(monkeypatch):
     """Fake `rcc-audiotap`: records argv, answers with the queued stdout."""
-    calls, replies = [], []
+    calls, replies, kwargs = [], [], []
 
     def run(argv, **kw):
         calls.append(argv[1:])
+        kwargs.append(kw)
         out = replies.pop(0) if replies else ""
         if isinstance(out, Exception):
             raise out
@@ -25,13 +26,16 @@ def helper(monkeypatch):
     monkeypatch.setattr("recandcc.native.find_helper", lambda: "/fake/rcc-audiotap")
     monkeypatch.setattr(perms.subprocess, "run", run)
     monkeypatch.setattr(sys, "platform", "darwin")
-    return SimpleNamespace(calls=calls, replies=replies)
+    return SimpleNamespace(calls=calls, replies=replies, kwargs=kwargs)
 
 
 def test_status_reads_the_last_json_line(helper):
     helper.replies.append('log line\n\n{"microphone": "granted"}\n')
     assert perms.status() == {"microphone": "granted", "system_audio": "unknown"}
     assert helper.calls == [["permissions"]]
+    # A wedged helper must not block the permission worker forever.
+    assert helper.kwargs[0]["timeout"] == perms.STATUS_TIMEOUT_S
+    assert helper.kwargs[0]["stdin"] is subprocess.DEVNULL
 
 
 @pytest.mark.parametrize("reply", ["", "not json", subprocess.TimeoutExpired("x", 1)])
@@ -44,6 +48,7 @@ def test_request_passes_the_timeout_and_returns_the_answer(helper):
     helper.replies.append(json.dumps({"system_audio": "denied"}))
     assert perms.request("system_audio", timeout=5) == "denied"
     assert helper.calls == [["request", "system_audio", "--timeout", "5"]]
+    assert helper.kwargs[0]["timeout"] == 5 + 15  # the prompt's timeout plus helper slack
 
 
 def test_request_failure_is_unknown(helper):

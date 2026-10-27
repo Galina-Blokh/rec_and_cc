@@ -49,32 +49,46 @@ class FakeWinreg:
 
     def __init__(self):
         self.values = {}
+        self.opened = []  # (access, closed?) per OpenKey
 
-    def OpenKey(self, root, key, *_):  # noqa: N802 - winreg API
-        return _Key(self)
+    def OpenKey(self, root, key, reserved=0, access=1):  # noqa: N802 - winreg API
+        assert (root, key, reserved) == (self.HKEY_CURRENT_USER, autostart.WIN_RUN_KEY, 0)
+        k = _Key(self, access)
+        self.opened.append(k)
+        return k
 
-    def SetValueEx(self, _k, name, _r, _t, value):  # noqa: N802
+    def _check(self, k, write):
+        assert not k.closed, "key used outside its with-block"
+        if write:
+            assert k.access == self.KEY_SET_VALUE, "writes need KEY_SET_VALUE"
+
+    def SetValueEx(self, k, name, reserved, kind, value):  # noqa: N802
+        self._check(k, write=True)
+        assert (reserved, kind) == (0, self.REG_SZ)
         self.values[name] = value
 
-    def QueryValueEx(self, _k, name):  # noqa: N802
+    def QueryValueEx(self, k, name):  # noqa: N802
+        self._check(k, write=False)
         if name not in self.values:
             raise FileNotFoundError(name)
         return self.values[name], self.REG_SZ
 
-    def DeleteValue(self, _k, name):  # noqa: N802
+    def DeleteValue(self, k, name):  # noqa: N802
+        self._check(k, write=True)
         if name not in self.values:
             raise FileNotFoundError(name)
         del self.values[name]
 
 
 class _Key:
-    def __init__(self, reg):
-        self.reg = reg
+    def __init__(self, reg, access):
+        self.reg, self.access, self.closed = reg, access, False
 
     def __enter__(self):
         return self
 
     def __exit__(self, *_):
+        self.closed = True
         return False
 
 
@@ -85,6 +99,7 @@ def test_windows_run_key_round_trip(monkeypatch):
     assert not autostart.is_enabled()
     autostart.enable()
     assert reg.values[autostart.WIN_VALUE].endswith('" -m recandcc run')
+    assert reg.opened and all(k.closed for k in reg.opened)
     assert autostart.is_enabled()
     assert "HKCU" in autostart.describe()
     autostart.disable()

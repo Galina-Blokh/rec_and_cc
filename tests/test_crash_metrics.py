@@ -159,6 +159,9 @@ def test_setup_logging_adds_file_and_stderr_handlers_once(monkeypatch, tmp_path)
     monkeypatch.setattr(root, "level", root.level)
     monkeypatch.setattr(logging_setup, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(logging_setup, "LOG_FILE", tmp_path / "logs" / "recandcc.log")
+    for name in ("faster_whisper", "httpx", "urllib3", "huggingface_hub"):
+        noisy = logging.getLogger(name)
+        monkeypatch.setattr(noisy, "level", noisy.level)  # restored after the test
     installed = []
     monkeypatch.setattr(logging_setup, "install_crash_handlers", installed.append)
     try:

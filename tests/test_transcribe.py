@@ -355,3 +355,49 @@ def test_queue_shutdown_without_wait_drops_sessions_not_started(tmp_path):
     release.set()
     q._thread.join(5)
     assert stub.order == ["a"] and q.pending() == 0
+
+
+def test_queue_submit_racing_shutdown_is_never_stranded(monkeypatch, tmp_path):
+    """shutdown() lands exactly while submit() is enqueueing: the session must still run."""
+    import queue as queue_mod
+
+    from recandcc.transcribe import queue as tq
+
+    stopper: list[threading.Thread] = []
+    holder = {}
+
+    class RacingQueue(queue_mod.Queue):
+        def put(self, item, *a, **k):
+            if isinstance(item, tuple) and not stopper:  # the submit, not the stop marker
+                stopper.append(threading.Thread(target=holder["q"].shutdown))
+                stopper[0].start()
+                stopper[0].join(0.3)  # let shutdown() get as far as it can
+            super().put(item, *a, **k)
+
+    # The dispatcher must block on the racing queue from the start.
+    monkeypatch.setattr(tq.queue, "Queue", RacingQueue)
+    stub, done = StubTranscriber(), []
+    q = holder["q"] = TranscriptionQueue(stub, on_done=lambda s, r: done.append(s.id))
+    q.submit(_s("a", tmp_path))
+    stopper[0].join(5)
+    q._thread.join(5)
+    assert done == ["a"] and q.pending() == 0
+
+
+def test_queue_second_shutdown_still_waits_for_the_running_session(tmp_path):
+    started, release = threading.Event(), threading.Event()
+
+    class Slow(StubTranscriber):
+        def transcribe_session(self, session, progress=None):
+            started.set()
+            release.wait(5)
+            return super().transcribe_session(session, progress)
+
+    stub = Slow()
+    q = TranscriptionQueue(stub)
+    q.submit(_s("a", tmp_path))
+    assert started.wait(5)
+    q.shutdown(wait=False)
+    threading.Timer(0.2, release.set).start()
+    q.shutdown(wait=True)  # joins the dispatcher even though it was already closed
+    assert stub.order == ["a"] and not q._thread.is_alive()
