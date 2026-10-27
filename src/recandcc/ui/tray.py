@@ -20,7 +20,6 @@ import os
 import queue
 import threading
 import time
-from pathlib import Path
 
 import pystray  # pyright: ignore[reportMissingImports] - Windows-only dependency
 from PIL import Image, ImageDraw  # pyright: ignore[reportMissingImports] - Windows-only dependency
@@ -43,6 +42,7 @@ from .common import (
     reveal_logs,
     transcript_label,
 )
+from .present import live_transcript_target, prompt_notice, record_item_title
 
 log = logging.getLogger(__name__)
 
@@ -259,9 +259,8 @@ class TrayApp:
                 ),
             ),
             Item(
-                lambda _i: (
-                    ("Stop recording" if st().status == RECORDING else "Start recording")
-                    + (f"\t{self.ctrl.hotkey_label}" if self.ctrl.hotkey_label else "")
+                lambda _i: record_item_title(
+                    st().status == RECORDING, self.ctrl.hotkey_label, sep="\t"
                 ),
                 lambda: self.ctrl.toggle_recording(),
             ),
@@ -304,9 +303,7 @@ class TrayApp:
 
     def _open_live(self) -> None:
         if self._live_dir:
-            d = Path(self._live_dir)
-            md = d / "transcript.md"
-            open_path(md if md.exists() else d)
+            open_path(live_transcript_target(self._live_dir))
 
     def _live_started(self, session_id: str, title: str) -> None:
         self._live_id = session_id
@@ -356,8 +353,7 @@ class TrayApp:
                 return
             if ev[0] == "prompt":
                 _, app, kind, pid = ev
-                what = "a call" if kind == TriggerKind.CALL else "audio"
-                self._notify("Recording — keep it?", f"{app}: {what} detected")
+                self._notify(*prompt_notice(app, kind))
                 threading.Thread(
                     target=self._prompt_window, args=(app, kind, pid), daemon=True
                 ).start()
