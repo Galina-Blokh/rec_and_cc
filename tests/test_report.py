@@ -417,9 +417,12 @@ def test_unfinished_run_refetches_are_capped(tmp_path, monkeypatch):
         {"id": 98, "updated_at": "a", "status": "completed"},
     ]
     old = [{"id": n, "updated_at": "a", "status": "queued"} for n in (5, 4, 3)]
-    _fake_api(
-        gh, {f"{ep}&page=1": {"workflow_runs": head}, f"{ep}&page=2": {"workflow_runs": old}}, []
-    )
+    cold = {
+        f"{ep}&page=1": {"workflow_runs": head},
+        f"{ep}&page=2": {"workflow_runs": old},
+        f"{ep}&page=3": {"workflow_runs": []},
+    }
+    _fake_api(gh, cold, [])
     gh.get_list(ep, key="workflow_runs")
     log = []
     _fake_api(
