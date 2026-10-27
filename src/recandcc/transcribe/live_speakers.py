@@ -35,7 +35,7 @@ MIN_AUDIO_S = 1.0  # shorter segments make noisy embeddings (like diarize.MIN_UN
 QUEUE_SIZE = 8  # pending embedding requests; more are dropped
 INHERIT_GAP_S = 1.5  # a short segment inherits the previous label only within this gap
 CLOSE_JOIN_S = 0.5
-LOAD_GRACE_S = 3.0  # most a cold model load may extend the request deadlines
+LOAD_GRACE_S = 1.5  # most a cold model load may extend the request deadlines
 
 Embedder = Callable[[np.ndarray], np.ndarray | None]
 

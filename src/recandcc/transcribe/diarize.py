@@ -218,11 +218,14 @@ def shared_extractor(download: bool = True) -> Any:
     `download` is off or fails); raises if it can't be loaded. ``compute`` on separate streams
     from several threads is safe (the Diarizer's worker pool already does it)."""
     global _shared_extractor
+    ex = _shared_extractor
+    if ex is not None:
+        return ex
+    path = model_path(download=download)  # may download: never under _shared_lock
+    if path is None:
+        return None
     with _shared_lock:
         if _shared_extractor is None:
-            path = model_path(download=download)
-            if path is None:
-                return None
             import sherpa_onnx
 
             cfg = sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(path), num_threads=1)

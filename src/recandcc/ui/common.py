@@ -314,8 +314,27 @@ class Controller:
             self.engine.start()
             threading.Thread(target=self._resubmit_unfinished, daemon=True, name="resubmit").start()
             threading.Thread(target=self._retention_loop, daemon=True, name="retention").start()
+            self._warm_speaker_model()
             self.refresh_async(force=True)
             self.apply_hotkey(cfg.hotkey)
+
+    def _warm_speaker_model(self) -> None:
+        """Load the speaker-embedding model off the main thread so the first live session
+        doesn't wait for it (US-33). Never downloads; a no-op if live labels are off or the
+        model isn't on disk."""
+        tcfg = self.cfg.transcription
+        if not (tcfg.live and getattr(tcfg, "live_speaker_labels", False)):
+            return
+
+        def run() -> None:
+            from ..transcribe import diarize
+
+            try:
+                diarize.shared_extractor(download=False)
+            except Exception:  # noqa: BLE001 - the labeler retries / falls back on its own
+                log.debug("speaker model warm-up failed", exc_info=True)
+
+        threading.Thread(target=run, daemon=True, name="speaker-warm").start()
 
     # --- global shortcut
     def apply_hotkey(self, text: str | None, factory=None) -> None:

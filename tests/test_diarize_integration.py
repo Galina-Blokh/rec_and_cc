@@ -216,15 +216,16 @@ def test_transcript_gets_speaker_labels(track, offline, tmp_path):
 
 
 def test_live_final_transcript_gets_speaker_labels(track, offline, tmp_path):
-    """Live path: captions keep "Others"; finish() returns / writes the labelled transcript."""
+    """Live path (real model): captions show "Speaker N"; finish() returns / writes the
+    batch-labelled transcript."""
     audio, truth, me = track
     session = _session(tmp_path, audio, me)
     session.ended_at = None
     mic, _ = sf.read(tmp_path / "me.wav", dtype="float32")
     model = os.environ.get("RECANDCC_TEST_MODEL", "large-v3-turbo")
-    # live labels are covered by test_live_speaker_labels_distinguish_voices (they depend on
-    # extractor load timing); this test is about the final transcript
-    t = Transcriber(TranscriptionConfig(model=model, live_speaker_labels=False))
+    if diarize.shared_extractor(download=False) is None:  # warm: no load-timing flake
+        pytest.skip("speaker model not on disk")
+    t = Transcriber(TranscriptionConfig(model=model, live_speaker_labels=True))
     t.ensure_loaded()
     shown, lock = [], threading.Lock()
 
@@ -245,7 +246,7 @@ def test_live_final_transcript_gets_speaker_labels(track, offline, tmp_path):
         print(f"finish() incl. diarization: {time.monotonic() - t0:.2f}s")
     finally:
         t.close()
-    assert shown and {s.speaker for s in shown} <= {"Me", "Others"}  # labels off: as before
+    assert shown and any(s.speaker.startswith("Speaker ") for s in shown)  # live captions
     others = [s for s in segs if s.speaker != "Me"]
     labels = labels_per_phrase(truth, [(s.start, s.end, s.speaker) for s in others])
     check(truth, labels, min_ok=len(truth) - 1)
@@ -274,13 +275,16 @@ def test_live_speaker_labels_distinguish_voices(tmp_path):
             "Daniel",
             "Samantha",
         ]
-        texts = {
-            "Samantha": "The quarterly numbers look better than we expected this time.",
-            "Daniel": "I think we should move the launch to next Tuesday afternoon.",
-        }
+        texts = [  # a different sentence per turn: repeats are not identical audio
+            "The quarterly numbers look better than we expected this time.",
+            "I think we should move the launch to next Tuesday afternoon.",
+            "Our biggest customer renewed their contract for another two years.",
+            "Please send me the updated budget before the meeting on Friday.",
+            "We hired three engineers last month and they start in September.",
+        ]
         got, t = [], 0.0
-        for voice in order:
-            audio = tts(voice, texts[voice], tmp_path)
+        for voice, text in zip(order, texts, strict=True):
+            audio = tts(voice, text, tmp_path)
             fut = lab.submit(audio)
             assert fut is not None
             emb = fut.result(30)

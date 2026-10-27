@@ -652,3 +652,46 @@ def test_live_finish_labels_final_transcript_but_not_captions(tmp_path):
     assert speakers(emitted) == ["Others", "Others"]  # live captions unchanged
     md = (session.directory / "transcript.md").read_text(encoding="utf-8")
     assert "Speaker 1:**" in md and "Speaker 2:**" in md
+
+
+def test_shared_extractor_does_not_hold_its_lock_during_a_download(monkeypatch):
+    """A slow model_path (download) doesn't block another caller; one extractor is made."""
+    import sys
+    import threading
+    import types
+
+    made = []
+
+    class Ex:
+        def __init__(self, cfg):
+            made.append(self)
+
+    fake = types.SimpleNamespace(
+        SpeakerEmbeddingExtractorConfig=lambda **kw: kw, SpeakerEmbeddingExtractor=Ex
+    )
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", fake)
+    gate, entered = threading.Event(), threading.Event()
+
+    def slow_path(*a, download=True, **k):
+        if download:
+            entered.set()
+            gate.wait(5)
+            return "m.onnx"
+        return None
+
+    monkeypatch.setattr(diarize, "model_path", slow_path)
+    diarize.reset_shared_extractor()
+    try:
+        results = []
+        t = threading.Thread(target=lambda: results.append(diarize.shared_extractor(True)))
+        t.start()
+        assert entered.wait(5)
+        t0 = time.monotonic()
+        assert diarize.shared_extractor(download=False) is None  # not blocked by the download
+        assert time.monotonic() - t0 < 1.0
+        gate.set()
+        t.join(5)
+        assert results[0] is diarize.shared_extractor(True) and len(made) == 1
+    finally:
+        gate.set()
+        diarize.reset_shared_extractor()

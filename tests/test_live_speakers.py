@@ -172,10 +172,10 @@ def test_cold_model_load_is_not_counted_against_the_deadline(monkeypatch):
     lab._preload = True
     futs = [lab.submit(long_audio(), deadline=0.5) for _ in range(3)]
     assert lab.effective_deadline(0.0, 0.5) == 0.5 + live_speakers.LOAD_GRACE_S  # while loading
-    clock[0] = 2.0  # the load takes 2 s: far past the 0.5 s deadline
+    clock[0] = 1.0  # the load takes 1 s: past the 0.5 s deadline
     gate.set()
     assert all(f.result(5) is not None for f in futs)
-    assert lab.effective_deadline(0.0, 0.5) == 2.5
+    assert lab.effective_deadline(0.0, 0.5) == 1.5
     # a request queued after the load gets the plain deadline
     clock[0] = 10.0
     assert lab.effective_deadline(10.0, 10.5) == 10.5
@@ -483,4 +483,12 @@ def test_echo_not_shown_twice_with_labels_on(tmp_path, emitted):
     live._step(False)
     live._step(True)
     assert [(s.speaker, s.text) for s in emitted] == [("Speaker 1", phrase(1))]
+    lab.close()
+
+
+def test_load_grace_is_bounded_for_live_latency():
+    """Stories: US-33. A cold load may delay a job by at most ~1.5 s."""
+    assert live_speakers.LOAD_GRACE_S <= 1.5
+    lab = SpeakerLabeler(embedder=lambda a: None)
+    assert lab.effective_deadline(0.0, 0.5) <= 0.5 + 1.5
     lab.close()
