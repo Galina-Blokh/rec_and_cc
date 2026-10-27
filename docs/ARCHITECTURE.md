@@ -44,6 +44,7 @@ across platforms.
 | `cloudsync.py` | Is `output_dir` synced to iCloud / OneDrive / File Provider? Local path checks only; the controller warns once per folder |
 | `permissions.py` | Query, request and open settings for mic and system-audio permissions |
 | `ui/` | `common.Controller` (platform-independent glue) + `present.py` (pure presenter logic: menu titles and check marks, notice texts, the ask dialog script and its answers, toast placement) + `mac.py` (rumps) / `tray.py` (pystray) / `toast_mac.py`, thin shells that only apply it |
+| `ui/notes.py` | Meeting notes (pure logic, no UI imports): scan session folders newest first, row texts, `summary.md` excerpt, rename (`title` in `session.json`), delete to the Trash (Foundation / `SHFileOperationW`) or via `discard_session`, the macOS dialog scripts; the Windows window is `TkNotes` in `tray.py` |
 | `ui/captions*.py` | Live captions window: `captions.py` (pure logic: ordering, trimming, header, panel frame, speaker colours) + `captions_mac.py` (floating non-activating NSPanel); Windows uses a Tk window in `tray.py` |
 | `autostart.py` | LaunchAgent (macOS) / HKCU Run key (Windows) |
 | `logging_setup.py`, `metrics.py` | Log file + crash reporting (`sys`/`threading.excepthook` → log with traceback, thread crash → `notice` toast at most once per thread name per minute; `faulthandler` → `<log dir>/faults.log`); per-session pipeline metrics in `session.json` `metrics` + one INFO summary line |
@@ -72,7 +73,7 @@ The app is built around one rule: **real-time audio threads never block**. Every
 | transcription workers (N) | Whisper chunks / live phrases from **both tracks concurrently** (shared by batch and live) | `ThreadPoolExecutor` |
 | diarizer (1) + embedding workers (`min(6, cores // 2)`) | Speaker diarization of `others.wav`, one session at a time; then (if it finished late) rewrites the transcript with speaker labels | `Future` + done-callback |
 | UI main thread | rumps/AppKit; drains an event queue every 0.5 s | event queue |
-| UI workers | Permission checks, recent-transcript scan, `osascript` dialogs, transcript search (syncs the index, posts a `search` event) | event queue |
+| UI workers | Permission checks, recent-transcript scan, `osascript` dialogs, transcript search (syncs the index, posts a `search` event), meeting notes scan / rename / delete (post a `notes` event; a delete also drops the session from the index) | event queue |
 | search indexer (per finished transcript) | `TranscriptIndex.index_session` after `on_done`; errors logged | own SQLite connection |
 | summary (1, only with `summary.enabled`) | Loads the summary LLM, writes `summary.md`, frees the model (and MLX's buffer cache); one session at a time. It never competes with a recording: while the engine is not idle (recording or asking) it waits before a session and pauses between model calls (chunk notes, summary, action items). Each call holds `gpu.MLX_LOCK`, which every MLX Whisper call also holds, for its prompt prefill (≤ 8,000 characters, ~1–2 s, in 512-token steps) and then per generated token, so the GPU is never driven from two threads at once and a post-session Whisper pass waits at most one prefill | `SummaryQueue` |
 
