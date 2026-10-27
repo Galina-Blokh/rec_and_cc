@@ -76,7 +76,9 @@ class FakeTranscriber(Transcriber):
         lang = self.language
         return lang(audio) if callable(lang) else lang
 
-    def transcribe_audio(self, audio, offset, speaker, language, *, beam_size=5, max_end=None):
+    def transcribe_audio(
+        self, audio, offset, speaker, language, *, beam_size=5, max_end=None, **_kw
+    ):
         with self.lock:
             i = len(self.calls)
             self.calls.append((speaker, offset, len(audio) / SR, language))
