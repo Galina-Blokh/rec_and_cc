@@ -342,9 +342,10 @@ noisy café.* (#7)
   so speech is at most half of it, so even 0 triggers on a real conversation) and sets a
   12–9 dB margin above the room's noise floor, judged per ~0.5 s step by its loud parts (so
   the dips between syllables still count). A non-numeric value counts as unset.
-- **Given** outside favoured (high) and inside low, **when** an app plays briefly and then
-  people talk in the room, **then** the short app audio starts nothing and the room starts the
-  recording; **given** inside favoured, **then** app audio starts it within a second.
+- **Given** inside low, **then** short app audio starts nothing yet; **given** inside favoured,
+  **then** app audio starts a recording within a second. Apps always take precedence over the
+  room: while any app does audio the room holds off (by design), and the outside setting only
+  changes how much room speech starts a recording when no app does.
 - **Given** a turn-taking conversation (1–3 s turns, 0.3–1.5 s pauses), **then** settings 0,
   25, 50 and 75 all start a recording, in a quiet room and in a café with the voices 10 dB
   (0, 25) or 8 dB (50, 75) over the babble; quieter voices are a known limit.

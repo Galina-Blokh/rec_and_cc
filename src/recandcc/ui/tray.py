@@ -41,6 +41,7 @@ from .common import (
     PERM_TITLES,
     PROMPT_BUTTONS,
     ROOM_ITEM,
+    SENSITIVITY_HINT,
     SENSITIVITY_ITEM,
     SENSITIVITY_PRESETS,
     Controller,
@@ -550,7 +551,11 @@ class TrayApp:
             ),
             Item(
                 SENSITIVITY_ITEM,
-                pystray.Menu(*(sensitivity_item(n) for n in SENSITIVITY_PRESETS)),
+                pystray.Menu(
+                    *(sensitivity_item(n) for n in SENSITIVITY_PRESETS),
+                    pystray.Menu.SEPARATOR,
+                    Item(SENSITIVITY_HINT, None, enabled=False),
+                ),
             ),
             Item(
                 "Open live transcript",

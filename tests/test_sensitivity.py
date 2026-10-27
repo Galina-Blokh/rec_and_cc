@@ -426,6 +426,38 @@ def test_a_long_lecture_during_a_room_session_keeps_counting_as_speech():
     mon.close()
 
 
+@pytest.mark.parametrize(("outside", "fires"), [(100, True), (75, True), (25, False), (0, False)])
+def test_the_outside_setting_decides_how_much_room_speech_starts_a_session(outside, fires):
+    mon, feed = monitor(outside)
+    feed(quiet_room(10))
+    talk = conversation(8, quiet_room(8, 1), 30, seed=6)  # a few seconds of talk, then quiet
+    assert feed(np.concatenate([talk, quiet_room(10, 2)])) is fires
+    mon.close()
+
+
+def test_a_step_still_running_on_the_old_stream_cant_survive_a_reopen():
+    mon, feed = monitor(50)
+    add = mon.floor.add
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_add(levels, margin=None):  # the worker is mid-step on the old stream
+        if not entered.is_set():
+            entered.set()
+            release.wait(5)
+        return add(levels, margin)
+
+    mon.floor.add = slow_add  # type: ignore[method-assign]
+    src = mon.source_factory()
+    src.cb(quiet_room(1))  # one step: its levels are added only after the reopen
+    assert entered.wait(5)
+    mon.close_mic()
+    assert mon.start()  # reopen: the floor must start empty
+    release.set()
+    assert mon.wait_idle()
+    assert mon.floor.db is None and len(mon.floor._levels) == 0
+    mon.close()
+
+
 def test_lowest_setting_needs_more_than_a_few_remarks():
     mon, feed = monitor(0)  # 24 s of speech within 48 s
     sparse = conversation(90, quiet_room(90), 30)

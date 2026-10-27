@@ -983,6 +983,7 @@ class _LiveAwareQueue:
 
 ROOM_ITEM = "Listen for conversations in the room"
 SENSITIVITY_ITEM = "Sensitivity"
+SENSITIVITY_HINT = "Room only (apps stay at 50); all but Off gate out noise"
 ROOM_LISTENING_NOTICE = (
     "While idle, the microphone stays on (orange dot) to notice conversations near the "
     "laptop, also while the screen is locked, which costs some battery; nothing leaves the "
@@ -1010,6 +1011,7 @@ PROMPT_BUTTONS = (("Discard", "ignore"), ("Always", "always"), ("Keep", "record"
 __all__ = [
     "PROMPT_BUTTONS",
     "ROOM_ITEM",
+    "SENSITIVITY_HINT",
     "SENSITIVITY_ITEM",
     "SENSITIVITY_PRESETS",
     "ROOM_LISTENING_NOTICE",

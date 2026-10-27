@@ -1220,10 +1220,10 @@ def test_sensitivity_unset_keeps_the_plain_thresholds():
     assert h.rec.starts == [(TriggerKind.MEDIA, "Google Chrome")]  # after min_active_s = 3
 
 
-def test_outside_favoured_room_speech_wins_over_short_app_audio():
+def test_low_inside_sensitivity_delays_app_audio_then_room_speech_starts():
     h = _room_harness(outside_sensitivity=100, inside_sensitivity=0)
     h.mon.procs = [CHROME]
-    h.run(10)  # 10 s of app audio < 4 x min_active_s: nothing yet
+    h.run(10)  # 10 s of app audio < 4 x min_active_s: nothing yet (inside = 0)
     assert h.rec.starts == []
     h.mon.procs = []
     h.run(1)

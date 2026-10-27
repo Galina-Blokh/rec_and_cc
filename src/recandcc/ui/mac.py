@@ -32,6 +32,7 @@ from .common import (
     PERM_KINDS,
     PERM_TITLES,
     ROOM_ITEM,
+    SENSITIVITY_HINT,
     SENSITIVITY_ITEM,
     SENSITIVITY_PRESETS,
     Controller,
@@ -135,6 +136,8 @@ class MacApp(rumps.App):
         self._sensitivity_shown: str | None = None
         for name in SENSITIVITY_PRESETS:
             self.sensitivity_menu.add(rumps.MenuItem(name, callback=self._set_sensitivity))
+        self.sensitivity_menu.add(None)
+        self.sensitivity_menu.add(rumps.MenuItem(SENSITIVITY_HINT))  # no callback: greyed out
         self._render_sensitivity()
         self.live_open_item = rumps.MenuItem("Open live transcript")
 

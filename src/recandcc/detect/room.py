@@ -255,7 +255,9 @@ class RoomMonitor:
                 self._worker.start()
             self._stream += 1
             self._reset_locked()
-            self.floor.clear()  # maybe another place now: warm up again
+            # Maybe another place now: warm up again. The worker clears the floor (in queue
+            # order), so a step it is still finishing on the old stream can't add after it.
+            self._q.put(FLOOR_RESET)
             stream = self._stream
         try:
             src = self.source_factory()
