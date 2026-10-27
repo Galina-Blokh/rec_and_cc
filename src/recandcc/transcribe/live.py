@@ -30,6 +30,7 @@ queue and a few flags, so the only shared state is guarded by ``self._lock``.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import queue
 import threading
@@ -114,6 +115,9 @@ class _Job:
     future: Future | None = None
     emb_futs: list[Future | None] = field(default_factory=list)  # per segment, Others only
     emb_deadline: float = 0.0  # LiveTranscriber.clock() after which a missing embedding is skipped
+    echo_noted: bool = (
+        False  # raw segments already in _shown_others (set while awaiting embeddings)
+    )
 
 
 def _ready_embeddings(job: _Job, n: int) -> list[np.ndarray | None]:
@@ -511,6 +515,7 @@ class LiveTranscriber:
         for tb in self._tracks.values():
             while tb.jobs and (fut := tb.jobs[0].future) is not None and fut.done():
                 if not self._embeddings_settled(tb.jobs[0], final):
+                    self._note_echo(tb.jobs[0])  # the text counts for echo checks right away
                     break  # keep per-track order; the deadline bounds this wait
                 job = tb.jobs.popleft()
                 try:
@@ -531,9 +536,10 @@ class LiveTranscriber:
                     self._held.extend((s, now) for s in segs)
                 else:
                     new_others.extend(segs)
+                    if not job.echo_noted:
+                        self._shown_others.extend(segs)
                     embeddings.extend(_ready_embeddings(job, len(segs)))
         emit = self._labelled(new_others, embeddings)
-        self._shown_others.extend(new_others)
         if new_others:  # only recent Others matter for the echo check: bound memory
             horizon = max(s.end for s in new_others) - 600.0
             while self._shown_others and self._shown_others[0].end < horizon:
@@ -549,6 +555,16 @@ class LiveTranscriber:
                 self.on_segments(emit)
             except Exception:
                 log.exception("live on_segments callback failed")
+
+    def _note_echo(self, job: _Job) -> None:
+        """Add a finished Others job's raw segments to the echo bookkeeping before its caption
+        is released: a Me segment released meanwhile must already be checked against them."""
+        if job.echo_noted or job.future is None:
+            return
+        job.echo_noted = True
+        # a failed job is logged when it is collected
+        with contextlib.suppress(Exception):
+            self._shown_others.extend(job.future.result())
 
     def _embeddings_settled(self, job: _Job, final: bool) -> bool:
         """True when the job's embeddings are ready or their deadline passed (then the

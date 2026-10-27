@@ -13,9 +13,9 @@ import types
 
 import numpy as np
 import pytest
-from test_live import FakeTranscriber, Feeder, burst, make_session, manual, silence
+from test_live import FakeTranscriber, Feeder, burst, make_session, manual, phrase, silence
 
-from recandcc.models import SAMPLE_RATE, Track
+from recandcc.models import SAMPLE_RATE, Segment, Track
 from recandcc.transcribe import diarize, live_speakers
 from recandcc.transcribe.live import EMBED_WAIT_S
 from recandcc.transcribe.live_speakers import SpeakerClusterer, SpeakerLabeler
@@ -370,3 +370,57 @@ def test_transcriber_that_never_runs_starts_no_labeler_thread(tmp_path, emitted)
     assert live._labeler is not None
     assert live._labeler._thread is None
     assert set(threading.enumerate()) == before
+
+
+class SamePhraseTranscriber(FakeTranscriber):
+    """Every region says the same thing, so a mic echo matches the other side's text."""
+
+    def transcribe_audio(self, audio, offset, speaker, language, *, max_end=None, **_kw):
+        end = min(offset + len(audio) / SR, max_end or 1e9)
+        return [Segment(offset, end, "hello there general kenobi", speaker, language)]
+
+
+def test_echo_is_dropped_while_the_others_embedding_is_pending(tmp_path, emitted):
+    clock = [100.0]
+    gate = threading.Event()
+    lab = SpeakerLabeler(embedder=lambda a: gate.wait(10) and vec(0), clock=lambda: clock[0])
+    live = manual(
+        SamePhraseTranscriber(),
+        make_session(tmp_path, (Track.OTHERS, Track.ME)),
+        emitted,
+        labeler=lab,
+        clock=lambda: clock[0],
+    )
+    # Me [~8.8, 9.9] is an echo of Others [~10, 12]: within the echo tolerance
+    Feeder(live, Track.ME)(np.concatenate([silence(8.8), burst(1.1), silence(1.5)]))
+    Feeder(live, Track.OTHERS)(np.concatenate([silence(10), burst(2), silence(1.5)]))
+    live._step(False)
+    deadline = time.monotonic() + 5
+    while not all(j.future.done() for tb in live._tracks.values() for j in tb.jobs):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    live._step(False)
+    # the Others job is blocked on its embedding, yet Me (ended before it started) is due
+    me_end = max(s.end for s in live._tracks[Track.ME].segments)
+    assert live._tracks[Track.OTHERS].done_through() >= me_end
+    assert emitted == []  # the echo is not shown as a Me caption
+    clock[0] += EMBED_WAIT_S + 0.1
+    live._step(False)
+    live._step(True)
+    assert [s.speaker for s in emitted] == ["Others"]  # echo dropped, fallback label
+    gate.set()
+    lab.close()
+
+
+def test_echo_not_shown_twice_with_labels_on(tmp_path, emitted):
+    lab = SpeakerLabeler(embedder=lambda a: vec(0))
+    live = manual(
+        FakeTranscriber(), make_session(tmp_path, (Track.OTHERS, Track.ME)), emitted, labeler=lab
+    )
+    audio = np.concatenate([silence(1), burst(1.5), silence(1.5)])
+    Feeder(live, Track.OTHERS)(audio)
+    Feeder(live, Track.ME)(0.3 * audio)  # speaker echo picked up by the mic
+    live._step(False)
+    live._step(True)
+    assert [(s.speaker, s.text) for s in emitted] == [("Speaker 1", phrase(1))]
+    lab.close()
