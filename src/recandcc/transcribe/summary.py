@@ -24,7 +24,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
-from ..config import Config
+from ..config import DEFAULT_SUMMARY_MODEL, QWEN_RESEARCH_SUMMARY_MODEL, Config
 from ..models import Segment, SessionInfo, is_rtl
 from .output import JSON_NAME, PDI, RLI, atomic_write, paragraphs
 
@@ -41,7 +41,8 @@ SOURCE_NAME = ".summary-source"
 # (which holds gpu.MLX_LOCK) stays within ~1-2 s.
 CHUNK_CHARS = 8_000
 PREFILL_STEP = 512  # prompt tokens per prefill step (lower peak memory than mlx-lm's 2048)
-DOWNLOAD_NOTICE = "Downloading the summary model (~1.7 GB, once)"
+# One-time download size of each pinned summary model, for the download notice.
+DOWNLOAD_SIZES = {DEFAULT_SUMMARY_MODEL: "~0.9 GB", QWEN_RESEARCH_SUMMARY_MODEL: "~1.7 GB"}
 MAX_ROUNDS = 3  # reduce rounds before the notes are cut to fit
 LANGUAGE_NAMES = {"en": "English", "ru": "Russian", "he": "Hebrew"}
 # (summary heading, action items heading, "none") per language; English otherwise.
@@ -57,6 +58,12 @@ Messages = list[dict[str, str]]
 
 class Generator(Protocol):
     def __call__(self, messages: Messages, max_tokens: int) -> str: ...
+
+
+def download_notice(model: str) -> str:
+    """The one-time download notice, with the size when ``model`` is a pinned one."""
+    size = DOWNLOAD_SIZES.get(model)
+    return f"Downloading the summary model ({size + ', ' if size else ''}once)"
 
 
 class SummaryUnavailable(RuntimeError):
@@ -323,7 +330,7 @@ class MlxGenerator:
             out.append(step.text)
 
     def close(self) -> None:
-        """Free the model, so its ~2 GB don't stay resident between sessions."""
+        """Free the model, so its 1-2 GB don't stay resident between sessions."""
         if self._model is None:
             return
         self._model = self._tokenizer = None
@@ -385,10 +392,11 @@ class SummaryQueue:
         owned = None
         gen = self.generate
         if gen is None:
+            model = self.cfg.summary.model  # a config reload may change it while we wait
             gen = owned = MlxGenerator(
-                self.cfg.summary.model,
+                model,
                 self.cfg.transcription.allow_unpinned_models,
-                on_download=lambda: self.notify("Summary model", DOWNLOAD_NOTICE),
+                on_download=lambda: self.notify("Summary model", download_notice(model)),
             )
 
         def gated(messages: Messages, max_tokens: int) -> str:
