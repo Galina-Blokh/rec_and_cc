@@ -3,6 +3,7 @@
 Stories: US-19.
 """
 
+import contextlib
 import os
 import threading
 import tomllib
@@ -263,3 +264,59 @@ def test_menu_change_waiting_for_its_save_survives_a_reload(tmp_path, monkeypatc
     ctrl.write_settings("live_captions")
     assert load_config(path).live_captions is False
     assert ctrl._dirty == {}
+
+
+def _race(ctrl, path, monkeypatch, click, join_name):
+    """Block the save (before its lock), click, edit the file and reload, then release."""
+    in_save, go = threading.Event(), threading.Event()
+    real = ctrl.write_settings
+
+    def slow_save(*keys, **kw):  # blocked before the save lock: a reload can run meanwhile
+        in_save.set()
+        assert go.wait(5)
+        return real(*keys, **kw)
+
+    monkeypatch.setattr(ctrl, "write_settings", slow_save)
+    click()
+    assert in_save.wait(5)  # the save is queued/blocked, not written
+    path.write_text(path.read_text() + "\n# touched\n")  # a different mtime/content on disk
+    ctrl._config_mtime = -1.0
+    ctrl._maybe_reload_config()  # reload while the click is not on disk yet
+    go.set()
+    for t in threading.enumerate():
+        if t.name == join_name:
+            t.join(5)
+
+
+def test_language_click_survives_a_reload_while_the_save_is_blocked(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch, '["en"]')
+    _race(ctrl, path, monkeypatch, lambda: ctrl.toggle_language("he"), "save-config")
+    assert ctrl.cfg.transcription.languages == ["en", "he"]
+    assert load_config(path).transcription.languages == ["en", "he"]
+    assert not ctrl._dirty
+
+
+def test_marks_are_released_if_the_save_thread_cannot_start(tmp_path, monkeypatch):
+    ctrl, _ = _ctrl(tmp_path, monkeypatch, '["en"]')
+
+    def boom(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", boom)
+    with contextlib.suppress(RuntimeError):
+        ctrl.toggle_language("he")
+    assert not ctrl._dirty
+
+
+def test_a_raising_toggle_leaves_no_dirty_mark(tmp_path, monkeypatch):
+    import recandcc.ui.present as present
+
+    ctrl, _ = _ctrl(tmp_path, monkeypatch, '["en"]')
+
+    def boom(*a, **k):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(present, "toggle_languages", boom)
+    with contextlib.suppress(ValueError):
+        ctrl.toggle_language("he")
+    assert not ctrl._dirty

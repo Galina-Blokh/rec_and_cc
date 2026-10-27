@@ -87,7 +87,30 @@ def test_dispatch_and_failures_are_quiet(tmp_path, monkeypatch):
         raise OSError("stalled")
 
     monkeypatch.setattr(cs, "mac_network_volume", boom)
-    assert cs.network_volume(tmp_path, platform="darwin") is None
+    res = cs.network_volume(tmp_path, platform="darwin")
+    assert res is cs.PROBE_FAILED and not res  # distinct from "not a network volume" (None)
+
+
+def test_fuse_mounts_are_judged_by_their_source():
+    def fuse(t, src, flags=0):
+        return lambda p: (t, flags, src)
+
+    nv = cs.mac_network_volume
+    # network FUSE keeps the privacy warning
+    assert nv("/V/x", fuse("macfuse", "me@host:/data")) == "a network volume"
+    assert nv("/V/x", fuse("fuse-t", "remote:bucket")) == "a network volume"
+    assert nv("/V/x", fuse("osxfuse", "//nas/share")) == "a network volume"
+    assert nv("/V/x", fuse("macfuse", "rclone")) == "a network volume"
+    assert nv("/V/x", fuse("macfuse", "smbnetfs")) == "a network volume"
+    assert nv("/V/x", fuse("macfuse", "mystery")) == "a network volume"  # unsure: warn
+    # known local vaults do not
+    assert nv("/V/x", fuse("macfuse", "Cryptomator@/Users/me/vault")) is None
+    assert nv("/V/x", fuse("fuse-t", "gocryptfs")) is None
+    assert nv("/V/x", fuse("macfuse", "veracrypt")) is None
+    assert nv("/V/x", lambda p: ("smbfs", cs._MNT_LOCAL)) == "SMB"
+    mounts = "x /mnt/vault fuse.cryptomator rw 0 0\ns:/ /mnt/s fuse.sshfs rw 0 0\n"
+    assert cs.linux_network_volume("/mnt/vault/a", mounts) is None
+    assert cs.linux_network_volume("/mnt/s/a", mounts) == "SSHFS"
 
 
 def test_real_local_folder_is_not_network(tmp_path):
@@ -229,3 +252,43 @@ def test_a_failed_or_hung_probe_is_not_retried_every_refresh(tmp_path, monkeypat
     ctrl._net_retry[tmp_path] = 0.0  # the retry interval has passed
     ctrl._check_network_volume()
     assert len(calls) == 2
+
+
+def test_probe_failed_result_backs_off_like_an_error(tmp_path, monkeypatch):
+    calls = []
+
+    def failed(p):
+        calls.append(p)
+        return cs.PROBE_FAILED
+
+    monkeypatch.setattr(common, "network_volume", failed)
+    ctrl = Controller(
+        Config(output_dir=tmp_path),
+        monitor=_Monitor(),
+        recorder=object(),
+        tq=_Q(),
+        start_threads=False,
+    )
+    ctrl._check_network_volume()
+    ctrl._net_probe.join(5)
+    ctrl._check_network_volume()
+    assert len(calls) == 1 and _notices(ctrl) == []  # backed off, no notice
+    ctrl._net_retry[tmp_path] = 0.0
+    ctrl._check_network_volume()
+    ctrl._net_probe.join(5)
+    assert len(calls) == 2
+
+
+def test_not_network_result_is_not_backed_off(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(common, "network_volume", lambda p: calls.append(p))  # returns None
+    ctrl = Controller(
+        Config(output_dir=tmp_path),
+        monitor=_Monitor(),
+        recorder=object(),
+        tq=_Q(),
+        start_threads=False,
+    )
+    ctrl._check_network_volume()
+    ctrl._net_probe.join(5)
+    assert tmp_path not in ctrl._net_retry
