@@ -281,7 +281,9 @@ enabled = false              # true = summary.md with action items after each me
 With `[summary] enabled = true` (Apple silicon), each finished transcript also gets a
 `summary.md` in its folder: a few sentences about the meeting and an **Action items** list
 (who does what, by when), written in the meeting's main language. The default model is
-Qwen3.5 4B Instruct (4-bit, Apache-2.0; ~3.0 GB download, ~2.9 GB of RAM while it runs). It
+Qwen3.5 4B (4-bit, Apache-2.0), a hybrid thinking model run with thinking off: ~3.0 GB
+download, ~2.9-3.4 GB of RAM while it runs (2.9 GB measured on one machine). Summaries take
+about 2.5x as long as with the 1.5B (measured on the synthetic one-hour meeting). The model
 writes English, Russian and Hebrew summaries; on our self-written test meetings its Hebrew
 summaries were fluent and got most owners and deadlines right, but not all. It runs in the
 background after the transcript is final, and waits while you are recording, so captions are
@@ -310,7 +312,7 @@ model; meetings in other languages keep `model`:
 
 ```toml
 [summary.language_models]
-he = "mlx-community/Qwen3.5-4B-MLX-4bit"   # the default already; ~3.0 GB once, ~2.9 GB RAM while it runs
+he = "mlx-community/Qwen3.5-4B-MLX-4bit"   # the default already; ~3.0 GB once, ~2.9-3.4 GB RAM while it runs
 ```
 
 The language with the most speech time picks the model (and the summary's language). The

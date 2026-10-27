@@ -67,7 +67,7 @@ HEADINGS = {
 }
 NONE_MARK = "NONE"
 # A bullet made only of one of these (any case, no punctuation) says there is no task.
-NONE_WORDS = frozenset({NONE_MARK.casefold(), "nothing", "нет", "ничего"})
+NONE_WORDS = frozenset({NONE_MARK.casefold(), "nothing", "нет", "ничего", "אין"})
 
 Messages = list[dict[str, str]]
 
@@ -228,7 +228,7 @@ def action_items(answer: str) -> list[str]:
 
 
 def _says_none(item: str) -> bool:
-    """True if the bullet only says there is no task ("None.", "**NONE**", "Нет.", "Ничего")."""
+    """True if the bullet only says there is no task ("None.", "**NONE**", "Нет.", "אין.")."""
     return "".join(ch for ch in item if ch.isalnum()).casefold() in NONE_WORDS
 
 
@@ -372,6 +372,13 @@ def mlx_lm_available() -> bool:
     )
 
 
+def _template_reads_thinking_flag(tokenizer: Any) -> bool:
+    """Whether the chat template reads ``enable_thinking`` (Qwen3.5's does, Qwen2.5's doesn't).
+    Unlike ``has_thinking``, this doesn't depend on the mlx-lm version."""
+    template = getattr(tokenizer, "chat_template", None)
+    return isinstance(template, str) and "enable_thinking" in template
+
+
 class MlxGenerator:
     """The summary LLM through mlx-lm. Loaded on first use and used from one thread (the
     summary thread). gpu.MLX_LOCK is held for each prompt's prefill (~1-2 s per chunk) and then
@@ -444,16 +451,18 @@ class MlxGenerator:
                     return "".join(out)
                 out.append(step.text)
 
-        # A thinking model (mlx-lm's TokenizerWrapper.has_thinking, e.g. Qwen3.5) answers with
-        # thinking off: mlx-lm would turn it on by default. Missing or non-bool has_thinking =
-        # not a thinking model (load() warns when missing): the template's defaults, so the
-        # default Qwen2.5's prompt is unchanged. Thought markers are stripped either way.
+        # A thinking model answers with thinking off: mlx-lm's TokenizerWrapper.has_thinking
+        # (Qwen3.5) or a chat template that reads enable_thinking (Qwen3.5's does). Without the
+        # flag the template's default turns thinking on, so a missing has_thinking (another
+        # mlx-lm) must not be enough to lose it. Qwen2.5's template reads no flag: its prompt is
+        # unchanged. Thought markers are stripped either way.
         thinking = getattr(tokenizer, "has_thinking", False) is True
+        think = False if thinking or _template_reads_thinking_flag(tokenizer) else None
         markers = THOUGHT_MARKERS
         start, end = getattr(tokenizer, "think_start", None), getattr(tokenizer, "think_end", None)
         if thinking and isinstance(start, str) and isinstance(end, str):
             markers = (*markers, (start, end))
-        return strip_thinking(generate(False if thinking else None, max_tokens), markers)
+        return strip_thinking(generate(think, max_tokens), markers)
 
     def close(self) -> None:
         """Free the model, so its 1-3 GB don't stay resident between sessions."""

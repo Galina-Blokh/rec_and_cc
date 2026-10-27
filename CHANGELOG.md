@@ -98,8 +98,8 @@ All notable changes to RecAndCC are documented here. The format is based on
   mixed en/ru 1-hour fixture (`tests/test_summary_timing.py`) the maintainer's measurement was
   that the 1.5B found none of the 3 planted action items, the 3B said "None.", and the 4B found
   all 3. A re-run on this fixture listed all 3 distinct planted tasks (its two Russian turns
-  restate two of them). Cost: a ~3.0 GB download instead of ~0.9 GB, ~2.9 GB peak
-  RAM, and about 2.5x slower. Migration: a settings file that still holds the 1.5B (saved while
+  restate two of them). Cost: a ~3.0 GB download instead of ~0.9 GB, ~2.9-3.4 GB peak RAM
+  (2.9 GB measured on one machine), and summaries about 2.5x slower than with the 1.5B. Migration: a settings file that still holds the 1.5B (saved while
   it was the default) moves to the 4B once, at the first start, recorded by a
   `.summary-1p5b-migrated` file next to `config.toml`; a 1.5B set by hand after that is kept,
   cached or not. Until then, the offline guard keeps the 1.5B while it is cached and the 4B

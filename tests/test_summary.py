@@ -284,6 +284,29 @@ def test_generator_turns_thinking_off_and_strips_thoughts(monkeypatch, model, th
     assert calls == seen
 
 
+@pytest.mark.parametrize(
+    ("template", "seen"),
+    [
+        # no has_thinking (an mlx-lm that doesn't report it): a template that reads
+        # enable_thinking still gets it off, or the template's default leaves thinking on
+        (
+            "{% if enable_thinking is defined and enable_thinking is false %}off{% endif %}",
+            [{"enable_thinking": False}, 400],
+        ),
+        # Qwen2.5's template reads no flag: its prompt is unchanged
+        ("{{ messages }}", [{}, 400]),
+    ],
+)
+def test_a_template_that_reads_enable_thinking_gets_it_off(monkeypatch, template, seen):
+    calls: list = []
+    gen = summary.MlxGenerator(DEFAULT_SUMMARY_MODEL)
+    tok = _fake_mlx_lm(monkeypatch, "Answer.", calls, None)  # None: no has_thinking
+    tok.chat_template = template
+    gen._model, gen._tokenizer = object(), tok
+    assert gen([{"role": "user", "content": "x"}], 400) == "Answer."
+    assert calls == seen
+
+
 def test_thought_cut_off_writes_no_summary(tmp_path, caplog):
     def cut_off(messages, max_tokens):
         return summary.strip_thinking(f"<think>\n{SPOKEN} and more")
@@ -392,13 +415,31 @@ def test_action_items_are_parsed_and_none_means_empty():
 
 @pytest.mark.parametrize(
     "bullet",
-    ["- None", "* None.", "1. NONE!", "- **None**", "- nothing.", "- Нет", "- Нет.", "- ничего!"],
+    [
+        "- None",
+        "* None.",
+        "1. NONE!",
+        "- **None**",
+        "- nothing.",
+        "- Нет",
+        "- Нет.",
+        "- ничего!",
+        "- אין",
+        "* אין.",
+    ],
 )
 def test_a_bullet_that_only_says_none_is_no_action_item(bullet):
     assert summary.action_items(f"Action items:\n{bullet}\n- Anna sends the deck") == [
         "Anna sends the deck"
     ]
     assert summary.action_items(bullet) == []
+
+
+def test_each_language_none_heading_is_recognised_as_no_task():
+    # the line the summary writes when there is no task, per language (None. / Нет. / אין.)
+    for _title, _actions, none in summary.HEADINGS.values():
+        assert summary._says_none(none), none
+        assert summary.action_items(f"- {none}") == [], none
 
 
 def test_a_task_that_mentions_none_is_kept():
@@ -462,6 +503,7 @@ def test_the_first_start_moves_the_1_5b_once_and_writes_the_marker(tmp_path):
         "to keep the smaller 1.5B model, set summary.model back to "
         "mlx-community/Qwen2.5-1.5B-Instruct-4bit" in cfg.summary.notice
     )
+    assert "a one-time ~3 GB download follows" in cfg.summary.notice
     assert moved.exists()
     text = path.read_text("utf-8")
     assert DEFAULT_SUMMARY_MODEL in text and PREVIOUS_DEFAULT_SUMMARY_MODEL not in text

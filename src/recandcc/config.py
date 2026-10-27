@@ -199,8 +199,8 @@ class TranscriptionConfig:
 
 
 # Apache-2.0 (commercial use allowed), a ~3.0 GB download (vision weights included, which mlx-lm
-# doesn't load) and ~2.9 GB peak RAM while it runs. A thinking model: summaries run with
-# thinking off (transcribe/summary.py).
+# doesn't load) and ~2.9-3.4 GB peak RAM while it runs (2.9 GB measured on one machine). A hybrid
+# thinking model: summaries run with thinking off (transcribe/summary.py).
 DEFAULT_SUMMARY_MODEL = "mlx-community/Qwen3.5-4B-MLX-4bit"
 # The previous default (Apache-2.0, ~0.9 GB). Config.save wrote it into every config.toml, so an
 # unchosen one moves to the default like the 3B below, with the same offline guard.
@@ -227,10 +227,11 @@ SUMMARY_MODEL_SWITCHED = (
     f'= "{QWEN_RESEARCH_SUMMARY_MODEL}" and summary.accept_qwen_research_licence = true '
     "in config.toml"
 )
-# The move from the 1.5B: the notice names the way back to it.
+# The move from the 1.5B: the notice says what download follows, and how to keep the 1.5B.
 SUMMARY_MODEL_SWITCHED_PREVIOUS = (
-    "Summary model switched to Qwen3.5 4B (Apache-2.0); to keep the smaller 1.5B model, set "
-    f"summary.model back to {PREVIOUS_DEFAULT_SUMMARY_MODEL} in config.toml"
+    "Summary model switched to Qwen3.5 4B (Apache-2.0); a one-time ~3 GB download follows "
+    "unless it is cached; to keep the smaller 1.5B model, set summary.model back to "
+    f"{PREVIOUS_DEFAULT_SUMMARY_MODEL} in config.toml"
 )
 SUMMARY_LICENCE_NOT_BOOL = "accept_qwen_research_licence must be a TOML boolean true, not {kind}"
 # Next to config.toml: a one-time "kept the cached ..." notice (one marker per model), and the
@@ -282,8 +283,8 @@ def _snapshot_complete(snap: Path) -> bool:
 @dataclass
 class SummaryConfig:
     # Write summary.md (short summary + action items) after each final transcript, with a
-    # local LLM (mlx-lm, Apple silicon only). Off by default: it costs ~2.9 GB of RAM (peak
-    # while it runs) and a one-time ~3.0 GB model download.
+    # local LLM (mlx-lm, Apple silicon only). Off by default: it costs ~2.9-3.4 GB of peak RAM
+    # (2.9 GB measured on one machine) and a one-time ~3.0 GB model download.
     enabled: bool = False
     model: str = DEFAULT_SUMMARY_MODEL  # pinned in transcribe/revisions.py, or a local path
     # Keep `model = QWEN_RESEARCH_SUMMARY_MODEL` (non-commercial licence). Without it, that
