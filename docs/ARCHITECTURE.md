@@ -330,6 +330,16 @@ by session id, with the session folder: pruned once it is deleted) live in the o
 to a cloud drive. A transcript written without labels or with the option off deletes its
 session's centroids. `name-speaker` marks the session as folded into the profile before it
 changes the profile, so a failure partway can't count one session twice. All of it runs on the diarizer / writer threads, after the audio threads.
+Locking: `voices.NAMING_LOCK` (in-process) serialises everything that changes a session's
+speaker labels — finalize/relabel, `name-speaker`, the call-app rename and "Forget all
+voices" (`forget_all`, so a forget comes after any of them and no forgotten name is written
+after it). The voices folder has an OS file lock for every store change (shared with the
+CLI); it is polled before the in-process `voices.LOCK` is taken, and slow session-folder
+checks happen outside it. Finalize waits for it at most once (`LOCK_WAIT_S`), then labels
+with numbers only and skips the voice writes. Every forget bumps a `generation` file; a
+session records the generation when it starts recording, and every voice or name write for
+it, and the names put into its transcript, are dropped if a forget came since. Profiles and
+session files carry their generation, so a file a failed forget left behind never matches.
 `intro_hints.py` only reads a transcript: `recandcc speakers` suggests a name for a
 `Speaker N` who introduces themself in their first 2 minutes ("I'm Anna", "Меня зовут Анна",
 "קוראים לי דנה"); strict patterns, nothing stored, renamed or logged.

@@ -25,6 +25,28 @@ from recandcc.ui.present import (
 )
 
 
+class SpyLock:
+    """A lock that tells when a second thread starts waiting for it."""
+
+    def __init__(self) -> None:
+        import threading
+
+        self._lock = threading.Lock()
+        self.waiting = threading.Event()
+
+    def __enter__(self):
+        if not self._lock.acquire(blocking=False):
+            self.waiting.set()
+            self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+
 def controller(speaker_names: bool = True) -> Controller:
     ctrl = Controller.__new__(Controller)
     ctrl.events = queue.Queue()
@@ -111,20 +133,21 @@ def test_forget_waits_for_a_running_naming(tmp_path, monkeypatch):
     _final(tmp_path, monkeypatch, speaker_names=True)
     ctrl = controller()
     started, release = threading.Event(), threading.Event()
-    real = voices.name_speaker
+    real_write = voices.write_outputs
 
-    def slow(*args):
-        with voices.LOCK:  # as the real one does
-            started.set()
-            release.wait(5)
-            return real(*args)
+    def slow_write(*args, **kwargs):  # the real naming, stalled on its transcript rewrite
+        started.set()
+        assert release.wait(5)
+        return real_write(*args, **kwargs)
 
-    monkeypatch.setattr(voices, "name_speaker", slow)
+    spy = SpyLock()
+    monkeypatch.setattr(voices, "NAMING_LOCK", spy)
+    monkeypatch.setattr(voices, "write_outputs", slow_write)
     ctrl.name_speaker_async(tmp_path, "Speaker 2", "Carl")
     assert started.wait(5)
     ctrl.forget_voices_async()
-    time.sleep(0.2)
-    assert ctrl.events.empty()  # forget is waiting for the naming
+    assert spy.waiting.wait(5)  # forget is queued on NAMING_LOCK behind the naming
+    assert ctrl.events.empty() and voices.load_profiles()  # ...and has deleted nothing yet
     release.set()
     assert ctrl.events.get(timeout=5)[0] == "named"
     assert ctrl.events.get(timeout=5) == ("forgot", 1)
@@ -568,3 +591,144 @@ def test_forget_dialog_has_a_timeout_and_a_timeout_cancels(monkeypatch):
     assert done.wait(5)
     time.sleep(0.05)
     assert seen == [mac.DIALOG_TIMEOUT_S]  # no forget after the timeout
+
+
+def test_a_forget_by_another_process_after_matching_leaves_no_name_in_the_text(
+    tmp_path, monkeypatch
+):
+    """The names were matched, then a forget (another process: no NAMING_LOCK) landed before
+    the transcript was written: it is written with numbers, and no voices are kept."""
+    from concurrent.futures import Future
+
+    from test_voices import SEGS, TURNS
+
+    from recandcc.transcribe.engine import Transcriber
+
+    voices.save_profile("Anna", ANNA)
+    real = Transcriber._labelled
+    calls = []
+
+    def labelled_then_forget(self, *args, **kwargs):
+        out = real(self, *args, **kwargs)
+        if not calls:
+            assert "Anna" in {s.speaker for s in out}  # matched before the forget
+            voices.delete_all_profiles()
+        calls.append(1)
+        return out
+
+    monkeypatch.setattr(Transcriber, "_labelled", labelled_then_forget)
+    session = make_session(tmp_path)
+    done: Future = Future()
+    done.set_result(TURNS)
+    t = Transcriber(TranscriptionConfig(model="fake", speaker_names=True))
+    out = t.write_final(session, list(SEGS), 60.0, done)
+    assert "Anna" not in {s.speaker for s in out}
+    assert "Anna" not in (tmp_path / "transcript.md").read_text(encoding="utf-8")
+    assert voices.read_session_voices(session.id) == {}
+
+
+def test_busy_store_makes_finalize_wait_once_and_skip_voice_work(tmp_path, monkeypatch):
+    from test_voices import SEGS, TURNS
+
+    from recandcc.transcribe.engine import Transcriber
+
+    voices.save_profile("Anna", ANNA)
+    waits = []
+
+    def busy(f):
+        waits.append(1)
+        raise OSError("the voice data is in use by another process; try again")
+
+    monkeypatch.setattr(voices, "_lock_posix", busy)
+    monkeypatch.setattr(voices, "_lock_windows", busy)
+    session = make_session(tmp_path)
+    t = Transcriber(TranscriptionConfig(model="fake", speaker_names=True))
+    out = t._labelled(session, list(SEGS), TURNS, voices.forget_generation())
+    assert waits == [1]  # one LOCK_WAIT_S at most, not one per voice step
+    assert "Anna" not in {s.speaker for s in out} and "Speaker 1" in {s.speaker for s in out}
+    monkeypatch.undo()
+    assert voices.read_session_voices(session.id) == {}
+
+
+def test_waiting_for_another_process_does_not_hold_the_in_process_lock(tmp_path, monkeypatch):
+    import threading
+
+    polling, release = threading.Event(), threading.Event()
+
+    def slow_os_lock(f):  # another process holds the voices lock until `release`
+        polling.set()
+        assert release.wait(5)
+
+    monkeypatch.setattr(voices, "_lock_posix", slow_os_lock)
+    monkeypatch.setattr(voices, "_lock_windows", slow_os_lock)
+    worker = threading.Thread(target=lambda: voices.save_profile("Anna", ANNA))
+    worker.start()
+    try:
+        assert polling.wait(5)
+        assert voices.LOCK.acquire(timeout=1)  # free while that thread waits for the OS lock
+        voices.LOCK.release()
+    finally:
+        release.set()
+        worker.join(5)
+    assert [p.name for p in voices.load_profiles()] == ["Anna"]
+
+
+def test_profile_left_by_a_failed_forget_never_matches(tmp_path, monkeypatch):
+    from test_transcribe import make_session as session_in
+
+    voices.save_profile("Anna", ANNA)
+    voices.save_profile("Bob", BOB)
+    session = session_in(tmp_path)
+    voices.write_session_voices(session, {"Speaker 1": ANNA})
+    voices.write_session_names(session, ["Anna Smith"])
+    anna = voices._hashed(voices.VOICES_DIR, voices._key("Anna"))
+    real = voices._retry
+
+    def stuck(op):
+        if getattr(op, "__defaults__", None) and op.__defaults__[0] == anna:
+            raise PermissionError("held by a scanner")
+        return real(op)
+
+    monkeypatch.setattr(voices, "_retry", stuck)
+    with pytest.raises(OSError, match="could not be deleted"):
+        voices.delete_all_profiles()
+    assert anna.exists()  # left behind...
+    assert voices.load_profiles() == []  # ...but it never matches again
+    voices.save_profile("Anna", CARL)  # a new profile of that name starts afresh
+    (profile,) = voices.load_profiles()
+    assert profile.count == 1 and float(profile.centroid @ CARL) > 0.99
+
+
+def test_naming_guard_blocks_a_second_dialog_until_released():
+    pytest.importorskip("rumps")
+    import threading
+
+    from recandcc.ui import mac
+
+    app = mac.MacApp.__new__(mac.MacApp)
+    app._naming_open, app._naming_lock = False, threading.Lock()
+    assert app._begin_naming()
+    assert not app._begin_naming()  # a second chooser while one is up
+    app._end_naming()
+    assert app._begin_naming()
+
+
+def test_live_markdown_never_sleeps_on_a_busy_file(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from recandcc.transcribe import output
+
+    slept = []
+    monkeypatch.setattr(output.time, "sleep", lambda s: slept.append(s))
+
+    def busy(self, target):
+        raise PermissionError("held by a reader")
+
+    monkeypatch.setattr(Path, "replace", busy)
+    with pytest.raises(PermissionError):
+        output.atomic_write(tmp_path / "transcript.md", "x", tries=1)
+    assert slept == [] and not list(tmp_path.glob(".*.tmp"))
+    tries = []
+    monkeypatch.setattr(output, "atomic_write", lambda p, t, **k: tries.append(k))
+    output.write_live_markdown(make_session(tmp_path), [], 1.0)
+    assert tries == [{"tries": 1}]

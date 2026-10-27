@@ -719,7 +719,7 @@ class Controller:
             try:
                 from ..transcribe import voices
 
-                result = voices.delete_all_profiles()
+                result = voices.forget_all()  # after any naming or finalize in flight
             except Exception as e:  # noqa: BLE001
                 log.error("could not delete the voices: %s", type(e).__name__)
                 result = e

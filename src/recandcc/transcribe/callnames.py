@@ -86,30 +86,56 @@ def suggestions(directory: Path) -> list[str]:
     return free_names(labels, names) if names else []
 
 
-def _rename(directory: Path, session: SessionInfo, label: str, name: str) -> None:
+class _Forgotten(Exception):
+    """All voices (and the kept participant names) were deleted since the session began."""
+
+
+def _rename(directory: Path, session: SessionInfo, label: str, name: str, since: int) -> None:
     """Relabel the transcript files; keep the session's voice (if any) under the new label,
-    with no profile."""
+    with no profile. Under NAMING_LOCK (``apply``), like ``voices.name_speaker``."""
     name = voices.check_name(name)
     data = json.loads((directory / JSON_NAME).read_text(encoding="utf-8"))
     segments = [Segment(**s) for s in data["segments"]]
+    if label not in {s.speaker for s in segments}:
+        raise ValueError("that speaker was renamed meanwhile")
     if any(s.speaker.casefold() == name.casefold() for s in segments):
         raise ValueError("that name is already a speaker of this session")
+    if since != voices.forget_generation():  # by another process (this one's waits for us)
+        raise _Forgotten
     segments = [replace(s, speaker=name) if s.speaker == label else s for s in segments]
     write_outputs(session, segments, data["duration"], data["model"])
-    stored = voices.read_session_voices(session.id)
-    if label in stored:
-        new = {(name if k == label else k): v for k, v in stored.items()}
-        voices.write_session_voices(
-            session,
-            {k: v["centroid"] for k, v in new.items()},
-            {k: v["profile"] for k, v in new.items() if v["profile"]},
-        )
+    with voices.store_lock():  # read and write together; a forget since `since` drops it
+        stored = voices.read_session_voices(session.id)
+        if label in stored:
+            new = {(name if k == label else k): v for k, v in stored.items()}
+            voices.write_session_voices(
+                session,
+                {k: v["centroid"] for k, v in new.items()},
+                {k: v["profile"] for k, v in new.items() if v["profile"]},
+                since=since,
+            )
 
 
-def apply(directory: Path) -> bool:
+def apply(directory: Path, since: int | None = None) -> bool:
     """Name the one unknown speaker after the one free participant, if that is what the session
-    has. True if the transcript was relabelled. Never logs names."""
+    has. True if the transcript was relabelled. Never logs names.
+
+    `since`: the voices' forget generation the session's work began at (default: the one the
+    session recorded, else now); nothing is renamed or stored if all voices were deleted
+    since. Runs under ``voices.NAMING_LOCK``, so it never interleaves with a naming, a
+    finalize or this process's "forget all"; the caller must not hold it."""
     session = SessionInfo.load(directory)
+    if since is None:
+        since = session.voices_generation
+    if since is None:
+        since = voices.forget_generation()
+    with voices.NAMING_LOCK:
+        return _apply(Path(directory), session, since)
+
+
+def _apply(directory: Path, session: SessionInfo, since: int) -> bool:
+    if since != voices.forget_generation():
+        return False  # forgotten since the session began: its names went with the voices
     names = voices.read_session_names(session.id)
     if not names:
         return False
@@ -127,7 +153,10 @@ def apply(directory: Path) -> bool:
             log.info("session %s: a self-introduction disagrees; no call-app name", session.id)
             return False
         try:
-            _rename(Path(directory), session, label, name)
+            _rename(directory, session, label, name, since)
+        except _Forgotten:
+            log.info("session %s: voices were forgotten; no call-app name", session.id)
+            return False
         except (OSError, ValueError):
             log.info("session %s: could not name a speaker from the call app", session.id)
             return False

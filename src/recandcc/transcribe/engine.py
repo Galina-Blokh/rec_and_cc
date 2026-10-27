@@ -709,23 +709,23 @@ class Transcriber:
                 turns = None
             self._diarization_metrics(session, diarization)
             with voices.NAMING_LOCK:  # voices and transcript change together, not mid-naming
-                segments = self._labelled(session, segments, turns, gen)
+                segments = self._labelled_now(session, segments, turns, gen)
                 self._write(session, segments, duration)
             self._prune_voices()
         else:
             with voices.NAMING_LOCK:
                 self._write(session, segments, duration)
-        self._name_from_call_app(session)
+        self._name_from_call_app(session, gen)
         self._drop_audio(session)
         return segments
 
-    def _name_from_call_app(self, session: SessionInfo) -> None:
+    def _name_from_call_app(self, session: SessionInfo, gen: int | None = None) -> None:
         """Opt-in: name the one unknown speaker after the one free call-app participant."""
         if not (self.cfg.speaker_names and self.cfg.names_from_call_app):
             callnames.forget(session.id)  # switched off since the call: don't keep the names
             return
         try:
-            callnames.apply(Path(session.directory))
+            callnames.apply(Path(session.directory), since=gen)  # takes NAMING_LOCK
         except Exception as e:  # noqa: BLE001 - optional; the numbered label stays
             # The exception text or traceback could quote a name: type at WARNING, rest at DEBUG
             log.warning(
@@ -785,18 +785,22 @@ class Transcriber:
         segments: list[Segment],
         turns: list[Turn] | dict[Track, list[Turn] | None] | None,
         gen: int | None = None,
+        use_names: bool = True,
     ) -> list[Segment]:
         """Number (or name) the speakers of each diarized track independently; a later
-        track's numbers continue after the earlier ones' ("Speaker 3" after 1 and 2)."""
+        track's numbers continue after the earlier ones' ("Speaker 3" after 1 and 2).
+        `use_names=False`: numbers only, no voice-profile names."""
         by_track = turns if isinstance(turns, dict) else {diarized_tracks(session)[0]: turns}
         out, n_labels, n_named = list(segments), 0, 0
         speakers: dict[str, np.ndarray] = {}
-        # Names, the generation check and the voice writes are one step against a forget
-        with voices.store_lock_best_effort():
+        folder_exists = Path(session.directory).exists()  # outside the voice lock: may be slow
+        # Names, the generation check and the voice writes are one step against a forget.
+        # If another process holds the store past LOCK_WAIT_S: numbers only, no voice work.
+        with voices.store_lock_best_effort() as locked:
             for track, track_turns in by_track.items():
                 centroids = getattr(track_turns, "centroids", {}) if self.cfg.speaker_names else {}
                 names: dict[int, str] = {}
-                if track_turns and centroids:
+                if track_turns and centroids and locked and use_names:
                     try:
                         known = voices.profiles_if_current(gen)  # none after a forget since `gen`
                         names = voices.match_profiles(centroids, known)
@@ -822,7 +826,9 @@ class Transcriber:
                 n_labels += len(labels)
                 n_named += len(names.keys() & labels.keys())
             try:  # opt-in only, in the private voices folder: lets `name-speaker` name them later
-                if speakers and Path(session.directory).exists():
+                if not locked:
+                    pass  # the store is busy: leave its voices as they are
+                elif speakers and folder_exists:
                     voices.write_session_voices(session, speakers, since=gen)
                 elif gen is None or gen == voices.forget_generation():
                     # never leave voices of an older transcript of this session behind (but not
@@ -838,6 +844,22 @@ class Transcriber:
             n_labels,
             n_named,
         )
+        return out
+
+    def _labelled_now(
+        self,
+        session: SessionInfo,
+        segments: list[Segment],
+        turns: list[Turn] | dict[Track, list[Turn] | None] | None,
+        gen: int | None,
+    ) -> list[Segment]:
+        """``_labelled``, re-checked just before the caller writes the transcript (under
+        NAMING_LOCK): if all voices were forgotten meanwhile (by another process: this one's
+        forget waits for NAMING_LOCK), the text gets numbers, never a forgotten name."""
+        out = self._labelled(session, segments, turns, gen)
+        if gen is not None and gen != voices.forget_generation():
+            log.info("session %s: voices were forgotten meanwhile; numbers only", session.id)
+            out = self._labelled(session, segments, turns, gen, use_names=False)
         return out
 
     @staticmethod
@@ -865,13 +887,13 @@ class Transcriber:
                     log.info("session %s: speakers already named; labels kept", session.id)
                     labelled = segments
                 else:
-                    labelled = self._labelled(session, segments, turns, gen)
+                    labelled = self._labelled_now(session, segments, turns, gen)
                 if labelled != segments and Path(session.directory).exists():
                     write_outputs(session, labelled, duration, self.cfg.model)
                     log.info("session %s: transcript rewritten with speaker labels", session.id)
             self._prune_voices()
             if Path(session.directory).exists():
-                self._name_from_call_app(session)
+                self._name_from_call_app(session, gen)
             if getattr(future, "timing", None) and Path(session.directory).exists():
                 self._diarization_metrics(session, future)
                 session.save()

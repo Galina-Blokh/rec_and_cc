@@ -153,37 +153,47 @@ def _lock_posix(f) -> None:
             pause = min(pause * 2, 0.5)
 
 
+def _gave_up(d: Path) -> bool:
+    return str(d) in getattr(_held, "gave_up", set())
+
+
 @contextlib.contextmanager
 def _file_lock(voices_dir: Path | None = None):
-    """Exclusive lock on the voices folder across processes (and threads, with LOCK), taken
-    by every change of the voice store. Re-entrant per thread and folder: a second handle on
-    the same file would block this very thread."""
+    """Exclusive lock on the voices folder across processes and threads, taken by every
+    change of the voice store. Re-entrant per thread and folder: a second handle on the same
+    file would block this very thread. The OS lock (one handle per holder, so it excludes the
+    other threads of this process too) is polled *before* LOCK is taken: a thread waiting
+    for another process never blocks this process's other voice operations."""
     d = _dir(voices_dir)
-    with LOCK:
-        if _depth(d):
-            _set_depth(d, _depth(d) + 1)
-            try:
-                yield
-            finally:
-                _set_depth(d, _depth(d) - 1)
-            return
-        d.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with open(d / LOCK_FILE, "a+b") as f:
+    if _depth(d):  # this thread holds it already
+        _set_depth(d, _depth(d) + 1)
+        try:
+            yield
+        finally:
+            _set_depth(d, _depth(d) - 1)
+        return
+    if _gave_up(d):  # inside store_lock_best_effort that already waited: never wait twice
+        raise OSError("the voice data is in use by another process; try again")
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with open(d / LOCK_FILE, "a+b") as f:
+        if os.name == "nt":
+            _lock_windows(f)
+        else:
+            _lock_posix(f)
+        try:
+            with LOCK:
+                _set_depth(d, 1)
+                try:
+                    yield
+                finally:
+                    _set_depth(d, 0)
+        finally:
             if os.name == "nt":
-                _lock_windows(f)
-            else:
-                _lock_posix(f)
-            _set_depth(d, 1)
-            try:
-                yield
-            finally:
-                _set_depth(d, 0)
-                if os.name == "nt":
-                    import msvcrt
+                import msvcrt
 
-                    f.seek(0)
-                    msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-                # POSIX: closing the file releases the flock
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            # POSIX: closing the file releases the flock
 
 
 store_lock = _file_lock  # for callers that must act on the store atomically
@@ -191,15 +201,23 @@ store_lock = _file_lock  # for callers that must act on the store atomically
 
 @contextlib.contextmanager
 def store_lock_best_effort(voices_dir: Path | None = None):
-    """``store_lock``, but when another process holds it for too long, carry on without it
-    (finalizing a transcript must not hang); the voice writes inside still take it and
-    report their own OSError."""
+    """``store_lock``, but when another process holds it for longer than ``LOCK_WAIT_S``,
+    carry on without it (finalizing a transcript must not hang): yields whether it is held.
+    Without it, every voice operation inside fails at once with OSError instead of waiting
+    again, so the whole block never waits longer than one ``LOCK_WAIT_S``."""
+    d = _dir(voices_dir)
     with contextlib.ExitStack() as stack:
         try:
             stack.enter_context(_file_lock(voices_dir))
         except OSError:
-            log.warning("the voice store is busy; continuing without its lock")
-        yield
+            log.warning("the voice store is busy; continuing without voice data")
+            if not hasattr(_held, "gave_up"):
+                _held.gave_up = set()
+            _held.gave_up.add(str(d))
+            stack.callback(_held.gave_up.discard, str(d))
+            yield False
+            return
+        yield True
 
 
 def profiles_if_current(since: int | None, voices_dir: Path | None = None) -> list[Profile]:
@@ -266,14 +284,16 @@ def _vector(c) -> list[float]:
 
 # --------------------------------------------------------------------------- profiles store
 def load_profiles(voices_dir: Path | None = None) -> list[Profile]:
-    """Profiles of the current embedding model, sorted by name; unreadable files are skipped
-    (logged by file name)."""
+    """Profiles of the current embedding model and forget generation, sorted by name;
+    unreadable files are skipped (logged by file name)."""
     d = _dir(voices_dir)
     out = []
+    gen = forget_generation(voices_dir) if d.is_dir() else 0
     for f in sorted(d.glob("*.json")) if d.is_dir() else []:
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
-            if data.get("model") == MODEL:
+            # a profile from before a "forget all" that could not be deleted never matches
+            if data.get("model") == MODEL and data.get("generation", 0) == gen:
                 count = int(data["count"])
                 if "sum" in data:
                     total = np.asarray(data["sum"], dtype=np.float64)
@@ -312,7 +332,13 @@ def _fold(name: str, centroid, sign: int, voices_dir: Path | None) -> Profile | 
         path.unlink(missing_ok=True)
         return None
     now = datetime.now().isoformat(timespec="seconds")
-    data = {"name": name, "model": MODEL, "count": count, "updated": now}
+    data = {
+        "name": name,
+        "model": MODEL,
+        "count": count,
+        "updated": now,
+        "generation": forget_generation(voices_dir),
+    }
     _write_private(path, {**data, "sum": [round(float(x), 6) for x in total]})
     return Profile(name, _unit(total), count, now, total)
 
@@ -359,6 +385,14 @@ def delete_all_profiles(voices_dir: Path | None = None) -> int:
         if left:
             raise OSError(f"{left} voice file(s) could not be deleted")
         return len(profiles)
+
+
+def forget_all(voices_dir: Path | None = None) -> int:
+    """``delete_all_profiles`` after any naming or finalize of this process has finished
+    (``NAMING_LOCK``): the forget comes last, so no remembered name lands in a transcript
+    after it. Other processes are covered by the generation checks before every write."""
+    with NAMING_LOCK:
+        return delete_all_profiles(voices_dir)
 
 
 # --------------------------------------------------------------------------- matching
@@ -441,17 +475,19 @@ def write_session_voices(
     added to (so naming it again doesn't count the same session twice). `since`: the
     ``forget_generation()`` when the work began; if all voices were deleted since, nothing
     is written."""
-    if since is None:
-        with _file_lock(voices_dir):
-            _store_session_voices(session, speakers, folded, voices_dir)
-        return
+    directory = _folder(session)  # outside the lock: it may touch a slow (cloud) folder
     with _file_lock(voices_dir):  # check and write together: a forget can't land between
-        if since == forget_generation(voices_dir):
-            _store_session_voices(session, speakers, folded, voices_dir)
+        if since is None or since == forget_generation(voices_dir):
+            _store_session_voices(session, directory, speakers, folded, voices_dir)
+
+
+def _folder(session: SessionInfo) -> str:
+    return str(Path(session.directory).resolve())  # to prune deleted sessions
 
 
 def _store_session_voices(
     session: SessionInfo,
+    directory: str,
     speakers: Mapping[str, np.ndarray],
     folded: Mapping[str, str] | None,
     voices_dir: Path | None,
@@ -464,8 +500,9 @@ def _store_session_voices(
     data = {
         "version": 1,
         "session_id": session.id,
-        "directory": str(Path(session.directory).resolve()),  # to prune deleted sessions
+        "directory": directory,
         "model": MODEL,
+        "generation": forget_generation(voices_dir),
         "speakers": entries,
     }
     _write_private(_session_path(session.id, voices_dir), data)
@@ -476,7 +513,6 @@ def _names_path(session_id: str, voices_dir: Path | None) -> Path:
     return _dir(voices_dir) / "sessions" / f"{h}.names.json"
 
 
-@_locked
 def write_session_names(
     session: SessionInfo,
     names: list[str],
@@ -488,22 +524,27 @@ def write_session_names(
     pruned when the folder is deleted and removed by `voices delete --all`. `since`: the
     ``forget_generation()`` when the session began; if all voices were deleted since, nothing
     is written. Returns whether the names were kept."""
-    if since is not None and since != forget_generation(voices_dir):
-        return False
-    data = {
-        "version": 1,
-        "session_id": session.id,
-        "directory": str(Path(session.directory).resolve()),
-        "participants": [str(n) for n in names],
-    }
-    _write_private(_names_path(session.id, voices_dir), data)
-    return True
+    directory = _folder(session)  # outside the lock: it may touch a slow (cloud) folder
+    with _file_lock(voices_dir):
+        if since is not None and since != forget_generation(voices_dir):
+            return False
+        data = {
+            "version": 1,
+            "session_id": session.id,
+            "directory": directory,
+            "generation": forget_generation(voices_dir),
+            "participants": [str(n) for n in names],
+        }
+        _write_private(_names_path(session.id, voices_dir), data)
+        return True
 
 
 def read_session_names(session_id: str, voices_dir: Path | None = None) -> list[str]:
     path = _names_path(session_id, voices_dir)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("generation", 0) != forget_generation(voices_dir):
+            return []  # left over by a "forget all" that could not delete it
         return [str(n) for n in data.get("participants", [])]
     except (OSError, ValueError, AttributeError):
         return []
@@ -519,8 +560,8 @@ def read_session_voices(session_id: str, voices_dir: Path | None = None) -> dict
     if not path.exists():
         return {}
     data = json.loads(path.read_text(encoding="utf-8"))
-    if data.get("model") != MODEL:
-        return {}
+    if data.get("model") != MODEL or data.get("generation", 0) != forget_generation(voices_dir):
+        return {}  # another model, or left over by a "forget all" that could not delete it
     return {
         label: {"centroid": _unit(v["centroid"]), "profile": v.get("profile")}
         for label, v in data.get("speakers", {}).items()
@@ -622,6 +663,7 @@ __all__ = [
     "Profile",
     "check_name",
     "delete_all_profiles",
+    "forget_all",
     "delete_profile",
     "delete_session_names",
     "delete_session_voices",
