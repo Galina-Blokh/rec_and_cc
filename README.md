@@ -280,7 +280,7 @@ Off by default, macOS only, and only together with `transcription.speaker_names`
 with **menu → Use names from the call app** (or `names_from_call_app = true`). While a call is
 recorded, RecAndCC reads the names in the call app's **participants panel, if you have it
 open**, through the macOS Accessibility API: it only reads what is on screen and never clicks,
-opens or changes anything; in a browser only a window showing a Meet/Teams/Zoom page is read.
+opens or changes anything; only the Zoom and Teams apps and, in a browser, a window showing a Meet/Teams/Zoom call page are read (never Slack, Discord, WhatsApp, FaceTime, Telegram and the like). A name counts only if it is in two samples in a row.
 A speaker is named only when it is certain: the panel shows exactly as many people as there
 are speakers besides `Me`, every speaker recognized by voice matches one of them, and one
 `Speaker N` and one name are left (a self-introduction that disagrees wins). Otherwise nothing

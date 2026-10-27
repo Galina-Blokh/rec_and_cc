@@ -305,7 +305,7 @@ when it is certain (`callnames.plan`: name count equals non-`Me` speaker count, 
 speakers match names by shared word, one `Speaker N` and one name left, no disagreeing
 self-introduction). It rewrites the transcript only and never creates a voice profile from a
 call-app name. The menu toggle checks Accessibility trust on a worker thread and writes only
-its own key to `config.toml`. Helper runs are killed when the session stops.
+its own key to `config.toml`. Helper runs are killed (and waited for) when the session stops. Only Zoom, new Teams and browser windows titled as a Meet/Teams/Zoom page are walked; the latest two samples must agree before a name is kept.
 
 Whose Accessibility grant is used? Checked on a Mac with `rcc-audiotap ax-status` started from
 Terminal while watching `log show --predicate 'subsystem == "com.apple.TCC"'`: tccd logged

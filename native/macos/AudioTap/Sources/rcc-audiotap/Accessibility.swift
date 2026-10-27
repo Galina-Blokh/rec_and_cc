@@ -43,8 +43,11 @@ private let browserIDs = [
 ]
 private let callPageWords = [
     "google meet", "meet.google.com", "meet - ", "meet \u{2013} ", "meet \u{2014} ",
-    "microsoft teams", "teams.microsoft", "zoom",
+    "microsoft teams", "teams.microsoft", "zoom.us", "zoom meeting", "zoom workplace",
 ]
+// Native apps that are read at all: Zoom and (new) Teams. Everything else (Slack, Discord,
+// WhatsApp, FaceTime, Telegram, ...) is skipped, however it is labelled.
+private let nativeCallIDs = ["us.zoom", "com.microsoft.teams"]
 
 private final class Walker {
     var nodes = 0
@@ -159,7 +162,7 @@ func runParticipants(pids: [pid_t], matches: [String], parentPID: pid_t?) -> Nev
                     walker.find(window, depth: 0)
                 }
             }
-        } else {
+        } else if nativeCallIDs.contains(where: { id.contains($0) }) {
             walker.find(root, depth: 0)
         }
         names += walker.names

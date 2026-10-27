@@ -271,7 +271,7 @@ don't have to name them myself, without the app ever asking for more permission 
 - **Given** it is on and Accessibility is granted, **when** a call is recorded and the call
   app's participants panel is open, **then** the visible names are sampled every ~15 s on a
   worker thread and kept in the owner-only voices store (not in the session folder); in a
-  browser only a Meet/Teams/Zoom window is read; the panel is never opened or clicked for me.
+  only Zoom, Teams and browser call windows are read, and a name must be in two samples in a row; the panel is never opened or clicked for me.
 - **Given** Accessibility is not granted, **then** nothing is read and macOS never shows its
   prompt because of RecAndCC: trust is only checked silently. Only **menu → Use names from the
   call app** explains why and opens System Settings > Accessibility.

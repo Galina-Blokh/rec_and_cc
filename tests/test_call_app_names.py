@@ -65,15 +65,45 @@ def test_sampler_not_started_when_disabled_or_not_macos(mac, monkeypatch):
 def test_nothing_is_read_without_accessibility_trust():
     reads = []
     s = participants.ParticipantSampler(
-        TARGET, trusted=lambda: False, read=lambda t: reads.append(t) or [], first_after=0
+        TARGET,
+        trusted=lambda: False,
+        read=lambda t: reads.append(t) or ["Anna"],
+        interval=0.01,
+        first_after=0,
     )
     s.start()
-    s._thread.join(2)
+    time.sleep(0.2)
     assert reads == [] and s.stop() == []
 
 
-def test_sampler_collects_union_in_order():
-    seen = iter([["Anna", "Bob (Me)"], ["Anna", "Cleo, Computer audio muted", "anna"], None])
+def test_trust_granted_mid_call_starts_the_sampling():
+    state = {"trusted": False}
+    s = participants.ParticipantSampler(
+        TARGET,
+        trusted=lambda: state["trusted"],
+        read=lambda t: ["Anna"],
+        interval=0.01,
+        first_after=0,
+    )
+    s.start()
+    time.sleep(0.15)
+    assert s._names == []
+    state["trusted"] = True
+    deadline = time.monotonic() + 5
+    while not s._names and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert s.stop() == ["Anna"]
+
+
+def test_only_names_stable_over_two_samples_count():
+    seen = iter(
+        [
+            ["Anna", "Bob (Me)", "Noise"],
+            ["Anna", "Cleo, Computer audio muted"],
+            ["Anna", "Cleo"],
+            [],
+        ]
+    )
     got = threading.Event()
 
     def read(_t):
@@ -88,7 +118,21 @@ def test_sampler_collects_union_in_order():
     )
     s.start()
     assert got.wait(5)
+    # "Noise" and the first "Cleo" flickered; an empty read (panel closed) keeps the last result
     assert s.stop() == ["Anna", "Cleo"]
+
+
+def test_a_helper_starting_after_stop_is_killed():
+    killed = []
+
+    class P:
+        def kill(self):
+            killed.append(1)
+
+    s = participants.ParticipantSampler(TARGET, trusted=lambda: True, read=lambda t: [])
+    s.signal()
+    s._track(P())  # type: ignore[arg-type]
+    assert killed == [1]
 
 
 def test_clean_names():
@@ -119,6 +163,55 @@ def test_trust_check_never_prompts(mac, monkeypatch):
     assert "--pid" in calls[1] and "us.zoom" in calls[1]
     # the helper's participants command only runs for the process that started it
     assert calls[1][-2:] == ["--parent-pid", str(os.getpid())]
+    # ax-status takes no options: the exact argv has nothing after the subcommand
+    assert calls[0] == ["/h/rcc-audiotap", "ax-status"]
+    assert calls[1] == [
+        "/h/rcc-audiotap",
+        "participants",
+        "--pid",
+        "123",
+        "--match",
+        "us.zoom",
+        "--parent-pid",
+        str(os.getpid()),
+    ]
+
+
+def built_helper():
+    from recandcc.native import find_helper
+
+    if sys.platform != "darwin":
+        pytest.skip("macOS helper")
+    try:
+        return str(find_helper())
+    except FileNotFoundError:
+        pytest.skip("rcc-audiotap is not built")
+
+
+def test_real_helper_parses_the_arguments_python_sends():
+    helper = built_helper()
+    out = subprocess.run(  # noqa: S603
+        [helper, "ax-status"], capture_output=True, text=True, timeout=20, check=False
+    )
+    assert out.returncode == 0 and json.loads(out.stdout)["trusted"] in (True, False)
+    # started by this test process, which the helper accepts as parent: no usage error (2)
+    ok = subprocess.run(  # noqa: S603
+        [helper, "participants", "--match", "zzz-none", "--parent-pid", str(os.getpid())],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert ok.returncode in (0, 3)
+    # without the parent pid it refuses
+    no = subprocess.run(  # noqa: S603
+        [helper, "participants", "--match", "zzz-none"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert no.returncode == 3 and json.loads(no.stdout)["refused"] is True
 
 
 def swift_sources() -> dict[str, str]:

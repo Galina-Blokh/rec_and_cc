@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 INTERVAL_S = 15.0
 FIRST_SAMPLE_S = 3.0  # the panel is usually opened a little after the call starts
 HELPER_TIMEOUT_S = 8.0
-STOP_JOIN_S = 3.0  # an in-flight sample may be lost; the next ones are not needed
+STOP_JOIN_S = 5.0  # hard cap; a killed helper ends at once
 MAX_NAMES = 60
 MAX_NAME_LEN = 60
 ACCESSIBILITY_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
@@ -69,8 +69,10 @@ def _run_helper(
     """Run the helper and parse its last JSON line. ``on_start(proc)`` lets the caller kill it."""
     from .native import find_helper
 
-    # --parent-pid: `participants` refuses to run unless this process started it
-    argv = [str(find_helper()), *args, "--parent-pid", str(os.getpid())]
+    # `participants` refuses to run unless this process started it (--parent-pid)
+    argv = [str(find_helper()), *args]
+    if args[0] == "participants":  # ax-status takes no options
+        argv += ["--parent-pid", str(os.getpid())]
     proc = subprocess.Popen(  # noqa: S603 - fixed argv: our own bundled helper, no shell
         argv,
         stdin=subprocess.DEVNULL,
@@ -165,17 +167,20 @@ class ParticipantSampler:
         with self._lock:
             self._proc = proc
             if self._stop.is_set():  # stopped while the helper was starting
-                proc.kill()
+                with contextlib.suppress(OSError):
+                    proc.kill()
 
     def signal(self) -> None:
         """Ask the thread to end and kill the helper run in flight (returns at once);
         ``stop()`` then collects the names."""
-        self._stop.set()
-        with self._lock:
+        with self._lock:  # same lock as _track: a helper starting right now is killed there
+            self._stop.set()
             proc = self._proc
         if proc is not None and proc.poll() is None:
             with contextlib.suppress(OSError):
                 proc.kill()
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                proc.wait(timeout=2.0)  # gone before stop() returns
 
     def stop(self) -> list[str]:
         """Stop sampling and return every name seen, in order of first appearance."""
@@ -186,25 +191,31 @@ class ParticipantSampler:
             return list(self._names)
 
     def _run(self) -> None:
-        if not self._trusted():  # checked silently; nothing is ever read without it
-            log.info("names from the call app: Accessibility is not granted; not sampling")
-            return
-        wait = self._first
+        wait, warned, previous = self._first, False, []
         while not self._stop.wait(wait):
             wait = self._interval
             try:
+                # Trust is checked silently at every sample, so granting it mid-call works and
+                # nothing is ever read while it is missing.
+                if not self._trusted():
+                    if not warned:
+                        log.info("names from the call app: Accessibility is not granted yet")
+                        warned = True
+                    continue
                 raw = self._read(self._target)
             except Exception:  # noqa: BLE001 - must not kill the thread
                 log.debug("participant sampling failed", exc_info=True)
                 continue
             if raw is None:
                 continue
-            with self._lock:
-                for name in clean_names(raw):
-                    if len(self._names) < MAX_NAMES and name.casefold() not in {
-                        n.casefold() for n in self._names
-                    }:
-                        self._names.append(name)
+            current = clean_names(raw)[:MAX_NAMES]
+            # Only names seen in two samples in a row count: a list that flickers by (another
+            # panel, a half-drawn list) is not stored. An empty read (panel closed) keeps them.
+            stable = [n for n in current if n.casefold() in {p.casefold() for p in previous}]
+            if stable:
+                with self._lock:
+                    self._names = stable
+            previous = current or previous
 
 
 def start_sampler(cfg: Config, target: AppTarget | None, **kwargs) -> ParticipantSampler | None:
