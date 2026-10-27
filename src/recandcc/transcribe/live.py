@@ -16,7 +16,8 @@ pool). Data flow::
                          -> transcript.md rewrite  (debounced, atomic)
                          -> at the end: final transcript.{md,json,srt}; speaker
                             diarization of the others track starts with the flush, so it
-                            overlaps with transcribing the tail (captions keep "Others")
+                            overlaps with transcribing the tail. Captions label Others "Speaker N"
+                            (live_speakers.py: display only, embeddings on a pool thread)
 
 A region is committed when it is followed by ``commit_silence_s`` of silence before the end of
 the buffer, or force-cut at the quietest point once it is ``max_region_s`` long. Audio before
@@ -37,7 +38,7 @@ from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures import wait as futures_wait
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +46,7 @@ import numpy as np
 from ..metrics import latency_stats, log_session_metrics, rounded
 from ..models import SAMPLE_RATE, Segment, SessionInfo, Track
 from .engine import MIN_LANGUAGE_CONFIDENCE, SPEAKERS, Transcriber
+from .live_speakers import SpeakerLabeler
 from .merge import ECHO_TOLERANCE_S, dedupe_echo, merge_tracks
 from .output import write_live_markdown
 
@@ -108,6 +110,7 @@ class _Job:
     language: str | None = None
     lang_ready: threading.Event = field(default_factory=threading.Event)
     future: Future | None = None
+    embeddings: list[np.ndarray | None] = field(default_factory=list)  # per segment
 
 
 class _TrackBuf:
@@ -180,6 +183,7 @@ class LiveTranscriber:
         md_interval_s: float = MD_INTERVAL_S,
         echo_hold_s: float = ECHO_HOLD_S,
         beam_size: int = LIVE_BEAM_SIZE,
+        labeler: SpeakerLabeler | None = None,
         clock: Callable[[], float] = time.monotonic,
         start: bool = True,
     ) -> None:
@@ -198,6 +202,10 @@ class LiveTranscriber:
         self.echo_hold_s = echo_hold_s
         self.beam_size = beam_size
         self.clock = clock
+        # "Speaker N" labels for Others captions (display only, see live_speakers.py)
+        if labeler is None and getattr(self.cfg, "live_speaker_labels", False):
+            labeler = SpeakerLabeler()
+        self._labeler = labeler
 
         self._inq: queue.SimpleQueue = queue.SimpleQueue()
         self._wake = threading.Event()
@@ -285,6 +293,13 @@ class LiveTranscriber:
 
     # ------------------------------------------------------------------ worker
     def _run(self) -> None:
+        try:
+            self._run_inner()
+        finally:
+            if self._labeler is not None:
+                self._labeler.close()
+
+    def _run_inner(self) -> None:
         try:
             self.transcriber.ensure_loaded()
         except BaseException as e:  # noqa: BLE001
@@ -446,7 +461,7 @@ class LiveTranscriber:
         if self._cancelled:
             return []
         try:
-            return self.transcriber.transcribe_audio(
+            segs = self.transcriber.transcribe_audio(
                 audio,
                 job.start,
                 SPEAKERS[job.track],
@@ -454,6 +469,9 @@ class LiveTranscriber:
                 beam_size=self.beam_size,
                 max_end=job.end,
             )
+            if job.track == Track.OTHERS and self._labeler is not None and not self._cancelled:
+                job.embeddings = [self._labeler.embed(_slice(audio, job, s)) for s in segs]
+            return segs
         finally:
             job.audio = None
 
@@ -461,6 +479,7 @@ class LiveTranscriber:
     def _collect(self, final: bool) -> None:
         """Move finished jobs (in per-track order) into the track results and emit."""
         new_others: list[Segment] = []
+        embeddings: list[np.ndarray | None] = []
         now = self.clock()
         for tb in self._tracks.values():
             while tb.jobs and (fut := tb.jobs[0].future) is not None and fut.done():
@@ -483,7 +502,8 @@ class LiveTranscriber:
                     self._held.extend((s, now) for s in segs)
                 else:
                     new_others.extend(segs)
-        emit = list(new_others)
+                    embeddings.extend(job.embeddings or [None] * len(segs))
+        emit = self._labelled(new_others, embeddings)
         self._shown_others.extend(new_others)
         if new_others:  # only recent Others matter for the echo check: bound memory
             horizon = max(s.end for s in new_others) - 600.0
@@ -496,6 +516,17 @@ class LiveTranscriber:
                 self.on_segments(emit)
             except Exception:
                 log.exception("live on_segments callback failed")
+
+    def _labelled(self, segs: list[Segment], embeddings: list[np.ndarray | None]) -> list[Segment]:
+        """Copies of the Others segments for display, labelled "Speaker N". The stored
+        segments (echo check, transcript.md, final transcript) keep "Others"."""
+        labeler = self._labeler
+        if labeler is None:
+            return list(segs)
+        return [
+            replace(seg, speaker=labeler.label(emb))
+            for seg, emb in zip(segs, embeddings, strict=True)
+        ]
 
     def _release_me(self, final: bool, now: float) -> list[Segment]:
         if not self._held:
@@ -597,6 +628,11 @@ class LiveTranscriber:
         except OSError:
             log.exception("could not save metrics of session %s", session.id)
         log_session_metrics(session)
+
+
+def _slice(audio: np.ndarray, job: _Job, seg: Segment) -> np.ndarray:
+    a = max(0, int((seg.start - job.start) * SAMPLE_RATE))
+    return audio[a : max(a, int((seg.end - job.start) * SAMPLE_RATE))]
 
 
 def live_title(session: SessionInfo) -> str:

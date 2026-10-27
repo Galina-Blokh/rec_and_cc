@@ -31,6 +31,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-20 | Search my transcripts | 🟡 search only; summaries, export planned (#4) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
+| US-33 | Live captions name the speakers | 🟡 no accuracy measurement on real speech (#1) |
 
 ---
 
@@ -268,3 +269,17 @@ its transcript, so that I know what was decided and who does what without reread
   ~1–2 min, offline.
 - **Not yet:** Windows/CPU backend (llama.cpp), a quality evaluation on real meetings,
   summaries in the meeting-notes window (#4).
+
+### US-33 Live captions name the speakers
+*As the owner, I want live captions to say `Speaker 1` / `Speaker 2` instead of `Others`, so
+that I can follow who says what during the call.*
+
+- **Given** `live_speaker_labels = true` (default) and the speaker model on disk, **when** a
+  finished `Others` caption is shown, **then** it says `Speaker N`, the same N for the same
+  voice for the whole session; a clearly different voice gets a new number (at most 8
+  speakers). `Me` stays `Me`.
+- **Then** the labels are display only: the final transcript keeps the offline diarization.
+- **Given** the model is not on disk, **then** captions keep `Others`, nothing is downloaded
+  and nothing is logged above DEBUG.
+- **Then** the work never runs on a capture callback or the UI thread, and when it falls
+  behind, requests are dropped rather than queued without limit.

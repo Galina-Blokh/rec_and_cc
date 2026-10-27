@@ -148,7 +148,7 @@ and has similar text (`difflib` ratio ≥ 0.6).
 
 ### Speaker diarization: `Others` → `Speaker 1`, `Speaker 2`, …
 The system-audio track mixes everyone else on the call. Only the **final** transcript splits
-it; live captions keep `Others`, and `Me` is never touched (`diarize.py`):
+it, and `Me` is never touched (`diarize.py`). Live captions are labelled separately (below):
 
 1. Silero VAD (the one used for chunking) finds speech in `others.wav`; regions are cut into
    ~2 s windows.
@@ -159,6 +159,14 @@ it; live captions keep `Others`, and `Me` is never touched (`diarize.py`):
    ≥ 1 s; clusters with < 2 s of speech and shorter windows join the nearest speaker.
 4. Each `Others` segment takes the speaker it overlaps most (nearest one if none), numbered by
    first appearance. If only one speaker is found the label stays `Others`.
+
+**Live labels** (`live_speakers.py`, display only): after Whisper, the pool thread asks a
+dedicated embedding thread (bounded queue of 8, dropped when full; same CAM++ model, loaded
+only if already on disk, never downloaded) for the embedding of each `Others` segment ≥ 1 s.
+The live worker then clusters them in time order: cosine ≥ 0.5 to a running-mean centroid,
+else a new speaker, at most 8. Only the copies sent to the captions are relabelled; stored
+segments, `transcript.md` and the final transcript are unchanged. Without the model, or for
+segments without an embedding, captions keep `Others` (or the previous label).
 
 Why not sherpa-onnx's own pyannote pipeline (segmentation-3.0 + embeddings per 10 s window):
 on the same synthetic en/ru voices it took **20 s for 13 min** of audio and got 141/170

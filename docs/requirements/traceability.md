@@ -31,3 +31,4 @@ Paths are relative to `src/recandcc/`.
 | US-20 | `search.py`, `ui/common.py`, `ui/present.py`, `ui/mac.py`, `ui/tray.py`, `cli.py` | `test_search.py::*`, `test_ui_present.py::test_search_hit_row_and_notices`, `test_ui_present.py::test_search_open_target_falls_back_to_the_folder`, `test_ui_tray.py::*` |
 | US-21 | `transcribe/voices.py`, `transcribe/diarize.py`, `cli.py` | `test_voices.py::*` |
 | US-27 | `transcribe/summary.py`, `transcribe/revisions.py`, `transcribe/gpu.py`, `config.py`, `ui/common.py`, `cli.py` | `test_summary.py::*` |
+| US-33 | `transcribe/live_speakers.py`, `transcribe/live.py`, `config.py` | `test_live_speakers.py::*` |

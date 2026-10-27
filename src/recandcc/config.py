@@ -138,8 +138,12 @@ class TranscriptionConfig:
     # Transcripts are never deleted. Also settable from the menu: "Delete audio after".
     audio_retention_days: int = 0
     # Split "Others" into "Speaker 1", "Speaker 2", ... in the final transcript (offline
-    # speaker diarization). Live captions keep showing "Others".
+    # speaker diarization).
     diarize: bool = True
+    # Live captions show "Speaker N" instead of "Others" (display only: the final
+    # transcript keeps the offline diarization). Needs the speaker model on disk and
+    # never downloads it.
+    live_speaker_labels: bool = True
     # Remember speakers' voices so that a speaker named once (`recandcc name-speaker`) is named
     # in later sessions. Off by default: voice profiles are biometric data. See voices.py.
     speaker_names: bool = False
