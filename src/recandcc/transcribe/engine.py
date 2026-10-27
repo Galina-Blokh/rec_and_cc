@@ -154,10 +154,9 @@ class Transcriber:
         if self._model is None:
             with self._init_lock:
                 if self._model is None:
-                    lid = self.language_model
-                    # _lid_model is kept if the main load below fails
-                    if lid and self._needs_detection() and self._lid_model is None:
-                        self._lid_model = self._load(lid)
+                    lid_name = self.language_model
+                    if lid_name and self._needs_detection() and self._lid_model is None:
+                        self._lid_model = self._load(lid_name)  # kept if the main load fails
                     if self.gpu:
                         t0 = time.monotonic()
                         model = MlxWhisper(
