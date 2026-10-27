@@ -12,7 +12,8 @@ hint for a warning, never a reason to refuse a folder, and not exhaustive.
   ``~/Documents`` when iCloud "Desktop & Documents Folders" is on, read from Finder's
   ``FXICloudDriveDesktop`` / ``FXICloudDriveDocuments`` preferences.
 - Windows: anything under ``%OneDrive%``, ``%OneDriveConsumer%``, ``%OneDriveCommercial%``
-  or ``%USERPROFILE%\\Dropbox`` (compared case-insensitively).
+  or ``%USERPROFILE%\\Dropbox``, and ``%USERPROFILE%\\Documents`` / ``Desktop`` when OneDrive
+  folder backup has moved them (compared case-insensitively).
 """
 
 from __future__ import annotations
@@ -106,20 +107,42 @@ def mac_provider(path: str | os.PathLike, home: Path | None = None) -> str | Non
     return found
 
 
-def windows_provider(path: str | os.PathLike, env: Mapping[str, str] | None = None) -> str | None:
+def _known_folders() -> list[str]:
+    """Where Windows really keeps Documents / Desktop (moved into OneDrive by folder backup)."""
+    if sys.platform != "win32":
+        return []
+    import platformdirs
+
+    return [platformdirs.user_documents_dir(), platformdirs.user_desktop_dir()]
+
+
+def windows_provider(
+    path: str | os.PathLike,
+    env: Mapping[str, str] | None = None,
+    known: list[str] | None = None,
+) -> str | None:
     env = os.environ if env is None else env
+    known = _known_folders() if known is None else known
 
     def norm(p: str | os.PathLike) -> PureWindowsPath:  # no realpath: OneDrive placeholders
-        return PureWindowsPath(ntpath.normpath(str(p)).lower())
+        return PureWindowsPath(ntpath.normpath(ntpath.abspath(str(p))).lower())
 
     target = norm(path)
-    for key in ONEDRIVE_ENV:
-        root = env.get(key) or env.get(key.upper())
-        if root and _under(target, norm(root)) is not None:
-            return "OneDrive"
+    roots = [norm(r) for k in ONEDRIVE_ENV if (r := env.get(k) or env.get(k.upper()))]
+    if any(_under(target, r) is not None for r in roots):
+        return "OneDrive"
     profile = env.get("USERPROFILE")
-    if profile and _under(target, norm(PureWindowsPath(profile) / "Dropbox")) is not None:
+    if not profile:
+        return None
+    if _under(target, norm(PureWindowsPath(profile) / "Dropbox")) is not None:
         return "Dropbox"
+    # Folder backup moves Documents / Desktop into OneDrive and may leave a junction behind
+    # at %USERPROFILE%\Documents: a path through it is synced too.
+    for folder in known:
+        moved = norm(folder)
+        stub = norm(PureWindowsPath(profile) / moved.name)
+        if any(_under(moved, r) is not None for r in roots) and _under(target, stub) is not None:
+            return "OneDrive"
     return None
 
 

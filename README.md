@@ -257,7 +257,8 @@ existed keeps its permissions; tighten it with `chmod 700 ~/Documents/Transcribe
 `Documents` by OneDrive folder backup on Windows. RecAndCC checks `output_dir` locally (no network)
 while it runs: if it lies in iCloud Drive (including "Desktop & Documents"),
 `~/Library/CloudStorage` (OneDrive, Dropbox, Google Drive, Box), `~/Dropbox`, `~/Google Drive`,
-or on Windows a OneDrive folder or `%USERPROFILE%\Dropbox`, it logs a warning and shows a
+or on Windows a OneDrive folder (including `Documents` / `Desktop` moved by OneDrive folder
+backup) or `%USERPROFILE%\Dropbox`, it logs a warning and shows a
 one-time notification, and `recandcc config` prints the same warning. Other sync tools (for
 example a Google Drive drive letter on Windows) are not detected. Set `output_dir` to a
 local folder (for example `~/Transcribes`) if recordings must stay on this device only.

@@ -60,10 +60,19 @@ def test_mac_desktop_and_documents(tmp_path):
     assert mac_provider(docs, home) is None
 
 
+def test_finder_prefs_change_is_picked_up_without_clearing_the_cache(tmp_path):
+    _finder_prefs(tmp_path, FXICloudDriveDocuments=False)
+    assert cloudsync.icloud_desktop_documents(tmp_path) == set()
+    prefs = tmp_path / "Library" / "Preferences" / "com.apple.finder.plist"
+    prefs.write_bytes(plistlib.dumps({"FXICloudDriveDocuments": True, "Other": "longer"}))
+    assert cloudsync.icloud_desktop_documents(tmp_path) == {"Documents"}
+
+
 def test_mac_legacy_sync_folders(tmp_path):
     assert mac_provider(tmp_path / "Dropbox" / "Rec", tmp_path) == "Dropbox"
     assert mac_provider(tmp_path / "Google Drive" / "Rec", tmp_path) == "Google Drive"
-    assert mac_provider("/Volumes/GoogleDrive/My Drive/Rec", tmp_path) == "Google Drive"
+    if sys.platform != "win32":  # a drive-less absolute path gets the cwd's drive on Windows
+        assert mac_provider("/Volumes/GoogleDrive/My Drive/Rec", tmp_path) == "Google Drive"
     box = tmp_path / "Library" / "CloudStorage" / "Box-Box" / "Rec"
     assert mac_provider(box, tmp_path) == "Box"
 
@@ -88,7 +97,16 @@ def test_windows_onedrive_env_case_insensitive():
     assert windows_provider(r"C:\Users\Me\Documents", {}) is None
     profile = {"USERPROFILE": r"C:\Users\Me"}
     assert windows_provider(r"C:\Users\me\Dropbox\Rec", profile) == "Dropbox"
-    assert windows_provider(r"C:\Users\Me\Documents", profile) is None
+    assert windows_provider(r"C:\Users\Me\Documents", profile, known=[]) is None
+
+
+def test_windows_folder_backup_junction():
+    env = {"OneDrive": r"C:\Users\Me\OneDrive", "USERPROFILE": r"C:\Users\Me"}
+    moved = [r"C:\Users\Me\OneDrive\Documents", r"C:\Users\Me\Desktop"]
+    docs = r"C:\Users\Me\Documents\Transcribes"
+    assert windows_provider(docs, env, known=moved) == "OneDrive"
+    assert windows_provider(r"C:\Users\Me\Desktop\x", env, known=moved) is None  # not moved
+    assert windows_provider(docs, env, known=[r"C:\Users\Me\Documents"]) is None
 
 
 def test_dispatch_by_platform(tmp_path, monkeypatch):
@@ -140,8 +158,10 @@ def test_controller_warns_once_per_folder(tmp_path, monkeypatch, caplog):
     assert len(got) == 1 and "OneDrive" in got[0][2] and "local folder" in got[0][2]
     assert sum("synced to OneDrive" in r.getMessage() for r in caplog.records) == 1
 
-    synced.add(tmp_path / "later")  # e.g. iCloud Desktop & Documents turned on later
     cfg.output_dir = tmp_path / "later"
+    ctrl._check_cloud_sync()
+    assert _notices(ctrl) == []
+    synced.add(tmp_path / "later")  # e.g. iCloud Desktop & Documents turned on later
     ctrl._check_cloud_sync()
     assert len(_notices(ctrl)) == 1  # a negative result is not cached
     synced.discard(tmp_path / "later")

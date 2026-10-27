@@ -444,12 +444,12 @@ class Controller:
 
     def _refresh(self) -> None:
         try:
+            self._maybe_reload_config()
+            self._check_cloud_sync()  # before listing output_dir, which may stall on a cloud mount
             perm = permission_status()
             recent = recent_transcripts(self.cfg.output_dir)
             with self._lock:
                 self._perm, self._recent = perm, recent
-            self._maybe_reload_config()
-            self._check_cloud_sync()
         finally:
             with self._lock:
                 self._refreshing = False
