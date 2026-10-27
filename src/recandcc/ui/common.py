@@ -38,11 +38,14 @@ from ..config import (
     load_config,
     normalize_languages,
     save_languages,
+    save_settings,
+    validate_settings,
 )
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind, discard_session
 from ..recorder import make_private_dir
 from ..retention import purge_old_audio, purge_transcribed_audio
+from ..settings_window import SettingsUnavailable, run_settings
 
 if TYPE_CHECKING:
     from ..transcribe.live import LiveTranscriber
@@ -257,6 +260,7 @@ class Controller:
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
         self._save_lock = threading.Lock()  # menu writes to config.toml
+        self._settings_lock = threading.Lock()  # one settings window at a time
         self._lang_lock = threading.Lock()  # transcription.languages + its raw spelling
         self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
         # global shortcut
@@ -632,6 +636,59 @@ class Controller:
             except Exception:
                 log.exception("saving settings failed")
                 self.post_notice("Settings not saved", "config.toml could not be written")
+
+    def open_settings_async(self) -> None:
+        """Menu "Settings…": the native window runs on a worker thread (it blocks until it is
+        closed); the outcome comes back as a ``settings_saved`` or ``settings_fallback`` event
+        and ``apply_settings`` runs on the UI thread."""
+        if not self._settings_lock.acquire(blocking=False):
+            return  # already open
+
+        def run() -> None:
+            try:
+                raw = run_settings(self.cfg)
+                if raw is None:
+                    return
+                updates = validate_settings(raw)
+                with self._save_lock:
+                    try:
+                        save_settings(updates, CONFIG_PATH)
+                    except FileNotFoundError:
+                        self.cfg.save(CONFIG_PATH)
+                        save_settings(updates, CONFIG_PATH)
+                    self._config_mtime = self._mtime()
+                self.events.put(("settings_saved", updates))
+            except SettingsUnavailable as e:
+                log.info("native settings unavailable: %s", e)
+                self.events.put(("settings_fallback",))
+            except ValueError as e:
+                log.warning("settings not saved: %s", e)
+                self.post_notice("Settings not saved", str(e))
+            except Exception:
+                log.exception("settings window failed")
+                self.post_notice("Settings not saved", "config.toml could not be written")
+            finally:
+                self._settings_lock.release()
+
+        threading.Thread(target=run, daemon=True, name="settings-window").start()
+
+    def apply_settings(self, updates: dict) -> None:
+        """Make saved settings live (UI thread). They are already on disk."""
+        cfg, tr = self.cfg, self.cfg.transcription
+        if "output_dir" in updates:
+            cfg.output_dir = updates["output_dir"]
+        if "live_captions" in updates:
+            cfg.live_captions = updates["live_captions"]
+        if "keep_audio" in updates:
+            tr.keep_audio = updates["keep_audio"]
+        if "speaker_names" in updates:
+            tr.speaker_names = updates["speaker_names"]
+        if "languages" in updates:
+            with self._lang_lock:
+                tr._raw_languages = None  # type: ignore[attr-defined]
+                tr.languages = list(updates["languages"])
+        if "mode" in updates and updates["mode"] != cfg.detection.mode:
+            self.engine.set_mode(updates["mode"])
 
     @property
     def permissions(self) -> dict[str, str]:

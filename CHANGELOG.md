@@ -27,6 +27,7 @@ All notable changes to RecAndCC are documented here. The format is based on
 - "Open transcripts folder" creates the folder owner-only, like session folders (#32).
 
 ### Added
+- **Settings…** menu item (macOS): a SwiftUI window, `rcc-audiotap settings`, for mode, folder, languages, keep audio, live captions and speaker names (US-30). Rebuild the helper with `./native/macos/build.sh`; an older helper falls back to opening `config.toml`.
 - `SECURITY.md`: how to report a vulnerability and a threat-model summary.
 - README "Privacy & consent": consent laws, where data lives, retention, deleting everything.
 - This changelog.

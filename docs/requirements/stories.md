@@ -30,6 +30,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 stock model, no Hebrew test set (#6) |
 | US-20 | Search my transcripts | 🟡 search only; summaries, export planned (#4) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
+| US-30 | Change common settings in a window | 🟡 claimed (#3): macOS spike, not on Windows |
 
 ---
 
@@ -243,3 +244,21 @@ I don't have to work out who `Speaker 2` was every time.*
   delete the profiles (`--all` also deletes every session's voices).
 - **Not yet:** naming from the menu with a voice sample, names from the call app, overlap
   handling and an accuracy measurement on real speech (#1, #13).
+
+### US-30 Change common settings in a window
+*As the owner, I want a settings window with the options I change most, so that I don't have
+to edit `config.toml` by hand.*
+
+- **Given** macOS and a helper that has the `settings` subcommand, **when** I choose
+  **Settings…** in the menu, **then** a window shows mode (off/ask/auto), transcripts folder,
+  languages (English, Russian, Hebrew), keep audio, live captions, speaker names and the
+  shortcut (read-only), without blocking the menu bar.
+- **When** I press Save, **then** the values are validated by the app and written to
+  `config.toml` (other keys are kept) and applied at once; **when** I cancel or close the
+  window, **then** nothing changes.
+- **Given** invalid values, **then** nothing is written and a notice says so.
+- **Given** a missing or older helper, **then** the app says so and opens `config.toml`
+  instead.
+- **Then** the window shows no transcript or audio content, uses no network and asks for no
+  new permission.
+- **Not yet:** Windows, the other keys (detection tuning, hotkey editing), a two-way protocol.

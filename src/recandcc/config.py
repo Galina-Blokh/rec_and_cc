@@ -222,6 +222,65 @@ def save_languages(languages: list, path: Path = CONFIG_PATH) -> None:
     path.write_bytes(tomli_w.dumps(data).encode())
 
 
+# Keys the native settings window may change: flat name -> (section or "", key).
+SETTINGS_KEYS = {
+    "mode": ("detection", "mode"),
+    "output_dir": ("", "output_dir"),
+    "languages": ("transcription", "languages"),
+    "keep_audio": ("transcription", "keep_audio"),
+    "speaker_names": ("transcription", "speaker_names"),
+    "live_captions": ("", "live_captions"),
+}
+
+
+def validate_settings(values) -> dict:
+    """Check values sent by the settings window (untrusted JSON) and return them cleaned:
+    ``mode`` as a Mode, ``output_dir`` as an expanded Path, ``languages`` normalised (at least
+    one), the rest as bools. Unknown names are ignored. Raises ValueError on a bad value."""
+    if not isinstance(values, dict):
+        raise ValueError("settings must be an object")
+    out: dict = {}
+    for name, value in values.items():
+        if name not in SETTINGS_KEYS:
+            continue
+        if name == "mode":
+            out[name] = Mode(value)
+        elif name == "output_dir":
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("output_dir must be a folder path")
+            out[name] = Path(value).expanduser()
+        elif name == "languages":
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                raise ValueError("languages must be a list of codes")
+            langs = [language_code(v) for v in value]
+            clean = normalize_languages(langs)
+            if not clean or len(clean) != len(set(langs)):
+                raise ValueError("languages: pick at least one valid language")
+            out[name] = clean
+        elif isinstance(value, bool):
+            out[name] = value
+        else:
+            raise ValueError(f"{name} must be true or false")
+    return out
+
+
+def save_settings(updates: dict, path: Path = CONFIG_PATH) -> None:
+    """Write validated settings (see validate_settings) into config.toml, keeping every other
+    key as it is on disk. Raises FileNotFoundError / ValueError like save_languages."""
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    for name, value in updates.items():
+        section, key = SETTINGS_KEYS[name]
+        target = data.setdefault(section, {}) if section else data
+        target[key] = (
+            value.value
+            if isinstance(value, Mode)
+            else (str(value) if isinstance(value, Path) else value)
+        )
+    tmp = path.with_suffix(".toml.tmp")
+    tmp.write_bytes(tomli_w.dumps(data).encode())
+    tmp.replace(path)
+
+
 def load_config(path: Path = CONFIG_PATH) -> Config:
     """Load config, creating a default file on first run. Unknown keys are ignored."""
     if not path.exists():
