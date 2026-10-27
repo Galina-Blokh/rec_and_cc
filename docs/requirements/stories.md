@@ -30,6 +30,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 stock model, no Hebrew test set (#6) |
 | US-20 | Search my transcripts | 🟡 search only; summaries, export planned (#4) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
+| US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
 
 ---
 
@@ -242,3 +243,28 @@ I don't have to work out who `Speaker 2` was every time.*
   delete the profiles (`--all` also deletes every session's voices).
 - **Not yet:** naming from the menu with a voice sample, names from the call app, overlap
   handling and an accuracy measurement on real speech (#1, #13).
+
+### US-27 Meeting summaries and action items
+*As the owner, I want a short summary and the action items of each meeting written next to
+its transcript, so that I know what was decided and who does what without rereading it.*
+
+- **Given** `summary.enabled = false` (default), **then** no summary is generated and no
+  summary model is downloaded or loaded.
+- **Given** `summary.enabled = true` on Apple silicon, **when** a session's final transcript
+  is written, **then** a background job (never on the audio or UI threads, and never while
+  a recording is in progress: it waits, and pauses between chunks) writes
+  `summary.md` next to `transcript.md`: a short summary and an **Action items** list, in the
+  meeting's main language (English, Russian or Hebrew headings; Hebrew right to left).
+- **Given** a transcript longer than the model's context, **then** it is summarised in
+  chunks and the chunk notes are merged (map-reduce).
+- **Then** the model runs locally (mlx-lm), pinned to an exact Hugging Face commit, loaded
+  from the local cache without the network, and downloaded once only on a genuine cache miss.
+- **Given** another platform, or the model missing while offline, **then** the summary is
+  skipped with an INFO log line and a one-time **Summary skipped** notice.
+- **When** I run `recandcc summarize <session_dir>`, **then** that session's `summary.md` is
+  (re)written, also with `summary.enabled = false`.
+- **Then** logs never contain transcript or summary text.
+- **Given** a 1-hour en/ru meeting on an M-series Mac, **then** the summary is ready within
+  ~1–2 min, offline.
+- **Not yet:** Windows/CPU backend (llama.cpp), a quality evaluation on real meetings,
+  summaries in the meeting-notes window (#4).

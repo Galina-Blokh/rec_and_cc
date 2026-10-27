@@ -32,6 +32,9 @@ All notable changes to RecAndCC are documented here. The format is based on
 - This changelog.
 - Search across all transcripts with a local SQLite FTS5 index: `recandcc search` and a
   menu item (#59).
+- Opt-in local meeting summaries (`[summary] enabled = true`, Apple silicon): `summary.md`
+  with a short summary and action items after each transcript, from a pinned Qwen2.5 3B
+  model via mlx-lm; `recandcc summarize <session_dir>` (#4).
 - Speaker names that carry over between sessions, from opt-in local voice profiles; name a
   speaker once from the CLI (#62).
 - Hebrew in `transcription.languages`, with right-to-left captions and transcripts (#60).
