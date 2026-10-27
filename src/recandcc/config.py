@@ -256,11 +256,14 @@ def normalize_language_models(value) -> dict[str, str]:
     return out
 
 
-def save_keys(path: Path, updates: dict[str, Any]) -> None:
+def save_keys(path: Path, updates: dict[str, Any]) -> float:
     """Write only the dotted keys in ``updates`` ("transcription.languages": [...]) into
-    config.toml, leaving every other key exactly as it is on disk (it may have been edited by
-    hand since the app loaded it). Raises FileNotFoundError if there is no file yet,
-    ValueError if it is not valid TOML or a key's parent is not a table."""
+    config.toml, leaving every other key's value exactly as it is on disk (it may have been
+    edited by hand since the app loaded it). Like every save, it drops TOML comments and
+    rewrites the file in tomli_w's key order. Returns the new file's mtime. Raises
+    FileNotFoundError if there is no file yet, ValueError if it is not valid TOML or a key's
+    parent is not a table."""
+    path = path.resolve()  # a symlinked config.toml stays a symlink
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     for dotted, value in updates.items():
         *parents, leaf = dotted.split(".")
@@ -270,16 +273,23 @@ def save_keys(path: Path, updates: dict[str, Any]) -> None:
             if not isinstance(table, dict):
                 raise ValueError(f"{name} in {path} is not a table")
         table[leaf] = value
-    _write_atomic(path, tomli_w.dumps(data).encode())
+    return _write_atomic(path, tomli_w.dumps(data).encode())
 
 
-def _write_atomic(path: Path, payload: bytes) -> None:
-    """Replace ``path`` in one step, so a crash mid-write never leaves half a config."""
+def _write_atomic(path: Path, payload: bytes) -> float:
+    """Replace ``path`` in one step, so a crash mid-write never leaves half a config. Returns
+    the new file's mtime."""
     tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_bytes(payload)
-    with contextlib.suppress(OSError):
-        os.chmod(tmp, path.stat().st_mode & 0o777)  # keep the user's file mode
-    os.replace(tmp, path)
+    try:
+        tmp.write_bytes(payload)
+        with contextlib.suppress(OSError):
+            os.chmod(tmp, path.stat().st_mode & 0o777)  # keep the user's file mode
+        mtime = tmp.stat().st_mtime  # os.replace keeps it
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return mtime
 
 
 def save_languages(languages: list, path: Path = CONFIG_PATH) -> None:

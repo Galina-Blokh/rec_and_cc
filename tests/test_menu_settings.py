@@ -67,6 +67,47 @@ def test_save_keys_writes_only_the_given_keys(tmp_path):
     assert not list(tmp_path.glob(".*.tmp"))
 
 
+def test_save_keys_returns_the_mtime_and_keeps_a_symlink(tmp_path):
+    real = tmp_path / "dotfiles" / "config.toml"
+    real.parent.mkdir()
+    real.write_text("[summary]\nenabled = true\n")
+    link = tmp_path / "config.toml"
+    try:
+        link.symlink_to(real)
+    except OSError:  # Windows without symlink rights
+        pytest.skip("symlinks unavailable")
+    mtime = save_keys(link, {"autostart": True})
+    assert link.is_symlink() and mtime == real.stat().st_mtime
+    assert tomllib.loads(real.read_text()) == {"summary": {"enabled": True}, "autostart": True}
+
+
+def test_save_keys_removes_its_temp_file_on_failure(tmp_path, monkeypatch):
+    path = tmp_path / "config.toml"
+    path.write_text("autostart = false\n")
+
+    def fail(*_a):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("recandcc.config.os.replace", fail)
+    with pytest.raises(OSError):
+        save_keys(path, {"autostart": True})
+    assert path.read_text() == "autostart = false\n"
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_cli_autostart_keeps_hand_edits(tmp_path, monkeypatch):
+    from recandcc import autostart, cli
+
+    path = tmp_path / "config.toml"
+    path.write_text(HAND_EDIT)
+    monkeypatch.setattr(cli, "CONFIG_PATH", path)
+    monkeypatch.setattr(autostart, "enable", lambda: None)
+    monkeypatch.setattr(autostart, "describe", lambda: "on")
+    assert cli.cmd_autostart(types.SimpleNamespace(action="on")) == 0
+    data = tomllib.loads(path.read_text())
+    assert data == {"summary": {"enabled": True}, "autostart": True}
+
+
 @pytest.mark.parametrize(
     ("key", "value"),
     [("live_captions", False), ("autostart", True), ("transcription.audio_retention_days", 7)],

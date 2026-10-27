@@ -748,11 +748,12 @@ class Controller:
             edited = self._mtime() != self._config_mtime  # changed on disk, not reloaded yet
             try:
                 try:
-                    save_keys(CONFIG_PATH, values)
+                    mtime = save_keys(CONFIG_PATH, values)
                 except FileNotFoundError:
                     self.cfg.save(CONFIG_PATH)  # no file yet: write a fresh one
+                    mtime = self._mtime()
                 if not edited:
-                    self._config_mtime = self._mtime()  # our own write: nothing to reload
+                    self._config_mtime = mtime  # our own write: nothing to reload
             except ValueError:  # invalid TOML (mid-edit?): don't overwrite the user's file
                 log.warning("config.toml could not be parsed; %s not saved", ", ".join(keys))
                 self.post_notice(f"{title} not saved", "config.toml could not be parsed")
