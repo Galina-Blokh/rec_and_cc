@@ -223,6 +223,12 @@ def named_notice(error: str | None) -> tuple[str, str]:
     return ("Speaker named", "The speaker was renamed in that transcript.")
 
 
+FORGET_VOICES_TEXT = (
+    "Delete all saved voice profiles and the voice data of every session? "
+    "Names already written into transcripts stay."
+)
+
+
 def forgot_notice(result) -> tuple[str, str]:
     if isinstance(result, Exception):
         return ("Can't delete voices", "Some voice data could not be deleted.")
