@@ -40,6 +40,7 @@ from .common import (
     PERM_LABELS,
     PERM_TITLES,
     PROMPT_BUTTONS,
+    ROOM_ITEM,
     Controller,
     keep_prompt_text,
     open_output_folder,
@@ -531,6 +532,11 @@ class TrayApp:
                 "Show live captions",
                 self._toggle_captions,
                 checked=lambda _i: bool(self.cfg.live_captions),
+            ),
+            Item(
+                ROOM_ITEM,
+                lambda: self.ctrl.set_room_listening(not self.cfg.detection.room_listening),
+                checked=lambda _i: bool(self.cfg.detection.room_listening),
             ),
             Item(
                 "Open live transcript",
