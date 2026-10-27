@@ -54,6 +54,18 @@ def snapshot(cfg: Config) -> dict:
     }
 
 
+def _changed(key: str, before, after) -> bool:
+    """Did the user change this value? The window returns languages in its own fixed order
+    (en, ru, he first), so the set is compared: a reorder is not an edit, and the user's own
+    spelling ("iw") and order in config.toml are left alone."""
+    if key == "languages" and isinstance(before, list) and isinstance(after, list):
+        try:
+            return set(before) != set(after)
+        except TypeError:
+            return True
+    return before != after
+
+
 def _kill(proc: subprocess.Popen) -> None:
     with contextlib.suppress(OSError):
         proc.kill()
@@ -149,5 +161,5 @@ def run_settings(cfg: Config, timeout: float = SETTINGS_TIMEOUT_S) -> dict | Non
         raise SettingsUnavailable("the helper has no settings window (rebuild it)") from e
     if state == "saved" and isinstance(reply.get("values"), dict):
         # only what the user changed: edits made to config.toml meanwhile are not reverted
-        return {k: v for k, v in reply["values"].items() if shown.get(k) != v}
+        return {k: v for k, v in reply["values"].items() if _changed(k, shown.get(k), v)}
     return None
