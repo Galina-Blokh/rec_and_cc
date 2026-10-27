@@ -135,3 +135,71 @@ def test_languages_swapped_mid_transcription_never_index_an_empty_list(tmp_path,
     assert transcriber.detect_language(audio) == ("he", 1.0)
     calls["n"] = 0
     assert transcriber._region_languages(audio, [(0.0, 0.1)]) == [("he", 1.0)]
+
+
+class _ProbeLock:
+    """Stands in for ``_lang_lock``: records whether ``_save_lock`` is free when it is taken."""
+
+    def __init__(self, ctrl: Controller, seen: list[bool]):
+        self._inner, self._ctrl, self._seen = threading.Lock(), ctrl, seen
+
+    def __enter__(self):
+        free = self._ctrl._save_lock.acquire(blocking=False)
+        if free:
+            self._ctrl._save_lock.release()
+        self._seen.append(free)
+        return self._inner.__enter__()
+
+    def __exit__(self, *a):
+        return self._inner.__exit__(*a)
+
+
+def test_reload_applies_values_under_the_save_lock(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch, '["en"]')
+    seen: list[bool] = []
+    ctrl._lang_lock = _ProbeLock(ctrl, seen)  # type: ignore[assignment]
+    path.write_text('[transcription]\nlanguages = ["ru"]\n')
+    ctrl._config_mtime = -1.0
+    ctrl._maybe_reload_config()
+    assert seen == [False]  # applying happened while a save could not run
+    assert ctrl.cfg.transcription.languages == ["ru"]
+
+
+def test_menu_click_during_reload_is_not_lost(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch, '["en"]')
+    in_load, go = threading.Event(), threading.Event()
+    real = common.load_config
+
+    def slow_load():
+        cfg = real()
+        in_load.set()
+        assert go.wait(5)
+        return cfg
+
+    monkeypatch.setattr(common, "load_config", slow_load)
+    path.write_text('[transcription]\nlanguages = ["ru"]\n')
+    ctrl._config_mtime = -1.0
+    reload_t = threading.Thread(target=ctrl._maybe_reload_config)
+    reload_t.start()
+    assert in_load.wait(5)  # the reload holds the lock, mid-way
+    ctrl.toggle_language("he")  # menu click: memory updated, save queued behind the reload
+    go.set()
+    reload_t.join(5)
+    for t in threading.enumerate():
+        if t.name == "save-config":
+            t.join(5)
+    # the click is not lost: memory and the file agree, and both hold it
+    assert ctrl.cfg.transcription.languages == ["en", "he"]
+    assert load_config(path).transcription.languages == ["en", "he"]
+
+
+def test_own_save_does_not_trigger_a_reload(tmp_path, monkeypatch):
+    ctrl, _ = _ctrl(tmp_path, monkeypatch, '["en", "ru"]')
+    ctrl._config_mtime = ctrl._mtime()
+    calls = []
+    real = common.load_config
+    monkeypatch.setattr(common, "load_config", lambda: calls.append(1) or real())
+    _toggle(ctrl, "he")
+    assert ctrl._config_mtime == ctrl._mtime()
+    ctrl._maybe_reload_config()
+    assert calls == []

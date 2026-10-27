@@ -306,6 +306,7 @@ class Controller:
         self._save_lock = threading.Lock()  # menu writes to config.toml
         self._settings_lock = threading.Lock()  # one settings window at a time
         self._lang_lock = threading.Lock()  # transcription.languages + its raw spelling
+        self._lang_gen = 0  # bumped by each menu language change (see _maybe_reload_config)
         self._summaries = None  # SummaryQueue, created on the first summary
         self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
         # global shortcut
@@ -829,30 +830,37 @@ class Controller:
     def _maybe_reload_config(self) -> None:
         """Apply edits made to config.toml by hand (detection settings, output dir, hotkey,
         languages). Under ``_save_lock`` so a menu write never interleaves with the read."""
+        hotkey = None
         with self._save_lock:
             m = self._mtime()
             if m == self._config_mtime:
                 return
             self._config_mtime = m
+            gen = self._lang_gen
             try:
                 new = load_config()
             except Exception:
                 log.exception("config.toml is invalid; keeping current settings")
                 self.post_notice("Settings not applied", "config.toml could not be parsed")
                 return
-        was_listening = self.cfg.detection.room_listening
-        for f in fields(new.detection):
-            setattr(self.cfg.detection, f.name, getattr(new.detection, f.name))
-        if self.cfg.detection.room_listening and not was_listening:  # turned on by hand
-            self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
-        self.cfg.output_dir = new.output_dir
-        tr, new_tr = self.cfg.transcription, new.transcription
-        with self._lang_lock:  # both together: save() pairs them
-            tr._raw_languages = getattr(new_tr, "_raw_languages", None)  # type: ignore[attr-defined]
-            tr.languages = new_tr.languages
-        if new.hotkey != self.cfg.hotkey:
-            self.cfg.hotkey = new.hotkey
-            self.apply_hotkey(new.hotkey)
+            # Applied under the same lock: a menu or Settings-window save never runs between
+            # "file read" and "memory updated", so it can't write half-applied values.
+            was_listening = self.cfg.detection.room_listening
+            for f in fields(new.detection):
+                setattr(self.cfg.detection, f.name, getattr(new.detection, f.name))
+            if self.cfg.detection.room_listening and not was_listening:  # turned on by hand
+                self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
+            self.cfg.output_dir = new.output_dir
+            tr, new_tr = self.cfg.transcription, new.transcription
+            with self._lang_lock:  # both together: save() pairs them
+                if gen == self._lang_gen:  # else a menu click came first: its queued save wins
+                    tr._raw_languages = getattr(new_tr, "_raw_languages", None)  # type: ignore[attr-defined]
+                    tr.languages = new_tr.languages
+            if new.hotkey != self.cfg.hotkey:
+                self.cfg.hotkey = new.hotkey
+                hotkey = new.hotkey
+        if hotkey is not None:  # re-registering the listener may block: outside the lock
+            self.apply_hotkey(hotkey)
         log.info("config reloaded from %s", CONFIG_PATH)
 
     # --- settings changed from the menu (main thread; saved on a worker thread)
@@ -868,6 +876,7 @@ class Controller:
                 langs = normalize_languages(new)
                 tr._raw_languages = new if new != langs else None  # type: ignore[attr-defined]
                 tr.languages = langs  # a new list: other threads never see it half-built
+                self._lang_gen += 1
         if new is None:
             self.post_notice("Languages", LANGUAGES_KEEP_ONE)
             return
