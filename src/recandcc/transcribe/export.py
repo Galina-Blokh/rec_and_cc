@@ -108,7 +108,7 @@ def _create_exclusive(tmp: Path) -> int:
     raise AssertionError("unreachable")
 
 
-def _write(path: Path, data: bytes) -> Path:
+def _write(path: Path, data: bytes, expected: Path | None = None) -> Path:
     """Write ``data`` to a temp file and rename it into place. The temp file is created
     owner-only (0600) and written through that same descriptor (no reopen that a scanner
     could block), with a name unique per process and thread (on Windows the output ACLs are
@@ -116,8 +116,11 @@ def _write(path: Path, data: bytes) -> Path:
     only the rename is retried. Only exception types are kept: library messages can quote the
     transcript."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    if path.parent.is_symlink():  # the folder was swapped for a link while rendering
-        raise ExportError("The session folder is a link; not writing through it")
+    parent = path.parent
+    is_junction = getattr(parent, "is_junction", lambda: False)()  # Windows junctions
+    if parent.is_symlink() or is_junction or (expected and parent.resolve() != expected):
+        # the folder (or a parent) was swapped for a link while the document was rendered
+        raise ExportError("The session folder is a link or moved; not writing through it")
     try:
         try:
             fd = _create_exclusive(tmp)
@@ -181,6 +184,7 @@ def export_docx(folder: Path, loaded=None) -> Path:
     from docx.oxml import OxmlElement
     from docx.shared import Pt
 
+    expected = Path(folder).resolve()
     data, segments = loaded or load_session(folder)
     doc = Document()
     doc.core_properties.title = _title(data)
@@ -205,7 +209,7 @@ def export_docx(folder: Path, loaded=None) -> Path:
         p.paragraph_format.space_after = Pt(6)
     buf = io.BytesIO()
     doc.save(buf)
-    return _write(Path(folder) / DOCX_NAME, buf.getvalue())
+    return _write(Path(folder) / DOCX_NAME, buf.getvalue(), expected)
 
 
 # Latin (with an accent), Cyrillic (with ё), Hebrew letters, niqqud, gershayim and geresh,
@@ -242,6 +246,7 @@ def export_pdf(folder: Path, loaded=None) -> Path:
     from fpdf import FPDF
     from fpdf.enums import WrapMode
 
+    expected = Path(folder).resolve()
     data, segments = loaded or load_session(folder)
     font = find_font()
     pdf = FPDF(format="A4")
@@ -281,7 +286,7 @@ def export_pdf(folder: Path, loaded=None) -> Path:
             para(seg.text, 11, rtl=True, gap=3)
         else:
             para(f"{label} {seg.text}", 11, gap=3)
-    return _write(Path(folder) / PDF_NAME, bytes(pdf.output()))
+    return _write(Path(folder) / PDF_NAME, bytes(pdf.output()), expected)
 
 
 def export_session(folder: Path, fmt: str = "both", skipped: list[str] | None = None) -> list[Path]:

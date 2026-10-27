@@ -487,3 +487,17 @@ def test_a_session_folder_swapped_for_a_link_is_not_written_through(tmp_path):
     with pytest.raises(export.ExportError, match="link"):
         export._write(link / "x.bin", b"data")
     assert not list(real.iterdir())
+
+
+def test_a_parent_swapped_for_a_link_during_rendering_is_refused(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("symlinks need privileges")
+    day, other = tmp_path / "day", tmp_path / "other"
+    (day / "s").mkdir(parents=True)
+    (other / "s").mkdir(parents=True)
+    expected = (day / "s").resolve()
+    day.rename(tmp_path / "day-old")
+    day.symlink_to(other)  # an ancestor became a link; the session folder itself is not one
+    with pytest.raises(export.ExportError):
+        export._write(day / "s" / "x.bin", b"data", expected)
+    assert not list((other / "s").iterdir())
