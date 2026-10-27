@@ -278,7 +278,7 @@ enabled = false              # true = summary.md with action items after each me
 
 ### Meeting summaries (opt-in)
 
-With `[summary] enabled = true` (Apple silicon), each finished transcript also gets a
+With `[summary] enabled = true`, each finished transcript also gets a
 `summary.md` in its folder: a few sentences about the meeting and an **Action items** list
 (who does what, by when), written in the meeting's main language. The default model is
 Qwen3.5 4B (4-bit, Apache-2.0), a hybrid thinking model run with thinking off: ~3.0 GB
@@ -300,8 +300,20 @@ before that, and older settings files hold it the same way, so it is replaced by
 (saved to `config.toml`, with a one-time notice) unless you also set
 `accept_qwen_research_licence = true` under `[summary]` (after a switch, set `model` back to the
 3B as well; only that line is rewritten, so comments stay). If the 3B is already downloaded and
-the new default isn't, it is kept for now, so offline summaries keep working. On Windows, or
-offline before the model is downloaded, the summary is skipped with a notice. It waits for
+the new default isn't, it is kept for now, so offline summaries keep working. On Windows (and
+Linux) there is no MLX, so the CPU runs a pinned, checksum-verified int4 ONNX build of the Qwen2.5
+1.5B Instruct through ONNX Runtime (the `onnxruntime` package the app already installs; ~1.8 GB,
+downloaded once). The default 4B and the old 1.5B both map to it, because the 4B has no CPU build;
+that mapping is logged once at INFO. That 1.5B is a smaller model, weaker than the 4B, especially
+for Hebrew and Russian and for action items. Other models are skipped there. It is much slower
+than on Apple silicon: about 25 tokens a second on an Apple M5 Max CPU. An 826-word meeting took
+about 18 seconds, and a transcript of about 9,000 words (an hour of talk) about 2.5 minutes
+(laptop CPUs may be slower). Offline before the model is downloaded, the summary is skipped with a notice. Intel Macs aren't
+supported (onnxruntime has no macOS x86_64 wheel). On Apple silicon, a broken or missing mlx-lm
+install falls back to this CPU 1.5B (logged at INFO). The CPU path peaks at about 5 GB of RAM
+while loading and about 3.2 GB while generating (measured on an Apple M-series machine), so 8 GB
+Windows laptops may struggle.
+It waits for
 the speaker labels (a slow diarization delays it), a summary cut short by quitting is redone
 at the next start (a `.summary-pending` marker in the session folder; a `.summary-source` file records a fingerprint of the transcript text the summary was made from), and after
 `recandcc name-speaker` the app redoes an existing `summary.md` with the new name once idle. Renaming a speaker in the menu, or call-app names, keeps the existing summary, whose text may still mention the old label. Old summaries are not given a fingerprint afterwards: one computed now could describe a transcript that already differs from what the summary was made from.
@@ -389,7 +401,8 @@ recognized voice or `Me` is never overridden.
 
 Audio and transcripts never leave your computer. The only network access is the one-time
 model download: Whisper (and, with summaries on, the summary model) from Hugging Face, pinned to exact repo commits
-([`revisions.py`](src/recandcc/transcribe/revisions.py); unpinned custom repos are refused
+([`revisions.py`](src/recandcc/transcribe/revisions.py), and the Windows and Linux CPU summary model
+in [`summary_cpu.py`](src/recandcc/transcribe/summary_cpu.py); unpinned custom repos are refused
 unless you opt in), and the 28 MB speaker model from the
 sherpa-onnx GitHub releases, verified by its SHA-256. After that the app works fully offline:
 models load from disk without contacting anything (tested with all network access blocked).
@@ -404,7 +417,7 @@ models load from disk without contacting anything (tested with all network acces
 | Each session's speaker voices (only with `speaker_names = true`) | `…/RecAndCC/voices/sessions/` | `%LOCALAPPDATA%\RecAndCC\voices\sessions\` |
 | Speaker-diarization model | `~/Library/Caches/RecAndCC/models/` | `%LOCALAPPDATA%\RecAndCC\Cache\models\` |
 | Whisper models (shared Hugging Face cache) | `~/.cache/huggingface/hub/models--*whisper*` | `%USERPROFILE%\.cache\huggingface\hub\` |
-| Summary model (only with summaries on) | `~/.cache/huggingface/hub/models--mlx-community--Qwen3.5-4B-MLX-4bit` (~3.0 GB) | not used |
+| Summary model (only with summaries on) | `~/.cache/huggingface/hub/models--mlx-community--Qwen3.5-4B-MLX-4bit` (~3.0 GB) | `%LOCALAPPDATA%\RecAndCC\Cache\models\onnx-community--Qwen2.5-1.5B-Instruct-*` (~1.8 GB) |
 | Older summary models: the Qwen2.5 1.5B (~0.9 GB) and 3B (~1.7 GB), used only while `model` still names one (see the summary section); otherwise safe to delete | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-1.5B-Instruct-4bit`, `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-3B-Instruct-4bit` | not used |
 | Launch at login | `~/Library/LaunchAgents/com.gblokh.recandcc.plist` | registry `HKCU\…\CurrentVersion\Run\RecAndCC` |
 

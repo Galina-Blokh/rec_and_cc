@@ -1,6 +1,7 @@
 """Local meeting summaries: ``summary.md`` (short summary + action items) next to a transcript.
 
-Opt-in (``summary.enabled``). A small instruct model runs through mlx-lm on Apple silicon,
+Opt-in (``summary.enabled``). A small instruct model runs through mlx-lm on Apple silicon
+(elsewhere on the CPU through ONNX Runtime, see summary_cpu.py and create_generator),
 pinned in revisions.py and loaded offline-first like Whisper (gpu.local_model_path); with
 ``summary.language_models`` the transcript's main spoken language picks it. Long
 transcripts are summarised map-reduce: notes per chunk, then the summary and the action list
@@ -76,9 +77,22 @@ class Generator(Protocol):
     def __call__(self, messages: Messages, max_tokens: int) -> str: ...
 
 
+class ModelGenerator(Generator, Protocol):
+    model_name: str
+
+    def close(self) -> None: ...
+
+
 def download_notice(model: str) -> str:
-    """The one-time download notice, with the size when ``model`` is a pinned one."""
-    size = MODEL_SIZES.get(model)
+    """The one-time download notice, with the size when ``model`` is a pinned one (of the
+    build this machine downloads: MLX, or the CPU one in summary_cpu)."""
+    sizes = MODEL_SIZES
+    if not mlx_lm_available():
+        from . import summary_cpu
+
+        if summary_cpu.cpu_available():
+            sizes = summary_cpu.DOWNLOAD_SIZES
+    size = sizes.get(model)
     return f"Downloading the summary model ({size + ', ' if size else ''}once)"
 
 
@@ -302,7 +316,7 @@ def summarize_session(
     def run_model(name: str) -> tuple[str, str, list[str]]:
         notice = on_download
         hook = None if notice is None else lambda: notice(name)
-        owned = MlxGenerator(name, cfg.transcription.allow_unpinned_models, hook)
+        owned = create_generator(name, cfg.transcription.allow_unpinned_models, hook, before_call)
         try:  # the real model, freed again after this session
             return run(owned)
         finally:
@@ -370,6 +384,24 @@ def mlx_lm_available() -> bool:
         and platform.machine() == "arm64"
         and importlib.util.find_spec("mlx_lm") is not None
     )
+
+
+def create_generator(
+    model: str,
+    allow_unpinned: bool = False,
+    on_download: Callable[[], None] | None = None,
+    pause: Callable[[], None] | None = None,
+) -> ModelGenerator:
+    """The summary model's generator on this machine: mlx-lm on Apple silicon, else the CPU
+    one (ONNX Runtime, summary_cpu.py, imported only here). With neither, MlxGenerator,
+    whose load() says why summaries can't run. ``pause`` goes to the CPU generator only, which
+    runs it before each token (MLX waits between model calls instead)."""
+    if not mlx_lm_available():
+        from . import summary_cpu
+
+        if summary_cpu.cpu_available():
+            return summary_cpu.CpuGenerator(model, allow_unpinned, on_download, pause)
+    return MlxGenerator(model, allow_unpinned, on_download)
 
 
 def _template_reads_thinking_flag(tokenizer: Any) -> bool:

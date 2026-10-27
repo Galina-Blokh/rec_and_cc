@@ -20,6 +20,9 @@ All notable changes to RecAndCC are documented here. The format is based on
   stored vector from SQLite (up to 100,000 segments, ~190 MB at most; larger indexes stream as
   before); it is dropped whenever vectors change, semantic is turned off, or it is unused for 15
   minutes (#4).
+- Meeting summaries on Windows and Linux: the CPU runs a pinned, checksum-verified int4 ONNX
+  build of Qwen2.5 1.5B Instruct through ONNX Runtime (the default Qwen3.5 4B has no CPU
+  build and maps to it), downloaded once (~1.8 GB); Apple silicon keeps MLX (#4).
 - RecAndCC is licensed under the Apache License 2.0 (`LICENSE`, `NOTICE`); completes #17.
 - Per-language summary models (`summary.language_models`, default `{}`): e.g. Hebrew
   meetings summarised by the pinned, Apache-2.0 `mlx-community/Qwen3.5-4B-MLX-4bit`
