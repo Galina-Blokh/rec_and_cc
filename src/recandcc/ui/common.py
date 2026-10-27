@@ -45,7 +45,7 @@ from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind, discard_session
 from ..recorder import make_private_dir
 from ..retention import purge_old_audio, purge_transcribed_audio
-from ..settings_window import SettingsUnavailable, run_settings
+from ..settings_window import SettingsUnavailable, close_settings, run_settings
 
 if TYPE_CHECKING:
     from ..transcribe.live import LiveTranscriber
@@ -651,12 +651,14 @@ class Controller:
                     return
                 updates = validate_settings(raw)
                 with self._save_lock:
+                    edited = self._mtime() != self._config_mtime  # hand edit not reloaded yet
                     try:
                         save_settings(updates, CONFIG_PATH)
                     except FileNotFoundError:
                         self.cfg.save(CONFIG_PATH)
                         save_settings(updates, CONFIG_PATH)
-                    self._config_mtime = self._mtime()
+                    if not edited:
+                        self._config_mtime = self._mtime()  # our own write: nothing to reload
                 self.events.put(("settings_saved", updates))
             except SettingsUnavailable as e:
                 log.info("native settings unavailable: %s", e)
@@ -759,6 +761,7 @@ class Controller:
                 return
             self._shut = True
         log.info("shutting down")
+        close_settings()
         with self._hotkey_lock:
             hk, self._hotkey = self._hotkey, None
         if hk is not None:

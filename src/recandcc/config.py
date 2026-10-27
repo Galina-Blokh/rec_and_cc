@@ -235,8 +235,9 @@ SETTINGS_KEYS = {
 
 def validate_settings(values) -> dict:
     """Check values sent by the settings window (untrusted JSON) and return them cleaned:
-    ``mode`` as a Mode, ``output_dir`` as an expanded Path, ``languages`` normalised (at least
-    one), the rest as bools. Unknown names are ignored. Raises ValueError on a bad value."""
+    ``mode`` as a Mode, ``output_dir`` as an expanded Path, ``languages`` normalised
+    ([] = any language), the rest as bools. Unknown names are ignored. Raises ValueError on a
+    bad value."""
     if not isinstance(values, dict):
         raise ValueError("settings must be an object")
     out: dict = {}
@@ -252,10 +253,10 @@ def validate_settings(values) -> dict:
         elif name == "languages":
             if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
                 raise ValueError("languages must be a list of codes")
-            langs = [language_code(v) for v in value]
+            langs = list(dict.fromkeys(language_code(v) for v in value))  # [] = any language
             clean = normalize_languages(langs)
-            if not clean or len(clean) != len(set(langs)):
-                raise ValueError("languages: pick at least one valid language")
+            if len(clean) != len(langs):
+                raise ValueError("languages: unknown language code")
             out[name] = clean
         elif isinstance(value, bool):
             out[name] = value

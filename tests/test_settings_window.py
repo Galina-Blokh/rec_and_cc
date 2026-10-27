@@ -137,7 +137,6 @@ def test_invalid_values_are_rejected(tmp_path, monkeypatch):
     [
         {"mode": "x"},
         {"output_dir": ""},
-        {"languages": []},
         {"languages": ["xx"]},
         {"languages": "en"},
         {"keep_audio": "yes"},
@@ -146,6 +145,11 @@ def test_invalid_values_are_rejected(tmp_path, monkeypatch):
 def test_validate_rejects(bad):
     with pytest.raises(ValueError):
         validate_settings(bad)
+
+
+def test_validate_allows_any_language_and_dedupes():
+    assert validate_settings({"languages": []}) == {"languages": []}
+    assert validate_settings({"languages": ["iw", "he", "en"]}) == {"languages": ["he", "en"]}
 
 
 def test_validate_ignores_unknown_and_cleans():
@@ -219,3 +223,30 @@ def test_snapshot_has_no_content(tmp_path):
         "hotkey",
     }
     json.dumps(snap)
+
+
+@mac_only
+def test_hand_edit_made_before_saving_is_still_reloaded(tmp_path, monkeypatch):
+    ctrl, path = make_ctrl(tmp_path, monkeypatch)
+    ctrl._config_mtime = -1.0  # the file changed on disk since the last reload
+    fake_helper(
+        tmp_path, monkeypatch, reply({"settings": "saved", "values": {"keep_audio": False}})
+    )
+    ctrl.open_settings_async()
+    assert next_event(ctrl, {"settings_saved", "notice"})[0] == "settings_saved"
+    assert ctrl._config_mtime == -1.0
+
+
+@mac_only
+def test_quitting_closes_an_open_window(tmp_path, monkeypatch):
+    ctrl, _ = make_ctrl(tmp_path, monkeypatch)
+    fake_helper(tmp_path, monkeypatch, "import time\ntime.sleep(60)\n")
+    ctrl.open_settings_async()
+    deadline = time.monotonic() + 5
+    while settings_window._proc is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert settings_window._proc is not None
+    settings_window.close_settings()
+    assert next_event(ctrl, {"settings_fallback", "settings_saved", "notice"})[0] == (
+        "settings_fallback"
+    )  # no answer from the closed helper; the app is quitting anyway

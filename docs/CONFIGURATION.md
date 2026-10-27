@@ -73,6 +73,9 @@ loss of accuracy in the final transcript too. Sessions recorded with `live = fal
 left untranscribed when the app quit, and `recandcc transcribe` always use the full
 post-session pass.
 
+Saving from the **Settings…** window or the **Languages** menu rewrites `config.toml`
+through a TOML library: values are kept, comments are not.
+
 ## Example
 
 ```toml

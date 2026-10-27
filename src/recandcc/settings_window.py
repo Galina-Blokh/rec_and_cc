@@ -17,6 +17,7 @@ import logging
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 from .config import Config
@@ -25,6 +26,10 @@ log = logging.getLogger(__name__)
 
 # The window waits for the owner: generous, but never hangs forever.
 SETTINGS_TIMEOUT_S = 15 * 60.0
+
+
+_proc_lock = threading.Lock()
+_proc: subprocess.Popen | None = None  # the open window's helper, so quitting can close it
 
 
 class SettingsUnavailable(RuntimeError):
@@ -45,6 +50,14 @@ def snapshot(cfg: Config) -> dict:
     }
 
 
+def close_settings() -> None:
+    """Close the settings window if one is open (the app is quitting)."""
+    with _proc_lock:
+        proc = _proc
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+
+
 def run_settings(cfg: Config, timeout: float = SETTINGS_TIMEOUT_S) -> dict | None:
     """Show the window and wait for it to close (blocks: call off the UI thread).
 
@@ -61,22 +74,34 @@ def run_settings(cfg: Config, timeout: float = SETTINGS_TIMEOUT_S) -> dict | Non
     with tempfile.TemporaryDirectory(prefix="rcc-settings-") as tmp:
         snap = Path(tmp) / "settings.json"
         snap.write_text(json.dumps(snapshot(cfg)), encoding="utf-8")
+        global _proc
         try:
-            result = subprocess.run(  # noqa: S603 - fixed argv: our own helper, no shell
+            proc = subprocess.Popen(  # noqa: S603 - fixed argv: our own helper, no shell
                 [str(helper), "settings", "--config", str(snap)],
                 stdin=subprocess.DEVNULL,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
             )
-        except (OSError, subprocess.TimeoutExpired) as e:
+        except OSError as e:
             raise SettingsUnavailable(f"settings window failed: {e}") from e
-    lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
+        with _proc_lock:
+            _proc = proc
+        try:
+            stdout, _err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            proc.kill()
+            proc.communicate()
+            raise SettingsUnavailable("settings window timed out") from e
+        finally:
+            with _proc_lock:
+                _proc = None
+    lines = [ln for ln in stdout.splitlines() if ln.strip()]
     try:
         reply = json.loads(lines[-1])
         state = reply["settings"]
     except (IndexError, ValueError, KeyError, TypeError) as e:
-        log.info("rcc-audiotap settings gave no answer (exit %s)", result.returncode)
+        log.info("rcc-audiotap settings gave no answer (exit %s)", proc.returncode)
         raise SettingsUnavailable("the helper has no settings window (rebuild it)") from e
     if state == "saved" and isinstance(reply.get("values"), dict):
         return reply["values"]

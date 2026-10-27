@@ -44,7 +44,7 @@ struct SettingsModel {
         hotkey = json["hotkey"] as? String ?? ""
     }
 
-    var canSave: Bool { !outputDir.isEmpty && !(languages.isEmpty && otherLanguages.isEmpty) }
+    var canSave: Bool { !outputDir.isEmpty }  // no language checked = any language
 
     var result: [String: Any] {
         let picked = settingsLanguages.map { $0.code }.filter { languages.contains($0) }
@@ -81,7 +81,7 @@ struct SettingsView: View {
                 Button("Choose…") { chooseFolder() }
             }
             HStack {
-                Text("Languages")
+                Text("Languages (none = any)")
                 ForEach(settingsLanguages, id: \.code) { lang in
                     Toggle(lang.label, isOn: Binding(
                         get: { model.languages.contains(lang.code) },
