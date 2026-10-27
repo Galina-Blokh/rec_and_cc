@@ -17,3 +17,4 @@ eval-results.json
 # build report output (scripts/report)
 .report/
 report-data.json
+build/
