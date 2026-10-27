@@ -30,3 +30,15 @@ def _private_voices_dir(tmp_path_factory, monkeypatch):
     from recandcc.transcribe import voices
 
     monkeypatch.setattr(voices, "VOICES_DIR", tmp_path_factory.mktemp("voices"))
+
+
+@pytest.fixture(autouse=True)
+def _private_config(tmp_path, monkeypatch):
+    """No test reads or writes the user's real config.toml, even through a bare
+    `Config().save()` / `load_config()` or a module that imported CONFIG_PATH by name."""
+    import sys
+
+    path = tmp_path / "private-config" / "config.toml"
+    for name, module in list(sys.modules.items()):
+        if name.split(".")[0] == "recandcc" and hasattr(module, "CONFIG_PATH"):
+            monkeypatch.setattr(module, "CONFIG_PATH", path)
