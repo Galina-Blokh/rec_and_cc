@@ -144,6 +144,11 @@ while I decide.*
   (faster-whisper backend), **then** it is split at that word boundary and each part gets its
   own speaker label, with flicker under about 1 s / 3 words ignored, the text kept word for
   word, `Me` never split, and segments without word timings (MLX backend) unchanged.
+- **Given** `diarize_overlap = true` and a speaker change without a pause, or two speakers
+  at once, **then** the turn
+  boundary follows the change (segmentation model), overlapped speech gets the dominant
+  speaker, and that segment has `"overlap": true` in `transcript.json` (only there); without
+  the segmentation model (off, offline or broken), fixed ~2 s windows as before.
 
 ### US-13 Readable transcripts in private folders
 - **Then** each session is saved under `<output_dir>/<date>/<time>_<app>/` with
@@ -156,7 +161,7 @@ while I decide.*
 - **Given** the models are on disk, **when** all network access is blocked, **then** a
   session records and transcribes end to end.
 - **Then** models download once: every offered Whisper model (`tiny` to `large-v3-turbo`,
-  both backends) pinned to an exact revision, the speaker model verified by SHA-256 (a bad
+  both backends) pinned to an exact revision, the speaker and segmentation models verified by SHA-256 (a bad
   checksum is rejected). A custom repo without a pin is refused unless
   `allow_unpinned_models = true`.
 - **Then** RecAndCC uploads nothing itself. The default output folder may still be synced

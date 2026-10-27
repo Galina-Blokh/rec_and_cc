@@ -125,15 +125,22 @@ def test_outputs_carry_the_split_segments(tmp_path):
     assert all("words" not in s for s in data["segments"])
 
 
-def test_json_without_words_is_byte_identical_to_asdict(tmp_path):
-    from dataclasses import asdict
-
-    segs = [Segment(0.0, 1.5, "héllo", "Me", "en"), Segment(1.5, 3.0, "привет", "Others", "ru")]
+def test_json_never_has_words_and_has_overlap_only_when_true(tmp_path):
+    segs = [
+        Segment(0.0, 1.5, "héllo", "Me", "en", words=[(0.0, 1.5, " héllo")]),
+        Segment(1.5, 3.0, "привет", "Others", "ru", overlap=True, words=[(1.5, 3.0, " привет")]),
+    ]
     session = make_session(tmp_path)
     got = json.loads(format_json(session, segs, 3.0, "m"))["segments"]
-    want = [{k: v for k, v in asdict(s).items() if k != "words"} for s in segs]
-    assert got == want
-    assert list(got[0]) == ["start", "end", "text", "speaker", "language"]
+    assert list(got[0]) == ["start", "end", "text", "speaker", "language"]  # as before #96/#97
+    assert got[1] == {
+        "start": 1.5,
+        "end": 3.0,
+        "text": "привет",
+        "speaker": "Others",
+        "language": "ru",
+        "overlap": True,
+    }
 
 
 class _W:
