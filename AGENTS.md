@@ -61,8 +61,8 @@ native/macos/AudioTap/      SwiftPM: rcc-audiotap (monitor/capture/permissions/h
 
 ```bash
 uv sync                                   # deps (incl. dev) into .venv
-uv run pytest -q                          # fast suite: no models, no network; coverage floor
-uv run pytest -m slow --no-cov           # + real Whisper / diarization integration tests
+uv run pytest -q                          # fast suite: no models, no network; coverage report
+uv run pytest -m slow                     # + real Whisper / diarization integration tests
 uv run ruff check . && uv run ruff format --check src tests
 uv run ruff format src tests              # apply formatting
 ./native/macos/build.sh                   # rebuild bin/rcc-audiotap after Swift helper changes

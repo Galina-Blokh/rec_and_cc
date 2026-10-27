@@ -39,4 +39,5 @@ jobs:
         if: runner.os == 'macOS'
         run: ./native/macos/build.sh
       - name: Unit tests (fast; model-free)
-        run: uv run --locked pytest -v
+        # Coverage floor (#16) is enforced here, not in pyproject, so local subset runs don't fail on it.
+        run: uv run --locked pytest -v --cov-fail-under=70

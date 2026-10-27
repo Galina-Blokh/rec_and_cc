@@ -76,7 +76,4 @@ omit = [
     "*/recandcc/ui/toast_mac.py",
 ]
 
-[tool.coverage.report]
-# Floor for the fast suite (issue #16). Raise it as tests are added; never lower it to merge.
-fail_under = 70
 
