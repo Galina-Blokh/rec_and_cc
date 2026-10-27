@@ -19,3 +19,5 @@ eval-results.json
 report-data.json
 # PyInstaller spike output
 /build/
+# make_synthetic_evalset.py renders these in a temp dir; guard against stray copies
+*.aiff
