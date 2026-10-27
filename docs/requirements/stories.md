@@ -359,10 +359,11 @@ its transcript, so that I know what was decided and who does what without reread
   skipped with an INFO log line and a one-time **Summary skipped** notice.
 - **When** I run `recandcc summarize <session_dir>`, **then** that session's `summary.md` is
   (re)written, also with `summary.enabled = false`.
-- **Given** `summary.language_models = { he = "mlx-community/gemma-4-e4b-it-4bit" }` (or
-  the E2B model), **when** a meeting's main spoken language (most speech time) is Hebrew,
+- **Given** `summary.language_models = { he = "mlx-community/Qwen3.5-4B-MLX-4bit" }`
+  (Apache-2.0), **when** a meeting's main spoken language (most speech time) is Hebrew,
   **then** that pinned model writes its summary in Hebrew, loaded only then and freed
-  afterwards (one summary model in memory at a time), with its thought block stripped; other
+  afterwards (one summary model in memory at a time), with thinking off and any thought
+  block stripped; other
   meetings, and everyone with the default `{}`, keep `summary.model`. If the routed model
   can't be downloaded or loaded, `summary.model` writes that summary instead. The same
   measure (most speech time) picks the summary's language and headings.

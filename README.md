@@ -279,25 +279,19 @@ the speaker labels (a slow diarization delays it), a summary cut short by quitti
 at the next start (a `.summary-pending` marker in the session folder), and after
 `recandcc name-speaker` the app redoes an existing `summary.md` with the new name once idle.
 
-Qwen2.5 summarises Hebrew badly. Route Hebrew meetings to Gemma 4 instead: on
-our short test meetings, Gemma 4 E4B got the facts right in English, Russian and Hebrew, and
-the lighter E2B got the Hebrew facts right with one action item assigned to the wrong
-person. Meetings in other languages keep the default:
+Qwen2.5 summarises Hebrew badly. Route Hebrew meetings to Qwen3.5 4B (Apache-2.0) instead.
+On our self-written test meetings it wrote fluent Hebrew summaries and got most owners and
+deadlines right, but not all: check them against the transcript. Meetings in other
+languages keep the default:
 
 ```toml
 [summary.language_models]
-he = "mlx-community/gemma-4-e4b-it-4bit"   # ~5.1 GB once, ~5.1 GB peak RAM while it runs
-# he = "mlx-community/gemma-4-e2b-it-4bit" # lighter (~3.6 GB), nearly as good
+he = "mlx-community/Qwen3.5-4B-MLX-4bit"   # ~3.0 GB once, ~3 GB RAM while it runs
 ```
 
 The language with the most speech time picks the model (and the summary's language). The
 model is downloaded once (pinned) on the first meeting that needs it, and freed after each
-summary; if it can't be downloaded or loaded, the default model writes that summary. Gemma
-thinks before it answers, so these summaries are slower (an answer whose thought runs out of
-tokens is redone without thinking, roughly doubling its time); on an 8 GB Mac use E2B.
-Gemma 4 is under the [Gemma Terms of Use](https://ai.google.dev/gemma/terms): you download
-the weights from Hugging Face yourself (RecAndCC doesn't redistribute them), and only if you
-opt in through `summary.language_models`.
+summary; if it can't be downloaded or loaded, the default model writes that summary.
 
 ## Command line
 
@@ -382,7 +376,7 @@ models load from disk without contacting anything (tested with all network acces
 | Each session's speaker voices (only with `speaker_names = true`) | `…/RecAndCC/voices/sessions/` | `%LOCALAPPDATA%\RecAndCC\voices\sessions\` |
 | Speaker-diarization model | `~/Library/Caches/RecAndCC/models/` | `%LOCALAPPDATA%\RecAndCC\Cache\models\` |
 | Whisper models (shared Hugging Face cache) | `~/.cache/huggingface/hub/models--*whisper*` | `%USERPROFILE%\.cache\huggingface\hub\` |
-| Summary model (only with summaries on) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-3B-Instruct-4bit` (and `…--gemma-4-*` with `summary.language_models`) | not used |
+| Summary model (only with summaries on) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-3B-Instruct-4bit` (and `…--Qwen3.5-4B-MLX-4bit` with `summary.language_models`) | not used |
 | Launch at login | `~/Library/LaunchAgents/com.gblokh.recandcc.plist` | registry `HKCU\…\CurrentVersion\Run\RecAndCC` |
 
 The folders RecAndCC creates for recordings (the transcripts folder, each day and each

@@ -41,14 +41,11 @@ PREFILL_STEP = 512  # prompt tokens per prefill step (lower peak memory than mlx
 # Download sizes of the offered (pinned) summary models, for the one-time download notice.
 MODEL_SIZES = {
     "mlx-community/Qwen2.5-3B-Instruct-4bit": "~1.7 GB",
-    "mlx-community/gemma-4-e4b-it-4bit": "~5.1 GB",
-    "mlx-community/gemma-4-e2b-it-4bit": "~3.6 GB",
+    "mlx-community/Qwen3.5-4B-MLX-4bit": "~3.0 GB",
 }
-# A thinking model (mlx-lm's tokenizer.has_thinking, e.g. Gemma 4) runs with thinking on, as
-# measured for Hebrew in #6 (with it off, Gemma 4 E2B's summaries lost facts). Its thought
-# block gets this many extra tokens, and only the text after the block is kept.
-THINKING_TOKENS = 1600
-CHANNEL_START, CHANNEL_END = "<|channel>thought", "<channel|>"  # Gemma 4's thought block
+# Thought-block markers of thinking models (Qwen3/3.5; Gemma 4's channel). Summaries run
+# with thinking off; a thought block that still shows up is cut from every answer.
+THOUGHT_MARKERS = (("<think>", "</think>"), ("<|channel>thought", "<channel|>"))
 CUT_OFF = "the summary model ran out of tokens while thinking"
 MAX_ROUNDS = 3  # reduce rounds before the notes are cut to fit
 LANGUAGE_NAMES = {"en": "English", "ru": "Russian", "he": "Hebrew"}
@@ -115,13 +112,14 @@ def download_notice(model: str) -> str:
     return f"Downloading the summary model ({size + ', ' if size else ''}once)"
 
 
-def strip_thinking(text: str, start: str = CHANNEL_START, end: str = CHANNEL_END) -> str:
-    """The answer after a thought block (``start``...``end``). Raises SummaryUnavailable if
-    the thought never ended: no answer, so no summary.md that says "none"."""
-    if end in text:
-        return text.rsplit(end, 1)[1].strip()
-    if start in text:
-        raise SummaryUnavailable(CUT_OFF)
+def strip_thinking(text: str, markers=THOUGHT_MARKERS) -> str:
+    """The answer after any thought block (``(start, end)`` in ``markers``). Raises
+    SummaryUnavailable if a thought never ended: no answer, so no summary.md saying "none"."""
+    for start, end in markers:
+        if end in text:
+            text = text.rsplit(end, 1)[1]
+        elif start in text:
+            raise SummaryUnavailable(CUT_OFF)
     return text.strip()
 
 
@@ -403,23 +401,19 @@ class MlxGenerator:
                     return "".join(out)
                 out.append(step.text)
 
-        # mlx-lm's own detection (TokenizerWrapper.has_thinking; load() warns if it is missing,
-        # since a thinking model would then get no extra budget and no strip). False for the
-        # default Qwen2.5, whose prompt and budget stay unchanged.
-        # Missing or non-bool has_thinking = not a thinking model (load() warns when missing).
-        # Gemma 4's markers are still stripped, so a thought never lands in summary.md.
-        if getattr(tokenizer, "has_thinking", False) is not True:
-            return strip_thinking(generate(None, max_tokens))
-        start = getattr(tokenizer, "think_start", None) or CHANNEL_START
-        end = getattr(tokenizer, "think_end", None) or CHANNEL_END
-        try:  # room for the thought block before the answer
-            return strip_thinking(generate(True, max_tokens + THINKING_TOKENS), start, end)
-        except SummaryUnavailable:  # the thought ran out of tokens: once more without it
-            log.info("summary model %s: thought cut off; retrying without", self.model_name)
-            return strip_thinking(generate(False, max_tokens), start, end)
+        # A thinking model (mlx-lm's TokenizerWrapper.has_thinking, e.g. Qwen3.5) answers with
+        # thinking off: mlx-lm would turn it on by default. Missing or non-bool has_thinking =
+        # not a thinking model (load() warns when missing): the template's defaults, so the
+        # default Qwen2.5's prompt is unchanged. Thought markers are stripped either way.
+        thinking = getattr(tokenizer, "has_thinking", False) is True
+        markers = THOUGHT_MARKERS
+        start, end = getattr(tokenizer, "think_start", None), getattr(tokenizer, "think_end", None)
+        if thinking and isinstance(start, str) and isinstance(end, str):
+            markers = (*markers, (start, end))
+        return strip_thinking(generate(False if thinking else None, max_tokens), markers)
 
     def close(self) -> None:
-        """Free the model, so its 2-5 GB don't stay resident between sessions."""
+        """Free the model, so its 2-3 GB don't stay resident between sessions."""
         if self._model is None:
             return
         self._model = self._tokenizer = None

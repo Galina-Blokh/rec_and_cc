@@ -85,7 +85,7 @@ def test_overlapping_speech_counts_once_per_language():
     assert summary.main_language(segs) == "ru"  # 9 s vs 8 s
 
 
-GEMMA = "mlx-community/gemma-4-e4b-it-4bit"
+QWEN35 = "mlx-community/Qwen3.5-4B-MLX-4bit"
 
 
 def test_unpinned_language_model_is_ignored_unless_allowed(tmp_path, caplog):
@@ -118,10 +118,10 @@ def test_mixed_meeting_uses_one_language_for_model_prompt_and_headings(tmp_path,
 
     monkeypatch.setattr(summary, "MlxGenerator", Gen)
     cfg = Config()
-    cfg.summary.language_models = {"he": GEMMA}
+    cfg.summary.language_models = {"he": QWEN35}
     segs = [Segment(0, 30, "כן", "Me", "he"), seg("a much longer English sentence", t=40)]
     text = summary.summarize_session(make_session(tmp_path, segs), cfg).read_text("utf-8")
-    assert seen[0] == GEMMA and "Always answer in Hebrew" in seen[1]
+    assert seen[0] == QWEN35 and "Always answer in Hebrew" in seen[1]
     assert text.startswith("# סיכום")
 
 
@@ -135,22 +135,22 @@ def test_routed_model_unavailable_falls_back_to_the_default(tmp_path, monkeypatc
             made.append(model)
 
         def __call__(self, messages, max_tokens):
-            if self.model == GEMMA:  # offline, or an mlx-lm without Gemma 4
+            if self.model == QWEN35:  # offline, or an mlx-lm without Qwen3.5
                 raise summary.ModelUnavailable("the summary model is not on disk")
             return super().__call__(messages, max_tokens)
 
     monkeypatch.setattr(summary, "MlxGenerator", Gen)
     cfg = Config()
-    cfg.summary.language_models = {"he": GEMMA}
+    cfg.summary.language_models = {"he": QWEN35}
     d = make_session(tmp_path, [Segment(0, 20, SPOKEN, "Me", "he")])
     with caplog.at_level(logging.DEBUG, logger="recandcc"):
         text = summary.summarize_session(d, cfg).read_text("utf-8")
-    assert made == [GEMMA, DEFAULT_SUMMARY_MODEL]
+    assert made == [QWEN35, DEFAULT_SUMMARY_MODEL]
     assert "by Qwen2.5-3B-Instruct-4bit;" in text
-    assert f"summary model {GEMMA} unavailable; using {DEFAULT_SUMMARY_MODEL}" in caplog.text
+    assert f"summary model {QWEN35} unavailable; using {DEFAULT_SUMMARY_MODEL}" in caplog.text
     assert SPOKEN not in caplog.text
     cfg.summary.language_models = {}  # the default itself unavailable: skipped as before
-    monkeypatch.setattr(cfg.summary, "model", GEMMA)
+    monkeypatch.setattr(cfg.summary, "model", QWEN35)
     with pytest.raises(summary.ModelUnavailable):
         summary.summarize_session(d, cfg)
 
@@ -159,8 +159,8 @@ def test_routed_model_unavailable_falls_back_to_the_default(tmp_path, monkeypatc
     ("models", "lang", "expected"),
     [
         ({}, "he", DEFAULT_SUMMARY_MODEL),  # no routing: the old behaviour
-        ({"he": GEMMA}, "he", GEMMA),
-        ({"he": GEMMA}, "en", DEFAULT_SUMMARY_MODEL),
+        ({"he": QWEN35}, "he", QWEN35),
+        ({"he": QWEN35}, "en", DEFAULT_SUMMARY_MODEL),
     ],
 )
 def test_summary_model_is_routed_by_the_main_language(models, lang, expected):
@@ -185,39 +185,43 @@ def test_session_loads_only_the_routed_model_and_frees_it(tmp_path, monkeypatch)
 
     monkeypatch.setattr(summary, "MlxGenerator", Gen)
     cfg = Config()
-    cfg.summary.language_models = {"he": GEMMA}
+    cfg.summary.language_models = {"he": QWEN35}
     he = make_session(tmp_path / "he", [Segment(0, 20, "שלום לכולם", "Me", "he")])
     text = summary.summarize_session(he, cfg).read_text("utf-8")
     en = make_session(tmp_path / "en", [seg("hello")])
     summary.summarize_session(en, cfg)
-    assert [(g.model, g.closed) for g in made] == [(GEMMA, True), (DEFAULT_SUMMARY_MODEL, True)]
-    assert "by gemma-4-e4b-it-4bit;" in text
+    assert [(g.model, g.closed) for g in made] == [(QWEN35, True), (DEFAULT_SUMMARY_MODEL, True)]
+    assert "by Qwen3.5-4B-MLX-4bit;" in text
 
 
 @pytest.mark.parametrize(
     ("raw", "answer"),
     [
         (
-            "<|channel>thought\nThe user wants a summary...<channel|>Anna fixes signing.",
+            "<think>\nThe user wants a summary...\n</think>\n\nAnna fixes signing.",
             "Anna fixes signing.",
         ),
-        ("<|channel>thought\na<channel|>x<|channel>thought\nb<channel|>\n Final. ", "Final."),
+        ("<think>\n\n</think>\n\n- Me: book the room", "- Me: book the room"),  # thinking off
+        ("<|channel>thought\nplan<channel|>Final.", "Final."),  # Gemma 4's channel
         ("  plain answer\n", "plain answer"),
     ],
 )
-def test_gemma_thinking_is_stripped(raw, answer):
+def test_thought_blocks_are_stripped(raw, answer):
     assert summary.strip_thinking(raw) == answer
 
 
-def _fake_mlx_lm(monkeypatch, text: str | list[str], seen: list, thinking: bool | None):
-    """Fake mlx_lm that streams ``text`` (or each of a list of texts, one per generation);
-    returns a fake tokenizer (no real model loads)."""
-    texts = [text] if isinstance(text, str) else list(text)
+@pytest.mark.parametrize("raw", ["<think>\nstill thinking", "<|channel>thought\nstill"])
+def test_an_unfinished_thought_gives_no_answer(raw):
+    with pytest.raises(summary.SummaryUnavailable, match="ran out of tokens"):
+        summary.strip_thinking(raw)
+
+
+def _fake_mlx_lm(monkeypatch, text: str, seen: list, thinking: bool | None):
+    """Fake mlx_lm that streams ``text``; returns a fake tokenizer (no real model loads)."""
 
     def stream_generate(model, tokenizer, prompt, max_tokens, **kw):
         seen.append(max_tokens)
-        t = texts.pop(0) if len(texts) > 1 else texts[0]
-        return iter(types.SimpleNamespace(text=c) for c in [t[:5], t[5:]])
+        return iter(types.SimpleNamespace(text=c) for c in [text[:5], text[5:]])
 
     def apply_chat_template(messages, add_generation_prompt, **kw):
         seen.append(kw)
@@ -226,8 +230,8 @@ def _fake_mlx_lm(monkeypatch, text: str | list[str], seen: list, thinking: bool 
     tok = types.SimpleNamespace(apply_chat_template=apply_chat_template)
     if thinking is not None:  # None: an mlx-lm without has_thinking
         tok.has_thinking = thinking
-    if thinking:  # what mlx-lm detects for Gemma 4
-        tok.think_start, tok.think_end = "<|channel>thought", "<channel|>"
+    if thinking:  # what mlx-lm detects for Qwen3.5
+        tok.think_start, tok.think_end = "<think>", "</think>"
     sample = types.SimpleNamespace(make_logits_processors=lambda **kw: [])
     monkeypatch.setitem(
         sys.modules, "mlx_lm", types.SimpleNamespace(stream_generate=stream_generate)
@@ -236,49 +240,28 @@ def _fake_mlx_lm(monkeypatch, text: str | list[str], seen: list, thinking: bool 
     return tok
 
 
-RAW_GEMMA = "<|channel>thought\nplan<channel|>Answer."
-
-
 @pytest.mark.parametrize(
-    ("model", "thinking", "seen", "answer"),
+    ("model", "thinking", "raw", "seen"),
     [
-        (GEMMA, True, [{"enable_thinking": True}, 400 + summary.THINKING_TOKENS], "Answer."),
-        (DEFAULT_SUMMARY_MODEL, False, [{}, 400], "Answer."),  # Qwen2.5: prompt as before
-        # no has_thinking (another mlx-lm): no budget, but a thought never reaches summary.md
-        (GEMMA, None, [{}, 400], "Answer."),
+        # a thinking model (Qwen3.5) answers with thinking off, within max_tokens
+        (QWEN35, True, "<think>\n\n</think>\n\nAnswer.", [{"enable_thinking": False}, 400]),
+        (DEFAULT_SUMMARY_MODEL, False, "Answer.", [{}, 400]),  # Qwen2.5: prompt as before
+        # no has_thinking (another mlx-lm): template defaults, but no thought reaches summary.md
+        (QWEN35, None, "<think>\nplan\n</think>\nAnswer.", [{}, 400]),
+        (QWEN35, None, "<|channel>thought\nplan<channel|>Answer.", [{}, 400]),
     ],
 )
-def test_generator_gives_a_thinking_model_room_and_strips_it(
-    monkeypatch, model, thinking, seen, answer
-):
+def test_generator_turns_thinking_off_and_strips_thoughts(monkeypatch, model, thinking, raw, seen):
     calls: list = []
     gen = summary.MlxGenerator(model)
-    gen._model, gen._tokenizer = object(), _fake_mlx_lm(monkeypatch, RAW_GEMMA, calls, thinking)
-    assert gen([{"role": "user", "content": "x"}], 400) == answer
+    gen._model, gen._tokenizer = object(), _fake_mlx_lm(monkeypatch, raw, calls, thinking)
+    assert gen([{"role": "user", "content": "x"}], 400) == "Answer."
     assert calls == seen
-
-
-def test_a_cut_off_thought_is_retried_once_without_thinking(monkeypatch, caplog):
-    cut = f"<|channel>thought\n{SPOKEN} and still thinking"
-    budget = 400 + summary.THINKING_TOKENS
-    for second, expected in [("Plain answer.", "Plain answer."), (cut, None)]:
-        calls: list = []
-        gen = summary.MlxGenerator(GEMMA)
-        gen._model, gen._tokenizer = object(), _fake_mlx_lm(monkeypatch, [cut, second], calls, True)
-        with caplog.at_level(logging.DEBUG, logger="recandcc"):
-            if expected is None:  # cut off again: no answer at all
-                with pytest.raises(summary.SummaryUnavailable, match="ran out of tokens"):
-                    gen([{"role": "user", "content": "x"}], 400)
-            else:
-                assert gen([{"role": "user", "content": "x"}], 400) == expected
-        assert calls == [{"enable_thinking": True}, budget, {"enable_thinking": False}, 400]
-    assert "thought cut off; retrying without" in caplog.text
-    assert SPOKEN not in caplog.text
 
 
 def test_thought_cut_off_writes_no_summary(tmp_path, caplog):
     def cut_off(messages, max_tokens):
-        return summary.strip_thinking(f"<|channel>thought\n{SPOKEN} and more")
+        return summary.strip_thinking(f"<think>\n{SPOKEN} and more")
 
     d = make_session(tmp_path, [seg(SPOKEN)])
     notices = []
@@ -293,13 +276,13 @@ def test_thought_cut_off_writes_no_summary(tmp_path, caplog):
 
 def test_a_model_this_mlx_lm_cannot_load_is_skipped(monkeypatch):
     def load(path):
-        raise ValueError("Model type gemma4 not supported.")
+        raise ValueError("Model type qwen3_5 not supported.")
 
     monkeypatch.setattr(summary, "mlx_lm_available", lambda: True)
     monkeypatch.setattr(gpu, "local_model_path", lambda *a: "/cache/m")
     monkeypatch.setitem(sys.modules, "mlx_lm", types.SimpleNamespace(load=load))
     with pytest.raises(summary.SummaryUnavailable, match="can't load"):
-        summary.MlxGenerator(GEMMA).load()
+        summary.MlxGenerator(QWEN35).load()
 
 
 def test_offered_summary_models_are_pinned_and_documented():
@@ -312,18 +295,18 @@ def test_offered_summary_models_are_pinned_and_documented():
         assert re.fullmatch(r"[0-9a-f]{40}", revisions.HF_REVISIONS[model]), model
         assert model in summary.MODEL_SIZES
         assert all(model.split("/")[1] in d for d in docs), model
-    assert summary.download_notice(GEMMA) == "Downloading the summary model (~5.1 GB, once)"
+    assert summary.download_notice(QWEN35) == "Downloading the summary model (~3.0 GB, once)"
     assert summary.download_notice("me/custom") == "Downloading the summary model (once)"
 
 
 def test_load_config_reads_summary_language_models(tmp_path):
     path = tmp_path / "config.toml"
-    path.write_text(f'[summary]\nlanguage_models = {{ iw = "{GEMMA}", xx = "m" }}\n', "utf-8")
-    assert load_config(path).summary.language_models == {"he": GEMMA}
+    path.write_text(f'[summary]\nlanguage_models = {{ iw = "{QWEN35}", xx = "m" }}\n', "utf-8")
+    assert load_config(path).summary.language_models == {"he": QWEN35}
     assert Config().summary.language_models == {}
     cfg = load_config(path)
     cfg.save(tmp_path / "saved.toml")  # round-trips
-    assert load_config(tmp_path / "saved.toml").summary.language_models == {"he": GEMMA}
+    assert load_config(tmp_path / "saved.toml").summary.language_models == {"he": QWEN35}
 
 
 def test_chunks_stay_within_the_limit_and_keep_everything():
