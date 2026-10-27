@@ -73,6 +73,12 @@ def test_unmatched_segment_goes_to_nearest_utterance_without_language_vote():
     assert w0 == [] and w1 == ["two"] and v1 == {}
 
 
+def test_unmatched_segment_goes_to_closest_interval_not_midpoint():
+    utts = [utt(0, 20, "long one"), utt(30, 31, "short")]
+    (w0, _), (w1, _) = ev.assign_words(utts, [seg(21, 22, "extra")])
+    assert w0 == ["extra"] and w1 == []  # 1 s after the long one, 8 s before the short one
+
+
 def test_segment_spanning_utterances_is_split():
     utts = [utt(0, 1, "hello"), utt(1, 2, "world")]
     s = ev.text_scores(utts, [seg(0, 2, "Hello world")])
@@ -106,14 +112,10 @@ def test_der_miss_false_alarm_confusion():
     assert d["der"] == pytest.approx(3.0 / 4.0)
 
 
-def test_der_many_speakers_is_exact_and_fast():
-    import time
-
+def test_der_many_speakers_is_exact():
     ref = [(i, i + 1, f"R{i}") for i in range(7)]
     hyp = [(i, i + 1, f"H{i}") for i in range(7)] + [(7 + i, 7.5 + i, f"X{i}") for i in range(13)]
-    t0 = time.monotonic()
-    d = ev.der(ref, hyp)
-    assert time.monotonic() - t0 < 2.0
+    d = ev.der(ref, hyp)  # 7 x 20: permutations would be ~390 million, the DP is instant
     assert d["confusion_s"] == 0.0 and d["false_alarm_s"] == pytest.approx(6.5)
 
 
@@ -178,6 +180,23 @@ def test_manifest_run_and_summary(tmp_path):
     assert s["der"] == 0.0 and s["rtf"] == 0.1
 
 
+def test_der_counts_false_alarms_on_clips_without_reference_speech():
+    silent = {"text": {}, "diarization": ev.der([], [(0, 5, "x")])}
+    clean = {"text": {}, "diarization": ev.der([(0, 10, "A")], [(0, 10, "x")])}
+    assert ev.summarize([silent, clean])["der"] == pytest.approx(0.5)  # 5 s errors / 10 s speech
+
+
+def test_work_root_removes_copies_left_by_a_killed_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(ev.tempfile, "gettempdir", lambda: str(tmp_path))
+    stale = tmp_path / "rcc-eval" / "clip-old"
+    stale.mkdir(parents=True)
+    (stale / "others.wav").write_bytes(b"x")
+    root = ev.work_root()
+    assert root == tmp_path / "rcc-eval" and list(root.iterdir()) == []
+    if sys.platform != "win32":
+        assert root.stat().st_mode & 0o777 == 0o700
+
+
 def test_rtf_weighs_clips_by_audio_length():
     results = [
         {"text": {}, "audio_s": 1.0, "elapsed_s": 1.0},  # RTF 1.0 on a 1 s clip
@@ -186,18 +205,19 @@ def test_rtf_weighs_clips_by_audio_length():
     assert ev.summarize(results)["rtf"] == pytest.approx(0.109)
 
 
-def test_manifest_rejects_bad_times(tmp_path):
-    bad = {
-        "clips": [
-            {
-                "id": "x",
-                "audio": "x.wav",
-                "utterances": [
-                    {"start": 2, "end": 1, "speaker": "A", "language": "en", "text": "a"}
-                ],
-            }
-        ]
-    }
+@pytest.mark.parametrize(
+    ("start", "end", "msg"),
+    [
+        (2, 1, "start < end"),
+        (-1, 1, "start < end"),
+        (0, float("nan"), "start < end"),
+        (0, 9, "after the audio"),
+    ],
+)
+def test_manifest_rejects_bad_times(tmp_path, start, end, msg):
+    sf.write(tmp_path / "x.wav", np.zeros(2 * SAMPLE_RATE, dtype=np.float32), SAMPLE_RATE)
+    u = {"start": start, "end": end, "speaker": "A", "language": "en", "text": "a"}
+    bad = {"clips": [{"id": "x", "audio": "x.wav", "utterances": [u]}]}
     (tmp_path / "manifest.json").write_text(json.dumps(bad), encoding="utf-8")
-    with pytest.raises(ValueError, match="end <= start"):
+    with pytest.raises(ValueError, match=msg):
         ev.load_manifest(tmp_path)

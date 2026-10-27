@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 import shutil
 import sys
 import tempfile
@@ -35,8 +37,10 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 
 from recandcc.models import Segment, SessionInfo, Track, TriggerKind
+from recandcc.recorder import make_private_dir
 
 FRAME_S = 0.01
 
@@ -63,9 +67,16 @@ def load_manifest(root: Path) -> list[Clip]:
     clips = []
     for c in data["clips"]:
         utts = [Utterance(**u) for u in c["utterances"]]
-        if any(u.end <= u.start for u in utts):
-            raise ValueError(f"clip {c['id']}: utterance with end <= start")
-        clips.append(Clip(c["id"], root / c["audio"], Track(c.get("track", "others")), utts))
+        audio = root / c["audio"]
+        duration = sf.info(str(audio)).duration
+        for u in utts:
+            if not (math.isfinite(u.start) and math.isfinite(u.end) and 0 <= u.start < u.end):
+                raise ValueError(f"clip {c['id']}: utterance times must be 0 <= start < end")
+            if u.end > duration + 0.05:
+                raise ValueError(
+                    f"clip {c['id']}: utterance ends after the audio ({duration:.2f} s)"
+                )
+        clips.append(Clip(c["id"], audio, Track(c.get("track", "others")), utts))
     return clips
 
 
@@ -91,6 +102,10 @@ def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
     return max(0.0, min(a1, b1) - max(a0, b0))
 
 
+def _gap(u: Utterance, s: Segment) -> float:
+    return max(u.start - s.end, s.start - u.end, 0.0)
+
+
 def assign_words(utts: list[Utterance], segs: list[Segment]) -> list[tuple[list[str], dict]]:
     """Per utterance: the hypothesis words that belong to it and its language votes.
 
@@ -107,8 +122,7 @@ def assign_words(utts: list[Utterance], segs: list[Segment]) -> list[tuple[list[
         if not utts:
             break
         if total == 0.0:
-            mid = (s.start + s.end) / 2
-            near = min(range(len(utts)), key=lambda i: abs((utts[i].start + utts[i].end) / 2 - mid))
+            near = min(range(len(utts)), key=lambda i: _gap(utts[i], s))
             words[near] += [(s.start, k, w) for k, w in enumerate(ws)]
             continue
         cum, lo = 0.0, 0
@@ -198,13 +212,25 @@ def der(ref: list[tuple[float, float, str]], hyp: list[tuple[float, float, str]]
         "false_alarm_s": false_alarm * FRAME_S,
         "confusion_s": round(confusion * FRAME_S, 2),
         "speech_s": round(total * FRAME_S, 2),
+        "error_s": round(err * FRAME_S, 2),
     }
 
 
 # ----------------------------------------------------------------------------- pipeline
-def run_clip(clip: Clip, transcriber, diarizer) -> dict:
+def work_root() -> Path:
+    """Owner-only folder for the temporary clip copies; copies left by a killed run are removed."""
+    root = Path(tempfile.gettempdir()) / "rcc-eval"
+    make_private_dir(root)
+    if os.name == "posix":
+        root.chmod(0o700)  # also if it already existed; fails if someone else owns it
+    for stale in root.iterdir():
+        shutil.rmtree(stale, ignore_errors=True)
+    return root
+
+
+def run_clip(clip: Clip, transcriber, diarizer, root: Path | None = None) -> dict:
     """Transcribe (and for "others", diarize) a temporary copy of the clip."""
-    with tempfile.TemporaryDirectory(prefix="rcc-eval-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="clip-", dir=root) as tmp:
         session = SessionInfo(
             id=f"eval-{clip.id}",
             directory=Path(tmp),
@@ -247,7 +273,7 @@ def summarize(results: list[dict]) -> dict:
     }
     d = [r["diarization"] for r in results if "diarization" in r]
     speech = sum(x["speech_s"] for x in d)
-    errors = sum(x["der"] * x["speech_s"] for x in d)
+    errors = sum(x["error_s"] for x in d)  # false alarms on clips without reference speech count
     timed = [r for r in results if r.get("audio_s") and r.get("elapsed_s") is not None]
     audio = sum(r["audio_s"] for r in timed)
     return {
@@ -279,7 +305,8 @@ def main(argv: list[str] | None = None) -> int:
     transcriber = Transcriber(cfg)
     diarizer = None if args.no_diarize else Diarizer()
     try:
-        results = [run_clip(c, transcriber, diarizer) for c in clips]
+        root = work_root()
+        results = [run_clip(c, transcriber, diarizer, root) for c in clips]
     finally:
         transcriber.close()
         if diarizer is not None:

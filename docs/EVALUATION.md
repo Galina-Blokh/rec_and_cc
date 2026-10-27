@@ -47,7 +47,10 @@ example `~/RecAndCC-eval`). Back it up privately, for example on an encrypted di
 
 - `track` is `others` (system audio; diarized and scored for DER) or `me` (microphone; no DER).
 - `speaker` names are any strings; only their grouping matters.
-- Times are seconds from the start of the clip. Overlapping utterances are allowed.
+- Times are seconds from the start of the clip, within the audio. Overlapping utterances are
+  allowed. Without word timestamps, though, a segment over simultaneous speech is split between
+  the utterances in start-time order, so WER on crosstalk is approximate. DER handles overlap
+  exactly.
 
 Aim for 10–20 minutes overall: en and ru, code-switching within a call, a few accents, 2–6
 speakers, and speaker-phone echo. Hebrew goes in later (#6).
@@ -65,8 +68,9 @@ uv run python scripts/eval.py ~/RecAndCC-eval --no-diarize          # skip DER
 ```
 
 Each clip is copied to a temporary session folder and run through the session pipeline
-(`Transcriber.transcribe_session`). The diarizer runs on the same copy, and the copy is
-deleted afterwards. The script prints scores only, never transcript text. It writes the full
+(`Transcriber.transcribe_session`), and the diarizer runs on the same copy. The copies go in
+an owner-only `rcc-eval` folder in the system temp directory: each is deleted after its clip,
+and any left over by a killed run are deleted when the next run starts. The script prints scores only, never transcript text. It writes the full
 results, including the counts for each clip, to `eval-results.json`. Like the app, it runs
 offline once the models are downloaded.
 
