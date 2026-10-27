@@ -20,13 +20,26 @@ def story_ids() -> list[str]:
     return re.findall(r"^### (US-\d+) ", (REQ / "stories.md").read_text("utf-8"), re.M)
 
 
-def trace_rows() -> dict[str, list[str]]:
-    rows = {}
+REF = re.compile(r"test_\w+\.py::(\*|test_\w+)")
+
+
+def split_refs(cell: str) -> tuple[list[str], list[str]]:
+    """(well-formed, malformed) backticked entries of a Tests cell."""
+    refs = re.findall(r"`([^`]+)`", cell)
+    return [r for r in refs if REF.fullmatch(r)], [r for r in refs if not REF.fullmatch(r)]
+
+
+def table_cells() -> dict[str, str]:
+    cells = {}
     for line in (REQ / "traceability.md").read_text("utf-8").splitlines():
         m = re.match(r"\| (US-\d+) \|[^|]*\|(.*)\|$", line)
         if m:
-            rows[m[1]] = re.findall(r"`(test_\w+\.py::[\w*]+)`", m[2])
-    return rows
+            cells[m[1]] = m[2]
+    return cells
+
+
+def trace_rows() -> dict[str, list[str]]:
+    return {story: split_refs(cell)[0] for story, cell in table_cells().items()}
 
 
 @cache
@@ -56,6 +69,19 @@ def test_every_story_is_traced_and_ids_are_unique():
     rows = trace_rows()
     assert sorted(rows) == sorted(ids)
     assert all(rows[i] for i in ids)
+
+
+def test_split_refs_rejects_malformed_entries():
+    good, bad = split_refs(
+        "`test_a.py::test_x`, `test_a.py::*`, `test_a.py::test-x`, `sub/test_b.py::t`"
+    )
+    assert good == ["test_a.py::test_x", "test_a.py::*"]
+    assert bad == ["test_a.py::test-x", "sub/test_b.py::t"]
+
+
+def test_every_table_reference_is_well_formed():
+    bad = {story: split_refs(cell)[1] for story, cell in table_cells().items()}
+    assert not any(bad.values()), {s: b for s, b in bad.items() if b}
 
 
 def test_traced_tests_exist():

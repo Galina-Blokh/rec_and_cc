@@ -4,6 +4,7 @@ import stat
 import sys
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -351,3 +352,17 @@ def test_make_private_dir_creates_parents_and_keeps_existing(tmp_path):
     deep = shared / "a" / "b"
     make_private_dir(deep)
     assert _mode(shared / "a") == 0o700 and _mode(deep) == 0o700
+
+
+def test_make_private_dir_rejects_a_file_in_the_way(tmp_path):
+    blocker = tmp_path / "out"
+    blocker.write_text("not a folder")
+    with pytest.raises(FileExistsError):
+        make_private_dir(blocker)
+
+
+def test_make_private_dir_stops_at_a_missing_root(monkeypatch, tmp_path):
+    # A missing drive / UNC share: the root is its own parent and never becomes a directory.
+    monkeypatch.setattr(Path, "is_dir", lambda self: False)
+    with pytest.raises(FileNotFoundError):
+        make_private_dir(tmp_path / "out")

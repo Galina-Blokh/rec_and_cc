@@ -43,12 +43,16 @@ def make_private_dir(path: Path) -> None:
     """
     if path.is_dir():
         return
+    if path.parent == path:  # a missing drive / UNC share root: nothing left to create
+        raise FileNotFoundError(f"{path} does not exist")
     if not path.parent.is_dir():
         make_private_dir(path.parent)
     try:
         path.mkdir(mode=PRIVATE_DIR_MODE)
     except FileExistsError:
-        return  # created concurrently
+        if path.is_dir():
+            return  # created concurrently
+        raise  # a file (or dangling symlink) is in the way
     path.chmod(PRIVATE_DIR_MODE)
 
 

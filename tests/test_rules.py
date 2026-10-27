@@ -1,5 +1,7 @@
 """Stories: US-01, US-04, US-16, US-17."""
 
+import sys
+
 from recandcc.config import DetectionConfig
 from recandcc.engine import classify, effective_mode, group_activity, match_pattern
 from recandcc.models import AudioProcess, Mode, TriggerKind
@@ -109,3 +111,27 @@ def test_autostart_prefers_app_bundle(tmp_path, monkeypatch):
     monkeypatch.setattr(autostart.Path, "home", lambda: tmp_path)
     if not (autostart.Path("/Applications") / "RecAndCC.app").exists():
         assert autostart.mac_program_arguments() == [sys.executable, "-m", "recandcc", "run"]
+
+
+def test_open_output_folder_creates_it_private_then_opens(monkeypatch, tmp_path):
+    from recandcc.ui import common
+
+    opened = []
+    monkeypatch.setattr(common, "open_path", opened.append)
+    out = tmp_path / "out" / "transcripts"
+    assert common.open_output_folder(out) is None
+    assert opened == [out]
+    if sys.platform != "win32":
+        assert (out.stat().st_mode & 0o777) == 0o700
+
+
+def test_open_output_folder_reports_instead_of_opening_a_file(monkeypatch, tmp_path):
+    from recandcc.ui import common
+
+    opened = []
+    monkeypatch.setattr(common, "open_path", opened.append)
+    out = tmp_path / "out"
+    out.write_text("not a folder")
+    err = common.open_output_folder(out)
+    assert err and str(out) in err
+    assert opened == []

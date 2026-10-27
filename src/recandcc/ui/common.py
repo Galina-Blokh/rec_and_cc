@@ -31,6 +31,7 @@ from .. import hotkey as hotkey_mod
 from ..config import CONFIG_PATH, LOG_DIR, Config, load_config
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind
+from ..recorder import make_private_dir
 from ..retention import purge_old_audio
 
 log = logging.getLogger(__name__)
@@ -85,6 +86,18 @@ def open_path(path: Path | str, text_editor: bool = False) -> None:
             subprocess.Popen(["xdg-open", path])
     except Exception:
         log.exception("could not open %s", path)
+
+
+def open_output_folder(path: Path) -> str | None:
+    """Open the transcripts folder, creating it owner-only (like the session folders) if it is
+    missing. Returns an error message for the UI instead of raising if it can't be created."""
+    try:
+        make_private_dir(path)
+    except OSError as e:
+        log.warning("could not create transcripts folder %s: %s", path, e)
+        return f"{path}: {e.strerror or e}"
+    open_path(path)
+    return None
 
 
 def recent_transcripts(output_dir: Path, n: int = RECENT_COUNT) -> list[Path]:

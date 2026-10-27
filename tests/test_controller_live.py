@@ -49,6 +49,15 @@ def make_ctrl(tmp_path, live=True, sync=True):
     return ctrl, sources, tr
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _warm_vad():
+    # Load Silero VAD (cached per process) before any timed wait: a cold load under CPU
+    # contention used to eat the event timeout and make these tests flaky.
+    from faster_whisper.vad import get_vad_model
+
+    get_vad_model()
+
+
 def events_until(ctrl, kind, timeout=10.0):
     out, deadline = [], time.monotonic() + timeout
     while time.monotonic() < deadline:
