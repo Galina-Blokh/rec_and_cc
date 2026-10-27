@@ -8,6 +8,7 @@
 
 import AppKit
 import ApplicationServices
+import Darwin
 import Foundation
 
 func runAXStatus() -> Never {
@@ -15,7 +16,13 @@ func runAXStatus() -> Never {
     exit(0)
 }
 
+/// No AX call is issued after this moment (the current app's budget is used up).
+private var axDeadline = Date.distantFuture
+
 private func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+    if Date() > axDeadline { return nil }
+    // Every element gets its own short timeout: it is not inherited from the system-wide one.
+    AXUIElementSetMessagingTimeout(element, 0.5)
     var value: CFTypeRef?
     return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
 }
@@ -41,10 +48,18 @@ private let perAppSeconds = 2.0
 private let browserIDs = [
     "chrome", "safari", "firefox", "edgemac", "brave", "thebrowser", "opera", "vivaldi",
 ]
+// Host-like or exact product titles only (no bare "meet - "): a Meet tab is titled
+// "Meet - abc-defg-hij".
 private let callPageWords = [
-    "google meet", "meet.google.com", "meet - ", "meet \u{2013} ", "meet \u{2014} ",
-    "microsoft teams", "teams.microsoft", "zoom.us", "zoom meeting", "zoom workplace",
+    "google meet", "meet.google.com", "microsoft teams", "teams.microsoft.com",
+    "teams.live.com", "zoom.us", "zoom meeting", "zoom workplace",
 ]
+private let meetTitlePattern = "^meet [-\u{2013}\u{2014}] [a-z]{3}-[a-z]{4}-[a-z]{3}"
+
+private func isCallPage(_ title: String) -> Bool {
+    callPageWords.contains(where: { title.contains($0) })
+        || title.range(of: meetTitlePattern, options: .regularExpression) != nil
+}
 // Native apps that are read at all: Zoom and (new) Teams. Everything else (Slack, Discord,
 // WhatsApp, FaceTime, Telegram, ...) is skipped, however it is labelled.
 private let nativeCallIDs = ["us.zoom", "com.microsoft.teams"]
@@ -147,24 +162,28 @@ func runParticipants(pids: [pid_t], matches: [String], parentPID: pid_t?) -> Nev
     // and a separate time budget per app.
     AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
     var names: [String] = []
+    var callWindows: [AXUIElement] = []
     for app in apps {
-        let walker = Walker()
         let root = AXUIElementCreateApplication(app.processIdentifier)
-        // The system-wide timeout is not inherited by application elements: set it on each.
-        AXUIElementSetMessagingTimeout(root, 0.5)
         let id = (app.bundleIdentifier ?? "").lowercased()
+        axDeadline = Date().addingTimeInterval(perAppSeconds)  // each app has its own budget
         if browserIDs.contains(where: { id.contains($0) }) {
             let windows = (attribute(root, kAXWindowsAttribute) as? [AXUIElement]) ?? []
-            for window in windows {
-                let title = text(window, kAXTitleAttribute).lowercased()
-                if callPageWords.contains(where: { title.contains($0) }) {
-                    AXUIElementSetMessagingTimeout(window, 0.5)
-                    walker.find(window, depth: 0)
-                }
+            for window in windows where isCallPage(text(window, kAXTitleAttribute).lowercased()) {
+                callWindows.append(window)
             }
         } else if nativeCallIDs.contains(where: { id.contains($0) }) {
+            let walker = Walker()
             walker.find(root, depth: 0)
+            names += walker.names
         }
+    }
+    // Fail closed: with two call windows open (two meetings, or a call and a look-alike) it is
+    // unclear whose list this is, so browsers contribute nothing.
+    if callWindows.count == 1 {
+        axDeadline = Date().addingTimeInterval(perAppSeconds)
+        let walker = Walker()
+        walker.find(callWindows[0], depth: 0)
         names += walker.names
     }
     printJSON(["trusted": true, "names": names])

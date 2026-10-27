@@ -141,6 +141,11 @@ while I decide.*
   with noisy audio, **then** the number of speakers is estimated per session instead of fixed
   by a threshold, within `min_speakers` / `max_speakers` if set, and an hour still
   diarizes in seconds.
+- **Given** `diarize_overlap = true` and a speaker change without a pause, or two speakers
+  at once, **then** the turn
+  boundary follows the change (segmentation model), overlapped speech gets the dominant
+  speaker, and that segment has `"overlap": true` in `transcript.json` (only there); without
+  the segmentation model (off, offline or broken), fixed ~2 s windows as before.
 
 ### US-13 Readable transcripts in private folders
 - **Then** each session is saved under `<output_dir>/<date>/<time>_<app>/` with
@@ -153,7 +158,7 @@ while I decide.*
 - **Given** the models are on disk, **when** all network access is blocked, **then** a
   session records and transcribes end to end.
 - **Then** models download once: every offered Whisper model (`tiny` to `large-v3-turbo`,
-  both backends) pinned to an exact revision, the speaker model verified by SHA-256 (a bad
+  both backends) pinned to an exact revision, the speaker and segmentation models verified by SHA-256 (a bad
   checksum is rejected). A custom repo without a pin is refused unless
   `allow_unpinned_models = true`.
 - **Then** RecAndCC uploads nothing itself. The default output folder may still be synced
@@ -210,7 +215,8 @@ while I decide.*
   background at a pinned revision, and en/ru regions by the default model; **given** it
   can't be loaded, **then** Hebrew falls back to the default model with a log warning and a
   one-time notice, and the load is retried after 5 minutes.
-- **Not yet:** a Hebrew evaluation set and WER (#6).
+- **Not yet:** a Hebrew evaluation set and WER (#6); `tests/test_hebrew_integration.py`
+  covers he/en/ru switching, RTL outputs and a two-speaker dialogue on synthetic `say` audio.
 - **Not yet:** the Windows (Tk) captions only right-justify Hebrew lines; Tk does no bidi
   reordering, so the label stays left of the Hebrew text and the glyph order is unverified
   on real hardware (#6).
@@ -225,7 +231,7 @@ open transcripts one by one.*
   speaker and a snippet; choosing one opens its transcript.
 - **Given** English or Russian text, **then** matching ignores case and diacritics and
   matches word prefixes (`бюдж` finds `бюджет`).
-- **Given** 100+ sessions, **then** a search returns in < 200 ms.
+- **Given** 100+ sessions, **then** a search returns in < 200 ms (`test_search_latency.py`).
 - **When** a transcript is final, **then** it is indexed in the background; a changed
   transcript is re-indexed and a deleted or discarded session leaves the index.
 - **Then** the index is local and owner-only, outside `output_dir` (never synced), and logs

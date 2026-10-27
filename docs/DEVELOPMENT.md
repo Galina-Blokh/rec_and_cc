@@ -44,7 +44,7 @@ src/recandcc/
   autostart.py cli.py logging_setup.py
 native/macos/AudioTap/          SwiftPM: rcc-audiotap (monitor/capture/permissions/hotkey) + RecAndCC launcher
 tests/                          pytest suite
-scripts/                        dev tools (captions_demo.py, eval.py)
+scripts/                        dev tools (captions_demo.py, eval.py, pyinstaller_spike.py)
 docs/                           this documentation
 ```
 
@@ -97,11 +97,16 @@ scripts/review_lanes.sh /tmp/pr.diff security                # one lane
 
 ```bash
 uv run pytest                    # fast suite (~11 s): no models, no network; coverage report
-uv run pytest -m slow            # + real Whisper integration test (en/ru speech made with `say`)
+uv run pytest -m slow            # + real Whisper integration tests (en/ru/he speech made with `say`)
 RECANDCC_TEST_MODEL=large-v3-turbo uv run pytest -m slow   # same with the production model
 uv run ruff check . && uv run ruff format --check src tests
 uv run pyright                   # type check src/ (basic mode; CI runs it in the lint job)
 ```
+
+The en/ru slow tests download missing models once. `test_hebrew_integration.py` never
+downloads: it skips unless the Whisper model, the `base` language-ID model and the speaker
+model are cached and the `say` voices Carmit, Samantha and Milena are installed; its ivrit.ai
+routing test also needs the pinned ivrit.ai model in the cache.
 
 - **Engine tests** use a fake monitor, fake recorder and fake clock, so detection scenarios
   (debounce, ask/always/ignore/timeout, stop conditions) run in milliseconds.
@@ -200,3 +205,5 @@ Anthropic list prices (the table is in `collect.py`).
   other's internals. Platform code is imported lazily through `create_*()` factories.
 - Never block a real-time audio thread or the UI main thread. Use queues and worker threads.
 - Logging goes through `logging` (`recandcc.*` loggers), never `print`, outside `cli.py`.
+
+Packaging spike (ADR 0011, follow-up 3): `uv run python scripts/pyinstaller_spike.py` (macOS only) builds an unsigned PyInstaller bundle into the gitignored `build/pyinstaller-spike/` and prints size and start-up timings; it never touches `RecAndCC.app`.

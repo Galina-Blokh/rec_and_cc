@@ -179,12 +179,17 @@ class ParticipantSampler:
         if proc is not None and proc.poll() is None:
             with contextlib.suppress(OSError):
                 proc.kill()
-            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-                proc.wait(timeout=2.0)  # gone before stop() returns
 
     def stop(self) -> list[str]:
-        """Stop sampling and return every name seen, in order of first appearance."""
+        """Stop sampling, wait for the killed helper and the thread (capped), and return every
+        stable name seen, in order of first appearance. Call it after ``signal()`` and after
+        whatever must not wait for the helper (the recorder flushes its audio first)."""
         self.signal()
+        with self._lock:
+            proc = self._proc
+        if proc is not None:
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                proc.wait(timeout=2.0)  # reaped: no helper outlives the session
         if self._thread.is_alive() and self._thread is not threading.current_thread():
             self._thread.join(timeout=STOP_JOIN_S)
         with self._lock:
@@ -209,12 +214,15 @@ class ParticipantSampler:
             if raw is None:
                 continue
             current = clean_names(raw)[:MAX_NAMES]
-            # Only names seen in two samples in a row count: a list that flickers by (another
-            # panel, a half-drawn list) is not stored. An empty read (panel closed) keeps them.
+            # Only names seen in two samples in a row are stored (a list that flickers by, like
+            # another panel or a half-drawn list, is not), and stored names are kept.
             stable = [n for n in current if n.casefold() in {p.casefold() for p in previous}]
-            if stable:
-                with self._lock:
-                    self._names = stable
+            with self._lock:  # accumulated: names that scroll out of view are kept
+                known = {n.casefold() for n in self._names}
+                for n in stable:
+                    if len(self._names) < MAX_NAMES and n.casefold() not in known:
+                        self._names.append(n)
+                        known.add(n.casefold())
             previous = current or previous
 
 

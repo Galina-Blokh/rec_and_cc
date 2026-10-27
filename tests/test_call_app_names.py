@@ -34,12 +34,12 @@ TARGET = AppTarget(("us.zoom",), (123,))
 NAME = "Zelda Quuxington"  # a fake participant name, must never reach a log
 
 
-@pytest.fixture(autouse=True)
-def private_app_data(tmp_path, monkeypatch):
-    """Never touch the real config.toml or voices folder of whoever runs the tests."""
-    monkeypatch.setattr(voices, "VOICES_DIR", tmp_path / "app" / "voices")
-    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "app" / "config.toml")
-    monkeypatch.setattr(common, "CONFIG_PATH", tmp_path / "app" / "config.toml")
+def wait_for(condition, seconds=5.0):
+    """Poll instead of sleeping a fixed time."""
+    deadline = time.monotonic() + seconds
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert condition()
 
 
 def on_cfg(**kw) -> Config:
@@ -120,6 +120,25 @@ def test_only_names_stable_over_two_samples_count():
     assert got.wait(5)
     # "Noise" and the first "Cleo" flickered; an empty read (panel closed) keeps the last result
     assert s.stop() == ["Anna", "Cleo"]
+
+
+def test_names_that_scroll_out_of_view_are_kept():
+    seen = iter([["Ann", "Bob", "Cy"]] * 2 + [["Ann", "Cy"]] * 2)
+    got = threading.Event()
+
+    def read(_t):
+        try:
+            return next(seen)
+        except StopIteration:
+            got.set()
+            return None
+
+    s = participants.ParticipantSampler(
+        TARGET, trusted=lambda: True, read=read, interval=0.01, first_after=0
+    )
+    s.start()
+    assert got.wait(5)
+    assert s.stop() == ["Ann", "Bob", "Cy"]
 
 
 def test_a_helper_starting_after_stop_is_killed():
@@ -235,8 +254,18 @@ def test_helper_walk_is_limited_to_call_windows_and_has_budgets():
     code = swift_sources()["Accessibility.swift"]
     assert "browserIDs" in code and "callPageWords" in code  # browsers: call windows only
     assert "AXUIElementCreateSystemWide()" in code and "perAppSeconds" in code
-    assert "AXUIElementSetMessagingTimeout(root" in code  # app elements don't inherit it
     assert "startedByRecAndCC" in code  # defense in depth for `participants`
+    assert "import Darwin" in code
+    # every AX read has its own timeout and stops once the app's budget is used up
+    assert "if Date() > axDeadline" in code
+    assert code.index("AXUIElementSetMessagingTimeout(element") < code.index(
+        "AXUIElementCopyAttributeValue"
+    )
+    # two call windows: fail closed; and no bare "meet - " page word
+    assert "callWindows.count == 1" in code
+    page_words = code[code.index("let callPageWords") : code.index("let meetTitlePattern")]
+    assert "meet - " not in page_words and "meet.google.com" in page_words
+    assert "teams.microsoft.com" in page_words and '"zoom"' not in page_words
 
 
 def _recorder(tmp_path, cfg):
@@ -260,7 +289,7 @@ def test_recorder_keeps_names_in_the_private_store_not_the_session(mac, tmp_path
     )
     rec = _recorder(tmp_path, on_cfg())
     s = rec.start(TriggerKind.CALL, "zoom.us", target=TARGET)
-    time.sleep(0.3)
+    wait_for(lambda: rec._sampler is not None and rec._sampler._names)
     assert rec.stop() is not None
     assert voices.read_session_names(s.id) == ["Anna"]
     # the session folder may sync to a cloud: no name in it
@@ -274,7 +303,9 @@ def test_recorder_without_the_option_has_no_sampler(mac, tmp_path):
     rec.stop()
 
 
-def test_stop_signals_the_sampler_and_joins_it_outside_the_lock(mac, tmp_path, monkeypatch):
+def test_stop_signals_first_and_reaps_after_capture_stopped_outside_the_lock(
+    mac, tmp_path, monkeypatch
+):
     order = []
 
     class Fake:
@@ -282,14 +313,23 @@ def test_stop_signals_the_sampler_and_joins_it_outside_the_lock(mac, tmp_path, m
             order.append("signal")
 
         def stop(self):
-            order.append(("join", rec._op_lock.locked()))
+            order.append(("reap", rec._op_lock.locked()))
             return []
 
+    real_stop = FakeSource.stop
+
+    def stop_source(self):
+        order.append("capture stopped")
+        return real_stop(self)
+
+    monkeypatch.setattr(FakeSource, "stop", stop_source)
     monkeypatch.setattr(participants, "start_sampler", lambda cfg, target: Fake())
     rec = _recorder(tmp_path, on_cfg())
     rec.start(TriggerKind.CALL, "zoom.us", target=TARGET)
     rec.stop()
-    assert order == ["signal", ("join", False)]
+    assert order[0] == "signal"  # only sets the flag and kills: nothing waits before capture
+    assert order[-1] == ("reap", False)  # waiting happens last, outside the lock
+    assert order.count("capture stopped") == 2 and "capture stopped" not in order[-1:]
 
 
 # -- assignment ---------------------------------------------------------------------------------
@@ -401,7 +441,7 @@ def test_stop_kills_an_in_flight_helper(tmp_path, monkeypatch):
     monkeypatch.setattr("recandcc.native.find_helper", lambda *_: slow)
     s = participants.ParticipantSampler(TARGET, trusted=lambda: True, interval=60, first_after=0)
     s.start()
-    time.sleep(0.5)  # the helper is running
+    wait_for(lambda: s._proc is not None)  # the helper is running
     assert s._proc is not None and s._proc.poll() is None
     started = time.monotonic()
     assert s.stop() == []
