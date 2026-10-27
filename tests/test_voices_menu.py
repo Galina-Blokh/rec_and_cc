@@ -148,9 +148,9 @@ def test_forget_waits_for_a_running_naming(tmp_path, monkeypatch):
     assert started.wait(5)
     ctrl.forget_voices_async()
     assert spy.waiting.wait(5)  # forget is queued on NAMING_LOCK behind the naming
-    assert ctrl.events.empty() and voices.read_session_voices(
-        "s1"
-    )  # ...and has deleted nothing yet
+    # ...and has deleted nothing yet
+    assert ctrl.events.empty()
+    assert voices.read_session_voices("s1")
     release.set()
     assert ctrl.events.get(timeout=5)[0] == "named"
     assert ctrl.events.get(timeout=5) == ("forgot", 1)

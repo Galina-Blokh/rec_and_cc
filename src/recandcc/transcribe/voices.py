@@ -609,15 +609,20 @@ def _name_speaker(directory: Path, label: str, name: str, voices_dir: Path | Non
     session = SessionInfo.load(directory)
     data = json.loads((directory / JSON_NAME).read_text(encoding="utf-8"))
     segments = [Segment(**s) for s in data["segments"]]
+    session_id = session.id
     found = next((s.speaker for s in segments if _key(s.speaker) == _key(label)), None)
+    done = False  # the transcript already says `name` (a kill hit between its two steps)
     if found is None:
-        raise ValueError("no such speaker in this transcript; see `recandcc speakers`")
+        held = [k for k in read_session_voices(session_id, voices_dir) if _key(k) == _key(label)]
+        if held and any(_key(s.speaker) == _key(name) for s in segments):
+            found, done = held[0], True
+        else:
+            raise ValueError("no such speaker in this transcript; see `recandcc speakers`")
     label = found
     if label == ME:
         raise ValueError(f'"{ME}" is your microphone track and is never renamed')
-    if any(_key(s.speaker) == _key(name) and s.speaker != label for s in segments):
+    if not done and any(_key(s.speaker) == _key(name) and s.speaker != label for s in segments):
         raise ValueError(f"{name!r} is already another speaker of this session")
-    session_id = session.id
 
     def locate():  # the stored voice of `label` (or, on a retry, already of `name`)
         stored = read_session_voices(session_id, voices_dir)
@@ -637,11 +642,12 @@ def _name_speaker(directory: Path, label: str, name: str, voices_dir: Path | Non
         before = locate()[0]
     # The transcript goes first: if it can't be written (cloud folder, Windows lock) nothing
     # in the voice store has changed and the speaker is still nameable.
-    renamed = label != name
-    if renamed:
-        named = [replace(s, speaker=name) if s.speaker == label else s for s in segments]
-        write_outputs(session, named, data["duration"], data["model"])
+    renamed = label != name and not done
+    snapshot: dict[Path, dict | None] = {}  # profile files before the store step
     try:
+        if renamed:  # inside the try: a partial write (md, json done, srt failed) is reverted too
+            named = [replace(s, speaker=name) if s.speaker == label else s for s in segments]
+            write_outputs(session, named, data["duration"], data["model"])
         with _file_lock(voices_dir):  # the voice store only
             stored, folded_as, key = locate()  # again: another process may have deleted it
             entry, previous = stored[key], folded_as[key]
@@ -657,14 +663,29 @@ def _name_speaker(directory: Path, label: str, name: str, voices_dir: Path | Non
             )
             profile = known.get(_key(name))
             if previous != _key(name) or profile is None:
+                for k in {previous, _key(name)} - {""}:
+                    path = _hashed(_dir(voices_dir), k)
+                    try:
+                        snapshot[path] = json.loads(path.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        snapshot[path] = None
+                profile = save_profile(name, entry["centroid"], voices_dir)  # Bob first,
                 if previous and previous != _key(name) and previous in known:
-                    _fold(known[previous].name, entry["centroid"], -1, voices_dir)  # Anna -> Bob
-                profile = save_profile(name, entry["centroid"], voices_dir)
+                    _fold(
+                        known[previous].name, entry["centroid"], -1, voices_dir
+                    )  # then out of Anna
     except Exception:
         # Keep transcript and store consistent: the old label back, the speaker nameable again.
         try:
             if renamed:
                 write_outputs(session, segments, data["duration"], data["model"])
+            with _file_lock(voices_dir):
+                if since == forget_generation(voices_dir):  # else forget wins: restore nothing
+                    for path, old in snapshot.items():
+                        if old is None:
+                            path.unlink(missing_ok=True)
+                        else:
+                            _write_private(path, old)
             write_session_voices(
                 session,
                 {lbl: v["centroid"] for lbl, v in before.items()},
