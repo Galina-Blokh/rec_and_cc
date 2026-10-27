@@ -1335,6 +1335,38 @@ def test_a_dead_room_mic_that_opens_slowly_still_backs_off():
         h.eng.shutdown()
 
 
+def test_a_slow_room_mic_start_is_not_counted_as_a_stall():
+    """start() blocks 12 s (first-run permission prompt) and the first block arrives 2 s after
+    it returns: the stall window runs from the end of the open, so the mic is not reopened."""
+    from recandcc.detect.room import RoomMonitor
+
+    h = _room_harness()
+    sources: list[_StallingSource] = []
+
+    class PromptSource(_StallingSource):
+        def start(self, on_frames):
+            self.cb = on_frames
+            h.clock.t += 12
+
+    def factory():
+        sources.append(PromptSource())
+        return sources[-1]
+
+    silent = lambda audio: np.zeros(len(audio) // 512, dtype=np.float32)  # noqa: E731
+    h.room = h.eng.room = RoomMonitor(h.cfg.detection, factory, vad=silent, clock=h.clock)
+    try:
+        h.eng.tick()  # opens the mic; start() returns 12 s later
+        assert h.room.running
+        h.clock.t += 1
+        h.eng.tick()  # no block yet, 1 s after the open: not a stall
+        h.clock.t += 1
+        sources[0].cb(np.zeros(1600, dtype=np.float32))  # the first block, 2 s after the open
+        h.eng.tick()
+        assert len(sources) == 1 and sources[0].cb is not None and h.room.running
+    finally:
+        h.eng.shutdown()
+
+
 def test_a_healthy_room_mic_is_not_reopened_and_recovers_after_a_stall():
     h, sources = _real_room_harness()
     try:
