@@ -301,6 +301,11 @@ local folder (for example `~/Transcribes`) if recordings must stay on this devic
   hourly check, whichever comes first. Removed or replaced text is overwritten in
   `search.sqlite3`, so it can't be recovered from the file. To remove the whole index at
   once, delete `search.sqlite3`; it is rebuilt from the transcripts on the next search.
+  With `speaker_names` on, its stored speaker voices are deleted the next time a transcript
+  is written or a `recandcc voices` command runs.
+- `recandcc voices delete <name>` deletes that profile and removes the named voice from every
+  session's stored voices too; renaming a speaker (`Anna` → `Bob`) takes that session's voice
+  out of Anna's profile.
 
 ### Delete everything
 
