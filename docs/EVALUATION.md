@@ -69,8 +69,8 @@ uv run python scripts/eval.py ~/RecAndCC-eval --no-diarize          # skip DER
 
 Each clip is copied to a temporary session folder and run through the session pipeline
 (`Transcriber.transcribe_session`), and the diarizer runs on the same copy. The copies go in
-an owner-only `rcc-eval` folder in the system temp directory: each is deleted after its clip,
-and any left over by a killed run are deleted when the next run starts. The script prints scores only, never transcript text. It writes the full
+a new owner-only `rcc-eval-*` folder in the system temp directory, created for that run alone and
+deleted when it ends. A run killed with SIGKILL can leave that folder behind; delete it by hand. The script prints scores only, never transcript text. It writes the full
 results, including the counts for each clip, to `eval-results.json`. Like the app, it runs
 offline once the models are downloaded.
 

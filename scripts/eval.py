@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 import shutil
 import sys
 import tempfile
@@ -40,7 +39,6 @@ import numpy as np
 import soundfile as sf
 
 from recandcc.models import Segment, SessionInfo, Track, TriggerKind
-from recandcc.recorder import make_private_dir
 
 FRAME_S = 0.01
 
@@ -217,17 +215,6 @@ def der(ref: list[tuple[float, float, str]], hyp: list[tuple[float, float, str]]
 
 
 # ----------------------------------------------------------------------------- pipeline
-def work_root() -> Path:
-    """Owner-only folder for the temporary clip copies; copies left by a killed run are removed."""
-    root = Path(tempfile.gettempdir()) / "rcc-eval"
-    make_private_dir(root)
-    if os.name == "posix":
-        root.chmod(0o700)  # also if it already existed; fails if someone else owns it
-    for stale in root.iterdir():
-        shutil.rmtree(stale, ignore_errors=True)
-    return root
-
-
 def run_clip(clip: Clip, transcriber, diarizer, root: Path | None = None) -> dict:
     """Transcribe (and for "others", diarize) a temporary copy of the clip."""
     with tempfile.TemporaryDirectory(prefix="clip-", dir=root) as tmp:
@@ -305,8 +292,9 @@ def main(argv: list[str] | None = None) -> int:
     transcriber = Transcriber(cfg)
     diarizer = None if args.no_diarize else Diarizer()
     try:
-        root = work_root()
-        results = [run_clip(c, transcriber, diarizer, root) for c in clips]
+        # one private (0700, created atomically) folder per run, removed by this run only
+        with tempfile.TemporaryDirectory(prefix="rcc-eval-") as root:
+            results = [run_clip(c, transcriber, diarizer, Path(root)) for c in clips]
     finally:
         transcriber.close()
         if diarizer is not None:

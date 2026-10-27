@@ -186,15 +186,14 @@ def test_der_counts_false_alarms_on_clips_without_reference_speech():
     assert ev.summarize([silent, clean])["der"] == pytest.approx(0.5)  # 5 s errors / 10 s speech
 
 
-def test_work_root_removes_copies_left_by_a_killed_run(tmp_path, monkeypatch):
-    monkeypatch.setattr(ev.tempfile, "gettempdir", lambda: str(tmp_path))
-    stale = tmp_path / "rcc-eval" / "clip-old"
-    stale.mkdir(parents=True)
-    (stale / "others.wav").write_bytes(b"x")
-    root = ev.work_root()
-    assert root == tmp_path / "rcc-eval" and list(root.iterdir()) == []
-    if sys.platform != "win32":
-        assert root.stat().st_mode & 0o777 == 0o700
+def test_clip_copies_stay_inside_the_given_root(tmp_path):
+    sf.write(tmp_path / "c.wav", np.zeros(SAMPLE_RATE, dtype=np.float32), SAMPLE_RATE)
+    clip = ev.Clip("c", tmp_path / "c.wav", ev.Track.OTHERS, [utt(0, 1, "a")])
+    root = tmp_path / "run"
+    root.mkdir()
+    tr = FakeTranscriber([])
+    ev.run_clip(clip, tr, None, root)
+    assert tr.sessions[0].directory.parent == root and list(root.iterdir()) == []
 
 
 def test_rtf_weighs_clips_by_audio_length():
