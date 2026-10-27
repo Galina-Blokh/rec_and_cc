@@ -21,7 +21,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-10 | Fast local transcription | ✅ GPU · 🟡 CPU slower |
 | US-11 | Live captions and live transcript | ✅ |
 | US-12 | Speaker labels for the other side | ✅ |
-| US-13 | Readable transcripts in private folders | 🟡 owner-only not enforced on Windows (#37) |
+| US-13 | Readable transcripts in private folders | ✅ |
 | US-14 | Works offline, nothing leaves the device | 🟡 some models unpinned (#39); no end-to-end offline test (#40) |
 | US-15 | Delete old audio automatically | 🟡 `keep_audio = false` can miss a crash (#38) |
 | US-16 | Permissions set up from the app | ✅ |
@@ -128,9 +128,8 @@ while I decide.*
 ### US-13 Readable transcripts in private folders
 - **Then** each session is saved under `<output_dir>/<date>/<time>_<app>/` with
   `transcript.md`, `.srt`, `.json`, WAVs and `session.json`.
-- **Then** the folders RecAndCC creates are readable only by the owner (`0700` on macOS).
-- **Not yet:** on Windows, `chmod` doesn't restrict NTFS ACLs, so folders inherit the
-  parent's permissions; an owner-only ACL is needed (#37).
+- **Then** the folders RecAndCC creates are readable only by the owner: `0700` on macOS; on
+  Windows a protected access list (owner and SYSTEM only, nothing inherited from the parent).
 - **Then** the menu lists the 10 most recent transcripts.
 
 ### US-14 Works offline, nothing leaves the device
