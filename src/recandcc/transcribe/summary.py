@@ -9,6 +9,7 @@ transcript or summary text.
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import importlib.util
 import json
@@ -23,12 +24,15 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..config import Config
-from ..models import Segment, is_rtl
+from ..models import Segment, SessionInfo, is_rtl
 from .output import JSON_NAME, PDI, RLI, atomic_write, paragraphs
 
 log = logging.getLogger("recandcc.transcribe")
 
 SUMMARY_NAME = "summary.md"
+# In a session folder while its summary is owed (queued, or stale after a speaker rename);
+# startup re-queues these, so a summary cut short by quitting is redone.
+PENDING_MARKER = ".summary-pending"
 # ~2-5k tokens (en..he): well inside Qwen2.5's 32k context, and each chunk's prompt prefill
 # (which holds gpu.MLX_LOCK) stays within ~1-2 s.
 CHUNK_CHARS = 8_000
@@ -203,6 +207,36 @@ def summarize_session(directory: Path, cfg: Config, generate: Generator | None =
     return path
 
 
+def mark_pending(directory: Path) -> None:
+    """Note that ``directory`` still needs (a fresh) summary.md. Never recreates a deleted
+    folder; never raises."""
+    with contextlib.suppress(OSError):
+        (Path(directory) / PENDING_MARKER).touch()
+
+
+def clear_pending(directory: Path) -> None:
+    try:
+        (Path(directory) / PENDING_MARKER).unlink(missing_ok=True)
+    except OSError:
+        log.warning("could not clear the summary marker of %s", Path(directory).name)
+
+
+def pending_summaries(output_dir: Path) -> list[Path]:
+    """Transcribed session folders whose summary is still owed, oldest first (discarded and
+    not yet transcribed ones are skipped: the latter get one after their transcription)."""
+    out = []
+    for marker in sorted(Path(output_dir).glob(f"*/*/{PENDING_MARKER}")):
+        d = marker.parent
+        if (d / SessionInfo.DISCARD_MARKER).exists() or not (d / JSON_NAME).exists():
+            continue
+        try:
+            if SessionInfo.load(d).transcribed:
+                out.append(d)
+        except Exception:  # noqa: BLE001 - unreadable session.json: nothing to summarise
+            log.warning("skipping unreadable session %s", d.name)
+    return out
+
+
 def mlx_lm_available() -> bool:
     return (
         sys.platform == "darwin"
@@ -313,6 +347,7 @@ class SummaryQueue:
         threading.Thread(target=self._loop, name="summary", daemon=True).start()
 
     def submit(self, directory: Path) -> None:
+        mark_pending(directory)  # removed when done; startup re-queues it if we quit first
         self._q.put(Path(directory))
 
     def join(self) -> None:
@@ -347,8 +382,12 @@ class SummaryQueue:
             directory = self._q.get()
             try:
                 self._wait_idle()
+                if not directory.exists():
+                    continue  # deleted meanwhile
                 self._job(directory)
+                clear_pending(directory)
             except SummaryUnavailable as e:
+                clear_pending(directory)  # no model here: retrying at every start won't help
                 log.info("summary of %s skipped: %s", directory.name, e)
                 if str(e) not in self._skipped:
                     self._skipped.add(str(e))
@@ -356,5 +395,6 @@ class SummaryQueue:
             except Exception as e:  # noqa: BLE001 - never kill the thread
                 # the type only: a model error could quote the transcript
                 log.error("summary of %s failed: %s", directory.name, type(e).__name__)
+                clear_pending(directory)  # e.g. a broken transcript: don't retry every start
             finally:
                 self._q.task_done()

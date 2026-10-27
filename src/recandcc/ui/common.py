@@ -238,6 +238,8 @@ def as_str(text: str) -> str:
 
 # ----------------------------------------------------------------------- controller
 class Controller:
+    _summaries_lock = threading.Lock()  # creating the SummaryQueue (class-wide: test fakes)
+
     def __init__(
         self,
         cfg: Config,
@@ -396,19 +398,47 @@ class Controller:
                 target=self._index_session, args=(session.directory,), daemon=True, name="search"
             ).start()
             if self.cfg.summary.enabled:
-                self._summarize(session.directory)
+                self._summarize_when_labelled(Path(session.directory))
+
+    def _summarize_when_labelled(self, directory: Path) -> None:
+        """Summarise once the transcript has its final speaker labels (a slow diarization
+        rewrites it later), so action items aren't credited to "Others"."""
+        from ..transcribe.summary import mark_pending
+
+        mark_pending(directory)  # owed from now on, even if we quit before diarization ends
+        transcriber = getattr(self, "transcriber", None)
+        after_labels = getattr(transcriber, "after_labels", None)  # None: test fakes
+        if after_labels is None:
+            self._summarize(directory)
+        else:
+            after_labels(directory, lambda: self._summarize(directory))
+
+    def _resubmit_summaries(self) -> None:
+        """summary.enabled: re-queue summaries cut short by quitting (or stale after a
+        speaker rename), after the transcripts are re-queued."""
+        if not self.cfg.summary.enabled:
+            return
+        try:
+            from ..transcribe.summary import pending_summaries
+
+            for d in pending_summaries(self.cfg.output_dir):
+                log.info("re-queueing the summary of %s", d.name)
+                self._summarize(d)
+        except Exception:
+            log.exception("scanning for pending summaries failed")
 
     def _summarize(self, directory: Path) -> None:
         """Queue summary.md for a final transcript (local LLM, own background thread)."""
-        summaries = getattr(self, "_summaries", None)
-        if summaries is None:
-            from ..transcribe.summary import SummaryQueue
+        with self._summaries_lock:  # called from the transcription and diarizer threads
+            summaries = getattr(self, "_summaries", None)
+            if summaries is None:
+                from ..transcribe.summary import SummaryQueue
 
-            summaries = self._summaries = SummaryQueue(
-                self.cfg,
-                notify=self.post_notice,
-                busy=lambda: self.engine.state.status != IDLE,  # never during a recording
-            )
+                summaries = self._summaries = SummaryQueue(
+                    self.cfg,
+                    notify=self.post_notice,
+                    busy=lambda: self.engine.state.status != IDLE,  # never during a recording
+                )
         summaries.submit(directory)
 
     # --- transcript search (worker threads; results arrive as a "search" event)
@@ -618,6 +648,7 @@ class Controller:
             log.exception("scanning for untranscribed sessions failed")
         finally:
             self._resubmitting = False
+        self._resubmit_summaries()
         try:  # after re-queueing, so deleting big WAVs doesn't delay recovery
             purge_discarded_sessions(self.cfg.output_dir)
         except Exception:

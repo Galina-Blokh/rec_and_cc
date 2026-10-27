@@ -107,6 +107,9 @@ class Transcriber:
         # model -> load seconds, not yet reported in a session's metrics (the session that
         # waited for the load gets them)
         self._load_times: dict[str, float] = {}
+        # session folder -> callbacks waiting for a slow diarization's relabelled transcript
+        # (see after_labels); under _init_lock
+        self._label_waiters: dict[str, list[Callable[[], None]]] = {}
 
     # -- models ------------------------------------------------------------------------------
 
@@ -576,6 +579,8 @@ class Transcriber:
             except TimeoutError:
                 log.info("session %s: speaker labels follow when diarization ends", session.id)
                 self._write(session, segments, duration)
+                with self._init_lock:  # before the callback, which may run right away
+                    self._label_waiters.setdefault(str(session.directory), [])
                 diarization.add_done_callback(
                     lambda f: self._relabel_later(session, segments, duration, f)
                 )
@@ -587,6 +592,25 @@ class Transcriber:
         self._write(session, segments, duration)
         self._drop_audio(session)
         return segments
+
+    def after_labels(self, directory: Path, fn: Callable[[], None]) -> None:
+        """Run ``fn`` once the session's transcript has its final speaker labels: now, or
+        (on the diarizer thread) after a slow diarization has rewritten it."""
+        with self._init_lock:
+            waiters = self._label_waiters.get(str(directory))
+            if waiters is not None:
+                waiters.append(fn)
+                return
+        fn()
+
+    def _labels_final(self, session: SessionInfo) -> None:
+        with self._init_lock:
+            waiters = self._label_waiters.pop(str(session.directory), [])
+        for fn in waiters:
+            try:
+                fn()
+            except Exception:  # noqa: BLE001 - runs on the diarizer thread
+                log.exception("session %s: a speaker-label callback failed", session.id)
 
     def _write(self, session: SessionInfo, segments: list[Segment], duration: float) -> None:
         write_outputs(session, segments, duration, self.cfg.model)
@@ -653,6 +677,7 @@ class Transcriber:
         finally:
             if Path(session.directory).exists():
                 self._drop_audio(session)
+            self._labels_final(session)
 
 
 def transcribe_directory(path: Path, cfg: TranscriptionConfig) -> list[Segment]:

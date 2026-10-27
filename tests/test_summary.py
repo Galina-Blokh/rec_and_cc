@@ -182,6 +182,80 @@ def test_controller_summarises_only_when_enabled(tmp_path, monkeypatch):
     assert (d / "summary.md").exists()
 
 
+def test_controller_summarises_after_the_final_speaker_labels(tmp_path, monkeypatch):
+    monkeypatch.setattr(summary, "MlxGenerator", lambda *a, **k: FakeGen())
+    d = make_session(tmp_path, [seg("Let's ship on Monday.")])
+    ctrl = _controller(Config(output_dir=tmp_path))
+    ctrl.cfg.summary.enabled = True
+    waiting = []  # a slow diarization: the summary waits for its relabelled transcript
+    ctrl.transcriber = types.SimpleNamespace(after_labels=lambda _d, fn: waiting.append(fn))
+    ctrl._on_transcribed(SessionInfo.load(d), [])
+    assert getattr(ctrl, "_summaries", None) is None and len(waiting) == 1
+    assert (d / summary.PENDING_MARKER).exists()  # owed even if we quit before the labels
+    waiting[0]()
+    ctrl._summaries.join()
+    assert (d / "summary.md").exists() and not (d / summary.PENDING_MARKER).exists()
+
+
+def _transcribed(d: Path) -> Path:
+    s = SessionInfo.load(d)
+    s.transcribed = True
+    s.save()
+    return d
+
+
+def test_pending_marker_is_set_on_submit_and_cleared_when_done(tmp_path):
+    d = make_session(tmp_path, [seg("hello")])
+    started = []
+
+    class Watch(FakeGen):
+        def __call__(self, messages, max_tokens):
+            started.append((d / summary.PENDING_MARKER).exists())
+            return super().__call__(messages, max_tokens)
+
+    q = summary.SummaryQueue(Config(), generate=Watch())
+    q.submit(d)
+    q.join()
+    assert started and all(started)  # there while the summary runs
+    assert (d / "summary.md").exists() and not (d / summary.PENDING_MARKER).exists()
+
+
+def test_startup_requeues_pending_summaries(tmp_path, monkeypatch):
+    monkeypatch.setattr(summary, "MlxGenerator", lambda *a, **k: FakeGen())
+    d = _transcribed(make_session(tmp_path, [seg("hello")]))
+    summary.mark_pending(d)  # the app quit mid-summary
+    ctrl = _controller(Config(output_dir=tmp_path))
+    ctrl._resubmit_summaries()  # summaries off: left alone
+    assert getattr(ctrl, "_summaries", None) is None
+    ctrl.cfg.summary.enabled = True
+    other = tmp_path / "2026-10-27" / "110000_zoom"
+    other.mkdir()
+    (other / summary.PENDING_MARKER).touch()
+    (other / SessionInfo.DISCARD_MARKER).touch()  # discarded: never summarised
+    assert summary.pending_summaries(tmp_path) == [d]
+    ctrl._resubmit_summaries()
+    ctrl._summaries.join()
+    assert (d / "summary.md").exists() and not (d / summary.PENDING_MARKER).exists()
+
+
+def test_cli_name_speaker_regenerates_or_marks_the_summary_stale(tmp_path, monkeypatch, capsys):
+    d = make_session(tmp_path, [seg("hello")])
+    cfg = Config()
+    cli._refresh_summary(d, cfg)  # no summary.md: nothing to do
+    assert not (d / summary.PENDING_MARKER).exists()
+    (d / "summary.md").write_text("old", encoding="utf-8")
+    cli._refresh_summary(d, cfg)  # summaries off: stale until `summarize`
+    assert (d / summary.PENDING_MARKER).exists() and "recandcc summarize" in capsys.readouterr().out
+    cfg.summary.enabled = True
+    monkeypatch.setattr(summary, "mlx_lm_available", lambda: False)
+    cli._refresh_summary(d, cfg)  # no model: the app redoes it at its next start
+    assert (d / summary.PENDING_MARKER).exists() and "stale" in capsys.readouterr().out
+    monkeypatch.setattr(summary, "MlxGenerator", lambda *a, **k: FakeGen())
+    cli._refresh_summary(d, cfg)
+    assert (d / "summary.md").read_text(encoding="utf-8") != "old"
+    assert not (d / summary.PENDING_MARKER).exists()
+
+
 def test_missing_model_offline_is_skipped_with_one_notice(tmp_path, monkeypatch, caplog):
     def offline(repo, allow_unpinned=False):
         raise ConnectionError("no network")
@@ -195,7 +269,7 @@ def test_missing_model_offline_is_skipped_with_one_notice(tmp_path, monkeypatch,
         q.submit(d)
         q.submit(d)
         q.join()
-    assert not (d / "summary.md").exists()
+    assert not (d / "summary.md").exists() and not (d / summary.PENDING_MARKER).exists()
     assert notices == [("Summary skipped", "the summary model is not on disk or can't be loaded")]
     assert "summary of 100000_zoom skipped" in caplog.text
     assert SPOKEN not in caplog.text
