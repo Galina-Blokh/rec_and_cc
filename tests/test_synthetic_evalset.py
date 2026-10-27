@@ -141,3 +141,32 @@ def test_main_skips_missing_voices_and_writes_the_rest(tmp_path, monkeypatch, ca
     ids = [c.id for c in ev.load_manifest(tmp_path / "set")]
     assert ids == ["en-01", "ru-01", "en-ru-01", "en-3spk-01"]
     assert mk.main([str(ROOT / "eval")]) == 2  # never inside the repo
+
+
+def test_meetings_have_the_right_speakers_varied_turns_and_no_repeats():
+    clips = mk.meeting_clips()
+    assert {c: len({s for s, _ in p}) for c, p in clips.items()} == {
+        "meeting-2spk": 2,
+        "meeting-3spk": 3,
+        "meeting-6spk": 6,
+    }
+    for parts in clips.values():
+        assert all(a[0] != b[0] for a, b in zip(parts, parts[1:], strict=False))
+    lengths = {len(t.split()) for _, t in clips["meeting-6spk"]}
+    assert min(lengths) == 1 and max(lengths) >= 12  # quick replies and long turns
+    assert mk.plan(set(mk.VOICES.values()), clips)[1] == []
+
+
+def test_meeting_gaps_vary_and_quick_replies_are_short():
+    parts = mk.meeting_clips()["meeting-6spk"]
+    gaps = mk.meeting_gaps(parts)
+    assert len(gaps) == len(parts) - 1
+    assert {mk.QUICK_S, *mk.GAP_CYCLE_S} >= set(gaps) and len(set(gaps)) > 2
+    quick = [g for g, (_, t) in zip(gaps, parts[1:], strict=True) if len(t.split()) <= 3]
+    assert quick and all(g == mk.QUICK_S for g in quick)
+
+
+def test_custom_gaps_set_the_pause_between_turns():
+    parts = [("en1", "one two three four"), ("en2", "five six seven eight")]
+    _, utts = mk.build_clip(parts, fake_synth, [0.25])
+    assert utts[1]["start"] == pytest.approx(utts[0]["end"] + 0.25)
