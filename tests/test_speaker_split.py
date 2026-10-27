@@ -217,3 +217,16 @@ def test_words_only_requested_when_the_speaker_model_is_on_disk(monkeypatch):
     assert _chunk_words(monkeypatch, False) is False
     off = TranscriptionConfig(model="fake", split_on_speaker_change=False)
     assert _chunk_words(monkeypatch, True, off) is False
+
+
+def test_room_sessions_request_words_on_the_mic_track(monkeypatch):
+    """In a room session the diarized track is "Me", so that is the one that needs words."""
+    model = _Model()
+    t = eng.Transcriber(TranscriptionConfig(model="fake"))
+    t._model = model
+    t._lid_model = None
+    monkeypatch.setattr(eng, "model_path", lambda *a, **k: "/x")
+    me = eng.Chunk(eng.Track.ME, 0.0, 1.0, language="en")
+    t._transcribe_chunk(me, np.zeros(SAMPLE_RATE, np.float32), eng.Track.ME)
+    t._transcribe_chunk(me, np.zeros(SAMPLE_RATE, np.float32))  # call session: Me never split
+    assert [c["word_timestamps"] for c in model.calls] == [True, False]
