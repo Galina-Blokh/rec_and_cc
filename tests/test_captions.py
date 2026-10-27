@@ -1,19 +1,27 @@
 """Live captions: platform-neutral logic (formatting, ordering, trimming, header, timers).
 
-Stories: US-11.
+Stories: US-11, US-19.
 """
+
+import sys
+
+import pytest
 
 from recandcc.models import Segment
 from recandcc.ui.captions import (
     FINISHED_TEXT,
+    PDI,
+    RLI,
     CaptionBuffer,
     CaptionLine,
     clean_text,
+    default_frame,
     fmt_mmss,
     format_line,
     header_text,
     is_at_bottom,
     should_auto_hide,
+    speaker_rgb,
 )
 
 
@@ -87,3 +95,48 @@ def test_should_auto_hide():
     assert not should_auto_hide(None, 100.0)
     assert not should_auto_hide(95.0, 100.0)
     assert should_auto_hide(90.0, 100.0)
+
+
+def test_default_frame_is_bottom_center_and_fits_the_screen():
+    assert default_frame(None) == (200.0, 120.0, 760.0, 190.0)
+    x, y, w, h = default_frame((0.0, 25.0, 1440.0, 875.0))
+    assert (w, h) == (760.0, 190.0)
+    assert x == (1440.0 - 760.0) / 2
+    assert y == 25.0 + 90.0
+    x, _, w, _ = default_frame((100.0, 0.0, 800.0, 600.0))  # narrow screen: 80% of width
+    assert w == 640.0
+    assert x == 100.0 + 80.0
+
+
+def test_speaker_colors():
+    assert speaker_rgb("Me") == (0.55, 0.86, 0.62)
+    assert speaker_rgb("Others") == (0.52, 0.74, 1.0)
+    assert speaker_rgb("Speaker 2") == (0.85, 0.75, 0.5)
+    assert speaker_rgb("?") == (0.85, 0.75, 0.5)
+
+
+def test_hebrew_lines_are_right_to_left():
+    b = CaptionBuffer()
+    b.add([seg(0.0, "Hello", "Me"), seg(1.0, "שלום, אני ב-Zoom", lang="he")])
+    en, he = b.lines
+    assert not en.rtl and en.alignment == "left"
+    assert he.rtl and he.alignment == "right"
+    assert format_line(he) == f"Others  {RLI}שלום, אני ב-Zoom{PDI}"
+    assert CaptionLine(0.0, "Me", "שלום").rtl  # no language: decided by the text
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="AppKit captions panel")
+def test_mac_panel_lays_out_hebrew_right_to_left():
+    pytest.importorskip("AppKit")
+    from AppKit import NSParagraphStyleAttributeName, NSWritingDirectionRightToLeft
+
+    from recandcc.ui.captions_mac import CaptionsPanel
+
+    panel = CaptionsPanel()  # no window is created until show()
+    panel.buffer.add([seg(0.0, "Hello", "Me"), seg(1.0, "שלום", lang="he")])
+    text = panel._attributed()
+    first = text.attribute_atIndex_effectiveRange_(NSParagraphStyleAttributeName, 0, None)[0]
+    at = text.string().index("שלום")
+    style = text.attribute_atIndex_effectiveRange_(NSParagraphStyleAttributeName, at, None)[0]
+    assert first.baseWritingDirection() != NSWritingDirectionRightToLeft
+    assert style.baseWritingDirection() == NSWritingDirectionRightToLeft

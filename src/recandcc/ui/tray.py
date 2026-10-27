@@ -20,7 +20,6 @@ import os
 import queue
 import threading
 import time
-from pathlib import Path
 
 import pystray  # pyright: ignore[reportMissingImports] - Windows-only dependency
 from PIL import Image, ImageDraw  # pyright: ignore[reportMissingImports] - Windows-only dependency
@@ -44,6 +43,7 @@ from .common import (
     reveal_logs,
     transcript_label,
 )
+from .present import live_transcript_target, prompt_notice, record_item_title
 
 log = logging.getLogger(__name__)
 
@@ -119,6 +119,9 @@ class TkCaptions:
         text.tag_configure("Others", foreground="#85bdff", font=("Segoe UI", 10, "bold"))
         text.tag_configure("other", foreground="#d9bf80", font=("Segoe UI", 10, "bold"))
         text.tag_configure("line", lmargin2=64, tabs=(64,))
+        # Right-to-left (Hebrew) lines: right-justified, label then text separated by spaces
+        # (tab stops don't mirror in Tk); the OS text renderer orders the Hebrew glyphs.
+        text.tag_configure("rtl", justify="right", rmargin=10)
         text.pack(fill="both", expand=True)
         text.configure(state="disabled")
 
@@ -131,8 +134,9 @@ class TkCaptions:
             text.delete("1.0", "end")
             for i, ln in enumerate(buf.lines):
                 tag = ln.label if ln.label in ("Me", "Others") else "other"
-                text.insert("end", ln.label + "\t", (tag, "line"))
-                text.insert("end", ln.text + ("\n" if i < len(buf) - 1 else ""), ("line",))
+                para = ("rtl",) if ln.rtl else ("line",)
+                text.insert("end", ln.label + ("  " if ln.rtl else "\t"), (tag, *para))
+                text.insert("end", ln.text + ("\n" if i < len(buf) - 1 else ""), para)
             text.configure(state="disabled")
             if follow:
                 text.see("end")
@@ -256,9 +260,8 @@ class TrayApp:
                 ),
             ),
             Item(
-                lambda _i: (
-                    ("Stop recording" if st().status == RECORDING else "Start recording")
-                    + (f"\t{self.ctrl.hotkey_label}" if self.ctrl.hotkey_label else "")
+                lambda _i: record_item_title(
+                    st().status == RECORDING, self.ctrl.hotkey_label, sep="\t"
                 ),
                 lambda: self.ctrl.toggle_recording(),
             ),
@@ -306,9 +309,7 @@ class TrayApp:
 
     def _open_live(self) -> None:
         if self._live_dir:
-            d = Path(self._live_dir)
-            md = d / "transcript.md"
-            open_path(md if md.exists() else d)
+            open_path(live_transcript_target(self._live_dir))
 
     def _live_started(self, session_id: str, title: str) -> None:
         self._live_id = session_id
@@ -358,8 +359,7 @@ class TrayApp:
                 return
             if ev[0] == "prompt":
                 _, app, kind, pid = ev
-                what = "a call" if kind == TriggerKind.CALL else "audio"
-                self._notify("Recording — keep it?", f"{app}: {what} detected")
+                self._notify(*prompt_notice(app, kind))
                 threading.Thread(
                     target=self._prompt_window, args=(app, kind, pid), daemon=True
                 ).start()

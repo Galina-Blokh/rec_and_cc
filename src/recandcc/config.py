@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import tomllib
 from dataclasses import asdict, dataclass, field, fields
@@ -17,6 +18,20 @@ CONFIG_DIR = Path(platformdirs.user_config_dir(APP_NAME, appauthor=False))
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 LOG_DIR = Path(platformdirs.user_log_dir(APP_NAME, appauthor=False))
 DEFAULT_OUTPUT_DIR = Path(platformdirs.user_documents_dir()) / "Transcribes"
+
+log = logging.getLogger("recandcc.config")
+
+# Language codes Whisper knows (faster_whisper.tokenizer._LANGUAGE_CODES), for validating
+# `transcription.languages` without importing a model library here.
+_WHISPER_CODES = (
+    "af am ar as az ba be bg bn bo br bs ca cs cy da de el en es et eu fa fi fo fr gl gu ha "
+    "haw he hi hr ht hu hy id is it ja jw ka kk km kn ko la lb ln lo lt lv mg mi mk ml mn mr "
+    "ms mt my ne nl nn no oc pa pl ps pt ro ru sa sd si sk sl sn so sq sr su sv sw ta te tg th "
+    "tk tl tr tt uk ur uz vi yi yo zh yue"
+)
+WHISPER_LANGUAGES = frozenset(_WHISPER_CODES.split())
+# Common spellings that are not Whisper codes ("iw" is the old ISO code for Hebrew).
+LANGUAGE_ALIASES = {"iw": "he", "hebrew": "he", "english": "en", "russian": "ru"}
 
 # Patterns are case-insensitive substrings matched against AudioProcess.bundle_id and .name.
 DEFAULT_CALL_APPS = [
@@ -105,6 +120,9 @@ class DetectionConfig:
     app_modes: dict[str, Mode] = field(default_factory=dict)
 
 
+DEFAULT_LANGUAGES = ("en", "ru")
+
+
 @dataclass
 class TranscriptionConfig:
     model: str = "large-v3-turbo"  # any faster-whisper model name or local path
@@ -115,7 +133,8 @@ class TranscriptionConfig:
     # "float32" uses Apple Accelerate and benchmarked ~20% faster than "int8" on Apple silicon
     # (at ~3 GB RAM instead of ~1 GB); int8 is the better trade-off on typical Windows laptops.
     compute_type: str = "float32" if sys.platform == "darwin" else "int8"
-    languages: list[str] = field(default_factory=lambda: ["en", "ru"])  # auto-detect among these
+    # Auto-detect among these Whisper codes, e.g. ["en", "ru", "he"]; [] = any language.
+    languages: list[str] = field(default_factory=lambda: list(DEFAULT_LANGUAGES))
     workers: int = 0  # parallel transcription workers, 0 = auto
     dedupe_echo: bool = True  # drop mic segments that are just speaker echo of "Others"
     keep_audio: bool = True  # False = delete WAVs after a successful transcription
@@ -148,12 +167,45 @@ class Config:
         path.parent.mkdir(parents=True, exist_ok=True)
         data = asdict(self)
         data["output_dir"] = str(self.output_dir)
+        # Keep the user's own spelling of `languages` ("iw", unknown codes) unless the list
+        # was changed since loading: load_config only normalises the in-memory copy.
+        tr = self.transcription
+        raw = getattr(tr, "_raw_languages", None)
+        if raw is not None and normalize_languages(raw) == tr.languages:
+            data["transcription"]["languages"] = raw
         path.write_bytes(tomli_w.dumps(data).encode())
 
 
 def _build(cls, data: dict):
     known = {f.name for f in fields(cls)}
     return cls(**{k: v for k, v in data.items() if k in known})
+
+
+def normalize_languages(value) -> list[str]:
+    """`transcription.languages` as clean Whisper codes: lowercased, aliases mapped
+    ("iw" -> "he"), duplicates and unknown codes dropped (with a warning). A single string is
+    accepted as a one-item list. `[]` stays `[]` (= any language)."""
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, list | tuple):
+        items = list(value)
+    elif value is None:
+        items = []
+    else:
+        log.warning("transcription.languages must be a list; using the defaults")
+        return list(DEFAULT_LANGUAGES)
+    out: list[str] = []
+    for item in items:
+        code = str(item).strip().lower()
+        code = LANGUAGE_ALIASES.get(code, code)
+        if code not in WHISPER_LANGUAGES:
+            log.warning("ignoring unknown language %r in transcription.languages", item)
+        elif code not in out:
+            out.append(code)
+    if items and not out:
+        log.warning("no valid transcription.languages; using %s", ", ".join(DEFAULT_LANGUAGES))
+        return list(DEFAULT_LANGUAGES)
+    return out
 
 
 def load_config(path: Path = CONFIG_PATH) -> Config:
@@ -167,6 +219,10 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     det.mode = Mode(det.mode)
     det.app_modes = {k: Mode(v) for k, v in det.app_modes.items()}
     tr = _build(TranscriptionConfig, data.pop("transcription", {}))
+    raw = tr.languages
+    tr.languages = normalize_languages(raw)
+    if tr.languages != raw:
+        tr._raw_languages = raw  # type: ignore[attr-defined]  # written back by save()
     cfg = _build(Config, data)
     cfg.output_dir = Path(cfg.output_dir).expanduser()
     cfg.detection, cfg.transcription = det, tr

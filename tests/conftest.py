@@ -13,3 +13,12 @@ def _no_diarization_model(request, monkeypatch):
         from recandcc.transcribe import diarize
 
         monkeypatch.setattr(diarize, "model_path", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def _private_search_index(tmp_path, monkeypatch):
+    """Tests never touch the user's real search index (the Controller updates it after
+    every transcription)."""
+    from recandcc import search
+
+    monkeypatch.setattr(search, "INDEX_PATH", tmp_path / "search-index" / "search.sqlite3")
