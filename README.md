@@ -14,7 +14,9 @@ account, nothing uploaded.
   recognize that voice and write `Anna` instead of `Speaker 2`.
 - 🌍 **English and Russian** are detected automatically, even when the language switches
   mid-meeting. **Hebrew** can be added (`languages = ["en", "ru", "he"]`): captions and
-  transcripts show it right to left. For better Hebrew, opt in to the Hebrew-tuned
+  transcripts show it right to left (Windows captions reorder RTL text themselves, as Tk does no
+  bidi; verified by unit tests only, no hardware check yet). Hebrew accuracy with the stock model
+  is not yet tuned; for better Hebrew, opt in to the Hebrew-tuned
   [ivrit.ai](https://huggingface.co/ivrit-ai) Whisper: with
   `language_models = { he = "ivrit-ai/whisper-large-v3-turbo-ct2" }` Hebrew regions are
   transcribed by it (its MLX build on the Apple-silicon GPU), English and Russian by the
@@ -251,7 +253,7 @@ repo):
 | `recandcc devices` | List audio devices |
 | `recandcc autostart on\|off\|status` | Launch at login |
 | `recandcc config` | Show the config path and contents |
-| `recandcc speakers <session_dir>` | List a transcript's speakers with their first lines |
+| `recandcc speakers <session_dir>` | List a transcript's speakers with their first lines. A speaker who introduces themself in their first 2 minutes ("I'm Anna", "Меня зовут Анна", "קוראים לי דנה") gets a hint, `suggested: Anna (said: …)`. Only a hint: nothing is renamed or saved until you run `name-speaker` |
 | `recandcc name-speaker <session_dir> "Speaker 2" "Anna"` | Name a speaker: rewrites that transcript and saves Anna's voice profile, so later sessions say `Anna` (needs `speaker_names = true`) |
 | `recandcc voices list\|delete <name>\|delete --all` | List or delete saved voice profiles |
 
