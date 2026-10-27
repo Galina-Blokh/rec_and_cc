@@ -48,8 +48,13 @@ TOKENIZER = "tokenizer.json"
 EOS_IDS = (151645, 151643)  # <|im_end|>, <|endoftext|>: the generation_config.json of Qwen2.5
 REPETITION_PENALTY = 1.1  # as in MlxGenerator
 REPETITION_WINDOW = 20  # the last tokens the penalty applies to: mlx-lm's default
-PREFILL_STEP = 512  # prompt tokens per run: the graph returns logits for every position
+# Prompt tokens per run. The graph returns logits for every position of a run and has no
+# last-position-only output; ONNX Runtime still computes them when only the caches are asked for
+# (measured: no faster). So a run's logits are ~78 MB here, and the piece size bounds them.
+PREFILL_STEP = 128
 QWEN_DEFAULT_SYSTEM = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+# Special tokens a message's text must not contain: the turn markers and the end of text.
+SPECIAL_TEXT = ("<|im_start|>", "<|im_end|>", "<|endoftext|>")
 NOT_ON_DISK = "the summary model is not on disk or can't be loaded"  # as in MlxGenerator
 TOO_LONG = "the transcript part is too long for the CPU summary model"
 CONTEXT_LENGTH = 32768  # Qwen2.5's
@@ -189,13 +194,22 @@ def _pid_alive(pid: int) -> bool:
     terminate the process, so that platform asks the kernel instead."""
     if sys.platform == "win32":
         import ctypes
+        from ctypes import wintypes
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # Declared, not left to ctypes' defaults: a handle is pointer-sized, and the default
+        # would return it as a 32-bit int.
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
         handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:  # ERROR_ACCESS_DENIED means it exists, another user's
             return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
         try:
-            code = ctypes.c_ulong()
+            code = wintypes.DWORD()
             if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
                 return True
             return code.value == _STILL_ACTIVE
@@ -274,13 +288,21 @@ def resolve(model: str, on_download: Callable[[], None] | None = None) -> Path:
         raise ModelUnavailable(NOT_ON_DISK) from e
 
 
+def _neutral(text: str) -> str:
+    """The text with each special token's ``<|`` split by a zero-width space, so that writing
+    one (in a transcript, say) can't open or close a turn, or end the text."""
+    for special in SPECIAL_TEXT:
+        text = text.replace(special, "<​" + special[1:])
+    return text
+
+
 def chatml(messages: Messages) -> str:
     """The Qwen2.5 chat template (tokenizer_config.json of the pinned build) for plain messages:
     ChatML turns, the default system prompt when the first message isn't one, and the assistant
     turn left open for the answer. The tests render the template itself and compare."""
     system = {"role": "system", "content": QWEN_DEFAULT_SYSTEM}
     turns = [*messages] if messages and messages[0]["role"] == "system" else [system, *messages]
-    text = "".join(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n" for m in turns)
+    text = "".join(f"<|im_start|>{m['role']}\n{_neutral(m['content'])}<|im_end|>\n" for m in turns)
     return text + "<|im_start|>assistant\n"
 
 
