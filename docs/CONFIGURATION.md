@@ -32,6 +32,9 @@ Changes to `[detection]` are picked up while the app runs. Restart the app after
 | `ask_timeout_s` | `30.0` | The "Keep it?" pop-up closes after this |
 | `ask_timeout_action` | `"record"` | What an unanswered pop-up means: `record` keeps the recording (nothing is lost if you're away), `ignore` discards it. In Ask mode recording always starts right away; the pop-up only decides whether to keep it |
 | `record_mic` | `"calls"` | `always` · `calls` (calls and manual recordings only) · `never` |
+| `room_listening` | `false` | Opt-in. While nothing records, keep the mic open and start a `room` session when people talk near the laptop (no app involved). macOS shows the orange mic indicator the whole time. Apps take precedence: a call starting during a room session turns it into a call session. A room session stops after `stop_after_silence_s` of silence. Needs `mode` other than `off` and `record_mic` other than `never` |
+| `room_speech_s` | `6.0` | Room listening triggers once speech totals this many seconds … |
+| `room_window_s` | `15.0` | … within this sliding window. Short remarks (yours or the TV's) stay below it |
 | `call_apps` | Zoom, Teams, FaceTime, Slack, Discord, Telegram, WhatsApp, Skype, Webex | Patterns for call apps |
 | `media_apps` | browsers, QuickTime, VLC, Podcasts, TV | Patterns for media apps |
 | `ignore_apps` | Spotify, Music, system sounds, Siri, Voice Memos | Never trigger |

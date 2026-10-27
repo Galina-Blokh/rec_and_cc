@@ -34,6 +34,7 @@ from .common import (
     PERM_LABELS,
     PERM_TITLES,
     PROMPT_BUTTONS,
+    ROOM_ITEM,
     Controller,
     as_str,
     keep_prompt_text,
@@ -107,6 +108,8 @@ class MacApp(rumps.App):
         self._render_retention()
         self.captions_item = rumps.MenuItem("Show live captions", callback=self._toggle_captions)
         self.captions_item.state = 1 if self.cfg.live_captions else 0
+        self.room_item = rumps.MenuItem(ROOM_ITEM, callback=self._toggle_room)
+        self.room_item.state = 1 if self.cfg.detection.room_listening else 0
         self.live_open_item = rumps.MenuItem("Open live transcript")
 
         self.menu = [
@@ -115,6 +118,7 @@ class MacApp(rumps.App):
             self.mode_menu,
             self.rec_item,
             self.captions_item,
+            self.room_item,
             self.live_open_item,
             None,
             rumps.MenuItem("Open transcripts folder", callback=self._open_folder),
@@ -323,6 +327,10 @@ class MacApp(rumps.App):
                 self.captions.reveal()
         else:
             self.captions.hide()
+
+    def _toggle_room(self, sender) -> None:
+        self.ctrl.set_room_listening(not self.cfg.detection.room_listening)
+        sender.state = 1 if self.cfg.detection.room_listening else 0
 
     def _open_live(self, _sender) -> None:
         if not self._live_dir:

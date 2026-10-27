@@ -34,7 +34,7 @@ across platforms.
 |---|---|
 | `models.py` | Shared types: `Mode`, `Track`, `TriggerKind`, `AudioProcess`, `Segment`, `SessionInfo`, `SAMPLE_RATE` |
 | `config.py` | Dataclass config ⇄ TOML, defaults and app lists, platform paths |
-| `detect/` | `ActivityMonitor`: which processes are doing audio input/output right now. `mac.py` (Core Audio process objects via helper), `win.py` (pycaw sessions + registry mic-in-use) |
+| `detect/` | `ActivityMonitor`: which processes are doing audio input/output right now. `mac.py` (Core Audio process objects via helper), `win.py` (pycaw sessions + registry mic-in-use). `room.py`: opt-in room listening (mic + Silero VAD → "room speech active") |
 | `capture/` | `AudioSource`: produces float32 mono 16 kHz frames. `mic.py` (sounddevice), `system_mac.py` (process tap via helper), `system_win.py` (WASAPI loopback) |
 | `recorder.py` | One session: sources → queues → WAV writer threads, live levels, silence tracking, frame tap for live transcription |
 | `engine.py` | Detection state machine: classify apps, debounce, ask/auto/off, stop conditions |
@@ -63,7 +63,8 @@ The app is built around one rule: **real-time audio threads never block**. Every
 | capture reader (per source) | Reads the pipe / PortAudio callback → `on_frames` (+ frame listeners, which only enqueue) | `queue.Queue` |
 | WAV writer (per track) | Writes PCM_16 WAV, so disk I/O never stalls capture | owns its file |
 | monitor reader | Parses JSON, keeps the latest snapshot (lock-protected) | `snapshot()` |
-| engine | `tick()` loop: the only thread that starts/stops the recorder | command queue + one lock |
+| engine | `tick()` loop: the only thread that starts/stops the recorder and the room monitor | command queue + one lock |
+| room VAD (room listening on, idle only) | Mic frames (the callback only copies into a queue) → Silero VAD per 1 s block → sliding speech window → `active` flag | `queue.Queue`; a bool the engine reads |
 | transcription dispatcher | Processes sessions in order, one at a time: a full transcription, or the "finalize" job of a live session (waits for `LiveTranscriber.finish()`) | `TranscriptionQueue` |
 | live worker (per recording session) | Buffers the tap's frames, VAD every 0.3 s, submits ended phrases, emits results, rewrites `transcript.md`, writes the final transcript | input `SimpleQueue`; callbacks |
 | transcription workers (N) | Whisper chunks / live phrases from **both tracks concurrently** (shared by batch and live) | `ThreadPoolExecutor` |
@@ -125,6 +126,27 @@ Core Audio reports per process whether input or output is running
 engine matches bundle ids against call / media / ignore lists, requires 3 s of continuous
 activity (debounce), and applies the per-app or global mode. Level-based silence (recorder
 dBFS) is a second stop condition, for apps that keep the audio device open while paused.
+
+### Room listening: a pseudo-app `room` with its own trigger kind
+Opt-in (`detection.room_listening`), for conversations near the laptop that involve no app
+(#2). `detect/room.RoomMonitor` owns a mic stream only while the engine wants it: room
+listening on, mode not `off`, `record_mic` not `never`, and **no session recording**. The
+engine thread opens it at the end of `tick()` and closes it in `_do_start()` before
+`recorder.start()`, so the mic is never opened twice; after the session it is reopened with a
+fresh window. Off means the mic is never opened.
+
+`TriggerKind.ROOM` (not `MANUAL` or `CALL`) because the stop rules and the UI differ: a room
+session has no app, so only the silence rule (`stop_after_silence_s`) stops it, and the
+recorder's `calls` mic policy includes it. In `tick()` sustained room speech is a candidate
+`room` that is appended *after* the app candidates, so an app that is ready wins, and it is
+only considered when nothing records or asks. A call that starts during a room session
+upgrades it to a call exactly like a media session (`recorder.upgrade_to_call`; the mic is
+already there), and from then on the call's inactivity rule applies. The pseudo-app's
+"last seen" is refreshed while the room talks or a room session records, so a room session the
+user stopped or discarded stays suppressed until the room has been quiet for
+`stop_after_inactive_s`; a silence stop doesn't suppress it. If the mic can't be opened the
+engine retries after 60 s. The menu toggle goes through `Controller.set_room_listening`.
+Not yet: pre-roll, a VAD-based stop, mic-track diarization.
 
 ### Two tracks → speaker labels for free
 Mic → `Me`, system → `Others`. A mic track that joins mid-session (a media recording upgraded
@@ -203,6 +225,7 @@ before the GPU backend).
 detected ─(active 3 s)─► recording ──────────────────────────────────────────────┐
    ask mode: "Keep it?" pop-up → Keep/Always/no answer: keep · Discard: stop+delete │
    call app appears during a media recording → upgrade: + mic track, padded        │
+   (room listening: room speech 6 s in 15 s → ROOM session; a call upgrades it)    │
 stop: app inactive 20 s │ silent 3 min │ manual stop ◄─────────────────────────────┘
   stop(): flush writers, save session.json ─► (< 3 s audio? delete) ─► TranscriptionQueue
   ─► transcript.md/.srt/.json (+ Speaker N labels), session.transcribed = true ─► (keep_audio = false? delete WAVs)

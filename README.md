@@ -107,6 +107,10 @@ Menu items:
   manual recording, and a small toast confirms it. Change or disable it with `hotkey` in the
   settings.
 - **Show live captions**: on/off switch for the floating captions window (saved to settings).
+- **Listen for conversations in the room** (off by default): while nothing records, the mic
+  stays on (macOS shows the orange dot the whole time) and about 6 s of speech within 15 s
+  near the laptop starts a recording, as in Auto/Ask mode. Calls take precedence. Tell the
+  people in the room: recording them may need their consent.
 - **Open live transcript**: opens the current (or last) live session's `transcript.md`.
 - **Recent transcripts**: the last 10, click to open.
 - **Open transcripts folder**

@@ -90,7 +90,7 @@ def should_record_mic(policy: str, kind: TriggerKind) -> bool:
         return True
     if policy == "never":
         return False
-    return kind in (TriggerKind.CALL, TriggerKind.MANUAL)
+    return kind in (TriggerKind.CALL, TriggerKind.MANUAL, TriggerKind.ROOM)
 
 
 class _TrackWriter:
@@ -352,12 +352,12 @@ class Recorder:
         return w
 
     def upgrade_to_call(self, app: str | None) -> bool:
-        """Turn a running media session into a call session (a call started while e.g. a
-        video was playing): adds the mic track if the policy wants it for calls. The mic
+        """Turn a running media or room session into a call session (a call started while e.g.
+        a video was playing): adds the mic track if the policy wants it for calls. The mic
         track starts with silence up to "now" so it stays aligned with the other tracks."""
         with self._op_lock:
             session = self._session
-            if session is None or session.trigger_kind != TriggerKind.MEDIA:
+            if session is None or session.trigger_kind not in (TriggerKind.MEDIA, TriggerKind.ROOM):
                 return False
             session.trigger_kind = TriggerKind.CALL
             session.trigger_app = app or session.trigger_app

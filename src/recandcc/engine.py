@@ -15,6 +15,10 @@ Threading model
   or deleted (discarded); ``session`` is None if the recorder dropped it (too short) or failed.
 * A discarded session is marked before ``recorder.stop()`` and deleted afterwards via
   ``run_in_background`` (a daemon thread), so big WAVs don't delay detection or the hotkey.
+* Room listening (opt-in): ``room_monitor`` (``detect/room.RoomMonitor``) owns its own mic
+  stream. The engine thread opens it while idle and closes it before ``recorder.start`` (so
+  the mic is never opened twice) and while recording; its ``active`` flag is a pseudo-app
+  ``room`` that only triggers when no app session is recording or pending.
 * Time comes from an injectable ``clock`` so tests can drive the state machine with a fake
   clock by calling ``tick()`` directly without starting the thread.
 """
@@ -35,6 +39,8 @@ from .models import AudioProcess, Mode, SessionInfo, TriggerKind, discard_sessio
 log = logging.getLogger(__name__)
 
 IDLE, PROMPTING, RECORDING = "idle", "prompting", "recording"
+ROOM_KEY, ROOM_NAME = "room", "Room"
+ROOM_RETRY_S = 60.0  # wait this long before reopening a room-listening mic that failed
 
 
 def _run_daemon(fn: Callable[[], None]) -> None:
@@ -181,6 +187,7 @@ class Engine:
         on_session_start: Callable[[SessionInfo], None] | None = None,
         on_session_end: Callable[[SessionInfo | None, bool], None] | None = None,
         run_in_background: Callable[[Callable[[], None]], None] | None = None,
+        room_monitor=None,  # RoomMonitor-like: start(speech_s, window_s), stop(), active
     ):
         self.cfg = cfg
         self.monitor = monitor
@@ -210,6 +217,8 @@ class Engine:
         self._prompt_seq = 0
         self._last_state_key = None
         self._apps: dict[str, AppActivity] = {}
+        self.room = room_monitor
+        self._room_retry_at = float("-inf")
 
         self._wake = threading.Event()
         self._stop_evt = threading.Event()
@@ -249,6 +258,8 @@ class Engine:
             self._rec, self._prompt = None, None
         if rec is not None:
             self._do_stop()
+        if self.room is not None:
+            self.room.stop()
         try:
             self.monitor.close()
         except Exception:
@@ -349,6 +360,8 @@ class Engine:
                 log.exception("recorder level query failed")
         apps = group_activity(procs, self.det, self.own_pids)
         now = self.clock()
+        room = self.room
+        room_active = room is not None and room.running and room.active and self._room_wanted()
 
         start_req: tuple[TriggerKind, str | None] | None = None
         stop_req = False
@@ -364,6 +377,8 @@ class Engine:
             for key in apps:
                 self._first_seen.setdefault(key, now)
                 self._last_seen[key] = now
+            if room_active or (self._rec is not None and self._rec.kind == TriggerKind.ROOM):
+                self._last_seen[ROOM_KEY] = now  # keeps a stopped room session suppressed
             for key in list(self._first_seen):
                 if key not in apps:
                     del self._first_seen[key]
@@ -446,12 +461,14 @@ class Engine:
                 media = r.kind == TriggerKind.MEDIA
                 inactive_s = det.media_stop_after_inactive_s if media else det.stop_after_inactive_s
                 silence_s = det.media_stop_after_silence_s if media else det.stop_after_silence_s
-                if r.key not in apps and now - last >= inactive_s:
+                is_room = r.kind == TriggerKind.ROOM  # no app: only the silence rule applies
+                if not is_room and r.key not in apps and now - last >= inactive_s:
                     log.info("stopping: %s inactive for %.0fs", r.name, now - last)
                     stop_req = True
                 elif silence >= silence_s:
                     log.info("stopping: silent for %.0fs", silence)
-                    self._suppressed.add(r.key)  # app may still hold an audio session
+                    if not is_room:
+                        self._suppressed.add(r.key)  # app may still hold an audio session
                     stop_req = True
 
             # Audio ended before the user answered: resolve the prompt by the timeout policy.
@@ -466,7 +483,7 @@ class Engine:
             r = self._rec
             if (
                 r is not None
-                and r.kind == TriggerKind.MEDIA
+                and r.kind in (TriggerKind.MEDIA, TriggerKind.ROOM)
                 and start_req is None
                 and not (stop_req or discard_req)
             ):
@@ -479,7 +496,7 @@ class Engine:
                         or effective_mode(det, a.key, a.procs) == Mode.OFF
                     ):
                         continue
-                    log.info("call detected during media recording: now following %s", a.name)
+                    log.info("call detected during %s recording: now following %s", r.kind, a.name)
                     r.key, r.name, r.kind = a.key, a.name, TriggerKind.CALL
                     upgrade_req = a.name
                     break
@@ -492,6 +509,8 @@ class Engine:
                     if k not in self._suppressed and now - self._first_seen[k] >= det.min_active_s
                 ]
                 cands.sort(key=lambda a: (a.kind != TriggerKind.CALL, self._first_seen[a.key]))
+                if room_active and ROOM_KEY not in self._suppressed:  # apps take precedence
+                    cands.append(AppActivity(ROOM_KEY, ROOM_NAME, TriggerKind.ROOM, []))
                 for a in cands:
                     m = effective_mode(det, a.key, a.procs)
                     if m == Mode.OFF:
@@ -529,7 +548,28 @@ class Engine:
                 self.on_prompt(*prompt_evt)
             except Exception:
                 log.exception("on_prompt callback failed")
+        self._sync_room(now)
         self._notify()
+
+    def _room_wanted(self) -> bool:
+        det = self.det
+        return bool(det.room_listening) and Mode(det.mode) != Mode.OFF and det.record_mic != "never"
+
+    def _sync_room(self, now: float) -> None:
+        """Engine thread, outside the lock: the room mic is open only while idle and wanted."""
+        room = self.room
+        if room is None:
+            return
+        with self._lock:
+            want = self._rec is None and self._room_wanted()
+        try:
+            if want and not room.running and now >= self._room_retry_at:
+                room.start(self.det.room_speech_s, self.det.room_window_s)
+            elif not want and room.running:
+                room.stop()
+        except Exception:
+            log.exception("room listening: could not open the microphone")
+            self._room_retry_at = now + ROOM_RETRY_S
 
     def _notice(self, title: str, message: str) -> None:
         log.warning("%s: %s", title, message)
@@ -591,6 +631,8 @@ class Engine:
             )
 
     def _do_start(self, kind: TriggerKind, app: str | None) -> None:
+        if self.room is not None and self.room.running:
+            self.room.stop()  # hand the mic over to the recorder
         self._preflight()
         try:
             session = self.recorder.start(kind, app)
