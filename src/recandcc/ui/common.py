@@ -309,6 +309,7 @@ class Controller:
         self._perm: dict[str, str] = {}
         self._recent: list[Path] = []
         self._export_lock = threading.Lock()
+        self._retention_lock = threading.Lock()  # one menu purge at a time
         self._refreshing = False
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
@@ -1063,16 +1064,16 @@ class Controller:
         t.daemon = True
         t.start()
 
-    def write_settings(self, *keys: str, title: str = "Settings") -> None:
+    def write_settings(self, *keys: str, title: str = "Settings") -> bool:
         """Blocking save of ``keys`` (see ``_write_settings``); marks them as pending so a
-        config reload meanwhile keeps the in-memory value."""
+        config reload meanwhile keeps the in-memory value. True when config.toml was written."""
         self._mark_dirty(keys, 1)
         try:
-            self._write_settings(*keys, title=title)
+            return self._write_settings(*keys, title=title)
         finally:
             self._mark_dirty(keys, -1)
 
-    def _write_settings(self, *keys: str, title: str = "Settings") -> None:
+    def _write_settings(self, *keys: str, title: str = "Settings") -> bool:
         """Blocking part of ``save_settings``: a read-modify-write of only ``keys``, so a hand
         edit made since the last reload is kept (and picked up by the next refresh). The values
         are read under ``_save_lock``: of two quick menu saves, the last one wins."""
@@ -1089,12 +1090,14 @@ class Controller:
                     mtime = self._mtime()
                 if not edited:
                     self._config_mtime = mtime  # our own write: nothing to reload
+                return True
             except ValueError:  # invalid TOML (mid-edit?): don't overwrite the user's file
                 log.warning("config.toml could not be parsed; %s not saved", ", ".join(keys))
                 self.post_notice(f"{title} not saved", "config.toml could not be parsed")
             except Exception:
                 log.exception("saving settings failed")
                 self.post_notice("Settings not saved", "config.toml could not be written")
+            return False
 
     def _setting(self, key: str):
         """The TOML value of a dotted config key, as the menu last set it."""
@@ -1279,12 +1282,19 @@ class Controller:
 
     def set_retention(self, days: int) -> None:
         """ "Delete audio after" menu (both shells): apply ``days`` in memory at once (the menu
-        check reads it), then save only this key and purge expired audio on a worker."""
-        self.cfg.transcription.audio_retention_days = int(days)
+        check reads it), then save only this key and purge expired audio on a worker. Audio
+        is deleted only once the choice is saved (a failed save reverts at the next start) and
+        only if it is still the current choice (a quick second click supersedes this one)."""
+        days = int(days)
+        self.cfg.transcription.audio_retention_days = days
 
         def apply() -> None:
-            self.write_settings("transcription.audio_retention_days", title="Delete audio after")
-            self.purge_audio_now()
+            key = "transcription.audio_retention_days"
+            if not self.write_settings(key, title="Delete audio after"):
+                return
+            with self._retention_lock:  # serialises menu purges; the check sees the latest
+                if self.cfg.transcription.audio_retention_days == days:
+                    self.purge_audio_now()
 
         threading.Thread(target=apply, daemon=True, name="retention-set").start()
 

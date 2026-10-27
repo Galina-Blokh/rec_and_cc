@@ -349,6 +349,32 @@ def test_retention_choice_saves_its_key_and_purges(tmp_path, monkeypatch):
     assert purged == [7]  # after the save, with the new value
 
 
+def test_retention_is_not_purged_when_the_save_fails(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    purged: list[int] = []
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda: purged.append(1))
+    path.write_text("[summary\n")  # mid-edit: the choice would revert at the next start
+    ctrl.set_retention(1)
+    _join("retention-set")
+    assert path.read_text() == "[summary\n"
+    assert purged == []  # no audio deleted under a setting that was not saved
+
+
+def test_superseded_retention_choice_does_not_purge(tmp_path, monkeypatch):
+    ctrl, _path = _ctrl(tmp_path, monkeypatch)
+    purged: list[int] = []
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda: purged.append(1))
+
+    def slow_save(*_keys, **_kw):  # the user picks Never while "1 day" is being saved
+        ctrl.cfg.transcription.audio_retention_days = 0
+        return True
+
+    monkeypatch.setattr(ctrl, "write_settings", slow_save)
+    ctrl.set_retention(1)
+    _join("retention-set")
+    assert purged == []  # the stale "1 day" purge is skipped; Never's own call decides
+
+
 def _fake_autostart(monkeypatch, module) -> None:
     state = {"on": False}
     monkeypatch.setattr(module.autostart, "is_enabled", lambda: state["on"])
