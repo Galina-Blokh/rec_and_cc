@@ -25,8 +25,9 @@ from .common import as_str, fmt_elapsed
 
 log = logging.getLogger(__name__)
 
-NOTES_LIMIT = 200  # newest sessions listed
+NOTES_LIMIT = 100  # newest sessions listed (each one's transcript.json is read)
 EXCERPT_CHARS = 120
+TITLE_CHARS = 200
 TRANSCRIPT_MD, TRANSCRIPT_JSON, SUMMARY_MD = "transcript.md", "transcript.json", "summary.md"
 ACTIONS = ("Open transcript", "Open summary", "Reveal folder", "Rename…", "Delete…")
 
@@ -111,9 +112,14 @@ def scan_notes(output_dir: Path, limit: int = NOTES_LIMIT) -> list[Note]:
         return []
     # Folder names sort by time (<day>/<HHMMSS>_<app>); read only the newest ones.
     metas.sort(key=lambda f: (f.parent.parent.name, f.parent.name), reverse=True)
-    notes = [n for f in metas[: limit * 2] if (n := load_note(f.parent))]
+    notes: list[Note] = []
+    for f in metas:  # stop once enough are read (discarded / broken folders are skipped)
+        if len(notes) >= limit:
+            break
+        if note := load_note(f.parent):
+            notes.append(note)
     notes.sort(key=lambda n: n.started_at.timestamp(), reverse=True)
-    return notes[:limit]
+    return notes
 
 
 def note_columns(note: Note) -> tuple[str, str, str, str, str, str]:
@@ -152,7 +158,7 @@ def action_target(note: Note, action: str) -> Path:
 def rename_session(directory: Path, title: str) -> SessionInfo:
     """Store a display title in session.json ("" goes back to the default title)."""
     info = SessionInfo.load(directory)
-    info.title = " ".join(title.split())
+    info.title = " ".join(title.split())[:TITLE_CHARS]
     info.save()
     return info
 
@@ -174,7 +180,7 @@ def move_to_trash(path: Path) -> bool:
         if sys.platform == "win32":
             return _win_recycle(path)
     except Exception as e:  # noqa: BLE001 - fall back to deleting
-        log.warning("could not move %s to the Trash: %s", path, type(e).__name__)
+        log.warning("could not move %s to the Trash: %s", Path(path).name, type(e).__name__)
     return False
 
 
@@ -182,6 +188,8 @@ def _win_recycle(path: Path) -> bool:
     from ctypes import wintypes
 
     class SHFILEOPSTRUCTW(ctypes.Structure):
+        # shellapi.h packs it to 1 byte on 32-bit only; 64-bit uses natural alignment.
+        _pack_ = 1 if ctypes.sizeof(ctypes.c_void_p) == 4 else 8
         _fields_ = [
             ("hwnd", wintypes.HWND),
             ("wFunc", wintypes.UINT),
@@ -193,21 +201,30 @@ def _win_recycle(path: Path) -> bool:
             ("lpszProgressTitle", wintypes.LPCWSTR),
         ]
 
-    # FO_DELETE with FOF_ALLOWUNDO (Recycle Bin) | NOCONFIRMATION | SILENT | NOERRORUI
-    op = SHFILEOPSTRUCTW(wFunc=3, pFrom=str(path) + "\0", fFlags=0x40 | 0x10 | 0x4 | 0x400)
-    shell32 = ctypes.windll.shell32  # pyright: ignore[reportAttributeAccessIssue]
-    return shell32.SHFileOperationW(ctypes.byref(op)) == 0 and not op.fAnyOperationsAborted
+    # FO_DELETE with FOF_ALLOWUNDO (Recycle Bin) | NOCONFIRMATION | SILENT, plus
+    # FOF_WANTNUKEWARNING: if the bin can't take it (too big, no bin on that drive) Windows
+    # asks before deleting for good instead of doing it silently; "No" aborts.
+    # pFrom is a list ending in an empty string: the buffer adds the second NUL.
+    buf = ctypes.create_unicode_buffer(str(Path(path).resolve()) + "\0")
+    flags = 0x40 | 0x10 | 0x4 | 0x4000
+    op = SHFILEOPSTRUCTW(wFunc=3, pFrom=ctypes.cast(buf, wintypes.LPCWSTR), fFlags=flags)
+    fn = ctypes.windll.shell32.SHFileOperationW  # pyright: ignore[reportAttributeAccessIssue]
+    fn.argtypes, fn.restype = [ctypes.POINTER(SHFILEOPSTRUCTW)], ctypes.c_int
+    return fn(ctypes.byref(op)) == 0 and not op.fAnyOperationsAborted
 
 
 def can_trash() -> bool:
     return sys.platform in ("darwin", "win32")
 
 
-def delete_session(directory: Path) -> str:
+def delete_session(directory: Path, output_dir: Path) -> str:
     """Delete a session: "trashed", "deleted" (permanently) or "failed" (left as it was).
     No Trash here, or a Trash move that took only part of the folder (a locked file on
     Windows) -> ``discard_session`` finishes it. Blocking: call it off the UI thread."""
     d = Path(directory)
+    if d.is_symlink() or Path(output_dir).resolve() not in d.resolve().parents:
+        log.warning("refusing to delete %s: not a folder inside the output folder", d.name)
+        return "failed"  # never follow a link out of output_dir
     if can_trash() and move_to_trash(d) and not d.exists():
         return "trashed"
     if can_trash() and (d / SessionInfo.FILENAME).exists():
@@ -251,6 +268,26 @@ def delete_script(note: Note) -> str:
         f'display dialog {as_str(delete_prompt(note))} with title "Delete meeting" '
         f'buttons {{"Cancel", "Delete"}} default button "Cancel" with icon caution'
     )
+
+
+def run_dialogs(notes: list[Note], ask, act, open_) -> None:
+    """The macOS flow (worker thread): pick a meeting, then an action. ``ask(script)`` runs
+    AppleScript and returns its output, ``act(directory, action, title="")`` renames or
+    deletes (``Controller.note_action_async``), ``open_(path)`` opens a file or folder."""
+    i = chosen_index(ask(list_script(notes)), len(notes))
+    if i is None:
+        return
+    note = notes[i]
+    action = ask(actions_script(note))
+    if action == "Rename…":
+        out = ask(rename_script(note))  # "button returned:Rename, text returned:<title>"
+        if out.startswith("button returned:Rename"):
+            act(note.directory, "rename", out.partition("text returned:")[2])
+    elif action == "Delete…":
+        if ask(delete_script(note)).startswith("button returned:Delete"):
+            act(note.directory, "delete")
+    elif action in note_actions(note):
+        open_(action_target(note, action))
 
 
 def chosen_index(output: str, count: int) -> int | None:

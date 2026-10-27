@@ -122,12 +122,14 @@ class SessionInfo:
             self.metrics[stage] = {**self.metrics.get(stage, {}), **values}
 
     def save(self) -> None:
-        if self.title is None:  # keep a rename made meanwhile through another copy
-            with contextlib.suppress(OSError, ValueError, AttributeError):
-                on_disk = json.loads((self.directory / self.FILENAME).read_text("utf-8"))
-                self.title = on_disk.get("title")
+        # Keep a rename made meanwhile through another copy (best effort, no lock: Meeting
+        # notes refuses renames while a session records or waits to be transcribed).
         with _METRICS_LOCK:
             data = asdict(self)
+        if self.title is None:  # into the file only: the next save looks again
+            with contextlib.suppress(OSError, ValueError, AttributeError):
+                on_disk = json.loads((self.directory / self.FILENAME).read_text("utf-8"))
+                data["title"] = on_disk.get("title")
         data["directory"] = str(self.directory)
         data["started_at"] = self.started_at.isoformat()
         data["ended_at"] = self.ended_at.isoformat() if self.ended_at else None

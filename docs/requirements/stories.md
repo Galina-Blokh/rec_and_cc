@@ -260,9 +260,10 @@ so that I don't have to dig through dated folders.*
   it or delete it. A rename is stored as `title` in `session.json` (older files without it
   still load) and an empty title goes back to the default.
 - **When** I delete a session and confirm, **then** its folder goes to the Trash / Recycle
-  Bin (permanently via `discard_session` where there is none), it leaves the search index
-  and the recent list; if the Trash refuses, nothing is deleted and I am told.
-- **Given** a session still recording or waiting to be transcribed, **then** rename and
+  Bin (permanently via `discard_session` where there is none), it leaves the search index,
+  the recent list and the stored speaker voices; if the Trash refuses, nothing is deleted
+  and I am told. A folder that is a link, or not inside `output_dir`, is never deleted.
+- **Given** a session from its start until its transcription is done, **then** rename and
   delete are refused with a notice.
 - **Then** logs never contain titles, excerpts or transcript text.
 - **Not yet:** a native macOS window (it is a pair of dialogs), summaries themselves (#4).

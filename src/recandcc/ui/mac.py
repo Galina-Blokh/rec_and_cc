@@ -78,6 +78,7 @@ class MacApp(rumps.App):
         self.cfg = ctrl.cfg
         self._dialog: tuple[int | None, subprocess.Popen] | None = None  # (prompt_id, osascript)
         self._dialog_lock = threading.Lock()
+        self._notes_lock = threading.Lock()  # held while the meeting notes dialogs are up
         self._onboarded = False
         self._delegate = None
         self._recent_sig: tuple = ()
@@ -442,27 +443,19 @@ class MacApp(rumps.App):
 
     def _show_notes(self, notes: list) -> None:
         """Meeting notes as AppleScript dialogs on a worker thread (pick a meeting, then an
-        action); rename and delete run on the Controller, which posts a fresh list."""
+        action); rename and delete run on the Controller, whose fresh list reopens the
+        dialog. One dialog at a time: a list arriving while one is open is dropped."""
         if not notes:
             self._notify("Meeting notes", "No meetings yet")
             return
+        if not self._notes_lock.acquire(blocking=False):
+            return
 
         def run():
-            i = notes_ui.chosen_index(osascript(notes_ui.list_script(notes)), len(notes))
-            if i is None:
-                return
-            note = notes[i]
-            action = osascript(notes_ui.actions_script(note))
-            if action == "Rename…":
-                out = osascript(notes_ui.rename_script(note))
-                if "button returned:Rename" in out:
-                    title = out.partition("text returned:")[2]
-                    self.ctrl.note_action_async(note.directory, "rename", title)
-            elif action == "Delete…":
-                if "button returned:Delete" in osascript(notes_ui.delete_script(note)):
-                    self.ctrl.note_action_async(note.directory, "delete")
-            elif action in notes_ui.ACTIONS:
-                open_path(notes_ui.action_target(note, action))
+            try:
+                notes_ui.run_dialogs(notes, osascript, self.ctrl.note_action_async, open_path)
+            finally:
+                self._notes_lock.release()
 
         threading.Thread(target=run, daemon=True, name="notes-dialog").start()
 

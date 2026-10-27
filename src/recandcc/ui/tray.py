@@ -398,7 +398,12 @@ class TkNotes:
                     bar, text=action, command=lambda a=action: self.act(selected(), a, ask)
                 ).pack(side="left", padx=2)
             tk.Button(bar, text="Refresh", command=self.ctrl.notes_async).pack(side="right")
-            tree.bind("<Double-1>", lambda _e: self.act(selected(), "Open transcript"))
+            tree.bind(  # the row under the pointer, not a stale focus (header, empty space)
+                "<Double-1>",
+                lambda e: (
+                    (row := tree.identify_row(e.y)) and self.act(tree.index(row), "Open transcript")
+                ),
+            )
             tree.bind(
                 "<<TreeviewSelect>>",
                 lambda _e: excerpt.configure(
