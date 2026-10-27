@@ -16,6 +16,8 @@ FrameCallback = Callable[[np.ndarray], None]
 
 class AudioSource(ABC):
     name: str = "source"
+    # What a system-audio source records: "all" (everything) or "app" (one app's processes).
+    scope: str = "all"
 
     @abstractmethod
     def start(self, on_frames: FrameCallback) -> None:

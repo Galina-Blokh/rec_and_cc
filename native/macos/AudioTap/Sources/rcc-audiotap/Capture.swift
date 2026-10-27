@@ -10,11 +10,13 @@
 //      stream. We make it private (invisible to other apps) and clock it from the default
 //      output device.
 //   4. An IOProc on the aggregate device receives the tapped audio in its input buffer list.
-//      We copy it off the real-time thread and convert it to 16 kHz mono float32.
+//      It only copies the samples into a preallocated ring (no allocation, no waiting); a
+//      10 ms timer drains the ring and converts to 16 kHz mono float32 off the IO thread.
 
 import AVFoundation
 import CoreAudio
 import Foundation
+import os
 
 /// Output format handed to consumers: what Whisper wants.
 let outputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
@@ -25,13 +27,32 @@ let outputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16
 struct AppTarget {
     var pids: [pid_t] = []
     var matches: [String] = []
+    /// The process object each PID had when first seen: a PID whose object changes was
+    /// reused by another process, and one without an object has exited; both are dropped.
+    private var seen: [pid_t: AudioObjectID] = [:]
+
+    init(pids: [pid_t] = [], matches: [String] = []) {
+        self.pids = pids
+        self.matches = matches
+    }
 
     /// The target's current Core Audio process objects (sorted, without `excluded` PIDs).
-    func processObjects(excluding excluded: Set<pid_t>) -> [AudioObjectID] {
+    mutating func processObjects(excluding excluded: Set<pid_t>) -> [AudioObjectID] {
         var result = Set<AudioObjectID>()
+        var alive: [pid_t] = []
         for pid in pids where !excluded.contains(pid) {
-            if let object = try? processObject(forPID: pid) { result.insert(object) }
+            let object = (try? processObject(forPID: pid)) ?? nil
+            if let object, seen[pid, default: object] == object {
+                seen[pid] = object
+                result.insert(object)
+                alive.append(pid)
+            } else if seen[pid] != nil {
+                seen[pid] = nil  // exited or reused: never follow this PID again
+            } else {
+                alive.append(pid)  // not playing yet
+            }
         }
+        pids = alive
         let needles = matches.map { $0.lowercased() }.filter { !$0.isEmpty }
         let all = needles.isEmpty ? [] : (try? readObjectList(AudioObjectID(kAudioObjectSystemObject),
                                                               kAudioHardwarePropertyProcessObjectList,
@@ -63,6 +84,11 @@ final class SystemAudioCapture {
     private var tapFormat: AVAudioFormat!
     private var converter: AVAudioConverter!
     private var loggedLayout = false
+    // IO-thread state, set up before IO starts: plain values, no Objective-C calls per cycle.
+    private var ring: SampleRing!
+    private var channels = 2, interleaved = true
+    private var drain: DispatchSourceTimer?
+    private var chunk: AVAudioPCMBuffer!  // the drain timer's input buffer (interleaved)
     /// Per-app tap only: the description the tap was made from and the objects it records.
     private var appDescription: CATapDescription?
     private var tappedObjects: [AudioObjectID] = []
@@ -92,6 +118,8 @@ final class SystemAudioCapture {
 
     /// Tear everything down in reverse order. Safe to call more than once.
     func stop() {
+        drain?.cancel()
+        drain = nil
         if let ioProcID {
             AudioDeviceStop(aggregateID, ioProcID)
             let status = AudioDeviceDestroyIOProcID(aggregateID, ioProcID)
@@ -113,8 +141,9 @@ final class SystemAudioCapture {
     // MARK: - Setup steps
 
     private func createTap() throws {
-        if let target {
+        if var target {
             let objects = target.processObjects(excluding: Set(excludePIDs))
+            self.target = target
             if objects.isEmpty {
                 logError("per-app tap: no audio process matches \(target.matches) / pids \(target.pids); using the global tap")
             } else {
@@ -124,6 +153,7 @@ final class SystemAudioCapture {
                     appDescription = description
                     tappedObjects = objects
                     logError("per-app tap on \(objects.count) process object(s) (\(target.matches))")
+                    logError("scope: app")  // machine-readable for system_mac.py
                     return
                 } catch {
                     logError("per-app tap failed (\(error)); using the global tap")
@@ -142,6 +172,7 @@ final class SystemAudioCapture {
 
         try makeTap(CATapDescription(stereoGlobalTapButExcludeProcesses: excluded))
         logError("global tap (excluding \(excluded.count) process object(s))")
+        logError("scope: all")
     }
 
     private func makeTap(_ description: CATapDescription) throws {
@@ -153,13 +184,19 @@ final class SystemAudioCapture {
 
         var tap = AudioObjectID(kAudioObjectUnknown)
         try check(AudioHardwareCreateProcessTap(description, &tap), "AudioHardwareCreateProcessTap")
-        tapID = tap
-
-        var asbd = try readValue(tapID, kAudioTapPropertyFormat, as: AudioStreamBasicDescription.self,
-                                 initial: AudioStreamBasicDescription(), name: "tap format")
-        guard let format = AVAudioFormat(streamDescription: &asbd) else {
-            throw ToolError("Unsupported tap format: \(asbd)")
+        let format: AVAudioFormat
+        do {
+            var asbd = try readValue(tap, kAudioTapPropertyFormat, as: AudioStreamBasicDescription.self,
+                                     initial: AudioStreamBasicDescription(), name: "tap format")
+            guard let parsed = AVAudioFormat(streamDescription: &asbd), parsed.commonFormat == .pcmFormatFloat32 else {
+                throw ToolError("Unsupported tap format: \(asbd)")
+            }
+            format = parsed
+        } catch {
+            AudioHardwareDestroyProcessTap(tap)  // don't leak it when falling back to the global tap
+            throw error
         }
+        tapID = tap
         tapFormat = format
         logError("tap format: \(format)")
     }
@@ -170,8 +207,8 @@ final class SystemAudioCapture {
     /// renderer, an Electron audio helper) join the tap. An empty set (the app quit) keeps
     /// the old one, which then just stays silent. No-op for the global tap.
     func retarget() {
-        guard let target, let description = appDescription, tapID != kAudioObjectUnknown else { return }
-        let objects = target.processObjects(excluding: Set(excludePIDs))
+        guard target != nil, let description = appDescription, tapID != kAudioObjectUnknown else { return }
+        let objects = target!.processObjects(excluding: Set(excludePIDs))
         guard !objects.isEmpty, objects != tappedObjects else { return }
         description.processes = objects
         var address = propertyAddress(kAudioTapPropertyDescription)
@@ -233,9 +270,17 @@ final class SystemAudioCapture {
     }
 
     private func setUpConverter() throws {
-        guard let converter = AVAudioConverter(from: tapFormat, to: outputFormat) else {
+        // The ring holds interleaved frames whatever the tap's layout, so convert from that.
+        channels = Int(tapFormat.channelCount)
+        interleaved = tapFormat.isInterleaved
+        guard let input = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: tapFormat.sampleRate,
+                                        channels: tapFormat.channelCount, interleaved: true),
+              let chunk = AVAudioPCMBuffer(pcmFormat: input, frameCapacity: AVAudioFrameCount(tapFormat.sampleRate / 10)),
+              let converter = AVAudioConverter(from: input, to: outputFormat) else {
             throw ToolError("Cannot convert from \(tapFormat!) to \(outputFormat)")
         }
+        self.chunk = chunk
+        ring = SampleRing(capacity: Int(tapFormat.sampleRate) * 2 * channels)  // 2 s
         // Mix all channels into mono instead of just taking the first one.
         converter.downmix = true
         self.converter = converter
@@ -247,17 +292,23 @@ final class SystemAudioCapture {
             self?.handleInput(inputData)
         }, "AudioDeviceCreateIOProcIDWithBlock")
         ioProcID = procID
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 0.01, repeating: 0.01)
+        timer.setEventHandler { [weak self] in self?.drainRing() }
+        timer.resume()
+        drain = timer
         try check(AudioDeviceStart(aggregateID, procID), "AudioDeviceStart on the tap aggregate device")
     }
 
     // MARK: - Audio path
 
-    /// Real-time thread: copy the tap's samples into an owned buffer and get off this thread.
+    /// Real-time thread: copy the tap's samples into the ring. Nothing here allocates,
+    /// waits on a lock or calls into Objective-C (AGENTS.md rule 1).
     private func handleInput(_ inputData: UnsafePointer<AudioBufferList>) {
         let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
         // The tap's stream(s) come after any input streams of the sub-device (e.g. a headset
         // mic on the output device), so take the trailing buffers that match the tap format.
-        let needed = tapFormat.isInterleaved ? 1 : Int(tapFormat.channelCount)
+        let needed = interleaved ? 1 : channels
         guard buffers.count >= needed else {
             if !loggedLayout {
                 loggedLayout = true
@@ -266,31 +317,39 @@ final class SystemAudioCapture {
             }
             return
         }
-        let tapBuffers = Array(buffers.suffix(needed))
-        let bytesPerFrame = Int(tapFormat.streamDescription.pointee.mBytesPerFrame)
-        guard bytesPerFrame > 0 else { return }
-        let frames = Int(tapBuffers[0].mDataByteSize) / bytesPerFrame
-        guard frames > 0,
-              let copy = AVAudioPCMBuffer(pcmFormat: tapFormat, frameCapacity: AVAudioFrameCount(frames)) else { return }
-        copy.frameLength = AVAudioFrameCount(frames)
-        let destination = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
-        for (src, var dst) in zip(tapBuffers, destination) {
-            if let s = src.mData, let d = dst.mData {
-                memcpy(d, s, Int(min(src.mDataByteSize, dst.mDataByteSize)))
+        let first = buffers.count - needed
+        let ch = channels
+        let frames = Int(buffers[first].mDataByteSize) / (4 * (interleaved ? ch : 1))
+        guard frames > 0 else { return }
+        if interleaved {
+            guard let src = buffers[first].mData?.assumingMemoryBound(to: Float.self) else { return }
+            ring.push(frames * ch) { src[$0] }
+        } else {
+            ring.push(frames * ch) { i in
+                buffers[first + i % ch].mData.map { $0.assumingMemoryBound(to: Float.self)[i / ch] } ?? 0
             }
-            dst.mDataByteSize = src.mDataByteSize
         }
         if !loggedLayout {
             loggedLayout = true
             let layout = buffers.count
             queue.async { logError("IO buffer list: \(layout) buffer(s), using last \(needed); \(frames) frames/cycle") }
         }
-        queue.async { [weak self] in self?.convert(copy) }
     }
 
-    /// Conversion queue: resample/downmix to 16 kHz mono and hand to the sink.
+    /// Conversion queue, every 10 ms: drain the ring, resample/downmix, hand to the sink.
+    private func drainRing() {
+        while true {
+            let (samples, dropped) = ring.pop(into: chunk.floatChannelData![0],
+                                              max: Int(chunk.frameCapacity) * channels)
+            if dropped > 0 { logError("ring buffer overflow: dropped \(dropped / channels) frames") }
+            guard samples > 0 else { return }
+            chunk.frameLength = AVAudioFrameCount(samples / channels)
+            convert(chunk)
+        }
+    }
+
     private func convert(_ input: AVAudioPCMBuffer) {
-        let ratio = outputFormat.sampleRate / tapFormat.sampleRate
+        let ratio = outputFormat.sampleRate / input.format.sampleRate
         let capacity = AVAudioFrameCount((Double(input.frameLength) * ratio).rounded(.up)) + 64
         guard let output = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: capacity) else { return }
         var consumed = false
@@ -312,6 +371,59 @@ final class SystemAudioCapture {
         }
         guard output.frameLength > 0, let samples = output.floatChannelData?[0] else { return }
         sink(UnsafeBufferPointer(start: samples, count: Int(output.frameLength)))
+    }
+}
+
+/// Sample FIFO between the IO thread (one producer) and the drain timer (one consumer).
+/// Preallocated; the producer only ever *tries* the lock, which the consumer holds just for
+/// a memcpy, so the IO thread never waits. Samples that don't fit are counted as dropped.
+final class SampleRing {
+    private let storage: UnsafeMutablePointer<Float>
+    private let capacity: Int
+    private let lock = UnsafeMutablePointer<os_unfair_lock>.allocate(capacity: 1)
+    private var head = 0, count = 0, dropped = 0  // guarded by lock
+    private var missed = 0  // producer only: samples lost while the consumer held the lock
+
+    init(capacity: Int) {
+        self.capacity = capacity
+        storage = .allocate(capacity: capacity)
+        storage.initialize(repeating: 0, count: capacity)
+        lock.initialize(to: os_unfair_lock())
+    }
+
+    deinit {
+        storage.deallocate()
+        lock.deallocate()
+    }
+
+    /// IO thread: append `n` samples, `sample(i)` giving the i-th.
+    func push(_ n: Int, _ sample: (Int) -> Float) {
+        guard os_unfair_lock_trylock(lock) else { missed += n; return }
+        let fits = min(n, capacity - count)
+        dropped += missed + n - fits
+        missed = 0
+        var tail = (head + count) % capacity
+        for i in 0..<fits {
+            storage[tail] = sample(i)
+            tail = tail + 1 == capacity ? 0 : tail + 1
+        }
+        count += fits
+        os_unfair_lock_unlock(lock)
+    }
+
+    /// Consumer: move up to `max` samples into `dst`; returns (moved, dropped since last pop).
+    func pop(into dst: UnsafeMutablePointer<Float>, max: Int) -> (Int, Int) {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        let n = min(max, count)
+        let firstPart = min(n, capacity - head)
+        dst.update(from: storage + head, count: firstPart)
+        (dst + firstPart).update(from: storage, count: n - firstPart)
+        head = (head + n) % capacity
+        count -= n
+        let lost = dropped
+        dropped = 0
+        return (n, lost)
     }
 }
 
