@@ -16,7 +16,8 @@ account, nothing uploaded.
   panel can be used when it is unambiguous; see [Names from the call app](#names-from-the-call-app).
 - 🌍 **English and Russian** are detected automatically, even when the language switches
   mid-meeting. **Hebrew** can be added (`languages = ["en", "ru", "he"]`): captions and
-  transcripts show it right to left. Hebrew accuracy with the stock model is not yet tuned.
+  transcripts show it right to left (Windows captions reorder RTL text themselves, as Tk does no
+  bidi; verified by unit tests only, no hardware check yet). Hebrew accuracy with the stock model is not yet tuned.
 - 🧠 Local Whisper (`large-v3-turbo`) on the **Apple-silicon GPU** (MLX), with CPU threads
   working alongside: a 1-hour meeting transcribes in about 2–3 minutes. Windows uses the CPU.
   and the final transcript is ready a moment after the recording stops.
