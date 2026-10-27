@@ -20,6 +20,7 @@ from recandcc import config as config_mod
 from recandcc.config import (
     DEFAULT_SUMMARY_MODEL,
     QWEN_RESEARCH_SUMMARY_MODEL,
+    SUMMARY_MODEL_KEPT,
     SUMMARY_MODEL_SWITCHED,
     Config,
     SummaryConfig,
@@ -189,12 +190,9 @@ def test_accepted_qwen_research_licence_keeps_the_3b(tmp_path):
 def _cache_model(cache: Path, repo: str, rev: str | None = None) -> None:
     """A fake complete snapshot of ``repo`` (its pinned commit by default) in an HF cache."""
     root = cache / ("models--" + repo.replace("/", "--"))
-    blob = root / "blobs" / (rev or "abc")
-    blob.parent.mkdir(parents=True, exist_ok=True)
-    blob.write_bytes(b"weights")
     snap = root / "snapshots" / (rev or gpu.revision(repo) or "commit")
     snap.mkdir(parents=True)
-    (snap / "model.safetensors").symlink_to(blob)
+    (snap / "model.safetensors").write_bytes(b"weights")  # a plain file: no symlink rights needed
 
 
 def test_old_default_switch_is_saved_with_only_that_key(tmp_path):
@@ -203,24 +201,23 @@ def test_old_default_switch_is_saved_with_only_that_key(tmp_path):
     path.write_text(path.read_text("utf-8") + "\n[extra]\nhand = 1\n", "utf-8")
     cfg = load_config(path, migrate=True)
     assert cfg.summary.model == DEFAULT_SUMMARY_MODEL
-    assert cfg.summary._switched_from == QWEN_RESEARCH_SUMMARY_MODEL
     text = path.read_text("utf-8")
     assert DEFAULT_SUMMARY_MODEL in text and QWEN_RESEARCH_SUMMARY_MODEL not in text
     assert "hand = 1" in text  # key-level save, not a full overwrite
-    again = load_config(path, migrate=True)
-    assert not hasattr(again.summary, "_switched_from")  # once: the switch is on disk
+    assert load_config(path, migrate=True).summary.model == DEFAULT_SUMMARY_MODEL
 
 
 def test_cli_loads_switch_in_memory_only(tmp_path):
     # a CLI command run first after the upgrade must not use up the app's one-time notice
     path = tmp_path / "config.toml"
-    Config(summary=SummaryConfig(model=QWEN_RESEARCH_SUMMARY_MODEL)).save(path)
+    Config(summary=SummaryConfig(enabled=True, model=QWEN_RESEARCH_SUMMARY_MODEL)).save(path)
     before = path.read_text("utf-8")
     cfg = load_config(path)
     assert cfg.summary.model == DEFAULT_SUMMARY_MODEL
-    assert not hasattr(cfg.summary, "_switched_from")
+    assert not hasattr(cfg.summary, "_notice")
     assert path.read_text("utf-8") == before
-    assert load_config(path, migrate=True).summary._switched_from == QWEN_RESEARCH_SUMMARY_MODEL
+    assert load_config(path, migrate=True).summary._notice == SUMMARY_MODEL_SWITCHED
+    assert not hasattr(load_config(path, migrate=True).summary, "_notice")  # once
 
 
 def test_cached_3b_is_kept_while_the_new_default_is_missing(tmp_path):
@@ -231,10 +228,39 @@ def test_cached_3b_is_kept_while_the_new_default_is_missing(tmp_path):
     before = path.read_text("utf-8")
     cfg = load_config(path, migrate=True)
     assert cfg.summary.model == QWEN_RESEARCH_SUMMARY_MODEL
-    assert not hasattr(cfg.summary, "_switched_from")
+    assert not hasattr(cfg.summary, "_notice")  # summaries off: nothing to say
     assert path.read_text("utf-8") == before
     _cache_model(config_mod.HF_CACHE_DIR, DEFAULT_SUMMARY_MODEL)  # both on disk: switch
     assert load_config(path, migrate=True).summary.model == DEFAULT_SUMMARY_MODEL
+
+
+def test_kept_cached_3b_is_noticed_once(tmp_path):
+    # nothing downloads the 1.5B while the 3B is kept, so the user is told how to switch
+    _cache_model(config_mod.HF_CACHE_DIR, QWEN_RESEARCH_SUMMARY_MODEL)
+    path = tmp_path / "config.toml"
+    Config(summary=SummaryConfig(enabled=True, model=QWEN_RESEARCH_SUMMARY_MODEL)).save(path)
+    assert not hasattr(load_config(path).summary, "_notice")  # CLI: no notice used up
+    cfg = load_config(path, migrate=True)
+    assert cfg.summary.model == QWEN_RESEARCH_SUMMARY_MODEL
+    assert cfg.summary._notice == SUMMARY_MODEL_KEPT
+    assert not hasattr(load_config(path, migrate=True).summary, "_notice")  # once
+
+
+def test_unpinned_1_5b_snapshot_does_not_replace_a_cached_3b(tmp_path):
+    # another tool's copy of the 1.5B at a different commit wouldn't load offline
+    _cache_model(config_mod.HF_CACHE_DIR, QWEN_RESEARCH_SUMMARY_MODEL)
+    _cache_model(config_mod.HF_CACHE_DIR, DEFAULT_SUMMARY_MODEL, rev="2" * 40)
+    path = tmp_path / "config.toml"
+    Config(summary=SummaryConfig(model=QWEN_RESEARCH_SUMMARY_MODEL)).save(path)
+    assert load_config(path, migrate=True).summary.model == QWEN_RESEARCH_SUMMARY_MODEL
+
+
+def test_config_does_not_import_transcribe():
+    # AGENTS rule 8: config.py is a leaf; the summary pins live there and revisions.py uses them
+    src = Path(config_mod.__file__).read_text("utf-8")
+    assert "from .transcribe" not in src and "import recandcc.transcribe" not in src
+    for model, rev in config_mod.SUMMARY_MODEL_REVISIONS.items():
+        assert gpu.revision(model) == rev
 
 
 def test_only_the_pinned_snapshot_counts_for_a_pinned_repo():
@@ -248,7 +274,10 @@ def test_only_the_pinned_snapshot_counts_for_a_pinned_repo():
 def test_interrupted_download_does_not_count_as_on_disk(tmp_path):
     snap = config_mod.HF_CACHE_DIR / "models--a--b" / "snapshots" / "c"
     snap.mkdir(parents=True)
-    (snap / "model.safetensors").symlink_to(tmp_path / "missing-blob")
+    try:
+        (snap / "model.safetensors").symlink_to(tmp_path / "missing-blob")
+    except OSError:
+        pytest.skip("symlinks unavailable")
     assert config_mod.summary_model_on_disk("a/b") is False
     assert config_mod.summary_model_on_disk("no/such") is False
 
@@ -256,7 +285,7 @@ def test_interrupted_download_does_not_count_as_on_disk(tmp_path):
 def test_cache_check_without_huggingface_hub_uses_the_default_folder(tmp_path, monkeypatch):
     monkeypatch.setattr(config_mod, "HF_CACHE_DIR", None)
     monkeypatch.setitem(sys.modules, "huggingface_hub.constants", None)  # not importable
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))  # every platform
     assert config_mod.summary_model_on_disk(QWEN_RESEARCH_SUMMARY_MODEL) is False
     _cache_model(tmp_path / ".cache" / "huggingface" / "hub", QWEN_RESEARCH_SUMMARY_MODEL)
     assert config_mod.summary_model_on_disk(QWEN_RESEARCH_SUMMARY_MODEL) is True

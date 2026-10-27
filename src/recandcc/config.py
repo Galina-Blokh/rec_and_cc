@@ -192,6 +192,14 @@ DEFAULT_SUMMARY_MODEL = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
 # The previous default, still pinned and selectable: a larger model (~1.7 GB), but under the
 # Qwen Research licence, which allows non-commercial use only.
 QWEN_RESEARCH_SUMMARY_MODEL = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+# Their pinned commits, part of transcribe/revisions.py's HF_REVISIONS. Kept here so the
+# load-time migration below can check the cache without config.py importing transcribe/.
+SUMMARY_MODEL_REVISIONS = {
+    # model.safetensors sha256 0979f33d1bc58afcf696d13f57977644e7b11a6f0eec3e631d8e9463d18c0717
+    DEFAULT_SUMMARY_MODEL: "8b403126fc14f14cfc99bb4cfa72ecbc129ea677",
+    # model.safetensors sha256 f212cf6fb9923281a09c135e05d43a052ee5ef7121f5b1dc0b0fb2de80f97cfd
+    QWEN_RESEARCH_SUMMARY_MODEL: "4f83f8f146fdf28b512a06562b671d7af4fab457",
+}
 # Hugging Face hub cache that summary_model_on_disk() looks in; None = huggingface_hub's own
 # (HF_HUB_CACHE / HF_HOME). Tests point it at a tmp folder.
 HF_CACHE_DIR: Path | None = None
@@ -199,23 +207,27 @@ SUMMARY_MODEL_SWITCHED = (
     "Summary model switched to Qwen2.5 1.5B (Apache-2.0); set "
     "summary.accept_qwen_research_licence = true to keep the 3B"
 )
+# Next to config.toml once the "kept the cached 3B" notice was shown.
+SUMMARY_KEPT_MARKER = ".summary-3b-kept-noticed"
+SUMMARY_MODEL_KEPT = (
+    "Keeping the cached Qwen2.5 3B summary model, which is non-commercial; set summary.model "
+    f'= "{DEFAULT_SUMMARY_MODEL}" in config.toml to switch to the Apache-2.0 1.5B'
+)
 
 
 def summary_model_on_disk(repo: str) -> bool:
     """Whether the snapshot of ``repo`` that would be loaded, with its weights, is in the
-    local Hugging Face cache: the pinned commit's (transcribe/revisions.py), or any snapshot
-    for an unpinned repo. Only looks at the disk (never the network), and never raises."""
+    local Hugging Face cache: the pinned commit's (SUMMARY_MODEL_REVISIONS), or any snapshot
+    for another repo. Only looks at the disk (never the network), and never raises."""
     cache = HF_CACHE_DIR
     if cache is None:
         try:
             from huggingface_hub.constants import HF_HUB_CACHE
-        except ImportError:  # same fallback as transcribe/gpu.hf_cache_folder
-            HF_HUB_CACHE = "~/.cache/huggingface/hub"
+        except ImportError:  # huggingface_hub's default, as in transcribe/gpu.hf_cache_folder
+            HF_HUB_CACHE = Path.home() / ".cache" / "huggingface" / "hub"
         cache = Path(HF_HUB_CACHE)
-    from .transcribe.revisions import revision  # lazy: only for the 3B migration
-
     snapshots = Path(cache).expanduser() / ("models--" + repo.replace("/", "--")) / "snapshots"
-    rev = revision(repo)
+    rev = SUMMARY_MODEL_REVISIONS.get(repo)
     try:
         # .exists() follows the symlink to the blob, so an interrupted download doesn't count
         if rev is not None:
@@ -509,21 +521,30 @@ def load_config(path: Path | None = None, *, migrate: bool = False) -> Config:
 def _migrate_summary_model(summary: SummaryConfig, path: Path, *, persist: bool) -> None:
     """Replace the old default 3B (non-commercial; Config.save wrote it into every
     config.toml) with the current default, unless its licence was accepted. Kept when the 3B
-    is on disk and the new default isn't, so an offline user's summaries keep working. The
-    switch applies in memory; with ``persist`` (the app's startup load) it is also written
-    to config.toml (that key only) and flagged with ``summary._switched_from`` for a
-    one-time notice (ui.common.Controller)."""
+    is on disk and the new default isn't, so an offline user's summaries keep working (and
+    nothing downloads the new default, so it stays until the user picks it). The switch
+    applies in memory; with ``persist`` (the app's startup load) it is also written to
+    config.toml (that key only), and with summaries on ``summary._notice`` is set for a
+    one-time notice (ui.common.Controller): after the switch, or the first time the 3B is
+    kept (remembered by a marker file next to config.toml)."""
     if summary.model != QWEN_RESEARCH_SUMMARY_MODEL or summary.accept_qwen_research_licence:
         return
     if summary_model_on_disk(QWEN_RESEARCH_SUMMARY_MODEL) and not summary_model_on_disk(
         DEFAULT_SUMMARY_MODEL
     ):
         log.info(
-            "summary.model %s (non-commercial licence) kept for now: it is on disk and %s "
-            "is not; set summary.accept_qwen_research_licence = true to keep it for good",
+            "summary.model %s (non-commercial licence) kept: it is on disk and %s is not; "
+            "set summary.model to switch, or summary.accept_qwen_research_licence = true",
             summary.model,
             DEFAULT_SUMMARY_MODEL,
         )
+        marker = path.with_name(SUMMARY_KEPT_MARKER)
+        if persist and summary.enabled and not marker.exists():
+            try:
+                marker.touch()
+            except OSError as e:
+                log.warning("could not write %s: %s", marker, type(e).__name__)
+            summary._notice = SUMMARY_MODEL_KEPT  # type: ignore[attr-defined]
         return
     log.info(
         "summary.model %s (the old default, non-commercial licence) -> %s; set "
@@ -534,7 +555,8 @@ def _migrate_summary_model(summary: SummaryConfig, path: Path, *, persist: bool)
     summary.model = DEFAULT_SUMMARY_MODEL
     if not persist:
         return
-    summary._switched_from = QWEN_RESEARCH_SUMMARY_MODEL  # type: ignore[attr-defined]
+    if summary.enabled:
+        summary._notice = SUMMARY_MODEL_SWITCHED  # type: ignore[attr-defined]
     try:
         save_keys(path, {"summary.model": DEFAULT_SUMMARY_MODEL})
     except (OSError, ValueError) as e:
