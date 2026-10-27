@@ -369,3 +369,22 @@ def test_real_diarization_attaches_speaker_centroids():
     assert abs(float(np.linalg.norm(first)) - 1) < 1e-5
     assert float(first @ ANNA) > 0.95 and float(last @ CARL) > 0.95
     assert voices.match_profiles(turns.centroids, profiles(Anna=ANNA)) == {turns[0].speaker: "Anna"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_lock_file_is_owner_only_even_when_it_pre_exists_loose(tmp_path):
+    d = tmp_path / "voices"
+    d.mkdir()
+    lock = d / voices.LOCK_FILE
+    lock.write_bytes(b"")
+    lock.chmod(0o644)
+    old = os.umask(0o022)
+    try:
+        with voices._file_lock(d):
+            pass
+        lock.unlink()
+        with voices._file_lock(d):
+            pass
+    finally:
+        os.umask(old)
+    assert lock.stat().st_mode & 0o777 == 0o600

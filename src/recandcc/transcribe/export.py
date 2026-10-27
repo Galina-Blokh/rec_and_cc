@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..models import Segment, is_rtl
-from .output import JSON_NAME, fmt_hms, languages_of
+from .output import JSON_NAME, fmt_hms, languages_of, sanitize_text
 from .summary import PENDING_MARKER, SUMMARY_NAME
 
 log = logging.getLogger(__name__)
@@ -56,7 +56,9 @@ def rtl_segment(seg: Segment) -> bool:
 
 
 def _clean(text: str) -> str:
-    """Control characters (they are invalid in DOCX XML) become spaces."""
+    """Control characters (they are invalid in DOCX XML) become spaces; surrogates and
+    noncharacters become U+FFFD."""
+    text = sanitize_text(text)
     return "".join(" " if unicodedata.category(c) == "Cc" else c for c in text).strip()
 
 

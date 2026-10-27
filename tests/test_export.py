@@ -144,6 +144,14 @@ def test_export_session_formats_and_private_mode(session):
         export.export_session(session, "odt")
 
 
+def test_clean_maps_surrogates_and_noncharacters_so_docx_still_exports(session):
+    assert export._clean("a\ud83db\uffffc\x01d") == "a\ufffdb\ufffdc d"
+    data = json.loads((session / "transcript.json").read_text("utf-8"))
+    data["segments"][0]["text"] = "x\uffff y"
+    (session / "transcript.json").write_text(json.dumps(data), "utf-8")
+    assert [p.name for p in export.export_session(session, "docx")] == ["transcript.docx"]
+
+
 def test_missing_or_broken_transcript(tmp_path):
     with pytest.raises(export.ExportError):
         export.export_docx(tmp_path)
