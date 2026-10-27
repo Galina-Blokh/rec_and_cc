@@ -17,6 +17,7 @@ from test_live import FakeTranscriber, Feeder, burst, manual, silence
 from test_live import make_session as make_live_session
 from test_transcribe import HebrewFakeModel, _install, _write_tracks, make_session
 
+import recandcc.transcribe.engine as eng
 from recandcc.config import TranscriptionConfig, load_config, normalize_language_models
 from recandcc.models import SAMPLE_RATE, Track
 from recandcc.transcribe import gpu
@@ -85,7 +86,37 @@ def test_routed_model_that_fails_to_load_falls_back(tmp_path, monkeypatch, caplo
     assert "שלום" not in caplog.text and "word" not in caplog.text  # no transcript text
 
 
-def test_unpinned_routed_repo_is_not_downloaded(monkeypatch, tmp_path):
+def _loaded(t: Transcriber, main) -> Transcriber:
+    t._model = main
+    t._ensure_loaded = lambda: main  # type: ignore[method-assign]
+    return t
+
+
+def test_failed_load_is_retried_after_a_backoff_with_one_notice():
+    t = _loaded(Transcriber(_cfg()), main := HebrewFakeModel())
+    routed, attempts, notices, now = HebrewFakeModel(), [], [], [0.0]
+    t.clock = lambda: now[0]
+    t.on_notice = lambda title, msg: notices.append((title, msg))
+
+    def load(name):  # offline at the first Hebrew speech, online again later
+        attempts.append(now[0])
+        if len(attempts) < 3:
+            raise OSError("network unreachable")
+        return routed
+
+    t._load = load  # type: ignore[method-assign]
+    assert t._model_for("he") is main and t._model_for("he") is main
+    now[0] = eng.ROUTE_RETRY_S - 1
+    assert t._model_for("he") is main and attempts == [0.0]  # still backing off
+    now[0] = eng.ROUTE_RETRY_S
+    assert t._model_for("he") is main  # second failure: next retry later again
+    now[0] = 2 * eng.ROUTE_RETRY_S
+    assert t._model_for("he") is routed and t._model_for("he") is routed
+    assert attempts == [0.0, eng.ROUTE_RETRY_S, 2 * eng.ROUTE_RETRY_S]
+    assert notices == [("Hebrew model unavailable", "Using the default model for Hebrew")]
+
+
+def test_unpinned_routed_repo_is_refused_for_good(monkeypatch, tmp_path):
     downloads = []
 
     def download_model(name, local_files_only=False, revision=None):
@@ -96,11 +127,34 @@ def test_unpinned_routed_repo_is_not_downloaded(monkeypatch, tmp_path):
     fake = types.SimpleNamespace(WhisperModel=object, utils=fake_utils)
     monkeypatch.setitem(sys.modules, "faster_whisper", fake)
     monkeypatch.setitem(sys.modules, "faster_whisper.utils", fake_utils)
-    t = Transcriber(_cfg(backend="faster-whisper", language_models={"he": "someone/custom"}))
-    main = HebrewFakeModel()
-    monkeypatch.setattr(t, "_ensure_loaded", lambda: main)
+    cfg = _cfg(backend="faster-whisper", language_models={"he": "someone/custom"})
+    t = _loaded(Transcriber(cfg), main := HebrewFakeModel())
     assert t._model_for("he") is main  # refused (allow_unpinned_models off) -> default model
+    t.clock = lambda: 1e9
+    assert t._model_for("he") is main  # a config problem: never retried
     assert downloads == [("someone/custom", None, True)]  # local lookup only, no download
+
+
+def test_prefetch_loads_configured_languages_in_the_background():
+    t = _loaded(Transcriber(_cfg(language_models={"he": IVRIT, "de": "other"})), HebrewFakeModel())
+    started, release, loads = threading.Event(), threading.Event(), []
+
+    def load(name):
+        loads.append(name)
+        started.set()
+        release.wait(5)
+        return HebrewFakeModel()
+
+    t._load = load  # type: ignore[method-assign]
+    t.start_prefetch()  # returns at once; "de" is not in languages, so it is skipped
+    assert started.wait(5)
+    assert t._model_for("he", wait=False) is t._model  # live: main model while it loads
+    release.set()
+    with t._route_lock:
+        pass  # the prefetch has finished
+    assert loads == [IVRIT] and t._model_for("he", wait=False) is t._routed[IVRIT]
+    t.close()
+    assert t._routed == {}
 
 
 def test_live_hebrew_region_goes_to_the_routed_model(tmp_path):
@@ -112,6 +166,7 @@ def test_live_hebrew_region_goes_to_the_routed_model(tmp_path):
         def __init__(self):
             super().__init__(_cfg())
             self.main, self.routed, self.loads = HebrewFakeModel(), HebrewFakeModel(), []
+            self._model = self.main
 
         def _ensure_loaded(self):
             return self.main
@@ -125,11 +180,19 @@ def test_live_hebrew_region_goes_to_the_routed_model(tmp_path):
     emitted = []
     live = manual(tr, make_live_session(tmp_path), emitted)
     feed = Feeder(live, Track.OTHERS)
-    feed(np.concatenate([burst(3), silence(1.5), burst(1), silence(1.5), burst(3), silence(1.5)]))
+    with tr._route_lock:  # the Hebrew model is still loading: captions don't wait for it
+        feed(np.concatenate([burst(3), silence(1.5)]))
+        live._step(False)
+    tr.start_prefetch()
+    for _ in range(500):
+        if IVRIT in tr._routed:
+            break
+        threading.Event().wait(0.01)
+    feed(np.concatenate([burst(1), silence(1.5), burst(3), silence(1.5)]))
     live._step(False)
     assert tr.loads == [IVRIT]
-    assert [c["language"] for c in tr.routed.calls] == ["he", "he"]
-    assert [c["language"] for c in tr.main.calls] == ["en"]
+    assert [c["language"] for c in tr.routed.calls] == ["he"]
+    assert [c["language"] for c in tr.main.calls] == ["he", "en"]
     assert [s.text for s in emitted] == ["שלום", "word", "שלום"]
 
 
@@ -240,3 +303,14 @@ def test_real_ivrit_model_transcribes_hebrew(tmp_path):
     finally:
         t.close()
     assert any("֐" <= ch <= "׿" for s in segs for ch in s.text)
+
+
+def test_controller_toasts_transcriber_notices(tmp_path):
+    from test_controller_live import make_ctrl
+
+    ctrl, _, tr = make_ctrl(tmp_path)
+    assert tr.on_notice is not None
+    tr.on_notice("Hebrew model unavailable", "Using the default model for Hebrew")
+    assert ("notice", "Hebrew model unavailable", "Using the default model for Hebrew") in list(
+        ctrl.events.queue
+    )

@@ -47,7 +47,7 @@ def mlx_repo(model: str) -> str:
     """HF repo of the MLX version of ``model`` (a repo id or local path is used as is)."""
     if model in IVRIT_MLX_REPOS:  # a CTranslate2 build named in language_models
         return IVRIT_MLX_REPOS[model]
-    if "/" in model:
+    if "/" in model or "\\" in model or Path(model).is_dir():  # repo id or local folder
         return model
     return MLX_REPOS.get(model, f"mlx-community/whisper-{model}-mlx")
 

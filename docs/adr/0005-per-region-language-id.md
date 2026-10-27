@@ -22,9 +22,10 @@ dropped. Unrestricted detection also confuses Russian with Ukrainian or Bulgaria
 
 5. Optionally, the region's language also picks the model that transcribes it
    (`transcription.language_models`, e.g. Hebrew → the ivrit.ai Whisper): the routed model
-   loads lazily on first use through the same pinned, offline-first loader
+   loads in the background when a session starts, through the same pinned, offline-first loader
    ([0010](0010-offline-first-model-loading.md)); on MLX it shares the main model's GPU
-   thread. A load failure falls back to the main model.
+   thread. Until it is ready, live captions use the main model; a load failure falls back to
+   the main model (with a notice) and is retried after 5 minutes.
 
 ## Alternatives considered
 - **Whisper's own per-window detection with the main model**: 2.5 s per detection versus

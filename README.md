@@ -18,8 +18,8 @@ account, nothing uploaded.
   [ivrit.ai](https://huggingface.co/ivrit-ai) Whisper: with
   `language_models = { he = "ivrit-ai/whisper-large-v3-turbo-ct2" }` Hebrew regions are
   transcribed by it (its MLX build on the Apple-silicon GPU), English and Russian by the
-  default model. It is downloaded once, pinned, on first Hebrew speech, and needs about as
-  much memory again as the default model.
+  default model. It is downloaded once, pinned, in the background when a session starts, and needs about
+  as much memory again as the default model.
 - 🧠 Local Whisper (`large-v3-turbo`) on the **Apple-silicon GPU** (MLX), with CPU threads
   working alongside: a 1-hour meeting transcribes in about 2–3 minutes. Windows uses the CPU.
   and the final transcript is ready a moment after the recording stops.

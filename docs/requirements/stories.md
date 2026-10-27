@@ -198,9 +198,10 @@ while I decide.*
   and the next piece of audio is transcribed with it; unticking the last language is refused
   unless **Any language** is chosen.
 - **Given** `language_models = { he = "ivrit-ai/whisper-large-v3-turbo-ct2" }`, **then**
-  Hebrew regions (live and final) are transcribed by that model, loaded once on first
-  Hebrew speech at a pinned revision, and en/ru regions by the default model; **given** it
-  can't be loaded, **then** Hebrew falls back to the default model with a log warning.
+  Hebrew regions (live and final) are transcribed by that model, loaded once in the
+  background at a pinned revision, and en/ru regions by the default model; **given** it
+  can't be loaded, **then** Hebrew falls back to the default model with a log warning and a
+  one-time notice, and the load is retried after 5 minutes.
 - **Not yet:** a Hebrew evaluation set and WER (#6).
 - **Not yet:** the Windows (Tk) captions only right-justify Hebrew lines; Tk does no bidi
   reordering, so the label stays left of the Hebrew text and the glyph order is unverified
