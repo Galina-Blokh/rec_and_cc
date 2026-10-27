@@ -31,6 +31,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-20 | Search my transcripts | 🟡 search only; summaries, export planned (#4) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
+| US-32 | Find transcripts by meaning | 🟡 opt-in; no accuracy measurement on real transcripts yet (#4) |
 
 ---
 
@@ -268,3 +269,22 @@ its transcript, so that I know what was decided and who does what without reread
   ~1–2 min, offline.
 - **Not yet:** Windows/CPU backend (llama.cpp), a quality evaluation on real meetings,
   summaries in the meeting-notes window (#4).
+
+### US-32 Find transcripts by meaning
+*As the owner, I want a search for "payment" to also find "we need to settle the invoice",
+so that I find a discussion without remembering its exact words.*
+
+- **Given** `[search] semantic = false` (default), **then** nothing is downloaded, embedded
+  or stored, and search results are exactly the full-text ones (US-20).
+- **Given** `semantic = true`, **then** a small multilingual sentence-embedding model
+  (English and Russian) is downloaded once, pinned to an exact revision and sha256, and runs
+  offline afterwards (US-14); no other network access.
+- **When** a transcript is indexed, **then** its segments are embedded in the background
+  (off the UI and audio threads) into the same local, owner-only index; unchanged sessions are
+  not re-embedded and deleted sessions leave the vectors with their text.
+- **When** I search, **then** the full-text ranking and the meaning ranking are merged
+  (reciprocal rank fusion); a segment found by both comes first, and words are still
+  highlighted. If the model is unavailable, I get the full-text results.
+- **When** I switch it off again, **then** the stored vectors are deleted at the next sync.
+- **Not yet:** an accuracy measurement on real transcripts, multi-segment chunks, and
+  summaries (#4).

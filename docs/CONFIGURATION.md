@@ -81,6 +81,12 @@ post-session pass.
 | `model` | `"mlx-community/Qwen2.5-3B-Instruct-4bit"` | mlx-lm model: a Hugging Face repo id or a local path. The default (~1.7 GB, ~2 GB RAM while it runs) is pinned to an exact repo commit in [`revisions.py`](../src/recandcc/transcribe/revisions.py) and downloaded once on first use, then loaded from disk without the network; another repo needs `transcription.allow_unpinned_models` to download |
 | `max_tokens` | `400` | Longest generated answer (the summary, the action list, each chunk's notes) |
 
+## `[search]`
+
+| Key | Default | Description |
+|---|---|---|
+| `semantic` | `false` | Also rank transcript search by meaning, so `payment` finds "settle the invoice" (English and Russian). Off: nothing is downloaded or stored and results are the full-text ones. On: a small multilingual sentence model (`paraphrase-multilingual-MiniLM-L12-v2`, int8 ONNX, 118 MB + 17 MB tokenizer, Apache-2.0, pinned to an exact Hugging Face commit and sha256s in [`semantic.py`](../src/recandcc/semantic.py)) is downloaded once to `~/Library/Caches/RecAndCC/models` (Windows: `%LOCALAPPDATA%\RecAndCC\Cache\models`) when first needed, then runs offline on the CPU. Segment embeddings are kept in the owner-only `search.sqlite3` next to the text index (never in `output_dir`), added in the background as transcripts are indexed, and merged with the full-text ranking by reciprocal rank fusion. If the model can't be downloaded (offline) search stays full-text and retries later. Switching it off deletes the vectors at the next sync. Applies from the next search or indexing, without a restart |
+
 ## Example
 
 ```toml

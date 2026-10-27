@@ -6,6 +6,10 @@ All notable changes to RecAndCC are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Opt-in semantic transcript search (`[search] semantic = true`): a pinned, checksum-verified
+  multilingual sentence model, downloaded once, merged with full-text results (#4).
+
 ### Security
 - CI installs exactly what `uv.lock` pins (`uv sync --locked` / `uv run --locked`), and its
   GitHub Actions are pinned to commit SHAs.

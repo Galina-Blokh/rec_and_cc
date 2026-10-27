@@ -283,7 +283,7 @@ def cmd_search(args) -> int:
     from .search import search_transcripts
     from .transcribe.output import fmt_hms
 
-    hits = search_transcripts(cfg.output_dir, args.query, args.limit)
+    hits = search_transcripts(cfg.output_dir, args.query, args.limit, cfg.search.semantic)
     if not hits:
         print(f"No matches for {args.query!r}.")
         return 1

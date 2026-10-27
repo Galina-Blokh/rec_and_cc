@@ -403,12 +403,11 @@ class Controller:
         summaries.submit(directory)
 
     # --- transcript search (worker threads; results arrive as a "search" event)
-    @staticmethod
-    def _index_session(directory: Path) -> None:
+    def _index_session(self, directory: Path) -> None:
         try:
             from ..search import default_index
 
-            default_index().index_session(directory)
+            default_index(self.cfg.search.semantic).index_session(directory)
         except Exception:  # noqa: BLE001 - search is optional; never break transcription
             log.exception("could not update the search index")
 
@@ -420,7 +419,9 @@ class Controller:
             try:
                 from ..search import search_transcripts
 
-                hits = search_transcripts(self.cfg.output_dir, query, SEARCH_LIMIT)
+                hits = search_transcripts(
+                    self.cfg.output_dir, query, SEARCH_LIMIT, self.cfg.search.semantic
+                )
             except Exception as e:  # noqa: BLE001
                 # the type only: an FTS5 syntax error quotes the query
                 log.error("transcript search failed: %s", type(e).__name__)
@@ -526,7 +527,7 @@ class Controller:
         try:
             from ..search import default_index
 
-            default_index().sync(self.cfg.output_dir)
+            default_index(self.cfg.search.semantic).sync(self.cfg.output_dir)
         except Exception:  # noqa: BLE001 - search is optional
             log.exception("could not sync the search index")
 

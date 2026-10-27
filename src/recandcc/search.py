@@ -9,6 +9,12 @@ ranked by BM25; an SQLite built without FTS5 falls back to a (slower) ``LIKE`` s
 indexed and searched as е. Deletes are secure (``secure_delete`` and FTS5 ``secure-delete``),
 so the text of a dropped session doesn't linger in the file.
 
+With an ``embedder`` (opt-in, ``[search] semantic``) every segment also gets a sentence
+embedding in ``seg_vec``, computed outside the write lock right after the FTS update, and
+``search`` fuses the BM25 and the cosine rankings by reciprocal rank. Without one nothing
+is embedded, stored or fused, and results are exactly the full-text ones; vectors left from
+an earlier opt-in are deleted at the next ``sync``.
+
 Every call opens its own connection, so any thread may use an index; writes are serialised
 by a lock (and by SQLite's file lock across processes, e.g. the app and the CLI). Transcript
 text is never logged.
@@ -23,13 +29,16 @@ import os
 import re
 import sqlite3
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import platformdirs
 
 from .config import APP_NAME
 from .models import SessionInfo
+from .semantic import Embedder
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +47,10 @@ TRANSCRIPT = "transcript.json"
 SCHEMA_VERSION = 2
 _YO = str.maketrans("ёЁ", "еЕ")
 _MARKS = "\x01\x02"  # highlight marks, shown as [ ]
+SEMANTIC_MIN_SIM = 0.3  # cosine below this is not a semantic match
+RRF_K = 60  # reciprocal rank fusion constant
+POOL = 4  # each ranking contributes up to POOL * limit candidates to the fusion
+NO_VECTORS = np.zeros((0, 0), dtype=np.float32)  # a session without segments
 _TOKEN = re.compile(r"\w+", re.UNICODE)
 _LIKE_SQL = (
     "SELECT p.folder, s.session_id, s.started_at, p.start, p.speaker, p.language, p.text "
@@ -73,7 +86,10 @@ def has_fts5() -> bool:
 class TranscriptIndex:
     """``fts=None`` uses FTS5 when this SQLite has it; ``False`` forces the LIKE fallback."""
 
-    def __init__(self, path: Path | None = None, fts: bool | None = None) -> None:
+    def __init__(
+        self, path: Path | None = None, fts: bool | None = None, embedder: Embedder | None = None
+    ) -> None:
+        self.embedder = embedder
         self.path = Path(path) if path is not None else INDEX_PATH
         self.fts = has_fts5() if fts is None else fts
         self._lock = threading.Lock()  # serialises writes
@@ -104,7 +120,7 @@ class TranscriptIndex:
 
     def _create(self, db: sqlite3.Connection) -> None:
         if db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
-            for table in ("sessions", "seg_fts", "seg_plain"):
+            for table in ("sessions", "seg_fts", "seg_plain", "seg_vec", "sem_sessions"):
                 db.execute(f"DROP TABLE IF EXISTS {table}")
             db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         db.execute(
@@ -128,6 +144,12 @@ class TranscriptIndex:
                 "language TEXT, text TEXT, norm TEXT)"
             )
             db.execute("CREATE INDEX IF NOT EXISTS seg_plain_folder ON seg_plain(folder)")
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS seg_vec (folder TEXT, start REAL, speaker TEXT, "
+            "language TEXT, text TEXT, vec BLOB)"
+        )
+        db.execute("CREATE INDEX IF NOT EXISTS seg_vec_folder ON seg_vec(folder)")
+        db.execute("CREATE TABLE IF NOT EXISTS sem_sessions (folder TEXT PRIMARY KEY, stamp TEXT)")
         db.commit()
 
     @property
@@ -158,6 +180,7 @@ class TranscriptIndex:
             db.commit()
             if removed:
                 self._purge(db)
+        self._embed_pending()
         return parsed is not None and parsed[1] is not None
 
     def sync(self, output_dir: Path) -> int:
@@ -188,6 +211,7 @@ class TranscriptIndex:
             db.commit()
             if removed:
                 self._purge(db)
+        self._embed_pending()
         changed = sum(p is not None for p in parsed.values())
         log.info("search index synced: %d sessions, %d updated", len(found), changed)
         return changed
@@ -195,9 +219,11 @@ class TranscriptIndex:
     def _drop(self, db: sqlite3.Connection, folder: str) -> bool:
         """Remove a session; True if it had segments (so there is text to purge)."""
         db.execute("DELETE FROM sessions WHERE folder = ?", (folder,))
+        vec = db.execute("DELETE FROM seg_vec WHERE folder = ?", (folder,))
+        db.execute("DELETE FROM sem_sessions WHERE folder = ?", (folder,))
         table = self._table  # a constant, never user input
         cur = db.execute(f"DELETE FROM {table} WHERE folder = ?", (folder,))  # noqa: S608
-        return cur.rowcount > 0
+        return cur.rowcount > 0 or vec.rowcount > 0
 
     def _write(self, db: sqlite3.Connection, d: Path, stamp: str, data: dict | None) -> None:
         """Insert a parsed transcript (``_read``). An unreadable one (None) is recorded with
@@ -216,8 +242,85 @@ class TranscriptIndex:
             rows = [(folder, *rest, t, _fold(t)) for t, *rest in segs]
             db.executemany("INSERT INTO seg_plain VALUES (?, ?, ?, ?, ?, ?)", rows)
 
+    # ------------------------------------------------------------------ embeddings
+    def _embed_pending(self) -> None:
+        """Embed the sessions whose vectors are missing or stale (opt-in; never raises).
+        Embedding runs outside the write lock; a session changed meanwhile is left for the
+        next call."""
+        try:
+            with contextlib.closing(self._connect()) as db:
+                if self.embedder is None:
+                    if db.execute("SELECT 1 FROM sem_sessions LIMIT 1").fetchone():
+                        with self._lock:  # semantic search was switched off: forget the vectors
+                            db.execute("DELETE FROM seg_vec")
+                            db.execute("DELETE FROM sem_sessions")
+                            db.commit()
+                            db.execute("VACUUM")
+                    return
+                todo = db.execute(
+                    "SELECT s.folder, s.stamp FROM sessions s LEFT JOIN sem_sessions v "
+                    "ON v.folder = s.folder WHERE v.stamp IS NULL OR v.stamp != s.stamp"
+                ).fetchall()
+            for folder, stamp in todo:
+                data = _read(Path(folder))
+                segs = data["segments"] if data else []
+                vecs = self.embedder.embed([_yo(s[0]) for s in segs]) if segs else NO_VECTORS
+                if vecs is None:
+                    return  # model unavailable now: retry at the next sync
+                with self._lock, contextlib.closing(self._connect()) as db:
+                    cur = db.execute("SELECT stamp FROM sessions WHERE folder = ?", (folder,))
+                    if (row := cur.fetchone()) is None or row[0] != stamp:
+                        continue
+                    db.execute("DELETE FROM seg_vec WHERE folder = ?", (folder,))
+                    rows = [
+                        (folder, start, speaker, lang, text, vecs[i].astype(np.float32).tobytes())
+                        for i, (text, start, speaker, lang) in enumerate(segs)
+                    ]
+                    db.executemany("INSERT INTO seg_vec VALUES (?, ?, ?, ?, ?, ?)", rows)
+                    db.execute("INSERT OR REPLACE INTO sem_sessions VALUES (?, ?)", (folder, stamp))
+                    db.commit()
+        except Exception as e:  # noqa: BLE001 - semantic search is optional
+            log.error("semantic indexing failed: %s", type(e).__name__)
+
+    def _semantic(self, query: str, limit: int) -> list[Hit]:
+        """Segments closest in meaning to ``query`` (cosine), best first; [] if unavailable."""
+        embedder = self.embedder
+        if embedder is None:
+            return []
+        q = embedder.embed([query])
+        if q is None or not len(q):
+            return []
+        with contextlib.closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT v.folder, s.session_id, s.started_at, v.start, v.speaker, v.language, "
+                "v.text, v.vec FROM seg_vec v JOIN sessions s ON s.folder = v.folder"
+            ).fetchall()
+        if not rows:
+            return []
+        matrix = np.frombuffer(b"".join(r[7] for r in rows), dtype=np.float32)
+        sims = matrix.reshape(len(rows), -1) @ q[0]
+        return [
+            Hit(Path(r[0]), r[1], r[2], float(r[3]), r[4], r[5], _plain_snippet(r[6]))
+            for i in np.argsort(-sims)[:limit]
+            if sims[i] >= SEMANTIC_MIN_SIM
+            for r in (rows[i],)
+        ]
+
     # ------------------------------------------------------------------ queries
     def search(self, query: str, limit: int = 20) -> list[Hit]:
+        """Full-text matches (``_lexical``); with an embedder, fused by reciprocal rank with
+        the segments closest in meaning. A failing embedder falls back to the full-text hits."""
+        if self.embedder is None or limit <= 0 or not _TOKEN.search(query):
+            return self._lexical(query, limit)
+        lexical = self._lexical(query, limit * POOL)
+        try:
+            semantic = self._semantic(query, limit * POOL)
+        except Exception as e:  # noqa: BLE001 - semantic search is optional
+            log.error("semantic search failed: %s", type(e).__name__)
+            return lexical[:limit]
+        return rrf([lexical, semantic])[:limit]
+
+    def _lexical(self, query: str, limit: int = 20) -> list[Hit]:
         """Segments containing every word of ``query`` (FTS5: prefix match, BM25-ranked;
         fallback: substring match, newest sessions first). ё and е match each other."""
         words = _TOKEN.findall(_yo(query))
@@ -242,6 +345,23 @@ class TranscriptIndex:
                 rows = db.execute(sql, params).fetchall()
                 rows = [(*r[:6], _snippet(_mark(r[6], folded[0]))) for r in rows]
         return [Hit(Path(r[0]), r[1], r[2], float(r[3]), r[4], r[5], r[6]) for r in rows]
+
+
+def rrf(rankings: Sequence[Sequence[Hit]]) -> list[Hit]:
+    """Reciprocal rank fusion of rankings of hits (one segment = folder + start). The first
+    ranking's copy of a hit is kept (the full-text one has the highlighted snippet)."""
+    score: dict[tuple[Path, float], float] = {}
+    first: dict[tuple[Path, float], Hit] = {}
+    for ranking in rankings:
+        for rank, h in enumerate(ranking):
+            key = (h.folder, h.start)
+            score[key] = score.get(key, 0.0) + 1.0 / (RRF_K + rank + 1)
+            first.setdefault(key, h)
+    return [first[k] for k in sorted(score, key=lambda k: -score[k])]
+
+
+def _plain_snippet(text: str, width: int = 120) -> str:
+    return text if len(text) <= width else text[:width] + "…"
 
 
 def _read(d: Path) -> dict | None:
@@ -314,18 +434,30 @@ _default: TranscriptIndex | None = None
 _default_lock = threading.Lock()
 
 
-def default_index() -> TranscriptIndex:
-    """The process-wide index at ``INDEX_PATH`` (created on first use)."""
+def default_index(semantic: bool = False) -> TranscriptIndex:
+    """The process-wide index at ``INDEX_PATH`` (created on first use). ``semantic`` is
+    ``[search] semantic``; a change of it takes effect on the next call."""
     global _default
     with _default_lock:
-        if _default is None or _default.path != INDEX_PATH:
-            _default = TranscriptIndex()
+        if (
+            _default is None
+            or _default.path != INDEX_PATH
+            or (_default.embedder is not None) != semantic
+        ):
+            embedder = None
+            if semantic:
+                from .semantic import default_embedder
+
+                embedder = default_embedder()
+            _default = TranscriptIndex(embedder=embedder)
         return _default
 
 
-def search_transcripts(output_dir: Path, query: str, limit: int = 20) -> list[Hit]:
+def search_transcripts(
+    output_dir: Path, query: str, limit: int = 20, semantic: bool = False
+) -> list[Hit]:
     """Sync the default index with ``output_dir`` (incremental: only changed sessions are
     read), then search it. Blocking: call it off the UI thread."""
-    index = default_index()
+    index = default_index(semantic)
     index.sync(output_dir)
     return index.search(query, limit)

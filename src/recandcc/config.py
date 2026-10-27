@@ -165,6 +165,13 @@ class SummaryConfig:
 
 
 @dataclass
+class SearchConfig:
+    # Rank transcript search by meaning as well as by words (a small local multilingual
+    # model, downloaded once when switched on). Off by default; see semantic.py.
+    semantic: bool = False
+
+
+@dataclass
 class Config:
     output_dir: Path = DEFAULT_OUTPUT_DIR
     autostart: bool = False
@@ -175,6 +182,7 @@ class Config:
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
     summary: SummaryConfig = field(default_factory=SummaryConfig)
+    search: SearchConfig = field(default_factory=SearchConfig)
 
     def save(self, path: Path = CONFIG_PATH) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -252,7 +260,9 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     if tr.languages != raw:
         tr._raw_languages = raw  # type: ignore[attr-defined]  # written back by save()
     summary = _build(SummaryConfig, data.pop("summary", {}))
+    search = _build(SearchConfig, data.pop("search", {}))
     cfg = _build(Config, data)
+    cfg.search = search
     cfg.output_dir = Path(cfg.output_dir).expanduser()
     cfg.detection, cfg.transcription, cfg.summary = det, tr, summary
     return cfg
