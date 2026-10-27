@@ -452,3 +452,7 @@ Windows needs no system-audio permission. The microphone is controlled in
 - [docs/ROADMAP.md](docs/ROADMAP.md): what's next
 - [CHANGELOG.md](CHANGELOG.md): what changed in each version
 - [SECURITY.md](SECURITY.md): reporting security issues, threat model
+
+## License
+
+Apache-2.0, see [LICENSE](LICENSE). Bundled third-party attributions are in [NOTICE](NOTICE).
