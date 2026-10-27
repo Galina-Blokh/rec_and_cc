@@ -230,7 +230,7 @@ open transcripts one by one.*
   speaker and a snippet; choosing one opens its transcript.
 - **Given** English or Russian text, **then** matching ignores case and diacritics and
   matches word prefixes (`бюдж` finds `бюджет`).
-- **Given** 100+ sessions, **then** a search returns in < 200 ms.
+- **Given** 100+ sessions, **then** a search returns in < 200 ms (`test_search_latency.py`).
 - **When** a transcript is final, **then** it is indexed in the background; a changed
   transcript is re-indexed and a deleted or discarded session leaves the index.
 - **Then** the index is local and owner-only, outside `output_dir` (never synced), and logs
