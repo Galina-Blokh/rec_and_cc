@@ -73,6 +73,9 @@ All notable changes to RecAndCC are documented here. The format is based on
   (#36, #54, #55).
 
 ### Fixed
+- A recording cut off by a crash, force-quit or power loss is transcribed at the next start:
+  its end time comes from the audio on disk, and `session.json` marks it `recovered`. A full
+  disk at stop no longer keeps a session's end time off disk (#150).
 - With `keep_audio = false`, audio left behind by a quit during slow diarization or a failed
   delete is removed at the next start (#45).
 - A discarded session is never transcribed later, even if deleting it failed; the delete is

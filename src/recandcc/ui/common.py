@@ -24,8 +24,9 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import fields
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -228,6 +229,59 @@ def untranscribed_sessions(output_dir: Path) -> list[SessionInfo]:
             continue
         if s.ended_at is not None and not s.transcribed and s.tracks:
             out.append(s)
+    return out
+
+
+def recover_interrupted_sessions(
+    output_dir: Path, *, started_before: datetime, skip: Iterable[Path] = ()
+) -> list[SessionInfo]:
+    """Finish sessions a crash, force-quit or power loss cut off (session.json still has no
+    ``ended_at``), so ``untranscribed_sessions`` re-queues them; returns those finished.
+
+    ``ended_at`` becomes ``started_at`` plus the longest track's length (``sf.info`` reads
+    WAVs whose header was never finalised); tracks without frames leave ``tracks`` but stay
+    on disk, and a session with no frames at all is left as it is. Only sessions that began,
+    and whose WAVs were last written, before ``started_before`` (this app's start) and are
+    not in ``skip`` are touched: a recording running now is never one of them. Blocking
+    I/O: call it on a worker thread."""
+    import soundfile as sf
+
+    skipped = {Path(p) for p in skip}
+    cutoff = started_before.timestamp()
+    out = []
+    for f in sorted(Path(output_dir).glob(f"*/*/{SessionInfo.FILENAME}")):
+        d = f.parent
+        try:
+            if d in skipped or (d / SessionInfo.DISCARD_MARKER).exists():
+                continue
+            s = SessionInfo.load(d)
+            if s.ended_at is not None or s.transcribed or s.started_at.timestamp() >= cutoff:
+                continue
+        except Exception:  # noqa: BLE001 - unreadable: left alone
+            continue
+        longest, newest, kept = 0.0, float("-inf"), {}
+        for track, name in s.tracks.items():
+            p = d / name
+            try:
+                newest = max(newest, p.stat().st_mtime)
+                info = sf.info(str(p))
+            except Exception:  # noqa: BLE001 - missing or unreadable track
+                continue
+            if info.frames > 0:
+                kept[track] = name
+                longest = max(longest, info.frames / info.samplerate)
+        if not kept or newest >= cutoff:  # no audio, or still being written
+            continue
+        s.tracks = kept
+        s.ended_at = s.started_at + timedelta(seconds=longest)
+        s.update_metrics("recording", {"audio_s": round(longest, 1), "recovered": True})
+        try:
+            s.save()
+        except Exception:
+            log.exception("could not save recovered session %s", d)
+            continue
+        log.info("recovered interrupted session %s (%.1fs)", d, longest)
+        out.append(s)
     return out
 
 
@@ -927,12 +981,29 @@ class Controller:
         except Exception:
             log.exception("deleting leftover audio failed")
 
+    def _recover_interrupted(self) -> None:
+        """Give sessions an earlier run never stopped (crash, force-quit, power loss) an end
+        time, so they are re-queued. Never the live one: it started after this controller
+        (and is skipped by folder too, in case a room pre-roll moved its start earlier)."""
+        live = self.engine.state.session_dir  # engine lock taken and released here
+        with self._lock:
+            skip = set(self._in_flight)
+        if live:
+            skip.add(Path(live))
+        try:
+            recover_interrupted_sessions(
+                self.cfg.output_dir, started_before=self._started_at, skip=skip
+            )
+        except Exception:
+            log.exception("recovering interrupted sessions failed")
+
     def _resubmit_unfinished(self) -> None:
         # Purge first, on this same thread: once a re-queued session is transcribed, its
         # diarization may still need the WAVs, and the purge must not see it as leftover.
         self._resubmitting = True  # note_busy: untranscribed sessions may be about to queue
         try:
             self._purge_leftover_audio()
+            self._recover_interrupted()
             for s in untranscribed_sessions(self.cfg.output_dir):
                 log.info("re-queueing untranscribed session %s", s.directory)
                 self.tq.submit(s)

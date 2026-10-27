@@ -800,19 +800,29 @@ class Recorder:
                 if w.frames_written == 0:
                     w.path.unlink(missing_ok=True)
                     session.tracks.pop(w.track, None)
-            session.update_metrics(
-                "recording",
-                {
-                    "audio_s": round(longest, 1),
-                    # Effective: "all" also when a per-app tap fell back to the global one.
-                    "system_audio_scope": next(
-                        (w.source.scope for w in writers if w.track == Track.OTHERS), None
-                    ),
-                    "writer_backlog_max_s": {
-                        str(w.track): round(w.backlog_max / SAMPLE_RATE, 3) for w in writers
+            # ended_at reaches disk first, on its own: if the metrics write fails (a full
+            # disk), startup recovery still sees a finished session, and the engine still
+            # gets it back to submit.
+            try:
+                session.save()
+            except Exception:
+                log.exception("saving the end of %s failed", session.directory)
+            try:
+                session.update_metrics(
+                    "recording",
+                    {
+                        "audio_s": round(longest, 1),
+                        # Effective: "all" also when a per-app tap fell back to the global one.
+                        "system_audio_scope": next(
+                            (w.source.scope for w in writers if w.track == Track.OTHERS), None
+                        ),
+                        "writer_backlog_max_s": {
+                            str(w.track): round(w.backlog_max / SAMPLE_RATE, 3) for w in writers
+                        },
                     },
-                },
-            )
-            session.save()
+                )
+                session.save()
+            except Exception:
+                log.exception("saving recording metrics for %s failed", session.directory)
             log.info("recording stopped: %s (%.1fs)", session.directory, longest)
             return session
