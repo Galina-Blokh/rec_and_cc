@@ -32,7 +32,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-21 | Speaker names remembered across sessions | 🟡 CLI (#62) and macOS menu (US-26, #76); self-intro hints (#81) and overlap segmentation (#96) shipped (#1) |
 | US-26 | Name speakers and forget voices from the menu | 🟡 macOS menu, first lines instead of an audio sample; Windows tray not yet (#1) |
 | US-31 | Speaker names from the call app's participant list | 🟡 shipped (#80, #1 A.3): opt-in, macOS, one-to-one only |
-| US-25 | Export a transcript to DOCX and PDF | 🟡 CLI and macOS menu; Windows tray, templates planned (#4) |
+| US-25 | Export a transcript to DOCX and PDF | 🟡 CLI, macOS menu and Windows tray; templates planned (#4) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
 | US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
 | US-23 | Sensitivity: room vs system audio | 🟡 presets and keys shipped (#7, #102); live level meters not yet |
@@ -181,7 +181,8 @@ while I decide.*
 - **Then** logs contain events, app names and paths, never transcript text or audio.
 
 ### US-15 Delete old audio automatically
-- **Given** `audio_retention_days = N` (menu: Never / 1 / 7 / 30 / 90), **then** WAVs of
+- **Given** `audio_retention_days = N` (macOS menu or Windows tray: Never / 1 / 7 / 30 /
+  90; the current choice is checked), **then** WAVs of
   transcribed sessions older than N days are deleted; transcripts are always kept.
 - **Given** `keep_audio = false`, **then** WAVs are deleted right after transcription. WAVs
   left behind (the app quit before a slow diarization finished, or a delete failed) are
@@ -338,7 +339,8 @@ don't have to name them myself, without the app ever asking for more permission 
 *As the owner, I want a transcript as a Word or PDF file, so that I can share or print it.*
 
 - **Given** a session with a `transcript.json`, **when** I run `recandcc export <session>
-  [--format docx|pdf|both]` (or choose **Export latest transcript** on macOS), **then**
+  [--format docx|pdf|both]` (or choose **Export latest transcript** in the macOS menu or
+  the Windows tray), **then**
   `transcript.docx` and/or `transcript.pdf` are written next to it: title, date, speakers,
   and one paragraph per segment with its timestamp.
 - **Given** English, Russian and Hebrew segments, **then** all are readable; Hebrew segments
@@ -352,7 +354,7 @@ don't have to name them myself, without the app ever asking for more permission 
   export, **then** nothing is written through it: the folder is pinned once before anything
   is read, and both files go to that folder or the export is refused (#129). A folder that
   was already a link when the export started is exported as usual.
-- **Not yet:** the Windows tray entry, custom templates; the PDF needs a system font with
+- **Not yet:** custom templates; the PDF needs a system font with
   Latin, Cyrillic and Hebrew (Arial, DejaVu Sans), otherwise only DOCX is produced (#4).
 
 ### US-27 Meeting summaries and action items
