@@ -32,4 +32,5 @@ Paths are relative to `src/recandcc/`.
 | US-21 | `transcribe/voices.py`, `transcribe/intro_hints.py`, `transcribe/diarize.py`, `cli.py` | `test_voices.py::*`, `test_intro_hints.py::*` |
 | US-25 | `transcribe/export.py`, `ui/common.py`, `ui/mac.py`, `cli.py` | `test_export.py::*` |
 | US-27 | `transcribe/summary.py`, `transcribe/revisions.py`, `transcribe/gpu.py`, `config.py`, `ui/common.py`, `cli.py` | `test_summary.py::*` |
+| US-28 | `ui/notes.py`, `ui/common.py`, `ui/mac.py`, `ui/tray.py`, `models.py` | `test_notes.py::*`, `test_ui_tray.py::test_notes_menu_item_and_events_reach_the_notes_window`, `test_ui_tray.py::test_notes_window_actions` |
 | US-29 | `ui/bidi.py`, `ui/captions.py`, `ui/tray.py` | `test_bidi.py::*` |
