@@ -208,6 +208,34 @@ def _extract(archive: Path, model: ModelFile, path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- pure logic
+_shared_lock = threading.Lock()
+_shared_extractor: Any = None
+
+
+def shared_extractor(download: bool = True) -> Any:
+    """The process-wide CAM++ extractor (one resident ONNX session for the offline Diarizer
+    and the live speaker labels), loaded on first use. None if the model isn't on disk (and
+    `download` is off or fails); raises if it can't be loaded. ``compute`` on separate streams
+    from several threads is safe (the Diarizer's worker pool already does it)."""
+    global _shared_extractor
+    with _shared_lock:
+        if _shared_extractor is None:
+            path = model_path(download=download)
+            if path is None:
+                return None
+            import sherpa_onnx
+
+            cfg = sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(path), num_threads=1)
+            _shared_extractor = sherpa_onnx.SpeakerEmbeddingExtractor(cfg)
+        return _shared_extractor
+
+
+def reset_shared_extractor() -> None:  # tests
+    global _shared_extractor
+    with _shared_lock:
+        _shared_extractor = None
+
+
 def speech_windows(
     regions: Sequence[tuple[float, float]], window_s: float = WINDOW_S
 ) -> list[tuple[float, float]]:
@@ -608,19 +636,17 @@ class Diarizer:
     def _load(self) -> tuple[Any, ThreadPoolExecutor] | None:
         with self._lock:
             if self._extractor is None:
-                path = model_path()
-                if path is None:
-                    return None
-                import sherpa_onnx
-
                 t0 = time.monotonic()
-                cfg = sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(path), num_threads=1)
-                self._extractor = sherpa_onnx.SpeakerEmbeddingExtractor(cfg)
+                extractor = shared_extractor()
+                if extractor is None:
+                    return None
+                path = model_path(download=False) or EMBEDDING_MODEL.name
+                self._extractor = extractor
                 self._pool = ThreadPoolExecutor(self.threads, thread_name_prefix="diarize-emb")
                 self.load_s = time.monotonic() - t0
                 log.info(
                     "loaded speaker model %s in %.2fs (%d threads)",
-                    path.name,
+                    Path(path).name,
                     self.load_s,
                     self.threads,
                 )

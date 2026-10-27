@@ -5,7 +5,7 @@ The speaker model is downloaded once into the cache dir; after that the test run
 network access blocked (proxy to a closed port + urlopen patched to fail).
 Whisper model: RECANDCC_TEST_MODEL (default "large-v3-turbo", the app default, so it is cached).
 
-Stories: US-12.
+Stories: US-12, US-33.
 """
 
 from __future__ import annotations
@@ -222,7 +222,9 @@ def test_live_final_transcript_gets_speaker_labels(track, offline, tmp_path):
     session.ended_at = None
     mic, _ = sf.read(tmp_path / "me.wav", dtype="float32")
     model = os.environ.get("RECANDCC_TEST_MODEL", "large-v3-turbo")
-    t = Transcriber(TranscriptionConfig(model=model))
+    # live labels are covered by test_live_speaker_labels_distinguish_voices (they depend on
+    # extractor load timing); this test is about the final transcript
+    t = Transcriber(TranscriptionConfig(model=model, live_speaker_labels=False))
     t.ensure_loaded()
     shown, lock = [], threading.Lock()
 
@@ -243,14 +245,50 @@ def test_live_final_transcript_gets_speaker_labels(track, offline, tmp_path):
         print(f"finish() incl. diarization: {time.monotonic() - t0:.2f}s")
     finally:
         t.close()
-    # live captions: Me, or "Speaker N" ("Others" before any voice is known) for system audio
-    assert shown and all(
-        s.speaker == "Me" or s.speaker == "Others" or s.speaker.startswith("Speaker ")
-        for s in shown
-    )
-    assert any(s.speaker.startswith("Speaker ") for s in shown)  # live labels fired
+    assert shown and {s.speaker for s in shown} <= {"Me", "Others"}  # labels off: as before
     others = [s for s in segs if s.speaker != "Me"]
     labels = labels_per_phrase(truth, [(s.start, s.end, s.speaker) for s in others])
     check(truth, labels, min_ok=len(truth) - 1)
     md = (tmp_path / "transcript.md").read_text(encoding="utf-8")
     assert "Speaker 3:**" in md and "in progress" not in md
+
+
+def test_live_speaker_labels_distinguish_voices(tmp_path):
+    """Stories: US-33. With the real model, warmed up: two different voices get different live
+    "Speaker N" labels, and a voice that speaks again keeps its number."""
+    from recandcc.transcribe.live_speakers import SpeakerLabeler
+
+    if diarize.model_path(download=False) is None:
+        pytest.skip("speaker model not on disk")
+    lab = SpeakerLabeler()
+    lab.warm()
+    try:
+        deadline = time.monotonic() + 60
+        while lab._ready_at is None and time.monotonic() < deadline:  # the extractor load
+            time.sleep(0.05)
+        assert lab._ready_at is not None
+        order = [
+            "Samantha",
+            "Daniel",
+            "Samantha",
+            "Daniel",
+            "Samantha",
+        ]
+        texts = {
+            "Samantha": "The quarterly numbers look better than we expected this time.",
+            "Daniel": "I think we should move the launch to next Tuesday afternoon.",
+        }
+        got, t = [], 0.0
+        for voice in order:
+            audio = tts(voice, texts[voice], tmp_path)
+            fut = lab.submit(audio)
+            assert fut is not None
+            emb = fut.result(30)
+            assert emb is not None, "no embedding: model missing or failed to load"
+            got.append(lab.label(emb, t, t + len(audio) / SAMPLE_RATE))
+            t += len(audio) / SAMPLE_RATE + 1.0
+    finally:
+        lab.close()
+    assert all(g.startswith("Speaker ") for g in got), got
+    assert got[0] != got[1]
+    assert got[0] == got[2] == got[4] and got[1] == got[3], got

@@ -236,9 +236,11 @@ The live worker then clusters them in time order: cosine ≥ 0.5 to a running-me
 else a new speaker, at most 8. Only the copies sent to the captions are relabelled; stored
 segments, `transcript.md` and the final transcript are unchanged. Without the model, or for
 segments without an embedding, captions keep `Others` (or the previous label; a segment under
-1 s inherits it only if the previous one ended within 1.5 s). One shared extractor is loaded
-once per process on the labeler thread (failures are remembered); requests past their 0.5 s
-deadline are skipped, and a finished embedding wakes the live worker. Live numbers are
+1 s inherits it only if the previous one ended within 1.5 s). One CAM++ extractor
+is shared with the offline Diarizer (`diarize.shared_extractor`, loaded once per process;
+live failures are remembered, no lock is held across `compute`, so a compute orphaned by a
+closed session blocks nobody); requests past their 0.5 s deadline are skipped, where the
+cold model load is not counted (at most 3 s), and a finished embedding wakes the live worker. Live numbers are
 provisional: they come from incremental clustering and can differ from the final transcript's
 labels (the offline diarization), e.g. one other voice is `Speaker 1` live but `Others` in
 the final transcript. The captions colour each `Speaker N` from a fixed palette.

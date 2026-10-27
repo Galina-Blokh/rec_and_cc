@@ -162,6 +162,66 @@ def test_expired_requests_are_skipped_not_embedded():
     lab.close()
 
 
+def test_cold_model_load_is_not_counted_against_the_deadline(monkeypatch):
+    """Stories: US-33. Requests submitted during a slow extractor load still get embeddings."""
+    gate = threading.Event()
+    monkeypatch.setattr(live_speakers, "_get_extractor", lambda: gate.wait(5))
+    clock = [0.0]
+    lab = SpeakerLabeler(embedder=None, clock=lambda: clock[0])
+    lab._embedder = lambda a: vec(0)  # the load is slow, the embedding itself is not
+    lab._preload = True
+    futs = [lab.submit(long_audio(), deadline=0.5) for _ in range(3)]
+    assert lab.effective_deadline(0.0, 0.5) == 0.5 + live_speakers.LOAD_GRACE_S  # while loading
+    clock[0] = 2.0  # the load takes 2 s: far past the 0.5 s deadline
+    gate.set()
+    assert all(f.result(5) is not None for f in futs)
+    assert lab.effective_deadline(0.0, 0.5) == 2.5
+    # a request queued after the load gets the plain deadline
+    clock[0] = 10.0
+    assert lab.effective_deadline(10.0, 10.5) == 10.5
+    lab.close()
+
+
+def test_orphaned_compute_does_not_block_the_next_session(monkeypatch):
+    """Stories: US-33. A compute still running after close() cannot block the next session."""
+    release = threading.Event()
+    entered = threading.Event()
+
+    class Stream:
+        def accept_waveform(self, *_):
+            pass
+
+        def input_finished(self):
+            pass
+
+    class Extractor:
+        def __init__(self):
+            self.n = 0
+
+        def create_stream(self):
+            return Stream()
+
+        def compute(self, stream):
+            self.n += 1
+            if self.n == 1:  # the first session's compute hangs
+                entered.set()
+                release.wait(10)
+            return np.array([1.0, 0.0, 0.0], np.float32)
+
+    ex = Extractor()
+    monkeypatch.setattr(live_speakers, "_get_extractor", lambda: ex)
+    first = SpeakerLabeler()
+    first.submit(long_audio())
+    assert entered.wait(5)
+    first.close()  # the join times out: the daemon thread is orphaned inside compute
+    second = SpeakerLabeler()
+    try:
+        assert embed(second, long_audio()) is not None
+    finally:
+        release.set()
+        second.close()
+
+
 def test_base_exception_does_not_kill_the_thread():
     def boom(a):
         if a[0] == 0:

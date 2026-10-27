@@ -35,22 +35,24 @@ MIN_AUDIO_S = 1.0  # shorter segments make noisy embeddings (like diarize.MIN_UN
 QUEUE_SIZE = 8  # pending embedding requests; more are dropped
 INHERIT_GAP_S = 1.5  # a short segment inherits the previous label only within this gap
 CLOSE_JOIN_S = 0.5
+LOAD_GRACE_S = 3.0  # most a cold model load may extend the request deadlines
 
 Embedder = Callable[[np.ndarray], np.ndarray | None]
 
-# One CAM++ extractor per process (loading takes longer than the live deadline), created lazily
-# on a labeler thread. A failed load is remembered (with the model's path and mtime) so it is
-# not retried for every segment, but is retried once the model file changes.
-_extractor_lock = threading.Lock()
-_extractor: Any = None
+# The CAM++ extractor is shared with the offline Diarizer (``diarize.shared_extractor``) and
+# loaded lazily on a labeler thread (loading takes longer than the live deadline). A failed
+# load is remembered (with the model's path and mtime) so it is not retried for every segment,
+# but is retried once the model file changes. ``compute`` on separate streams is thread-safe,
+# so no lock is held across it: a compute orphaned by close() cannot block the next session.
+_failed_lock = threading.Lock()
 _extractor_failed: tuple[str, float] | None = None  # (path, mtime) of the model that failed
-_compute_lock = threading.Lock()  # an extractor is not shared between concurrent computes
 
 
 def _reset_extractor_cache() -> None:  # tests
-    global _extractor, _extractor_failed
-    with _extractor_lock:
-        _extractor, _extractor_failed = None, None
+    global _extractor_failed
+    with _failed_lock:
+        _extractor_failed = None
+    diarize.reset_shared_extractor()
 
 
 def _model_key(path: Any) -> tuple[str, float]:
@@ -63,26 +65,21 @@ def _model_key(path: Any) -> tuple[str, float]:
 def _get_extractor() -> Any:
     """The shared extractor, or None: model not on disk (checked again next time, it may be
     downloaded later) or it failed to load (remembered until the model file changes)."""
-    global _extractor, _extractor_failed
-    with _extractor_lock:
-        if _extractor is not None:
-            return _extractor
-        path = diarize.model_path(download=False)
-        if path is None:
-            return None
-        key = _model_key(path)
+    global _extractor_failed
+    path = diarize.model_path(download=False)
+    if path is None:
+        return None
+    key = _model_key(path)
+    with _failed_lock:
         if _extractor_failed == key:
             return None
-        try:
-            import sherpa_onnx
-
-            cfg = sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(path), num_threads=1)
-            _extractor = sherpa_onnx.SpeakerEmbeddingExtractor(cfg)
-            _extractor_failed = None
-        except Exception as e:  # noqa: BLE001 - ImportError (Windows) or a bad model
+    try:
+        return diarize.shared_extractor(download=False)
+    except Exception as e:  # noqa: BLE001 - ImportError (Windows) or a bad model
+        with _failed_lock:
             _extractor_failed = key
-            log.debug("live speaker labels off: cannot load the speaker model: %s", e)
-        return _extractor
+        log.debug("live speaker labels off: cannot load the speaker model: %s", e)
+        return None
 
 
 class SpeakerClusterer:
@@ -128,11 +125,10 @@ def sherpa_embedder() -> Embedder:
                 warned = True
                 log.debug("live speaker labels off: speaker model not available")
             return None
-        with _compute_lock:
-            stream = extractor.create_stream()
-            stream.accept_waveform(SAMPLE_RATE, audio)
-            stream.input_finished()
-            return np.asarray(extractor.compute(stream), dtype=np.float32)
+        stream = extractor.create_stream()
+        stream.accept_waveform(SAMPLE_RATE, audio)
+        stream.input_finished()
+        return np.asarray(extractor.compute(stream), dtype=np.float32)
 
     return embed
 
@@ -162,6 +158,7 @@ class SpeakerLabeler:
         self.clock = clock
         self.clusterer = clusterer or SpeakerClusterer()
         self.dropped = 0
+        self._ready_at: float | None = None  # clock() when the extractor load ended
         self._last = ""
         self._last_end = float("-inf")  # end of the previous labelled segment
 
@@ -177,6 +174,15 @@ class SpeakerLabeler:
             if not self._closed:
                 self._start_locked()
 
+    def effective_deadline(self, submitted: float, deadline: float) -> float:
+        """`deadline` of a request submitted at `submitted`, pushed back by the time the
+        extractor load took (at most LOAD_GRACE_S), so a cold load is not counted against it.
+        While the load is still running: the full grace."""
+        ready = self._ready_at
+        if ready is None:
+            return deadline + LOAD_GRACE_S
+        return deadline + min(max(0.0, ready - submitted), LOAD_GRACE_S)
+
     def submit(self, audio: np.ndarray, deadline: float | None = None) -> Future | None:
         """Queue `audio` for embedding; the future resolves to the embedding or None. A request
         still queued after `deadline` (on `clock`) is skipped, resolving to None. Never blocks;
@@ -189,24 +195,29 @@ class SpeakerLabeler:
                 return None
             self._start_locked()
             try:
-                self._q.put_nowait((audio, fut, deadline))
+                self._q.put_nowait((audio, fut, self.clock(), deadline))
             except queue.Full:
                 self.dropped += 1
                 return None
         return fut
 
     def _run(self) -> None:
-        if self._preload:
-            with contextlib.suppress(Exception):
-                _get_extractor()
+        try:
+            if self._preload:
+                with contextlib.suppress(Exception):
+                    _get_extractor()
+        finally:
+            self._ready_at = self.clock()
         while not self._stop.is_set():
             try:
-                audio, fut, deadline = self._q.get(timeout=0.2)
+                audio, fut, submitted, deadline = self._q.get(timeout=0.2)
             except queue.Empty:
                 continue
             result = None
             try:
-                if deadline is None or self.clock() < deadline:  # else nobody waits for it
+                if deadline is None or self.clock() < self.effective_deadline(
+                    submitted, deadline
+                ):  # else nobody waits for it
                     result = self._embedder(audio)
             except BaseException as e:  # noqa: BLE001 - labels are optional; keep the thread alive
                 log.debug("live speaker embedding failed: %s", e)
@@ -238,7 +249,7 @@ class SpeakerLabeler:
         self._embedder = _no_embedder
         while True:  # fail what is still queued so nobody waits on it
             try:
-                _, fut, _ = self._q.get_nowait()
+                _, fut, _, _ = self._q.get_nowait()
             except queue.Empty:
                 break
             fut.set_result(None)

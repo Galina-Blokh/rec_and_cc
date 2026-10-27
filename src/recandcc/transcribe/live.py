@@ -47,7 +47,7 @@ import numpy as np
 from ..metrics import latency_stats, log_session_metrics, rounded
 from ..models import SAMPLE_RATE, Segment, SessionInfo, Track
 from .engine import MIN_LANGUAGE_CONFIDENCE, SPEAKERS, Transcriber
-from .live_speakers import SpeakerLabeler
+from .live_speakers import LOAD_GRACE_S, SpeakerLabeler
 from .merge import ECHO_TOLERANCE_S, dedupe_echo, merge_tracks
 from .output import write_live_markdown
 
@@ -114,6 +114,7 @@ class _Job:
     lang_ready: threading.Event = field(default_factory=threading.Event)
     future: Future | None = None
     emb_futs: list[Future | None] = field(default_factory=list)  # per segment, Others only
+    emb_submitted: float = 0.0  # LiveTranscriber.clock() when the embeddings were requested
     emb_deadline: float = 0.0  # LiveTranscriber.clock() after which a missing embedding is skipped
     echo_noted: bool = (
         False  # raw segments already in _shown_others (set while awaiting embeddings)
@@ -495,7 +496,8 @@ class LiveTranscriber:
             )
             if job.track == Track.OTHERS and self._labeler is not None and not self._cancelled:
                 # never wait here: the pool is shared. _collect attaches what is ready.
-                job.emb_deadline = self.clock() + EMBED_WAIT_S
+                job.emb_submitted = self.clock()
+                job.emb_deadline = job.emb_submitted + EMBED_WAIT_S
                 job.emb_futs = [
                     self._labeler.submit(_slice(audio, job, s), job.emb_deadline) for s in segs
                 ]
@@ -572,9 +574,15 @@ class LiveTranscriber:
         pending = [f for f in job.emb_futs if f is not None and not f.done()]
         if not pending:
             return True
-        remaining = job.emb_deadline - self.clock()
+        # a cold model load is not counted against the deadline (bounded by LOAD_GRACE_S)
+        deadline = (
+            self._labeler.effective_deadline(job.emb_submitted, job.emb_deadline)
+            if self._labeler is not None
+            else job.emb_deadline
+        )
+        remaining = deadline - self.clock()
         if final and remaining > 0:
-            futures_wait(pending, timeout=min(remaining, EMBED_WAIT_S))
+            futures_wait(pending, timeout=min(remaining, EMBED_WAIT_S + LOAD_GRACE_S))
             return True
         return remaining <= 0
 
