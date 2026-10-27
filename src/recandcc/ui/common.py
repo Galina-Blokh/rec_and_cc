@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .. import hotkey as hotkey_mod
+from ..cloudsync import cloud_sync_provider, warning_text
 from ..config import CONFIG_PATH, LOG_DIR, Config, load_config, normalize_languages
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind, discard_session
@@ -245,6 +246,7 @@ class Controller:
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
         self._save_lock = threading.Lock()
+        self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
         # global shortcut
         self._hotkey_lock = threading.Lock()
         self._hotkey = None  # HotkeyListener / WinHotkeyListener
@@ -512,15 +514,38 @@ class Controller:
 
     def _refresh(self) -> None:
         try:
+            self._maybe_reload_config()
+            self._check_cloud_sync()  # before listing output_dir, which may stall on a cloud mount
             perm = permission_status()
             recent = recent_transcripts(self.cfg.output_dir)
             with self._lock:
                 self._perm, self._recent = perm, recent
-            self._maybe_reload_config()
         finally:
             with self._lock:
                 self._refreshing = False
         self.events.put(("refreshed",))
+
+    def _check_cloud_sync(self) -> None:
+        """Warn once per output folder if it is synced to iCloud / OneDrive / ...: recordings
+        would leave the device. Runs on every refresh (worker thread; the check is local and
+        cheap), so a folder that becomes synced later is still reported."""
+        out = Path(self.cfg.output_dir)
+        with self._lock:
+            if out in self._cloud_warned:
+                return
+        provider = cloud_sync_provider(out)
+        if provider is None:
+            return
+        with self._lock:
+            if out in self._cloud_warned:
+                return
+            self._cloud_warned.add(out)
+        log.warning(
+            "output folder %s is synced to %s; use a local folder to keep it", out, provider
+        )
+        self.events.put(
+            ("notice", "Transcripts folder is cloud-synced", warning_text(out, provider))
+        )
 
     def _mtime(self) -> float:
         try:
