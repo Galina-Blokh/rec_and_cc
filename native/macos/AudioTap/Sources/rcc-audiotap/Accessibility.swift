@@ -66,7 +66,7 @@ private let nativeCallIDs = ["us.zoom", "com.microsoft.teams"]
 
 private final class Walker {
     var nodes = 0
-    var names: [String] = []
+    var lists: [[String]] = []  // every participant list found, one entry per list
     let deadline = Date().addingTimeInterval(perAppSeconds)  // each app has its own budget
 
     var exhausted: Bool { nodes >= maxNodes || Date() > deadline }
@@ -78,15 +78,19 @@ private final class Walker {
         let role = text(element, kAXRoleAttribute)
         let label = (text(element, kAXTitleAttribute) + " " + text(element, kAXDescriptionAttribute))
             .lowercased()
-        if listRoles.contains(role), listWords.contains(where: { label.contains($0) }), collect(element) {
-            return
+        if listRoles.contains(role), listWords.contains(where: { label.contains($0) }) {
+            let rows = collect(element)
+            if !rows.isEmpty {
+                lists.append(rows)  // do not look inside it, but go on: a second list matters
+                return
+            }
         }
         for child in children(element) { find(child, depth: depth + 1) }
     }
 
-    /// One entry per row of `list`: all the row's texts, one per line. True if any was found.
-    private func collect(_ list: AXUIElement) -> Bool {
-        var found = false
+    /// One entry per row of `list`: all the row's texts, one per line.
+    private func collect(_ list: AXUIElement) -> [String] {
+        var found: [String] = []
         func rows(_ element: AXUIElement, _ depth: Int) {
             if exhausted || depth > 8 { return }
             nodes += 1
@@ -97,8 +101,7 @@ private final class Walker {
                     allTexts(row, 0, &texts)
                     if !texts.isEmpty {
                         // every text of the row, so the caller can spot the user's own "(You)"
-                        names.append(texts.joined(separator: "\n"))
-                        found = true
+                        found.append(texts.joined(separator: "\n"))
                     }
                 } else {
                     rows(row, depth + 1)
@@ -161,7 +164,7 @@ func runParticipants(pids: [pid_t], matches: [String], parentPID: pid_t?) -> Nev
     // A slow app can't hang the whole read: a short timeout for every AX call of this process
     // and a separate time budget per app.
     AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
-    var names: [String] = []
+    var lists: [[String]] = []
     var callWindows: [AXUIElement] = []
     for app in apps {
         let root = AXUIElementCreateApplication(app.processIdentifier)
@@ -175,7 +178,7 @@ func runParticipants(pids: [pid_t], matches: [String], parentPID: pid_t?) -> Nev
         } else if nativeCallIDs.contains(where: { id.contains($0) }) {
             let walker = Walker()
             walker.find(root, depth: 0)
-            names += walker.names
+            lists += walker.lists
         }
     }
     // Fail closed: with two call windows open (two meetings, or a call and a look-alike) it is
@@ -184,8 +187,11 @@ func runParticipants(pids: [pid_t], matches: [String], parentPID: pid_t?) -> Nev
         axDeadline = Date().addingTimeInterval(perAppSeconds)
         let walker = Walker()
         walker.find(callWindows[0], depth: 0)
-        names += walker.names
+        lists += walker.lists
     }
+    // Exactly one participant list in everything read (several Zoom/Teams windows, or a native
+    // app and a browser call at once): otherwise it is unclear whose it is, so no names.
+    let names = lists.count == 1 ? lists[0] : []
     printJSON(["trusted": true, "names": names])
     exit(0)
 }

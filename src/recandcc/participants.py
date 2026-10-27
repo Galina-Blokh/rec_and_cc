@@ -86,7 +86,8 @@ def _run_helper(
         out, _ = proc.communicate(timeout=HELPER_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         proc.kill()
-        proc.communicate()
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+            proc.communicate(timeout=2.0)  # reaped, but never waited for indefinitely
         raise
     lines = [line for line in (out or "").splitlines() if line.strip()]
     if not lines:
@@ -111,9 +112,9 @@ def read_participants(
 ) -> list[str] | None:
     """Raw names in the app's visible participant list; None when Accessibility isn't granted
     (or the helper failed), [] when no participant list is visible."""
+    # Matched by bundle id / name only: a pid saved at the start of the call may belong to
+    # another process by now, so the long-lived pids of the target are not sent.
     args = ["participants"]
-    for pid in target.pids:
-        args += ["--pid", str(pid)]
     for pattern in target.match:
         args += ["--match", pattern]
     try:
@@ -152,7 +153,9 @@ class ParticipantSampler:
         self._target = target
         self._proc: subprocess.Popen | None = None  # the helper run in flight, if any
         # by default the helper runs are tracked so that signal() can kill an in-flight one
-        self._trusted = trusted or (lambda: ax_trusted(self._track))
+        # Without an explicit check the trust test is part of every `participants` run (it
+        # reports untrusted itself), so a sample costs one helper process, not two.
+        self._trusted = trusted
         self._read = read or (lambda t: read_participants(t, self._track))
         self._interval, self._first = interval, first_after
         self._names: list[str] = []
@@ -202,7 +205,7 @@ class ParticipantSampler:
             try:
                 # Trust is checked silently at every sample, so granting it mid-call works and
                 # nothing is ever read while it is missing.
-                if not self._trusted():
+                if self._trusted is not None and not self._trusted():
                     if not warned:
                         log.info("names from the call app: Accessibility is not granted yet")
                         warned = True
@@ -211,7 +214,10 @@ class ParticipantSampler:
             except Exception:  # noqa: BLE001 - must not kill the thread
                 log.debug("participant sampling failed", exc_info=True)
                 continue
-            if raw is None:
+            if raw is None:  # not trusted (yet), or the helper failed: try again next time
+                if not warned:
+                    log.info("names from the call app: nothing readable yet (is Accessibility on?)")
+                    warned = True
                 continue
             current = clean_names(raw)[:MAX_NAMES]
             # Only names seen in two samples in a row are stored (a list that flickers by, like

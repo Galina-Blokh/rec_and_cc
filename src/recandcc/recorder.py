@@ -690,10 +690,14 @@ class Recorder:
 
     def _start_sampler(self, kind: TriggerKind, target: AppTarget | None) -> None:
         """Opt-in participant names; a thread of its own, never on the audio path."""
-        if kind == TriggerKind.CALL and self._sampler is None:
+        if kind != TriggerKind.CALL or self._sampler is not None:
+            return
+        try:  # optional: whatever goes wrong here must never fail or end the recording
             from . import participants
 
             self._sampler = participants.start_sampler(self.cfg, target)
+        except Exception as e:  # noqa: BLE001
+            log.warning("names from the call app: could not start (%s)", type(e).__name__)
 
     def upgrade_to_call(self, app: str | None, target: AppTarget | None = None) -> bool:
         """Turn a running media or room session into a call session (a call started while e.g.
@@ -731,16 +735,28 @@ class Recorder:
         """Stop, flush and close. Returns the session, or None if nothing was recording
         or the session was shorter than ``min_session_s`` (its directory is deleted)."""
         sampler = self._sampler
-        if sampler is not None:
-            sampler.signal()  # so it is ending while the writers flush
-        session = self._stop()
-        if sampler is not None:  # joined here, not under the lock: a start isn't held up
+        session = None
+        try:
+            if sampler is not None:
+                sampler.signal()  # so it is ending while the writers flush
+            session = self._stop()
+        finally:
+            if sampler is not None:  # reaped even if stopping failed; outside the lock
+                self._reap_sampler(sampler, session)
+        return session
+
+    def _reap_sampler(self, sampler, session: SessionInfo | None) -> None:
+        try:
             names = sampler.stop()
             if session is not None:
                 from . import participants
 
                 participants.store(session, names)
-        return session
+        except Exception as e:  # noqa: BLE001 - never turns a stop into a failure
+            log.warning("names from the call app: could not finish (%s)", type(e).__name__)
+        finally:
+            if self._sampler is sampler:  # cleared only now: no second helper can overlap
+                self._sampler = None
 
     def _stop(self) -> SessionInfo | None:
         with self._op_lock:
@@ -755,7 +771,6 @@ class Recorder:
             for w in writers:
                 w.finish()
             self._session, self._writers, self._listeners = None, [], ()
-            self._sampler = None  # signalled and joined by stop(), outside the lock
             self.last_peaks = {w.track: w.peak for w in writers}
             session.ended_at = datetime.now().astimezone()
 

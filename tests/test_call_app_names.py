@@ -63,16 +63,16 @@ def test_sampler_not_started_when_disabled_or_not_macos(mac, monkeypatch):
 
 
 def test_nothing_is_read_without_accessibility_trust():
-    reads = []
+    reads, checks = [], []
     s = participants.ParticipantSampler(
         TARGET,
-        trusted=lambda: False,
+        trusted=lambda: checks.append(1) or False,
         read=lambda t: reads.append(t) or ["Anna"],
         interval=0.01,
         first_after=0,
     )
     s.start()
-    time.sleep(0.2)
+    wait_for(lambda: len(checks) >= 3)  # the loop ran several times, and never read
     assert reads == [] and s.stop() == []
 
 
@@ -141,6 +141,17 @@ def test_names_that_scroll_out_of_view_are_kept():
     assert s.stop() == ["Ann", "Bob", "Cy"]
 
 
+def test_a_sample_costs_one_helper_process_not_two(monkeypatch):
+    monkeypatch.setattr(participants, "ax_trusted", lambda *a: pytest.fail("extra ax-status run"))
+    reads = []
+    s = participants.ParticipantSampler(
+        TARGET, read=lambda t: reads.append(1) or ["Anna"], interval=0.01, first_after=0
+    )
+    s.start()
+    wait_for(lambda: len(reads) >= 3)
+    assert s.stop() == ["Anna"]
+
+
 def test_a_helper_starting_after_stop_is_killed():
     killed = []
 
@@ -179,7 +190,7 @@ def test_trust_check_never_prompts(mac, monkeypatch):
     assert participants.ax_trusted() is False
     assert participants.read_participants(TARGET) is None
     assert [c[1] for c in calls] == ["ax-status", "participants"]
-    assert "--pid" in calls[1] and "us.zoom" in calls[1]
+    assert "--pid" not in calls[1]  # a pid saved at the start may belong to another process
     # the helper's participants command only runs for the process that started it
     assert calls[1][-2:] == ["--parent-pid", str(os.getpid())]
     # ax-status takes no options: the exact argv has nothing after the subcommand
@@ -187,8 +198,6 @@ def test_trust_check_never_prompts(mac, monkeypatch):
     assert calls[1] == [
         "/h/rcc-audiotap",
         "participants",
-        "--pid",
-        "123",
         "--match",
         "us.zoom",
         "--parent-pid",
@@ -441,6 +450,7 @@ def test_discarded_sessions_leave_no_names(tmp_path):
         def stop(self):
             s = super().stop()
             voices.write_session_names(s, ["Anna"])  # what Recorder.stop() stores
+            assert voices.read_session_names(s.id) == ["Anna"]  # they really are there
             return s
 
     h = Harness(Mode.ASK)
@@ -451,6 +461,55 @@ def test_discarded_sessions_leave_no_names(tmp_path):
     h.eng.tick()
     assert h.status == IDLE and h.rec.stops == 1
     assert voices.read_session_names("s") == []
+
+
+def test_a_sampler_that_fails_to_start_never_fails_the_recording(mac, tmp_path, monkeypatch):
+    def boom(cfg, target):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(participants, "start_sampler", boom)
+    rec = _recorder(tmp_path, on_cfg())
+    s = rec.start(TriggerKind.CALL, "zoom.us", target=TARGET)  # no exception
+    assert rec.is_recording and rec._sampler is None
+    assert rec.stop() is not None and s.directory.exists()
+
+
+def test_the_sampler_is_reaped_even_if_stopping_fails(mac, tmp_path, monkeypatch):
+    calls = []
+
+    class Fake:
+        def signal(self):
+            calls.append("signal")
+
+        def stop(self):
+            calls.append("stop")
+            return ["Anna"]
+
+    monkeypatch.setattr(participants, "start_sampler", lambda cfg, target: Fake())
+    rec = _recorder(tmp_path, on_cfg())
+    rec.start(TriggerKind.CALL, "zoom.us", target=TARGET)
+
+    def broken():
+        raise OSError("disk")
+
+    monkeypatch.setattr(rec, "_stop", broken)
+    with pytest.raises(OSError, match="disk"):
+        rec.stop()
+    assert calls == ["signal", "stop"] and rec._sampler is None
+
+
+def test_upgrading_to_a_call_starts_the_sampler(mac, tmp_path, monkeypatch):
+    started = []
+    monkeypatch.setattr(
+        participants, "start_sampler", lambda cfg, target: started.append(target) or object()
+    )
+    rec = _recorder(tmp_path, on_cfg())
+    rec.start(TriggerKind.MEDIA, "Safari")
+    assert started == []  # not a call yet
+    assert rec.upgrade_to_call("zoom.us", target=TARGET) is True
+    assert started == [TARGET] and rec._sampler is not None
+    rec._sampler = None  # the fake has no stop()
+    rec.stop()
 
 
 def test_a_room_session_assigns_nothing(tmp_path):
