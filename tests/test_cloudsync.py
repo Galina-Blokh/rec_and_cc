@@ -220,12 +220,61 @@ def test_refresh_runs_the_check(tmp_path, monkeypatch):
         start_threads=False,
     )
     calls = []
-    monkeypatch.setattr(common, "cloud_sync_provider", lambda p: calls.append(p) or "iCloud Drive")
+    monkeypatch.setattr(
+        common, "cloud_sync_provider", lambda p: calls.append("cloud") or "iCloud Drive"
+    )
+    monkeypatch.setattr(common, "recent_transcripts", lambda d: calls.append("recent") or [])
     ctrl._maybe_reload_config = lambda: None
     ctrl._refresh()
     ctrl._refresh()
     assert len(_notices(ctrl)) == 1
-    assert len(calls) == 1  # an already-warned folder is not checked again
+    # checked before output_dir is listed (that may stall on a cloud mount), and an
+    # already-warned folder is not checked again
+    assert calls == ["cloud", "recent", "recent"]
+
+
+def test_known_cloud_roots_are_classified_without_touching_the_disk(tmp_path, monkeypatch):
+    def boom(*_a, **_k):
+        raise AssertionError("touched the filesystem")
+
+    monkeypatch.setattr(cloudsync.os.path, "islink", boom)
+    monkeypatch.setattr(cloudsync.os, "readlink", boom)
+    monkeypatch.setattr(cloudsync.Path, "stat", boom)
+    lib = tmp_path / "Library"
+    assert mac_provider(lib / "Mobile Documents" / "x", tmp_path) == "iCloud Drive"
+    assert mac_provider(lib / "CloudStorage" / "OneDrive-A" / "x", tmp_path) == "OneDrive"
+    assert mac_provider(tmp_path / "Dropbox" / "x", tmp_path) == "Dropbox"
+    env = {"OneDrive": str(tmp_path / "OneDrive")}
+    assert windows_provider(tmp_path / "OneDrive" / "x", env, known=[]) == "OneDrive"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need admin rights on Windows")
+def test_windows_follows_links_into_onedrive(tmp_path):
+    onedrive = tmp_path / "OneDrive"
+    (onedrive / "Rec").mkdir(parents=True)
+    (tmp_path / "Transcribes").symlink_to(onedrive / "Rec")
+    env = {"OneDrive": str(onedrive)}
+    assert windows_provider(tmp_path / "Transcribes" / "2026", env, known=[]) == "OneDrive"
+    assert windows_provider(tmp_path / "Transcribes", env, known=[], follow_links=False) is None
+
+
+def test_windows_known_folders_are_reread(monkeypatch):
+    import platformdirs
+
+    docs = [r"C:\Users\Me\Documents"]
+    monkeypatch.setattr(cloudsync.sys, "platform", "win32")
+    monkeypatch.setattr(cloudsync, "_known_cache", None)
+    monkeypatch.setattr(platformdirs, "user_documents_dir", lambda: docs[0])
+    monkeypatch.setattr(platformdirs, "user_desktop_dir", lambda: r"C:\Users\Me\Desktop")
+    t = [1000.0]
+    monkeypatch.setattr(cloudsync.time, "monotonic", lambda: t[0])
+    env = {"OneDrive": r"C:\Users\Me\OneDrive", "USERPROFILE": r"C:\Users\Me"}
+    path = r"C:\Users\Me\Documents\Transcribes"
+    assert windows_provider(path, env, follow_links=False) is None
+    docs[0] = r"C:\Users\Me\OneDrive\Documents"  # folder backup turned on while running
+    assert windows_provider(path, env, follow_links=False) is None  # cached for a while
+    t[0] += cloudsync._KNOWN_TTL_S + 1
+    assert windows_provider(path, env, follow_links=False) == "OneDrive"
 
 
 def test_cli_config_prints_warning(tmp_path, monkeypatch, capsys):

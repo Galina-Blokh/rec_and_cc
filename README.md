@@ -264,7 +264,7 @@ while it runs: if it lies in iCloud Drive (including "Desktop & Documents"),
 `~/Library/CloudStorage` (OneDrive, Dropbox, Google Drive, Box), `~/Dropbox`, `~/Google Drive`,
 `~/OneDrive*`, `~/Box`, `~/Box Sync` (case-insensitive, also through symlinks),
 or on Windows a OneDrive folder (including `Documents` / `Desktop` moved by OneDrive folder
-backup) or `%USERPROFILE%\Dropbox`, it logs a warning and shows a
+backup) or `%USERPROFILE%\Dropbox`, also through symlinks and junctions, it logs a warning and shows a
 one-time notification, and `recandcc config` prints the same warning. Other sync tools (for
 example a Google Drive drive letter on Windows) are not detected. Set `output_dir` to a
 local folder (for example `~/Transcribes`) if recordings must stay on this device only.

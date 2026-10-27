@@ -19,12 +19,12 @@ result is a hint for a warning, never a reason to refuse a folder, and not exhau
 
 from __future__ import annotations
 
-import functools
 import logging
 import ntpath
 import os
 import plistlib
 import sys
+import time
 from collections.abc import Mapping
 from pathlib import Path, PurePath, PureWindowsPath
 
@@ -111,24 +111,32 @@ def _mac_classify(path: Path, home: Path) -> str | None:
     return None
 
 
+def _is_link(path: Path) -> bool:
+    """Symlink, or (Windows) directory junction. One lstat, nothing inside the target."""
+    return os.path.islink(path) or (hasattr(path, "is_junction") and path.is_junction())
+
+
 def _follow_one_link(path: Path) -> Path | None:
-    """``path`` with its first symlinked component replaced by the link's target, or None.
+    """``path`` with its first linked component replaced by the link's target, or None.
     Reads link text only (lstat + readlink); never stats inside the target."""
     for anc in [*reversed(path.parents), path]:
-        if anc.parent != anc and os.path.islink(anc):
-            return _absolute(anc.parent / os.readlink(anc)) / path.relative_to(anc)
+        if anc.parent != anc and _is_link(anc):
+            text = os.readlink(anc)
+            if text.startswith("\\\\?\\"):  # Windows junction targets: \\?\C:\...
+                text = text[4:]
+            return _absolute(anc.parent / text) / path.relative_to(anc)
     return None
 
 
-def mac_provider(path: str | os.PathLike, home: Path | None = None) -> str | None:
-    """Classify ``path``; if nothing matches, follow symlinks in it (``~/Transcribes`` ->
-    iCloud Drive, or a symlinked parent) one at a time, re-checking after each."""
-    home = _absolute(home or Path.home())
+def _following_links(path: str | os.PathLike, classify) -> str | None:
+    """``classify(path)``; if nothing matches, follow links in the path (``~/Transcribes`` ->
+    iCloud Drive, or a linked parent) one at a time, re-checking after each. A path already
+    inside a known cloud root is classified before anything in it is touched."""
     path = _absolute(path)
     for _ in range(_MAX_LINKS):
-        found = _mac_classify(path, home)
+        found = classify(path)
         if found is not None:
-            return found  # known cloud root: nothing below it is touched
+            return found
         nxt = _follow_one_link(path)
         if nxt is None:
             return None
@@ -136,24 +144,30 @@ def mac_provider(path: str | os.PathLike, home: Path | None = None) -> str | Non
     return None
 
 
-@functools.cache
+def mac_provider(path: str | os.PathLike, home: Path | None = None) -> str | None:
+    home = _absolute(home or Path.home())
+    return _following_links(path, lambda p: _mac_classify(p, home))
+
+
+_KNOWN_TTL_S = 300.0
+_known_cache: tuple[float, list[str]] | None = None
+
+
 def _known_folders() -> list[str]:
-    """Where Windows really keeps Documents / Desktop (moved into OneDrive by folder backup)."""
+    """Where Windows really keeps Documents / Desktop (moved into OneDrive by folder backup).
+    Re-read every few minutes, so turning folder backup on while running is noticed."""
+    global _known_cache
     if sys.platform != "win32":
         return []
-    import platformdirs
+    now = time.monotonic()
+    if _known_cache is None or now - _known_cache[0] > _KNOWN_TTL_S:
+        import platformdirs
 
-    return [platformdirs.user_documents_dir(), platformdirs.user_desktop_dir()]
+        _known_cache = (now, [platformdirs.user_documents_dir(), platformdirs.user_desktop_dir()])
+    return _known_cache[1]
 
 
-def windows_provider(
-    path: str | os.PathLike,
-    env: Mapping[str, str] | None = None,
-    known: list[str] | None = None,
-) -> str | None:
-    env = os.environ if env is None else env
-    known = _known_folders() if known is None else known
-
+def _win_classify(path: str | os.PathLike, env: Mapping[str, str], known: list[str]) -> str | None:
     def norm(p: str | os.PathLike) -> PureWindowsPath:  # no realpath: OneDrive placeholders
         return PureWindowsPath(ntpath.normpath(ntpath.abspath(str(p))).lower())
 
@@ -174,6 +188,20 @@ def windows_provider(
         if any(_under(moved, r) is not None for r in roots) and _under(target, stub) is not None:
             return "OneDrive"
     return None
+
+
+def windows_provider(
+    path: str | os.PathLike,
+    env: Mapping[str, str] | None = None,
+    known: list[str] | None = None,
+    follow_links: bool = True,
+) -> str | None:
+    env = os.environ if env is None else env
+    known = _known_folders() if known is None else known
+    found = _win_classify(path, env, known)
+    if found is None and follow_links:  # e.g. C:\Transcribes is a junction into OneDrive
+        found = _following_links(path, lambda p: _win_classify(p, env, known))
+    return found
 
 
 def cloud_sync_provider(path: str | os.PathLike, platform: str | None = None) -> str | None:
