@@ -521,8 +521,10 @@ correctly, even though Tk does no bidi.*
   reach Tk.
 - **Given** an English or Russian line, **then** it is unchanged (`label<TAB>text`); macOS
   captions and the transcript files are unchanged.
-- **Not yet:** a visual check on Windows hardware (#6); long RTL lines that wrap are reordered
-  as one line, so the wrap point may read oddly.
+- **Given** a Hebrew line longer than the window, **then** it is wrapped at word boundaries
+  in logical order first and each piece is reordered on its own (label on the first line,
+  right-justified), so wrapped lines read in order; very long single words are hard-split.
+- **Not yet:** a visual check on Windows hardware (#6).
 
 ### US-30 Change common settings in a window
 *As the owner, I want a settings window with the options I change most, so that I don't have
