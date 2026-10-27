@@ -38,6 +38,7 @@ from .common import (
     PROMPT_BUTTONS,
     Controller,
     keep_prompt_text,
+    open_output_folder,
     open_path,
     reveal_logs,
     transcript_label,
@@ -283,8 +284,8 @@ class TrayApp:
         )
 
     def _open_folder(self) -> None:
-        self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
-        open_path(self.cfg.output_dir)
+        if err := open_output_folder(self.cfg.output_dir):
+            self._notify("Can't open transcripts folder", err)
 
     def _toggle_captions(self) -> None:
         self.cfg.live_captions = not self.cfg.live_captions

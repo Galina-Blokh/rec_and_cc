@@ -37,6 +37,7 @@ from .common import (
     Controller,
     as_str,
     keep_prompt_text,
+    open_output_folder,
     open_path,
     reveal_logs,
     transcript_label,
@@ -329,8 +330,8 @@ class MacApp(rumps.App):
         open_path(md if md.exists() else d)
 
     def _open_folder(self, _sender) -> None:
-        self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
-        open_path(self.cfg.output_dir)
+        if err := open_output_folder(self.cfg.output_dir):
+            self._notify("Can't open transcripts folder", err)
 
     def _open_recent(self, sender) -> None:
         open_path(sender.path)
