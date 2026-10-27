@@ -72,6 +72,7 @@ SEARCH_LIMIT = 20
 HOTKEY_DEBOUNCE_S = 0.5
 NET_PROBE_WAIT_S = 2.0  # how long a refresh waits for the network-volume probe
 NET_PROBE_RETRY_S = 300.0  # after a hung or failed probe
+NET_PROBE_MAX_THREADS = 4  # stuck probes (one per folder) allowed at once
 REFRESH_EVERY_S = 10.0
 PERM_KINDS = ("microphone", "system_audio")
 PERM_TITLES = {"microphone": "Microphone", "system_audio": "System audio"}
@@ -345,7 +346,8 @@ class Controller:
         self._lang_lock = threading.Lock()  # transcription.languages + its raw spelling
         self._summaries = None  # SummaryQueue, created on the first summary
         self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
-        self._net_probe: threading.Thread | None = None
+        self._net_probes: dict[Path, threading.Thread] = {}  # one in-flight probe per folder
+        self._net_local: set[Path] = set()  # folders already probed as local: skip the statfs
         self._net_retry: dict[Path, float] = {}  # folder -> earliest next probe (monotonic)
         self._net_warned: set[Path] = set()  # network-volume output dirs already warned about
         # global shortcut
@@ -947,11 +949,17 @@ class Controller:
         with self._lock:
             if out in self._net_warned:
                 return
-            if self._net_probe is not None and self._net_probe.is_alive():
-                return  # a previous probe is still stuck: don't pile up threads
+            if out in self._net_local:
+                return  # known local: no thread, no statfs on every refresh
+            prev = self._net_probes.get(out)
+            if prev is not None and prev.is_alive():
+                return  # this folder's probe is still stuck: don't pile up threads
             if time.monotonic() < self._net_retry.get(out, 0.0):
                 return  # a recent probe of this folder hung or failed
-            self._net_probe = t = threading.Thread(
+            self._net_probes = {p: th for p, th in self._net_probes.items() if th.is_alive()}
+            if len(self._net_probes) >= NET_PROBE_MAX_THREADS:
+                return  # too many stuck shares already
+            self._net_probes[out] = t = threading.Thread(
                 target=self._probe_network_volume, args=(out,), daemon=True, name="ui-netprobe"
             )
         t.start()
@@ -970,6 +978,8 @@ class Controller:
                 self._net_retry[out] = time.monotonic() + NET_PROBE_RETRY_S
             return
         if kind is None:
+            with self._lock:
+                self._net_local.add(out)
             return
         with self._lock:
             if out in self._net_warned:
@@ -1254,7 +1264,14 @@ class Controller:
 
         def run() -> None:
             try:
-                raw = run_settings(self.cfg)
+                try:
+                    raw = run_settings(self.cfg)
+                except OSError as e:  # temp dir / snapshot file: not the transcripts folder
+                    log.warning("could not open settings: %s (errno %s)", type(e).__name__, e.errno)
+                    self.post_notice(
+                        "Settings not saved", f"couldn't open settings: {type(e).__name__}"
+                    )
+                    return
                 if not raw:  # cancelled, closed, or nothing changed
                     return
                 updates = validate_settings(raw)

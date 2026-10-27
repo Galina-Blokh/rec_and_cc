@@ -11,6 +11,12 @@ All notable changes to RecAndCC are documented here. The format is based on
   multilingual sentence model, downloaded once, merged with full-text results (#4).
 - RecAndCC is licensed under the Apache License 2.0 (`LICENSE`, `NOTICE`); completes #17.
 
+### Fixed
+- A hung network-volume probe no longer blocks the warning for other folders (one probe per
+  folder, capped; local results are cached) (#110).
+- Settings errors before the save (temp dir, snapshot file) say "couldn't open settings"
+  instead of blaming the transcripts folder; the never-blocks test has a wider margin (#109).
+
 ### Security
 - CI installs exactly what `uv.lock` pins (`uv sync --locked` / `uv run --locked`), and its
   GitHub Actions are pinned to commit SHAs.

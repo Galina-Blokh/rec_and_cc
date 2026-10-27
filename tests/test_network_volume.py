@@ -189,7 +189,7 @@ def test_a_hung_probe_never_stalls_the_refresh(tmp_path, monkeypatch):
     ctrl._check_network_volume()  # does not start a second stuck probe
     assert _notices(ctrl) == [] and ctrl._net_warned == set()
     release.set()
-    ctrl._net_probe.join(5)
+    ctrl._net_probes[tmp_path].join(5)
     assert len(_notices(ctrl)) == 1  # a late answer still warns, once
 
 
@@ -223,9 +223,57 @@ def test_a_failed_or_hung_probe_is_not_retried_every_refresh(tmp_path, monkeypat
         start_threads=False,
     )
     ctrl._check_network_volume()
-    ctrl._net_probe.join(5)
+    ctrl._net_probes[tmp_path].join(5)
     ctrl._check_network_volume()
     assert len(calls) == 1
     ctrl._net_retry[tmp_path] = 0.0  # the retry interval has passed
     ctrl._check_network_volume()
     assert len(calls) == 2
+
+
+def test_a_hung_probe_does_not_block_other_folders(tmp_path, monkeypatch):
+    release = threading.Event()
+    monkeypatch.setattr(common, "NET_PROBE_WAIT_S", 0.05)
+
+    def probe(p):
+        return (release.wait(10) and "NFS") if p == tmp_path / "dead" else "SMB"
+
+    monkeypatch.setattr(common, "network_volume", probe)
+    cfg = Config(output_dir=tmp_path / "dead")
+    ctrl = Controller(cfg, monitor=_Monitor(), recorder=object(), tq=_Q(), start_threads=False)
+    ctrl._check_network_volume()  # hangs
+    cfg.output_dir = tmp_path / "healthy"
+    ctrl._check_network_volume()
+    ctrl._net_probes[tmp_path / "healthy"].join(5)
+    assert len(_notices(ctrl)) == 1
+    release.set()
+    ctrl._net_probes[tmp_path / "dead"].join(5)
+
+
+def test_local_result_is_cached_per_path(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(common, "network_volume", lambda p: calls.append(p))
+    ctrl = Controller(
+        Config(output_dir=tmp_path),
+        monitor=_Monitor(),
+        recorder=object(),
+        tq=_Q(),
+        start_threads=False,
+    )
+    ctrl._check_network_volume()
+    ctrl._check_network_volume()
+    assert len(calls) == 1
+
+
+def test_probe_threads_are_capped(tmp_path, monkeypatch):
+    release = threading.Event()
+    monkeypatch.setattr(common, "NET_PROBE_WAIT_S", 0.01)
+    monkeypatch.setattr(common, "NET_PROBE_MAX_THREADS", 2)
+    monkeypatch.setattr(common, "network_volume", lambda p: release.wait(10) and None)
+    cfg = Config(output_dir=tmp_path)
+    ctrl = Controller(cfg, monitor=_Monitor(), recorder=object(), tq=_Q(), start_threads=False)
+    for i in range(5):
+        cfg.output_dir = tmp_path / str(i)
+        ctrl._check_network_volume()
+    assert len(ctrl._net_probes) == 2
+    release.set()
