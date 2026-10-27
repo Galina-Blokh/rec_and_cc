@@ -58,9 +58,29 @@ def local_model_path(repo: str) -> str:
         log.info("model %s has no pinned revision; using its latest version", repo)
     try:
         return snapshot_download(repo, revision=rev, local_files_only=True)
-    except Exception:
+    except FileNotFoundError:
+        # A missing or partial snapshot (LocalEntryNotFoundError, incl. IncompleteSnapshotError):
+        # download it, or finish the interrupted download.
         log.info("model %s not on disk yet; downloading it once", repo)
-        return snapshot_download(repo, revision=rev)
+    except Exception:
+        # A snapshot that is present but unreadable or corrupt must not go online: surface it.
+        log.warning(
+            "model %s failed to load from the local cache %s; "
+            "delete it to download the model again",
+            repo,
+            hf_cache_folder(repo),
+        )
+        raise
+    return snapshot_download(repo, revision=rev)
+
+
+def hf_cache_folder(repo: str) -> Path:
+    """Hugging Face cache folder of ``repo`` (all its snapshots), for log messages."""
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+    except ImportError:
+        HF_HUB_CACHE = "~/.cache/huggingface/hub"
+    return Path(HF_HUB_CACHE).expanduser() / ("models--" + repo.replace("/", "--"))
 
 
 def gpu_available() -> bool:
