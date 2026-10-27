@@ -19,6 +19,7 @@ the numbers in them come from the commits and docs they link to (measured on an 
 | [0008](0008-in-app-toast-notifications.md) | In-app toast instead of `osascript` notifications | Accepted |
 | [0009](0009-sherpa-onnx-campp-diarization.md) | sherpa-onnx CAM++ diarization instead of pyannote | Accepted |
 | [0010](0010-offline-first-model-loading.md) | Offline-first model loading | Accepted |
+| [0011](0011-stack-and-packaging-after-v0-1.md) | Stack and packaging after v0.1: keep Python + Swift, ship a signed self-contained app, benchmark before switching engines | Proposed |
 
 ## Adding an ADR
 
