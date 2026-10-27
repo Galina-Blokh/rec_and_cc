@@ -60,6 +60,12 @@ OWN_AUDIO = ("recandcc", "rcc-audiotap")  # our own mic use (the room monitor) n
 # a room session mid-conversation.
 SYSTEM_SOUNDS = ("com.apple.systemsound", "com.apple.notificationcenter", "coreaudiod")
 ROOM_RETRY_S = 60.0  # wait this long before reopening a room-listening mic that failed
+# An idle room mic that delivers no frames this long has stalled (the device went away, e.g.
+# AirPods disconnected): close it and reopen. A reopened mic that stalls again backs off.
+ROOM_STALL_S = 10.0
+# A call app playing audio this long without the mic is a muted or listen-only call, not a
+# notification ding (Electron keeps a ding's output stream open a few seconds).
+ROOM_CALL_OUTPUT_S = 15.0
 
 
 def _run_daemon(fn: Callable[[], None]) -> None:
@@ -244,6 +250,8 @@ class Engine:
         self.room = room_monitor
         self._room_retry_at = float("-inf")
         self._room_mic_busy = self._room_apps_busy = False  # engine thread only
+        self._room_stalled = False  # the room mic was last closed for a stall (engine thread)
+        self._room_opened_at = float("-inf")
         self._room_blockers: list[str] = []
         self._room_prev_busy = False
 
@@ -420,7 +428,10 @@ class Engine:
         if room is not None and room.running:
             # A clean snapshot after a busy one first: detection lags the audio by ~1-2 s.
             clean = not busy and not was_busy
-            room_active = self._room_wanted() and clean and room.triggered()
+            # A stalled mic's last speech never ages out of the window: it can't start a
+            # session (the idle stall check below closes and reopens it instead).
+            live = room.seconds_since_frame() < ROOM_STALL_S
+            room_active = self._room_wanted() and clean and live and room.triggered()
             room_quiet = room.seconds_since_speech()
 
         start_req: tuple[TriggerKind, str | None, AppTarget | None] | None = None
@@ -560,6 +571,14 @@ class Engine:
                 for a in apps.values():
                     if a.kind != TriggerKind.CALL:
                         continue
+                    # A call app turns a room session into a call once it uses the mic, or
+                    # has played audio long enough to be a muted call rather than a ding.
+                    if (
+                        r.kind == TriggerKind.ROOM
+                        and not any(p.input_active for p in a.procs)
+                        and now - self._first_seen[a.key] < ROOM_CALL_OUTPUT_S
+                    ):
+                        continue
                     if a.key != r.key and (
                         a.key in self._suppressed
                         or now - self._first_seen[a.key] < min_active
@@ -665,11 +684,25 @@ class Engine:
             # A room session's mic track is the monitor's stream: keep it open until it ends.
             idle = r is None
             want = self._room_wanted() and not self._room_mic_busy if idle else r.room_mic
+        if want and idle and room.running:
+            if room.seconds_since_frame() >= ROOM_STALL_S:
+                log.warning("room listening: the microphone stopped delivering audio")
+                room.close_mic()
+                if self._room_stalled:  # stalled again right after a reopen: back off
+                    self._room_retry_at = now + ROOM_RETRY_S
+                self._room_stalled = True
+            elif room.last_frame_at() >= self._room_opened_at + ROOM_STALL_S:
+                # Healthy only if frames kept coming well after the open: a dead device can
+                # deliver one block while a slow start() runs, and must still back off.
+                self._room_stalled = False
         if want and not room.running and now >= self._room_retry_at:
-            if not room.start():
+            if room.start():
+                self._room_opened_at = self.clock()  # start() may be slow (helper, prompt)
+            else:
                 self._room_retry_at = now + ROOM_RETRY_S
         elif not want and room.running:
             room.close_mic()
+            self._room_stalled = False  # closed on purpose: the next stall reopens at once
         elif want and idle and self._room_apps_busy:
             room.reset()
 

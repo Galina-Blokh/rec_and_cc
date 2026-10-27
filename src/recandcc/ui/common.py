@@ -269,6 +269,9 @@ def grant_permission(kind: str) -> str | None:
         return None
 
 
+DIALOG_TIMEOUT_S = 300  # an abandoned chooser must not keep a flow "open" for ever
+
+
 def osascript(script: str, timeout: float | None = None) -> str:
     """Run AppleScript, return stdout ('' on error/cancel). The script goes in on stdin, not
     argv, so text in it (search results) isn't visible in the process list."""
@@ -285,6 +288,22 @@ def osascript(script: str, timeout: float | None = None) -> str:
 def as_str(text: str) -> str:
     """Quote a Python string as an AppleScript string literal."""
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def chooser_script(labels: list[str], prompt: str, button: str) -> str:
+    """AppleScript for a list chooser; every text is quoted by ``as_str``."""
+    items = ", ".join(map(as_str, labels))
+    return (
+        f'choose from list {{{items}}} with title "RecAndCC" '
+        f"with prompt {as_str(prompt)} OK button name {as_str(button)}"
+    )
+
+
+def name_dialog_script(label: str) -> str:
+    return (
+        f'display dialog {as_str(f"Name for {label}:")} default answer "" '
+        'with title "RecAndCC" buttons {"Cancel", "Save"} default button "Save"'
+    )
 
 
 # ----------------------------------------------------------------------- controller
@@ -537,6 +556,15 @@ class Controller:
         except Exception:
             log.exception("scanning for pending summaries failed")
 
+    def _recording_busy(self) -> bool:
+        """Background indexing yields to a recording and to the transcription backlog."""
+        tq = getattr(self, "tq", None)
+        return (
+            self.engine.state.status != IDLE
+            or (tq is not None and tq.pending() > 0)
+            or bool(getattr(self, "_resubmitting", 0))
+        )
+
     def _summarize(self, directory: Path) -> None:
         """Queue summary.md for a final transcript (local LLM, own background thread)."""
         with self._summaries_lock:  # called from the transcription and diarizer threads
@@ -552,12 +580,11 @@ class Controller:
         summaries.submit(directory)
 
     # --- transcript search (worker threads; results arrive as a "search" event)
-    @staticmethod
-    def _index_session(directory: Path) -> None:
+    def _index_session(self, directory: Path) -> None:
         try:
             from ..search import default_index
 
-            default_index().index_session(directory)
+            default_index(self.cfg.search.semantic, self._recording_busy).index_session(directory)
         except Exception:  # noqa: BLE001 - search is optional; never break transcription
             log.exception("could not update the search index")
 
@@ -649,7 +676,13 @@ class Controller:
             try:
                 from ..search import search_transcripts
 
-                hits = search_transcripts(self.cfg.output_dir, query, SEARCH_LIMIT)
+                hits = search_transcripts(
+                    self.cfg.output_dir,
+                    query,
+                    SEARCH_LIMIT,
+                    self.cfg.search.semantic,
+                    busy=self._recording_busy,
+                )
             except Exception as e:  # noqa: BLE001
                 # the type only: an FTS5 syntax error quotes the query
                 log.error("transcript search failed: %s", type(e).__name__)
@@ -657,6 +690,71 @@ class Controller:
             self.events.put(("search", query, hits))
 
         threading.Thread(target=run, daemon=True, name="search").start()
+
+    # --- speaker names (opt-in; worker threads; results arrive as events)
+    @property
+    def speaker_names_enabled(self) -> bool:
+        return self.cfg.transcription.speaker_names
+
+    def speakers_async(self, directory: Path) -> None:
+        """List the session's speakers that have voice data, with their first lines; posts
+        ``("speakers", directory, [(label, lines)])`` (the exception if it failed)."""
+
+        def run() -> None:
+            try:
+                from ..models import SessionInfo
+                from ..transcribe import voices
+
+                # the transcript (maybe cloud-synced) is read outside any lock
+                lines = voices.session_speakers(directory)
+                known = voices.read_session_voices(SessionInfo.load(directory).id)
+                result = [(lbl, ln) for lbl, ln in lines if lbl in known]
+            except Exception as e:  # noqa: BLE001
+                log.error("could not list the speakers: %s", type(e).__name__)
+                result = e
+            self.events.put(("speakers", directory, result))
+
+        threading.Thread(target=run, daemon=True, name="speakers").start()
+
+    def name_speaker_async(self, directory: Path, label: str, name: str) -> None:
+        """Name a speaker through the same function as ``recandcc name-speaker``; posts
+        ``("named", label, name, error | None)``. Names are never logged."""
+
+        def run() -> None:
+            error = None
+            try:
+                if not self.speaker_names_enabled:
+                    error = "Voice profiles are off (transcription.speaker_names)."
+                else:
+                    from ..transcribe import voices
+
+                    voices.name_speaker(Path(directory), label, name)  # holds voices.LOCK
+            except Exception as e:  # noqa: BLE001 - always post an outcome
+                log.error("could not name a speaker: %s", type(e).__name__)
+                # fixed text: the library's messages quote the name, and notices may be logged
+                error = (
+                    "The name could not be saved: it may be reserved, used by another "
+                    "speaker of this session, or the voice data is gone."
+                )
+            self.events.put(("named", label, name, error))
+
+        threading.Thread(target=run, daemon=True, name="name-speaker").start()
+
+    def forget_voices_async(self) -> None:
+        """Delete every voice profile and all stored session voices; posts
+        ``("forgot", count | exception)``."""
+
+        def run() -> None:
+            try:
+                from ..transcribe import voices
+
+                result = voices.forget_all()  # after any naming or finalize in flight
+            except Exception as e:  # noqa: BLE001
+                log.error("could not delete the voices: %s", type(e).__name__)
+                result = e
+            self.events.put(("forgot", result))
+
+        threading.Thread(target=run, daemon=True, name="forget-voices").start()
 
     def export_async(self, transcript: Path | None = None, fmt: str = "both") -> None:
         """Export a session's transcript to DOCX + PDF off the UI thread; posts a ``notice``
@@ -817,7 +915,7 @@ class Controller:
         try:
             from ..search import default_index
 
-            default_index().sync(self.cfg.output_dir)
+            default_index(self.cfg.search.semantic, self._recording_busy).sync(self.cfg.output_dir)
         except Exception:  # noqa: BLE001 - search is optional
             log.exception("could not sync the search index")
 
@@ -983,6 +1081,8 @@ class Controller:
             out[("detection", f.name)] = getattr(cfg.detection, f.name)
         for f in fields(cfg.summary):
             out[("summary", f.name)] = getattr(cfg.summary, f.name)
+        for f in fields(cfg.search):  # [search] semantic: applies from the next search
+            out[("search", f.name)] = getattr(cfg.search, f.name)
         for name in RELOADED_TRANSCRIPTION_KEYS:
             out[("transcription", name)] = getattr(cfg.transcription, name)
         tr = cfg.transcription
@@ -1010,6 +1110,7 @@ class Controller:
             "top": self.cfg,
             "detection": self.cfg.detection,
             "summary": self.cfg.summary,
+            "search": self.cfg.search,
             "transcription": self.cfg.transcription,
         }[owner]
 

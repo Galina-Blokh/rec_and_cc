@@ -8,6 +8,7 @@ import threading
 from collections.abc import Callable
 
 from ..models import Segment, SessionInfo
+from . import voices
 from .engine import Transcriber
 
 log = logging.getLogger("recandcc.transcribe")
@@ -37,6 +38,11 @@ class TranscriptionQueue:
         self._thread.start()
 
     def submit(self, session: SessionInfo, finalize: Finalizer | None = None) -> None:
+        if session.voices_generation is None:  # an older session.json: count from queueing
+            try:
+                session.voices_generation = voices.forget_generation()
+            except Exception:  # noqa: BLE001 - write_final reads it again then
+                log.warning("session %s: could not read the voices forget generation", session.id)
         # Under the lock so a submit racing shutdown() is either rejected or queued ahead of
         # the stop marker, never stranded behind it.
         with self._lock:
