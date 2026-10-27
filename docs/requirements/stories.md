@@ -288,7 +288,9 @@ don't need the command line for it.*
 - **Given** `speaker_names = false` (default), **then** "Name speakers…" is greyed out and
   naming through the controller is refused.
 - **When** I choose "Forget all voices…" and confirm, **then** every voice profile and every
-  session's saved voices are deleted (like `voices delete --all`); cancelling deletes nothing.
+  session's saved voices are deleted (like `voices delete --all`); cancelling (or leaving the
+  dialog unanswered until it times out) deletes nothing. A session recorded or queued before
+  the forget keeps no voices or call-app names either, even if it is transcribed after it.
 - **Then** dialogs run off the menu thread, disk work on worker threads, and neither names
   nor transcript text are logged at INFO or above.
 - **Not yet:** a short audio sample (the first lines are shown instead), the Windows tray

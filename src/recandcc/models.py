@@ -124,6 +124,9 @@ class SessionInfo:
     # Display title the user gave it in Meeting notes (None: never renamed, "": reset).
     # Changed only by set_title; save() keeps whatever title the file already has.
     title: str | None = None
+    # The voices store's forget generation when recording began: if "Forget all voices" ran
+    # since, no voice data or call-app names are kept for it (None: older files, unknown).
+    voices_generation: int | None = None
 
     FILENAME = "session.json"
     # Present in a folder the user discarded: never transcribe or list it (discard_session).
@@ -184,6 +187,7 @@ class SessionInfo:
             metrics=data.get("metrics") or {},
             started_as_room=data.get("started_as_room", False),
             title=t if isinstance(t := data.get("title"), str) else None,
+            voices_generation=g if type(g := data.get("voices_generation")) is int else None,
         )
 
 

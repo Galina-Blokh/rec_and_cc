@@ -478,11 +478,18 @@ def _names_path(session_id: str, voices_dir: Path | None) -> Path:
 
 @_locked
 def write_session_names(
-    session: SessionInfo, names: list[str], voices_dir: Path | None = None
-) -> None:
+    session: SessionInfo,
+    names: list[str],
+    voices_dir: Path | None = None,
+    since: int | None = None,
+) -> bool:
     """Keep the participant names a call app showed during `session` in the owner-only store
     (never in the session folder, which may sync to a cloud). Like the session's voices it is
-    pruned when the folder is deleted and removed by `voices delete --all`."""
+    pruned when the folder is deleted and removed by `voices delete --all`. `since`: the
+    ``forget_generation()`` when the session began; if all voices were deleted since, nothing
+    is written. Returns whether the names were kept."""
+    if since is not None and since != forget_generation(voices_dir):
+        return False
     data = {
         "version": 1,
         "session_id": session.id,
@@ -490,6 +497,7 @@ def write_session_names(
         "participants": [str(n) for n in names],
     }
     _write_private(_names_path(session.id, voices_dir), data)
+    return True
 
 
 def read_session_names(session_id: str, voices_dir: Path | None = None) -> list[str]:

@@ -681,7 +681,11 @@ class Transcriber:
         background as soon as they are ready (WAVs are deleted only after that). Returns the
         segments written now.
         """
-        gen = voices.forget_generation()  # a "forget all" after this drops our voice writes
+        # A "forget all" after this drops our voice writes; it counts from when the session
+        # was recorded, so one recorded or queued before a forget keeps no voice data either.
+        gen = session.voices_generation
+        if gen is None:
+            gen = voices.forget_generation()
         if diarization is None:
             diarization = self.start_diarization(session)
         with self._init_lock:

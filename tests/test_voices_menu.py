@@ -484,3 +484,65 @@ def test_posix_lock_gives_up_instead_of_hanging(monkeypatch):
         pass
     with voices.store_lock_best_effort():  # finalize carries on
         pass
+
+
+def test_forget_while_a_session_is_queued_keeps_no_voices_or_names(tmp_path, monkeypatch):
+    """The forget generation is taken when recording starts and carried with the session: a
+    "Forget all voices" while it waits in the queue leaves nothing to name for it."""
+    from concurrent.futures import Future
+
+    from test_voices import SEGS, TURNS
+
+    from recandcc import participants
+    from recandcc.models import SessionInfo
+    from recandcc.transcribe.engine import Transcriber
+
+    session = make_session(tmp_path)
+    session.voices_generation = voices.forget_generation()  # as Recorder.start sets it
+    session.save()
+    voices.save_profile("Anna", ANNA)
+    ctrl = controller()
+    ctrl.forget_voices_async()  # while the session is queued
+    assert ctrl.events.get(timeout=5)[0] == "forgot"
+    participants.store(session, ["Anna Smith", "Bob Jones"])  # gathered before the forget
+    assert voices.read_session_names(session.id) == []
+    loaded = SessionInfo.load(tmp_path)  # the generation survives a reload from disk
+    assert loaded.voices_generation == session.voices_generation
+    done: Future = Future()
+    done.set_result(TURNS)
+    t = Transcriber(TranscriptionConfig(model="fake", speaker_names=True))
+    assert t.write_final(loaded, list(SEGS), 60.0, done)
+    assert voices.read_session_voices(session.id) == {}
+    ctrl.speakers_async(tmp_path)
+    _, _, speakers = ctrl.events.get(timeout=5)
+    assert speakers == []  # "Name speakers…" finds nothing for it
+
+
+def test_session_recorded_after_a_forget_keeps_voices_and_names(tmp_path, monkeypatch):
+    from recandcc import participants
+
+    voices.delete_all_profiles()
+    session = make_session(tmp_path)
+    session.voices_generation = voices.forget_generation()
+    participants.store(session, ["Anna Smith"])
+    assert voices.read_session_names(session.id) == ["Anna Smith"]
+    _final(tmp_path, monkeypatch, speaker_names=True)
+    assert voices.read_session_voices(session.id)
+
+
+def test_queue_stamps_an_older_session_without_a_generation(tmp_path):
+    from recandcc.transcribe.queue import TranscriptionQueue
+
+    class _Fake:
+        def transcribe_session(self, session):
+            return []
+
+    session = make_session(tmp_path)
+    assert session.voices_generation is None
+    q = TranscriptionQueue(_Fake())  # type: ignore[arg-type]
+    try:
+        q.submit(session)
+    finally:
+        q.shutdown()
+    assert session.voices_generation == voices.forget_generation()
+

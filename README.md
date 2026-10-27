@@ -142,7 +142,8 @@ Menu items:
   and a `Speaker N` (their first lines are shown to help), type a name. Same as
   `recandcc name-speaker`.
 - **Forget all voices…**: after a confirmation, deletes every voice profile and all saved
-  session voices (`recandcc voices delete --all`). macOS menu only for now.
+  session voices (`recandcc voices delete --all`), including those of sessions still waiting
+  to be transcribed. macOS menu only for now.
 - **Export latest transcript (DOCX + PDF)**: writes `transcript.docx` and `transcript.pdf`
   next to the newest transcript. Same as `recandcc export`.
 - **Meeting notes…**: your past sessions, newest first, with title (the app that triggered
