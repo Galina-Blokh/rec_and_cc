@@ -111,8 +111,8 @@ def _undo_setup_logging(before) -> None:
 @pytest.fixture(autouse=True)
 def _private_config(request, tmp_path, _import_path_modules):
     """No test reads or writes the user's real config, logs, LaunchAgent plist, lock file or
-    default output folder, even through a bare `Config().save()` or a module that imported
-    the constant by name."""
+    default output folder (nor, in fast tests, the model caches), even through a bare
+    `Config().save()` or a module that imported the constant by name."""
     import sys
 
     before = _logging_state()
