@@ -276,7 +276,7 @@ I don't have to work out who `Speaker 2` was every time.*
   `speaker_names` on or off, and
   nothing is renamed, stored or logged until I run `name-speaker`.
 - **Measured (synthetic only):** a voice named once got its name on 21/21 of its segments in
-  three later `say`-voice sessions; an unnamed voice was wrongly named on 5/9 of its segments
+  three later `say`-voice sessions; an unnamed voice was wrongly named on 5/9 of its segments at threshold 0.6, 3/9 at the shipped 0.75
   (`tests/test_voice_recall.py`, docs/EVALUATION.md).
 - **Not yet:** naming from the menu with a voice sample, names from the call app, overlap
   handling and an accuracy measurement on real speech (#1, #13).

@@ -62,7 +62,7 @@ def test_match_needs_similarity_and_margin():
 
 def at_similarity(v, sim):
     """A unit vector at exactly cosine `sim` to `v` (and almost orthogonal to the others)."""
-    w = RNG.normal(size=v.shape)
+    w = np.random.default_rng(int(sim * 1000)).normal(size=v.shape)  # independent of test order
     w -= (w @ v) * v
     return sim * v + np.sqrt(1 - sim**2) * w / np.linalg.norm(w)
 
