@@ -480,6 +480,7 @@ know recordings and transcripts leave this computer.*
   `output_dir` changes (also from Settings) or the menu refreshes, **then** a notification
   says so and suggests a local folder; it is shown once per folder, and `recandcc config`
   prints the same warning.
-- **Then** recording is never blocked, the check is local (no network, no subprocess) and
+- **Then** recording is never blocked, the check asks the OS about the volume (no subprocess, no traffic of its own; a dead mount
+  is probed on a side thread with a short wait, so the menu never hangs) and
   logs contain the kind of share but never the path.
 - **Not yet:** shares that a sync or FUSE tool presents as a local disk are not detected.

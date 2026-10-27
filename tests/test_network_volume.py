@@ -10,6 +10,9 @@ import logging
 import queue
 import subprocess
 import sys
+import threading
+
+import pytest
 
 import recandcc.cloudsync as cs
 import recandcc.ui.common as common
@@ -17,6 +20,18 @@ from recandcc.config import Config
 from recandcc.ui.common import Controller
 
 LOCAL = 0x1000
+
+
+@pytest.fixture(autouse=True)
+def _no_realpath(monkeypatch):
+    """Fake paths (UNC, /mnt/...) must not be resolved against the host filesystem."""
+    monkeypatch.setattr(cs.os.path, "realpath", lambda p: str(p))
+
+
+def test_links_to_shares_are_resolved(tmp_path, monkeypatch):
+    monkeypatch.setattr(cs.os.path, "realpath", lambda p: "/mnt/nas/rec")
+    mounts = "srv:/x /mnt/nas nfs rw 0 0\n"
+    assert cs.linux_network_volume(tmp_path / "link", mounts) == "NFS"
 
 
 def _mac(fstype, flags=LOCAL):
@@ -40,6 +55,7 @@ def test_windows_unc_and_remote_drive():
     assert unc == "a network share"
     assert cs.windows_network_volume(r"\\?\UNC\server\share", drive_type=lambda _r: 3)
     assert cs.windows_network_volume(r"\\?\C:\Rec", drive_type=lambda _r: 3) is None
+    assert cs.windows_network_volume(r"\\?\Z:\Rec", drive_type=lambda _r: 4) == "a network drive"
     seen = []
 
     def remote(root):
@@ -156,3 +172,60 @@ def test_cli_config_prints_warning(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cs, "network_volume", lambda p: "NFS")
     cli.cmd_config(None)
     assert "NFS storage" in capsys.readouterr().out
+
+
+def test_a_hung_probe_never_stalls_the_refresh(tmp_path, monkeypatch):
+    release = threading.Event()
+    monkeypatch.setattr(common, "NET_PROBE_WAIT_S", 0.05)
+    monkeypatch.setattr(common, "network_volume", lambda p: release.wait(10) and "NFS")
+    ctrl = Controller(
+        Config(output_dir=tmp_path),
+        monitor=_Monitor(),
+        recorder=object(),
+        tq=_Q(),
+        start_threads=False,
+    )
+    ctrl._check_network_volume()  # returns after the short wait although the probe hangs
+    ctrl._check_network_volume()  # does not start a second stuck probe
+    assert _notices(ctrl) == [] and ctrl._net_warned == set()
+    release.set()
+    ctrl._net_probe.join(5)
+    assert len(_notices(ctrl)) == 1  # a late answer still warns, once
+
+
+def test_cloud_synced_folder_gets_only_the_cloud_notice(tmp_path, monkeypatch):
+    monkeypatch.setattr(common, "cloud_sync_provider", lambda p: "OneDrive")
+    monkeypatch.setattr(common, "network_volume", lambda p: "a network share")
+    ctrl = Controller(
+        Config(output_dir=tmp_path),
+        monitor=_Monitor(),
+        recorder=object(),
+        tq=_Q(),
+        start_threads=False,
+    )
+    ctrl._check_network_volume()
+    assert _notices(ctrl) == []
+
+
+def test_a_failed_or_hung_probe_is_not_retried_every_refresh(tmp_path, monkeypatch):
+    calls = []
+
+    def boom(p):
+        calls.append(p)
+        raise OSError("stalled")
+
+    monkeypatch.setattr(common, "network_volume", boom)
+    ctrl = Controller(
+        Config(output_dir=tmp_path),
+        monitor=_Monitor(),
+        recorder=object(),
+        tq=_Q(),
+        start_threads=False,
+    )
+    ctrl._check_network_volume()
+    ctrl._net_probe.join(5)
+    ctrl._check_network_volume()
+    assert len(calls) == 1
+    ctrl._net_retry[tmp_path] = 0.0  # the retry interval has passed
+    ctrl._check_network_volume()
+    assert len(calls) == 2

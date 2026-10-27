@@ -297,10 +297,12 @@ def mac_network_volume(path: str | os.PathLike, statfs=None) -> str | None:
 
 
 def windows_network_volume(path: str | os.PathLike, drive_type=None) -> str | None:
-    text = ntpath.normpath(str(path))
-    if text.lower().startswith("\\\\?\\unc\\") or (
-        text.startswith("\\\\") and not text.startswith(("\\\\?\\", "\\\\.\\"))
-    ):
+    text = ntpath.normpath(os.path.realpath(str(path)))  # junctions / links to shares
+    if text.lower().startswith("\\\\?\\unc\\"):
+        return "a network share"
+    if text.startswith(("\\\\?\\", "\\\\.\\")):  # \\?\Z:\... -> Z:\...
+        text = text[4:]
+    elif text.startswith("\\\\"):
         return "a network share"  # UNC path
     drive = ntpath.splitdrive(ntpath.abspath(text))[0]
     if len(drive) != 2:
@@ -316,8 +318,7 @@ def linux_network_volume(path: str | os.PathLike, mounts: str | None = None) -> 
     """Longest matching mount point in /proc/mounts decides."""
     if mounts is None:
         mounts = Path("/proc/mounts").read_text(encoding="utf-8", errors="replace")
-    target = str(path)
-    target = posixpath.normpath(target if target.startswith("/") else str(_absolute(path)))
+    target = posixpath.normpath(os.path.realpath(str(path)).replace("\\", "/"))
     best, best_type = "", ""
     for line in mounts.splitlines():
         parts = line.split()
