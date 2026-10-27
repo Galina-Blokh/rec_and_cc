@@ -108,19 +108,35 @@ def _create_exclusive(tmp: Path) -> int:
     raise AssertionError("unreachable")
 
 
+# POSIX can pin the checked folder with a directory descriptor; Windows can't (residual risk).
+_DIR_FD = os.open in os.supports_dir_fd and os.replace in os.supports_dir_fd
+
+
 def _write(path: Path, data: bytes, expected: Path | None = None) -> Path:
     """Write ``data`` to a temp file and rename it into place. The temp file is created
     owner-only (0600) and written through that same descriptor (no reopen that a scanner
     could block), with a name unique per process and thread (on Windows the output ACLs are
     inherited from the owner-only session folder, #42). Windows may hold the target open, so
     only the rename is retried. Only exception types are kept: library messages can quote the
-    transcript."""
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    transcript.
+
+    ``expected`` is the session folder resolved when the export started. The write is refused
+    if the folder now resolves elsewhere (it, or a parent, was swapped for a link or junction
+    while the document was rendered); a folder that was already a link at the start is fine.
+    On POSIX the checked folder is then pinned by a directory descriptor, so a swap after the
+    check can't redirect the write; on Windows a swap in that millisecond remains possible.
+    Without ``expected`` any link or junction is refused."""
     parent = path.parent
-    is_junction = getattr(parent, "is_junction", lambda: False)()  # Windows junctions
-    if parent.is_symlink() or is_junction or (expected and parent.resolve() != expected):
-        # the folder (or a parent) was swapped for a link while the document was rendered
-        raise ExportError("The session folder is a link or moved; not writing through it")
+    if expected is None:
+        if parent.is_symlink() or parent.is_junction():
+            raise ExportError("The session folder is a link; not writing through it")
+    elif parent.resolve() != expected:
+        raise ExportError("The session folder moved during the export; not writing through it")
+    tmp_name = f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    if expected is not None and _DIR_FD:
+        _write_in_dir(expected, path.name, tmp_name, data)
+        return path
+    tmp = parent / tmp_name
     try:
         try:
             fd = _create_exclusive(tmp)
@@ -141,6 +157,31 @@ def _write(path: Path, data: bytes, expected: Path | None = None) -> Path:
     finally:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
+
+
+def _write_in_dir(directory: Path, name: str, tmp_name: str, data: bytes) -> None:
+    """POSIX: create, write and rename inside the already-checked folder through one
+    directory descriptor (no path lookups after the check)."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        dfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+    except OSError as e:
+        raise ExportError(f"could not write {name} ({type(e).__name__})") from None
+    try:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp_name, dir_fd=dfd)
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow
+            fd = os.open(tmp_name, flags, 0o600, dir_fd=dfd)
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp_name, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        except OSError as e:
+            raise ExportError(f"could not write {name} ({type(e).__name__})") from None
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name, dir_fd=dfd)
+        os.close(dfd)
 
 
 STALE_TEMP_AGE_S = 3600.0

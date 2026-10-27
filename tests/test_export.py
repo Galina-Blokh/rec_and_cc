@@ -501,3 +501,52 @@ def test_a_parent_swapped_for_a_link_during_rendering_is_refused(tmp_path):
     with pytest.raises(export.ExportError):
         export._write(day / "s" / "x.bin", b"data", expected)
     assert not list((other / "s").iterdir())
+
+
+def test_a_junction_session_folder_is_refused_without_expected(tmp_path, monkeypatch):
+    # runs on every platform: the junction check itself is faked
+    (tmp_path / "s").mkdir()
+    monkeypatch.setattr(export.Path, "is_junction", lambda self: True)
+    with pytest.raises(export.ExportError, match="link"):
+        export._write(tmp_path / "s" / "x.bin", b"data")
+    assert not list((tmp_path / "s").iterdir())
+
+
+def test_write_without_expected_into_a_plain_folder_is_unchanged(tmp_path):
+    out = export._write(tmp_path / "x.bin", b"data")
+    assert out.read_bytes() == b"data"
+    assert [p.name for p in tmp_path.iterdir()] == ["x.bin"]  # no temp left behind
+
+
+def test_a_session_folder_that_was_already_a_link_at_the_start_is_exported(tmp_path):
+    # e.g. a redirected or synced folder: linked before the export began, so it's legitimate
+    if sys.platform == "win32":
+        pytest.skip("symlinks need privileges")
+    real, link = tmp_path / "real", tmp_path / "link"
+    real.mkdir()
+    link.symlink_to(real)
+    expected = link.resolve()
+    out = export._write(link / "x.bin", b"data", expected)
+    assert (real / "x.bin").read_bytes() == b"data" and out == link / "x.bin"
+    assert [p.name for p in real.iterdir()] == ["x.bin"]
+
+
+def test_a_swap_after_the_check_cannot_redirect_the_write(tmp_path, monkeypatch):
+    # POSIX: the checked folder is pinned by a descriptor, so a swap after the check is harmless
+    if not export._DIR_FD:
+        pytest.skip("no dir_fd support (Windows): documented residual risk")
+    (tmp_path / "s").mkdir()
+    (tmp_path / "evil").mkdir()
+    expected = (tmp_path / "s").resolve()
+    real_open = export.os.open
+
+    def swap_then_open(p, *a, **kw):  # swap the folder right after the check, before the open
+        if export.Path(p) == expected and "dir_fd" not in kw:
+            (tmp_path / "s").rename(tmp_path / "s-moved")
+            (tmp_path / "s").symlink_to(tmp_path / "evil")
+        return real_open(p, *a, **kw)
+
+    monkeypatch.setattr(export.os, "open", swap_then_open)
+    with pytest.raises(export.ExportError):  # O_NOFOLLOW refuses the swapped-in link
+        export._write(tmp_path / "s" / "x.bin", b"data", expected)
+    assert not list((tmp_path / "evil").iterdir())
