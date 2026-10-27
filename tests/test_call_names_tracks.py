@@ -28,7 +28,7 @@ class FakeDiarizer:
     def __init__(self, turns):
         self.turns = turns
 
-    def submit(self, path, timing=None):
+    def submit(self, path, timing=None, hints=None):
         from concurrent.futures import Future
 
         done: Future = Future()

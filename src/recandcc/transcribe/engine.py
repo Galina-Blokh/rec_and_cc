@@ -711,7 +711,9 @@ class Transcriber:
         futures: dict[Track, Future] = {}
         for track, path in paths.items():
             timing: dict = {}
-            futures[track] = diarizer.submit(path, timing)
+            # the min/max_speakers hints count the remote side only: the room mic gets none
+            hints = None if track == Track.OTHERS else (0, 0)
+            futures[track] = diarizer.submit(path, timing, hints)
             # Ad-hoc attribute, read back with getattr. Filled in before the result is set
             # (see Diarizer._safe).
             futures[track].timing = timing  # pyright: ignore[reportAttributeAccessIssue]

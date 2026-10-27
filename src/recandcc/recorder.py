@@ -337,6 +337,18 @@ def should_record_mic(policy: str, kind: TriggerKind) -> bool:
     return kind in (TriggerKind.CALL, TriggerKind.MANUAL, TriggerKind.ROOM)
 
 
+SCOPE_WAIT_S = 1.0  # how long a room upgrade waits for the helper to confirm a per-app tap
+
+
+def _stop_quietly(source: AudioSource | None) -> None:
+    if source is None:
+        return
+    try:
+        source.stop()
+    except Exception:
+        log.exception("could not stop a system audio source")
+
+
 def _voices_generation() -> int | None:
     """The voices store's forget generation now: a "Forget all voices" after this point
     drops the voice data and call-app names of the session being started."""
@@ -364,6 +376,7 @@ class _TrackWriter:
         self.level_dbfs = -120.0
         self.peak = 0.0  # max |sample| over the session (0.0 => digital silence throughout)
         self.error: BaseException | None = None
+        self.scope: str | None = None  # for the metrics, if not the source's ("all→app")
         self._tap_lock = threading.Lock()  # frames_received + listeners + replay buffer
         self._listeners: tuple[FrameListener, ...] = recorder._listeners
         self._recent: deque[tuple[int, np.ndarray]] = deque()
@@ -468,6 +481,7 @@ class Recorder:
         self._op_lock = threading.Lock()  # serialises start/stop
         self._lvl_lock = threading.Lock()  # guards _last_sound
         self._session: SessionInfo | None = None
+        self._scope_issue: str | None = None  # app a room upgrade couldn't tap alone
         self._privacy_issue: str | None = None  # last start's not-private key (privacy_notice)
         self._writers: list[_TrackWriter] = []
         self._started_mono = 0.0
@@ -597,7 +611,7 @@ class Recorder:
             if self._session is not None:
                 raise RuntimeError("already recording")
             now = datetime.now().astimezone()
-            self._privacy_issue = None
+            self._privacy_issue = self._scope_issue = None
             sid, directory, privacy_issue = self._make_dir(now, app, kind)
             session = SessionInfo(
                 id=sid,
@@ -731,7 +745,9 @@ class Recorder:
                 if daemons := self._daemons(per_app):
                     per_app = AppTarget((*per_app.match, *daemons), per_app.pids)
                 for w in self._writers:
-                    if w.track == Track.OTHERS and not w.source.add_target(per_app):
+                    if w.track != Track.OTHERS or w.source.add_target(per_app):
+                        continue
+                    if not (session.started_as_room and self._reopen_per_app(w, per_app)):
                         log.info("Others track: could not add %s to the per-app tap", app)
             have_mic = any(w.track == Track.ME for w in self._writers)
             if not have_mic and should_record_mic(self.cfg.detection.record_mic, TriggerKind.CALL):
@@ -747,6 +763,69 @@ class Recorder:
                 ", ".join(str(t) for t in session.tracks),
             )
             return True
+
+    def _reopen_per_app(self, w: _TrackWriter, target: AppTarget) -> bool:
+        """A room session taps all system audio (no app to follow). Once a call upgrades it
+        in app scope, record only the call app from now on: the per-app tap starts first,
+        its frames held back until the system-wide one has stopped, and the moment between
+        is padded with silence to the longest track, so the WAV stays aligned and continuous.
+        False (the system-wide tap is kept) unless the helper confirms a per-app tap within
+        ``SCOPE_WAIT_S`` (waited for on the engine thread, outside the engine lock)."""
+        gate = threading.Event()
+
+        def on_frames(frames: np.ndarray) -> None:  # capture thread: drop until switched
+            if gate.is_set():
+                w.on_frames(frames)
+
+        new: AudioSource | None = None
+        try:
+            new = self.system_factory(target)
+            if new.scope == "app":  # not on Windows
+                new.start(on_frames)
+                # Bounded wait (SCOPE_WAIT_S, once per upgrade, engine thread only) under
+                # _op_lock: a concurrent stop() waits that long rather than race the swap.
+                confirmed = new.confirmed_scope(SCOPE_WAIT_S) == "app"
+            else:
+                confirmed = False
+        except Exception:
+            log.exception("per-app system audio unavailable; still recording all system audio")
+            confirmed = False
+        if not confirmed:  # e.g. no audio process of the call app yet: the helper taps all
+            _stop_quietly(new)
+            name = ", ".join(target.match) or str(target.pids)
+            log.warning("per-app tap of %s not confirmed; recording all system audio", name)
+            self._scope_issue = name  # one notice (scope_notice), no retry
+            return False
+        assert new is not None  # noqa: S101 - type narrowing: confirmed implies a source
+        old, t0 = w.source, self.clock()
+        try:
+            old.stop()
+        except Exception:  # new is live; old may be half-stopped (helper already SIGTERMed)
+            log.warning("could not stop the system-wide tap cleanly", exc_info=True)
+            _stop_quietly(old)
+        w.source, w.scope = new, "all→app"
+        # Audio between the old tap's stop and gate.set() is dropped: pad the longer of the
+        # lag behind the other tracks and the measured switch time (no mic track: lead 0),
+        # so Others keeps to the wall clock (a few tens of ms of drift against Me remain).
+        lead = max(x.frames_received for x in self._writers) - w.frames_received
+        gap = int((self.clock() - t0) * SAMPLE_RATE)
+        if max(lead, gap) > 0:
+            w.pad_silence(max(lead, gap))
+        gate.set()
+        log.info("Others track: now recording only %s", ", ".join(target.match) or target.pids)
+        return True
+
+    def scope_notice(self) -> tuple[str, str] | None:
+        """``(title, message)`` once after a room upgrade could not switch Others to the
+        call app (app scope): all system audio is still recorded. Names the app only."""
+        name, self._scope_issue = self._scope_issue, None
+        if name is None:
+            return None
+        return (
+            "Recording all system audio",
+            f"Could not record only {name} in this session; everything the Mac plays is "
+            "recorded until it ends.",
+        )
 
     def stop(self) -> SessionInfo | None:
         """Stop, flush and close. Returns the session, or None if nothing was recording
@@ -806,7 +885,8 @@ class Recorder:
                     "audio_s": round(longest, 1),
                     # Effective: "all" also when a per-app tap fell back to the global one.
                     "system_audio_scope": next(
-                        (w.source.scope for w in writers if w.track == Track.OTHERS), None
+                        (w.scope or w.source.scope for w in writers if w.track == Track.OTHERS),
+                        None,
                     ),
                     "writer_backlog_max_s": {
                         str(w.track): round(w.backlog_max / SAMPLE_RATE, 3) for w in writers
