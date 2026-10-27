@@ -356,7 +356,6 @@ def _deleted(directory: Path) -> bool:
     return False
 
 
-@_locked
 def prune_session_voices(voices_dir: Path | None = None) -> int:
     """Delete the voices of sessions whose folder was deleted; returns how many. Files that
     can't be read or name no folder (written before folders were stored) are kept."""
@@ -364,8 +363,10 @@ def prune_session_voices(voices_dir: Path | None = None) -> int:
     for f in _session_files(voices_dir):
         try:
             directory = json.loads(f.read_text(encoding="utf-8")).get("directory")
+            # the folder check may walk a slow (cloud) tree: no lock for it, only the unlink
             if isinstance(directory, str) and directory and _deleted(Path(directory)):
-                f.unlink()
+                with _file_lock(voices_dir):
+                    f.unlink(missing_ok=True)
                 n += 1
         except (OSError, ValueError, AttributeError):
             log.warning("could not check session voices %s", f.name)
@@ -432,6 +433,17 @@ def read_session_voices(session_id: str, voices_dir: Path | None = None) -> dict
 @_locked
 def delete_session_voices(session_id: str, voices_dir: Path | None = None) -> None:
     _session_path(session_id, voices_dir).unlink(missing_ok=True)
+
+
+def has_user_names(directory: Path) -> bool:
+    """True if the transcript on disk has a speaker that is not Me, Others or `Speaker N`:
+    a name the user gave, which a late relabel must not overwrite."""
+    try:
+        data = json.loads((Path(directory) / JSON_NAME).read_text(encoding="utf-8"))
+        labels = {s["speaker"] for s in data.get("segments", [])}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+    return any(lbl not in (ME, OTHERS) and not re.fullmatch(r"Speaker \d+", lbl) for lbl in labels)
 
 
 def session_speakers(directory: Path, lines: int = 2) -> list[tuple[str, list[str]]]:
@@ -502,6 +514,7 @@ def _name_speaker(directory: Path, label: str, name: str, voices_dir: Path | Non
 __all__ = [
     "LOCK",
     "forget_generation",
+    "has_user_names",
     "profiles_if_current",
     "MATCH_MARGIN",
     "NAMING_LOCK",

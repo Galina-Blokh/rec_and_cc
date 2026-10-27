@@ -270,9 +270,13 @@ def test_slow_relabel_keeps_a_name_and_holds_the_naming_lock(tmp_path, monkeypat
         "write_outputs",
         lambda *a, **k: (held.append(voices.NAMING_LOCK.locked()), real(*a, **k))[1],
     )
-    voices.delete_all_profiles()  # nothing named any more: the relabel now writes
-    t._relabel_later(SessionInfo.load(tmp_path), list(SEGS), 60.0, done)
-    assert held == [True]
+    fresh = tmp_path / "fresh"  # a session nobody named: the relabel writes
+    fresh.mkdir()
+    voices.delete_all_profiles()  # or its voices would match Carl
+    _final(fresh, monkeypatch, speaker_names=True)
+    held.clear()
+    t._relabel_later(SessionInfo.load(fresh), list(SEGS), 60.0, done)
+    assert held and all(held)
 
 
 def test_forget_retries_a_busy_file_and_keeps_going_after_a_failure(tmp_path, monkeypatch):
@@ -356,3 +360,31 @@ def test_fast_final_write_holds_the_naming_lock(tmp_path, monkeypatch):
     t = Transcriber(TranscriptionConfig(model="fake", speaker_names=True))
     t.write_final(SessionInfo.load(tmp_path), list(SEGS), 60.0, done)
     assert held == [True]
+
+
+def test_relabel_never_overwrites_names_even_after_a_forget(tmp_path, monkeypatch):
+    from concurrent.futures import Future
+
+    from test_voices import SEGS, TURNS
+
+    from recandcc.models import SessionInfo
+    from recandcc.transcribe.engine import Transcriber
+
+    _final(tmp_path, monkeypatch, speaker_names=True)
+    voices.name_speaker(tmp_path, "Speaker 2", "Carl")
+    voices.delete_all_profiles()  # the session voices are gone: only the transcript tells
+    assert voices.has_user_names(tmp_path)
+    before = (tmp_path / "transcript.md").read_text(encoding="utf-8")
+    done: Future = Future()
+    done.set_result(TURNS)
+    t = Transcriber(TranscriptionConfig(model="fake", speaker_names=True))
+    t._relabel_later(SessionInfo.load(tmp_path), list(SEGS), 60.0, done)
+    assert (tmp_path / "transcript.md").read_text(encoding="utf-8") == before
+
+
+def test_prune_does_not_hold_the_file_lock_while_checking_folders(tmp_path, monkeypatch):
+    held = []
+    monkeypatch.setattr(voices, "_deleted", lambda d: held.append(voices._held.depth) or True)
+    voices.write_session_voices(make_session(tmp_path), {"Speaker 1": ANNA})
+    assert voices.prune_session_voices() == 1
+    assert held == [0]

@@ -655,8 +655,8 @@ class Transcriber:
         try:
             turns = None if future.cancelled() else future.result()
             with voices.NAMING_LOCK:  # voices and transcript change together, not mid-naming
-                if any(v["profile"] for v in voices.read_session_voices(session.id).values()):
-                    # the user named a speaker of this session already: keep their names
+                if voices.has_user_names(session.directory):
+                    # a speaker was named meanwhile (here or by the CLI): keep their names
                     log.info("session %s: speakers already named; labels kept", session.id)
                     labelled = segments
                 else:
