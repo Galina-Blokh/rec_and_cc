@@ -265,7 +265,12 @@ so `transcribe/mlx_timing.py` is a copy of its `find_alignment` / `add_word_time
 file header) on the numpy kernels in `_align_np.py`. `gpu.import_mlx_whisper` registers it
 as `mlx_whisper.timing`; for any other mlx-whisper version it registers a stub instead, logs
 one warning and MLX segments keep no words. The alignment runs inside `mlx_whisper.transcribe`
-on the GPU thread under `MLX_LOCK`.
+on the GPU thread under `MLX_LOCK`: one extra forward pass per window plus the CPU median
+filter and DTW, during which live captions and the summary model wait. mlx-whisper never
+loads tuned alignment heads, so every head of the decoder's last half is used (40 on turbo,
+320 on large-v3); `capped_heads` keeps at most 64 (last layer first, evenly spaced) to bound
+that cost. The version is read from `mlx_whisper/_version.py` (a frozen bundle has no
+dist-info), and a test pins the SHA-256 of upstream `timing.py` so an upgrade forces a review.
 
 **Speaker names (opt-in, `speaker_names`, `voices.py`).** Diarization also returns each
 speaker's centroid (unit mean of its window embeddings). With the option on, the final pass

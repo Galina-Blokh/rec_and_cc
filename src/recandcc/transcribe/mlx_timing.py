@@ -1,6 +1,7 @@
 # Vendored from mlx-whisper 0.4.3, mlx_whisper/timing.py (WordTiming, find_alignment,
 # merge_punctuations, add_word_timestamps), with the numba/scipy kernels replaced by
-# recandcc.transcribe._align_np.
+# recandcc.transcribe._align_np and the alignment heads capped (capped_heads); changes
+# are marked "RecAndCC".
 #
 # Copyright (c) 2022 OpenAI (Whisper, https://github.com/openai/whisper)
 # Copyright © 2023 Apple Inc. (mlx-examples, https://github.com/ml-explore/mlx-examples)
@@ -46,6 +47,22 @@ SAMPLE_RATE = 16000
 TOKENS_PER_SECOND = SAMPLE_RATE // HOP_LENGTH // 2  # 50
 
 
+# RecAndCC: mlx-whisper never loads tuned alignment heads, so every head of the decoder's last
+# half is used (40 on turbo, 320 on large-v3). The median filter over all of them costs
+# seconds per window while the GPU thread is held, so at most this many are kept.
+MAX_ALIGNMENT_HEADS = 64
+
+
+def capped_heads(heads: list[list[int]]) -> list[list[int]]:
+    """``heads`` ((layer, head) pairs) unchanged up to MAX_ALIGNMENT_HEADS, else a fixed subset:
+    ordered last layer first, then evenly spaced, so the latest layers are always included."""
+    if len(heads) <= MAX_ALIGNMENT_HEADS:
+        return heads
+    ordered = sorted(heads, key=lambda lh: (-lh[0], lh[1]))
+    picks = np.linspace(0, len(ordered) - 1, MAX_ALIGNMENT_HEADS).round().astype(int)
+    return [ordered[i] for i in picks]
+
+
 @dataclass
 class WordTiming:
     word: str
@@ -82,7 +99,8 @@ def find_alignment(
     text_token_probs = np.array(text_token_probs)
 
     # heads * tokens * frames
-    weights = mx.stack([cross_qk[_l][0, _h] for _l, _h in model.alignment_heads.tolist()])
+    heads = capped_heads(model.alignment_heads.tolist())  # RecAndCC: cost cap
+    weights = mx.stack([cross_qk[_l][0, _h] for _l, _h in heads])
     weights = weights[:, :, : num_frames // 2]
     weights = mx.softmax(weights * qk_scale, axis=-1, precise=True)
     weights = weights.astype(mx.float32)

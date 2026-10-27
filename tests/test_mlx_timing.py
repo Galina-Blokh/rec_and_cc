@@ -26,6 +26,7 @@ KEY = "mlx_whisper.timing"
 def clean_timing(monkeypatch):
     """No ``mlx_whisper.timing`` registered, numba/scipy absent; restored afterwards."""
     saved = sys.modules.pop(KEY, None)
+    monkeypatch.delitem(sys.modules, "mlx_whisper.transcribe", raising=False)
     real_find_spec = gpu.importlib.util.find_spec
     monkeypatch.setattr(
         gpu.importlib.util,
@@ -50,12 +51,72 @@ def test_other_mlx_whisper_version_keeps_words_off_and_warns_once(
 ):
     monkeypatch.setattr(gpu, "_mlx_whisper_version", lambda: "0.5.0")
     with caplog.at_level(logging.INFO, "recandcc.transcribe"):
+        gpu._install_timing()
+        assert not caplog.records  # importing alone (split off) only logs at DEBUG
         assert not gpu.mlx_word_timestamps()
         sys.modules.pop(KEY)
         assert not gpu.mlx_word_timestamps()
     assert len([r for r in caplog.records if "0.5.0" in r.getMessage()]) == 1
     with pytest.raises(RuntimeError, match="word timestamps"):
         sys.modules[KEY].add_word_timestamps()
+
+
+def test_words_follow_what_mlx_whisper_transcribe_imported(clean_timing, monkeypatch):
+    monkeypatch.setattr(gpu, "_mlx_whisper_version", lambda: "0.4.3")
+    loaded = types.SimpleNamespace(add_word_timestamps=gpu._stub_word_timestamps)
+    monkeypatch.setitem(sys.modules, "mlx_whisper.transcribe", loaded)
+    assert not gpu.mlx_word_timestamps()  # registered too late: transcribe holds the stub
+    loaded.add_word_timestamps = mlx_timing.add_word_timestamps
+    assert gpu.mlx_word_timestamps()
+
+
+def _fake_spec(monkeypatch, folder):
+    spec = types.SimpleNamespace(submodule_search_locations=[str(folder)])
+    real = gpu.importlib.util.find_spec
+    monkeypatch.setattr(
+        gpu.importlib.util, "find_spec", lambda n, *a: spec if n == "mlx_whisper" else real(n, *a)
+    )
+
+
+def test_version_is_read_from_the_package_file_without_dist_info(tmp_path, monkeypatch):
+    (tmp_path / "_version.py").write_text('# c\n\n__version__ = "0.4.3"\n')
+    _fake_spec(monkeypatch, tmp_path)
+
+    def no_dist_info(_name):
+        raise gpu.importlib.metadata.PackageNotFoundError
+
+    monkeypatch.setattr(gpu.importlib.metadata, "version", no_dist_info)  # frozen bundle
+    assert gpu._mlx_whisper_version() == "0.4.3"
+
+
+def test_version_falls_back_to_importlib_metadata(tmp_path, monkeypatch):
+    _fake_spec(monkeypatch, tmp_path)  # no _version.py
+    monkeypatch.setattr(gpu.importlib.metadata, "version", lambda _name: "0.4.2")
+    assert gpu._mlx_whisper_version() == "0.4.2"
+
+
+def test_alignment_heads_are_capped_but_turbo_is_unchanged():
+    turbo = [[layer, h] for layer in (2, 3) for h in range(20)]
+    assert mlx_timing.capped_heads(turbo) == turbo
+    large = [[layer, h] for layer in range(16, 32) for h in range(20)]  # 320
+    picked = mlx_timing.capped_heads(large)
+    assert len(picked) == mlx_timing.MAX_ALIGNMENT_HEADS == 64
+    assert picked == mlx_timing.capped_heads(list(reversed(large)))  # deterministic
+    assert picked[0] == [31, 0] and {layer for layer, _ in picked} == set(range(16, 32))
+    assert len({tuple(p) for p in picked}) == 64
+
+
+def test_installed_upstream_timing_is_the_vendored_version():
+    """If this fails, mlx-whisper's timing.py changed: review mlx_timing.py against it."""
+    import hashlib
+
+    spec = gpu.importlib.util.find_spec("mlx_whisper")
+    if spec is None or not spec.submodule_search_locations:
+        pytest.skip("mlx-whisper is not installed")
+    path = gpu.Path(next(iter(spec.submodule_search_locations))) / "timing.py"
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert gpu._mlx_whisper_version() == gpu.VENDORED_TIMING_VERSION
+    assert digest == "2736c2bf19f2ebbaa521dae9deb3748c6b5d5f319af729f4078dc2b0769822cd"
 
 
 @pytest.fixture

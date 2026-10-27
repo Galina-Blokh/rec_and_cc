@@ -134,7 +134,16 @@ def test_real_mlx_word_timestamps_without_excluded_packages(tmp_path):
         pytest.skip("MLX large-v3-turbo is not cached (this test never downloads)")
     if not (shutil.which("say") and shutil.which("afconvert")):
         pytest.skip("needs macOS say/afconvert")
-    reference = "The quarterly budget review is scheduled for next Thursday afternoon."
+    reference = (  # ~35 s: two 30 s windows, so the multi-window and word-end seek paths run
+        "The quarterly budget review is scheduled for next Thursday afternoon. "
+        "Please bring the updated sales figures and the hiring plan for the second half. "
+        "We will start with a short summary of last quarter, then go through each region. "
+        "Marketing asked for ten minutes to present the new campaign and its early results. "
+        "After that, finance will explain the changes to the travel policy. "
+        "If there is time left, we will discuss the office move planned for next spring. "
+        "Send any questions to the team before Wednesday evening so we can prepare answers. "
+        "Thank you all, and see you on Thursday."
+    )
     aiff, wav = tmp_path / "s.aiff", tmp_path / "s.wav"
     subprocess.run(["say", "-v", "Samantha", "-o", str(aiff), reference], check=True)
     fmt = f"LEF32@{SAMPLE_RATE}"
@@ -151,14 +160,17 @@ def test_real_mlx_word_timestamps_without_excluded_packages(tmp_path):
         w = MlxWhisper("large-v3-turbo")
         try:
             w.load()
+            t0 = time.monotonic()
             plain = w.transcribe(audio, "en")
+            plain_took = time.monotonic() - t0
             t0 = time.monotonic()
             worded = w.transcribe(audio, "en", words=True)
             took = time.monotonic() - t0
         finally:
             w.close()
         words = [x for s in worded for x in s[3]]
-        assert words
+        assert words and duration > 30
+        assert took <= 3 * plain_took + 1.0, (took, plain_took)  # MLX_LOCK is held meanwhile
         starts = [a for a, _, _ in words]
         assert starts == sorted(starts)
         assert all(0 <= a <= b <= duration + 0.05 for a, b, _ in words)
@@ -168,7 +180,8 @@ def test_real_mlx_word_timestamps_without_excluded_packages(tmp_path):
         text = " ".join(s[2] for s in worded)
         assert similarity(text, ref) >= similarity(" ".join(s[2] for s in plain), ref)
         print(f"words={{len(words)}} segments={{len(worded)}} audio={{duration:.2f}}s "
-              f"words_pass={{took:.2f}}s first={{words[0][0]:.2f}} last={{words[-1][1]:.2f}}")
+              f"plain_pass={{plain_took:.2f}}s words_pass={{took:.2f}}s "
+              f"first={{words[0][0]:.2f}} last={{words[-1][1]:.2f}}")
         """,
         env={"HF_HUB_OFFLINE": "1"},
     )

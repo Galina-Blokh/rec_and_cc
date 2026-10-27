@@ -16,6 +16,7 @@ import importlib.metadata
 import importlib.util
 import logging
 import platform
+import re
 import sys
 import threading
 import time
@@ -128,6 +129,19 @@ def _stub_word_timestamps(*_args: object, **_kwargs: object) -> None:
 
 
 def _mlx_whisper_version() -> str | None:
+    """Installed mlx-whisper version, without importing it. ``mlx_whisper/_version.py`` comes
+    first: a PyInstaller bundle has no dist-info for importlib.metadata."""
+    try:
+        spec = importlib.util.find_spec("mlx_whisper")
+    except (ImportError, ValueError):
+        spec = None
+    for folder in (spec and spec.submodule_search_locations) or []:
+        try:
+            text = (Path(folder) / "_version.py").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if m := re.search(r"""^__version__\s*=\s*["']([^"']+)["']""", text, re.MULTILINE):
+            return m.group(1)
     try:
         return importlib.metadata.version("mlx-whisper")
     except importlib.metadata.PackageNotFoundError:
@@ -138,7 +152,6 @@ def _install_timing() -> None:
     """Register ``mlx_whisper.timing`` before mlx_whisper imports the real one (which needs
     numba and scipy): our numpy port ``mlx_timing`` for the version it was copied from, else
     a stub that turns word timestamps off. With numba and scipy installed, the real one."""
-    global _version_warned
     if "mlx_whisper.timing" in sys.modules or (
         importlib.util.find_spec("numba") is not None
         and importlib.util.find_spec("scipy") is not None
@@ -150,23 +163,28 @@ def _install_timing() -> None:
 
         sys.modules["mlx_whisper.timing"] = mlx_timing
         return
-    if not _version_warned:
-        _version_warned = True
-        log.warning(
-            "mlx-whisper %s is not %s: MLX word timestamps (split_on_speaker_change) are off",
-            version,
-            VENDORED_TIMING_VERSION,
-        )
+    log.debug("mlx-whisper %s is not %s: stub word timing", version, VENDORED_TIMING_VERSION)
     stub = types.ModuleType("mlx_whisper.timing")
     stub.__dict__["add_word_timestamps"] = _stub_word_timestamps
     sys.modules["mlx_whisper.timing"] = stub
 
 
 def mlx_word_timestamps() -> bool:
-    """Whether ``MlxWhisper.transcribe(..., words=True)`` works: not with the stub."""
+    """Whether ``MlxWhisper.transcribe(..., words=True)`` works (not with the stub). Called
+    only when words are wanted (split_on_speaker_change), so a mismatch warns here, once."""
+    global _version_warned
     _install_timing()
-    timing = sys.modules.get("mlx_whisper.timing")
-    return getattr(timing, "add_word_timestamps", None) is not _stub_word_timestamps
+    # What mlx_whisper.transcribe really calls, once it is loaded; else what it will import.
+    owner = sys.modules.get("mlx_whisper.transcribe") or sys.modules.get("mlx_whisper.timing")
+    ok = getattr(owner, "add_word_timestamps", None) is not _stub_word_timestamps
+    if not ok and not _version_warned:
+        _version_warned = True
+        log.warning(
+            "mlx-whisper %s is not %s: MLX word timestamps (split_on_speaker_change) are off",
+            _mlx_whisper_version(),
+            VENDORED_TIMING_VERSION,
+        )
+    return ok
 
 
 def import_mlx_whisper() -> Any:
@@ -242,13 +260,13 @@ class MlxWhisper:
                 )
             segments = cast(list[dict[str, Any]], result["segments"])  # untyped in mlx_whisper
             if not words:
-                return [(s["start"], s["end"], s["text"]) for s in segments]
+                return [(float(s["start"]), float(s["end"]), s["text"]) for s in segments]
             return [
                 (
-                    s["start"],
-                    s["end"],
+                    float(s["start"]),
+                    float(s["end"]),
                     s["text"],
-                    [(w["start"], w["end"], w["word"]) for w in s.get("words", [])],
+                    [(float(w["start"]), float(w["end"]), w["word"]) for w in s.get("words", [])],
                 )
                 for s in segments
             ]
