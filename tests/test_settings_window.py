@@ -231,13 +231,13 @@ def test_window_never_blocks_the_caller(tmp_path, monkeypatch):
     fake_helper(
         tmp_path,
         monkeypatch,
-        "import signal,time\nsignal.signal(signal.SIGUSR1, signal.SIG_IGN)\ntime.sleep(1.0)\n"
+        "import signal,time\nsignal.signal(signal.SIGUSR1, signal.SIG_IGN)\ntime.sleep(3.0)\n"
         'print(\'{"settings": "cancelled"}\')\n',
     )
     start = time.monotonic()
     ctrl.open_settings_async()
-    # returns at once; a blocking call would take the helper's full 1 s
-    assert time.monotonic() - start < 0.9
+    # returns at once; a blocking call would take the helper's full 3 s
+    assert time.monotonic() - start < 1.5
     # the helper runs on a worker thread
     assert any(t.name == "settings-window" for t in threading.enumerate())
     ctrl.open_settings_async()  # a second click while open is ignored
@@ -592,3 +592,15 @@ def test_hand_edited_unknown_languages_still_degrade_gracefully(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text('[transcription]\nlanguages = ["xx"]\n')
     assert load_config(path).transcription.languages == ["en", "ru"]  # defaults, with a warning
+
+
+def test_run_settings_oserror_is_not_blamed_on_the_folder(tmp_path, monkeypatch):
+    ctrl, _ = make_ctrl(tmp_path, monkeypatch)
+
+    def boom(_cfg):
+        raise OSError(28, "no space")
+
+    monkeypatch.setattr(common, "run_settings", boom)
+    ctrl.open_settings_async()
+    ev = next_event(ctrl, {"notice"})
+    assert ev[2] == "couldn't open settings: OSError"
