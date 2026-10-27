@@ -34,6 +34,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import platformdirs
@@ -296,7 +297,7 @@ class Diarizer:
         self._jobs: ThreadPoolExecutor | None = None  # one diarization at a time
         self.load_s: float | None = None  # last model load time, until a job reports it
 
-    def _load(self) -> tuple[object, ThreadPoolExecutor] | None:
+    def _load(self) -> tuple[Any, ThreadPoolExecutor] | None:
         with self._lock:
             if self._extractor is None:
                 path = model_path()
@@ -315,6 +316,8 @@ class Diarizer:
                     self.load_s,
                     self.threads,
                 )
+            if self._pool is None:  # unreachable: set and cleared together with the extractor
+                return None
             return self._extractor, self._pool
 
     def diarize(self, audio: np.ndarray) -> list[Turn] | None:

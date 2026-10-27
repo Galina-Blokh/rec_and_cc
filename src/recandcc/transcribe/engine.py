@@ -154,9 +154,9 @@ class Transcriber:
         if self._model is None:
             with self._init_lock:
                 if self._model is None:
-                    need_lid = self.language_model and self._needs_detection()
-                    if need_lid and self._lid_model is None:  # kept if the main load fails
-                        self._lid_model = self._load(self.language_model)
+                    lid_name = self.language_model
+                    if lid_name and self._needs_detection() and self._lid_model is None:
+                        self._lid_model = self._load(lid_name)  # kept if the main load fails
                     if self.gpu:
                         t0 = time.monotonic()
                         model = MlxWhisper(
@@ -175,6 +175,12 @@ class Transcriber:
                     self._pool = ThreadPoolExecutor(self.num_workers, thread_name_prefix="whisper")
                     self._model = model
         return self._model
+
+    def _require_pool(self) -> ThreadPoolExecutor:
+        """The worker pool; only valid after _ensure_loaded() and before close()."""
+        if self._pool is None:
+            raise RuntimeError("Transcriber is closed")
+        return self._pool
 
     def _needs_detection(self) -> bool:
         return len(self.cfg.languages) != 1
@@ -208,7 +214,7 @@ class Transcriber:
         if self._lid_model is None:
             return [(None, 0.0)] * len(regions)  # decided per chunk by the main model
         det = list(
-            self._pool.map(
+            self._require_pool().map(
                 lambda r: self._detect(
                     self._lid_model, audio[int(r[0] * SAMPLE_RATE) : int(r[1] * SAMPLE_RATE)]
                 ),
@@ -263,7 +269,7 @@ class Transcriber:
     def submit(self, fn: Callable, *args) -> Future:
         """Run ``fn(*args)`` on the shared worker pool (loads the model first if needed)."""
         self._ensure_loaded()
-        return self._pool.submit(fn, *args)
+        return self._require_pool().submit(fn, *args)
 
     @property
     def has_language_model(self) -> bool:
@@ -353,7 +359,7 @@ class Transcriber:
         if audio:
             self._ensure_loaded()
             t0 = time.monotonic()
-            pool = self._pool
+            pool = self._require_pool()
             tracks = list(audio)
             regions = dict(
                 zip(tracks, pool.map(lambda t: find_speech(audio[t]), tracks), strict=True)
@@ -428,7 +434,9 @@ class Transcriber:
             diarizer = self._diarizer
         timing: dict = {}
         future = diarizer.submit(path, timing)
-        future.timing = timing  # filled in before the result is set (see Diarizer._safe)
+        # Ad-hoc attribute, read back with getattr. Filled in before the result is set
+        # (see Diarizer._safe).
+        future.timing = timing  # pyright: ignore[reportAttributeAccessIssue]
         return future
 
     def write_final(

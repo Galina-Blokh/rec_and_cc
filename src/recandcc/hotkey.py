@@ -199,7 +199,8 @@ class HotkeyListener:
             proc = self._proc
         if proc is not None and proc.poll() is None:
             with contextlib.suppress(Exception):
-                proc.stdin.close()  # type: ignore[union-attr] # the helper exits on EOF
+                if proc.stdin is not None:
+                    proc.stdin.close()  # the helper exits on EOF
             try:
                 proc.wait(timeout=1)
             except subprocess.TimeoutExpired:
@@ -375,7 +376,7 @@ class WinHotkeyListener:
         mods, vk = self.hotkey.win32()
         hk_id = 1
         if not user32.RegisterHotKey(None, hk_id, mods, vk):
-            err = ctypes.get_last_error()
+            err = ctypes.get_last_error()  # type: ignore[attr-defined]
             label = self.hotkey.label("win32")
             if err == ERROR_HOTKEY_ALREADY_REGISTERED:
                 _call(self._on_error, "taken", f"{label} is already registered by another app")
