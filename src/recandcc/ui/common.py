@@ -610,6 +610,8 @@ class Controller:
                     if not inside(target.parent, self.cfg.output_dir):
                         raise ExportError("That session is outside the transcripts folder")
                     paths = export_session(target.parent, fmt, skipped)
+                    if not all(p.is_file() for p in paths):  # e.g. the session was deleted
+                        raise ExportError("The session folder changed during the export")
                     names = " and ".join(p.name for p in paths)
                     msg = f"Saved {names} ({transcript_label(target)})"
                     if skipped:

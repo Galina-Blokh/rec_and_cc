@@ -94,6 +94,20 @@ _REPLACE_TRIES, _REPLACE_WAIT_S = 20, 0.1  # ~2 s: Word, a viewer or sync may ho
 _export_lock = threading.Lock()  # one export at a time in this process
 
 
+def _create_exclusive(tmp: Path) -> int:
+    """Create the temp file (0600, O_EXCL). A stale file of the same name must not block it;
+    on Windows a scanner may hold it for a moment, so removal and creation are retried."""
+    for attempt in range(_REPLACE_TRIES):
+        try:
+            tmp.unlink(missing_ok=True)
+            return os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except (PermissionError, FileExistsError):
+            if attempt + 1 == _REPLACE_TRIES:
+                raise
+            time.sleep(_REPLACE_WAIT_S)
+    raise AssertionError("unreachable")
+
+
 def _write(path: Path, data: bytes) -> Path:
     """Write ``data`` to a temp file and rename it into place. The temp file is created
     owner-only (0600) and written through that same descriptor (no reopen that a scanner
@@ -104,9 +118,7 @@ def _write(path: Path, data: bytes) -> Path:
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         try:
-            with contextlib.suppress(OSError):  # a stale file must not block O_EXCL
-                tmp.unlink(missing_ok=True)
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            fd = _create_exclusive(tmp)
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
         except Exception as e:

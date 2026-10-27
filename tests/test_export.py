@@ -15,7 +15,7 @@ from docx import Document
 from docx.oxml.ns import qn
 
 from recandcc import cli
-from recandcc.models import Segment
+from recandcc.models import Segment, SessionInfo
 from recandcc.transcribe import export
 
 SEGS = [
@@ -194,6 +194,7 @@ def test_controller_export_posts_a_notice(session, monkeypatch, fmt):
 
     def fake(folder, f, skipped):
         seen.append(f)
+        (folder / "transcript.docx").write_text("x")
         return [folder / "transcript.docx"]
 
     monkeypatch.setattr(export, "export_session", fake)
@@ -363,6 +364,8 @@ def test_latest_finished_session_skips_live_ones_and_ignores_mtime(tmp_path):
     old = sess("2026-10-25", "100000_meet", True)
     os.utime(old, (9e9, 9e9))  # re-transcribed just now: newest mtime, oldest session
     assert latest_finished_session(tmp_path) == new
+    (new.parent / SessionInfo.DISCARD_MARKER).write_text("")  # discarded: the next one counts
+    assert latest_finished_session(tmp_path) == old
     assert latest_finished_session(tmp_path / "missing") is None
 
 
@@ -425,8 +428,12 @@ def test_a_failing_cleanup_does_not_hide_the_export_error(session, monkeypatch):
     def locked(src, dst):
         raise PermissionError("in use")
 
+    calls = []
+
     def no_unlink(self, missing_ok=False):
-        raise PermissionError("held by antivirus")
+        calls.append(1)
+        if len(calls) > 1:  # the pre-create removal works; the final cleanup is blocked
+            raise PermissionError("held by antivirus")
 
     monkeypatch.setattr(export.os, "replace", locked)
     monkeypatch.setattr(export.time, "sleep", lambda _s: None)
@@ -455,33 +462,15 @@ def test_a_long_meeting_exports(tmp_path):
 
 
 @pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
-def test_a_wrapped_rtl_paragraph_keeps_its_line_order(tmp_path):
-    from pypdf import PdfReader
+def test_a_wrapped_rtl_paragraph_keeps_its_line_order():
+    from fpdf import FPDF
 
     words = [f"מילה{chr(0x5D0 + i % 26)}{chr(0x5D0 + i // 26)}" for i in range(60)]
-    (tmp_path / "transcript.json").write_text(
-        json.dumps(
-            {
-                "segments": [
-                    {
-                        "start": 0,
-                        "end": 1,
-                        "text": " ".join(words),
-                        "speaker": "Me",
-                        "language": "he",
-                    }
-                ]
-            },
-            ensure_ascii=False,
-        ),
-        "utf-8",
-    )
-    text = PdfReader(str(export.export_pdf(tmp_path))).pages[0].extract_text()
-    lines = [ln for ln in text.splitlines() if "מילה" in ln or "הלימ" in ln]
+    pdf = FPDF(format="A4")
+    pdf.add_font("body", "", str(export.find_font()))
+    pdf.set_text_shaping(True, direction="rtl")
+    pdf.add_page()
+    pdf.set_font("body", size=11)
+    lines = pdf.multi_cell(150, 6, " ".join(words), align="R", dry_run=True, output="LINES")
     assert len(lines) > 1  # it wrapped
-
-    def line_of(word):
-        return next(i for i, ln in enumerate(lines) if word in ln or word[::-1] in ln)
-
-    assert line_of(words[0]) < line_of(words[-1])
-    assert [line_of(w) for w in words] == sorted(line_of(w) for w in words)
+    assert " ".join(lines).split() == words  # logical order kept across the wrap points
