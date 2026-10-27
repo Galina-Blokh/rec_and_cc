@@ -155,8 +155,13 @@ it; live captions keep `Others`, and `Me` is never touched (`diarize.py`):
 2. One 192-d speaker embedding per window with **3D-Speaker CAM++** (zh+en "advanced",
    28 MB ONNX, Apache-2.0) through **sherpa-onnx**, on `min(6, cores // 2)` threads (ONNX
    Runtime releases the GIL).
-3. Average-linkage agglomerative clustering on cosine distance (threshold 0.5) of the windows
-   ≥ 1 s; clusters with < 2 s of speech and shorter windows join the nearest speaker.
+3. Average-linkage agglomerative clustering on cosine distance of the windows ≥ 1 s. The
+   number of speakers is picked adaptively ([ADR 0013](adr/0013-adaptive-speaker-count.md)):
+   the k ≤ 20 with the best cluster silhouette (read off the linkage matrix as it merges),
+   one speaker if no split scores ≥ 0.3, within the optional `min_speakers` / `max_speakers`
+   hints; with fewer than 10 windows the fixed threshold 0.5 decides. Clusters with < 2 s of
+   speech and shorter windows join the nearest speaker. Clustering 3000 windows (the
+   subsample cap; an hour is ~1800) takes ~0.15 s.
 4. Each `Others` segment takes the speaker it overlaps most (nearest one if none), numbered by
    first appearance. If only one speaker is found the label stays `Others`.
 

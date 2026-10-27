@@ -538,7 +538,9 @@ class Transcriber:
             return None
         with self._init_lock:
             if self._diarizer is None:
-                self._diarizer = Diarizer()
+                self._diarizer = Diarizer(
+                    min_speakers=self.cfg.min_speakers, max_speakers=self.cfg.max_speakers
+                )
             diarizer = self._diarizer
         timing: dict = {}
         future = diarizer.submit(path, timing)
