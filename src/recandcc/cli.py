@@ -325,7 +325,7 @@ def cmd_export(args) -> int:
 
 
 def cmd_config(args) -> int:
-    from .cloudsync import cloud_sync_provider, warning_text
+    from .cloudsync import cloud_sync_provider, network_volume, network_warning_text, warning_text
 
     cfg = load_config()  # creates the default file on first run
     print(f"# {CONFIG_PATH}\n")
@@ -334,6 +334,9 @@ def cmd_config(args) -> int:
     provider = cloud_sync_provider(cfg.output_dir)
     if provider:
         print(f"# WARNING: {warning_text(cfg.output_dir, provider)}")
+    kind = network_volume(cfg.output_dir)
+    if kind:
+        print(f"# WARNING: {network_warning_text(cfg.output_dir, kind)}")
     return 0
 
 

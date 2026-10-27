@@ -458,7 +458,7 @@ def validate_settings(values) -> dict:
                 raise ValueError("languages must be a list of codes")
             langs = list(dict.fromkeys(language_code(v) for v in value))  # [] = any language
             clean = normalize_languages(langs)
-            if len(clean) != len(langs):
+            if any(c not in WHISPER_LANGUAGES for c in langs) or len(clean) != len(langs):
                 raise ValueError("languages: unknown language code")
             out[name] = clean
         elif isinstance(value, bool):

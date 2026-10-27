@@ -110,7 +110,11 @@ def test_helper_fallback_to_the_global_tap_is_noticed(procs, monkeypatch, caplog
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell script as a fake helper")
-def test_support_probe_reads_the_helpers_usage(tmp_path):
+def test_support_probe_reads_the_helpers_usage(tmp_path, monkeypatch):
+    real_run = system_mac.subprocess.run  # the production probe waits 5 s: too tight under load
+    monkeypatch.setattr(
+        system_mac.subprocess, "run", lambda argv, **kw: real_run(argv, **{**kw, "timeout": 60})
+    )
     for name, usage in (("new", "capture [--pid PID ...] [--match TEXT ...]"), ("old", "capture")):
         helper = tmp_path / name
         helper.write_text(f"#!/bin/sh\necho '{usage}'\n", encoding="utf-8")
