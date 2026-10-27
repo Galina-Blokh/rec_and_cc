@@ -21,6 +21,10 @@ jobs:
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
       - run: uv run --locked --only-dev ruff check .
       - run: uv run --locked --only-dev ruff format --check src tests
+      # Type checking (#16). Not --only-dev: pyright resolves imports against the project deps.
+      # The pip wrapper fetches the pyright npm package on first run (outside uv.lock hashes);
+      # dev/CI only, never at app runtime.
+      - run: uv run --locked pyright
 
   test:
     strategy:
@@ -39,4 +43,5 @@ jobs:
         if: runner.os == 'macOS'
         run: ./native/macos/build.sh
       - name: Unit tests (fast; model-free)
-        run: uv run --locked pytest -v
+        # Coverage floor (#16) is enforced here, not in pyproject, so local subset runs don't fail on it.
+        run: uv run --locked pytest -v --cov-fail-under=70

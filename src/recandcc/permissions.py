@@ -86,7 +86,7 @@ def open_settings(kind: str) -> None:
     """Open the System Settings / Windows Settings page where the permission can be changed."""
     _check_kind(kind)
     if sys.platform == "win32":
-        os.startfile("ms-settings:privacy-microphone")  # type: ignore[attr-defined]  # noqa: S606, S607 - constant URI
+        os.startfile("ms-settings:privacy-microphone")  # noqa: S606, S607 - constant URI
         return
     if sys.platform != "darwin":
         return

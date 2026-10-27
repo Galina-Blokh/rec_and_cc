@@ -50,7 +50,7 @@ using the mic is treated as a call (Google Meet). The global `mode = "off"` over
 
 | Key | Default | Description |
 |---|---|---|
-| `model` | `"large-v3-turbo"` | faster-whisper model name (`tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo`) or a local CTranslate2 model path |
+| `model` | `"large-v3-turbo"` | faster-whisper model name (`tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo`), each pinned to an exact repo commit; or a local CTranslate2 model path. A custom repo id needs `allow_unpinned_models` to download |
 | `backend` | `"auto"` | `auto` = MLX on the Apple-silicon GPU when available (one pass ~0.13 s vs ~2.5 s on the CPU), else faster-whisper · `mlx` · `faster-whisper` (CPU/CUDA) |
 | `device` | `"auto"` | `auto` · `cpu` · `cuda` (NVIDIA on Windows) |
 | `compute_type` | `"float32"` on macOS, `"int8"` elsewhere | Quantisation. On Apple silicon float32 is ~20% faster (Accelerate) at ~3 GB RAM; int8 uses ~1 GB |
@@ -61,6 +61,7 @@ using the mic is treated as a call (Google Meet). The global `mode = "off"` over
 | `keep_audio` | `true` | `false` deletes the WAVs after a successful transcription (~115 MB per track-hour) |
 | `audio_retention_days` | `0` | Delete a recording's audio (`*.wav`) this many days after it was transcribed; `0` = keep forever. Transcripts are never deleted. Checked at startup and hourly. Also in **menu → Delete audio after** (Never / 1 / 7 / 30 / 90 days) |
 | `live` | `true` | Transcribe while recording: each phrase appears ~1 s after it is spoken (~3 s on the CPU backend) (captions, and `transcript.md` is rewritten every few seconds), and the final transcript is written about a second after the session stops. `false` = transcribe the whole session after it stops |
+| `allow_unpinned_models` | `false` | Allow downloading a Whisper model with no pinned revision (a custom Hugging Face repo id). Every offered `model` name is pinned to an exact repo commit for both backends ([`revisions.py`](../src/recandcc/transcribe/revisions.py)); other repos are refused with a logged error unless this is `true`, because upstream could swap their weights. Already-downloaded models and local paths load either way |
 
 With `live = true`, the latency is dominated by one Whisper pass per phrase (~2.5 s for
 `large-v3-turbo` with the default 4 workers on an M5 Max). `workers = 1` gives every pass all

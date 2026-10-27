@@ -32,6 +32,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "pyright>=1.1.414",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "ruff>=0.17.2",
@@ -58,8 +59,14 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "S"]
 "src/recandcc/ui/mac.py" = ["S603", "S607"]
 "src/recandcc/ui/tray.py" = ["S606", "S607"]
 
+[tool.pyright]
+typeCheckingMode = "basic"
+pythonVersion = "3.12"
+include = ["src"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The coverage floor is enforced in CI only: `--cov-fail-under` in .github/workflows/ci.yml.
 addopts = "-m 'not slow' --cov --cov-report=term-missing:skip-covered"
 markers = ["slow: downloads Whisper models / runs real inference (run with -m slow)"]
 
@@ -76,7 +83,4 @@ omit = [
     "*/recandcc/ui/toast_mac.py",
 ]
 
-[tool.coverage.report]
-# Floor for the fast suite (issue #16). Raise it as tests are added; never lower it to merge.
-fail_under = 70
 

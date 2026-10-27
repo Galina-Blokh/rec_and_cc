@@ -120,6 +120,9 @@ class TranscriptionConfig:
     # Transcribe while recording: text appears ~1-2 s after each phrase, and the final
     # transcript is ready right when the session stops (no post-session pass).
     live: bool = True
+    # Allow downloading Whisper repos without a pinned revision (custom HF repo ids). Off by
+    # default: upstream could swap their weights. Already-downloaded copies load either way.
+    allow_unpinned_models: bool = False
 
 
 @dataclass

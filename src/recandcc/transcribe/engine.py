@@ -32,7 +32,7 @@ from .diarize import Diarizer, Turn, assign_speakers
 from .gpu import MlxWhisper, hf_cache_folder, use_gpu
 from .merge import ME, OTHERS, language_confidence, merge_tracks, smooth_languages
 from .output import write_outputs
-from .revisions import faster_whisper_revision
+from .revisions import check_download_allowed, faster_whisper_revision
 
 log = logging.getLogger("recandcc.transcribe")
 
@@ -107,6 +107,7 @@ class Transcriber:
         try:
             path = utils.download_model(name, local_files_only=True, revision=rev)
         except FileNotFoundError:
+            check_download_allowed(name, rev, self.cfg.allow_unpinned_models)
             log.info("model %s not on disk yet; downloading it once", name)
             path = utils.download_model(name, revision=rev)
         except Exception:
@@ -153,12 +154,19 @@ class Transcriber:
         if self._model is None:
             with self._init_lock:
                 if self._model is None:
-                    if self.language_model and self._needs_detection():
-                        self._lid_model = self._load(self.language_model)
+                    lid = self.language_model
+                    if lid and self._needs_detection() and self._lid_model is None:  # kept on failure
+                        self._lid_model = self._load(lid)
                     if self.gpu:
                         t0 = time.monotonic()
-                        model = MlxWhisper(self.cfg.model)
-                        model.load()
+                        model = MlxWhisper(
+                            self.cfg.model, allow_unpinned=self.cfg.allow_unpinned_models
+                        )
+                        try:
+                            model.load()
+                        except BaseException:
+                            model.close()  # e.g. an unpinned model refused: free its thread
+                            raise
                         self._load_times[f"{self.cfg.model} (gpu)"] = rounded(
                             time.monotonic() - t0, 2
                         )
@@ -167,6 +175,12 @@ class Transcriber:
                     self._pool = ThreadPoolExecutor(self.num_workers, thread_name_prefix="whisper")
                     self._model = model
         return self._model
+
+    def _require_pool(self) -> ThreadPoolExecutor:
+        """The worker pool; only valid after _ensure_loaded() and before close()."""
+        if self._pool is None:
+            raise RuntimeError("Transcriber is closed")
+        return self._pool
 
     def _needs_detection(self) -> bool:
         return len(self.cfg.languages) != 1
@@ -200,7 +214,7 @@ class Transcriber:
         if self._lid_model is None:
             return [(None, 0.0)] * len(regions)  # decided per chunk by the main model
         det = list(
-            self._pool.map(
+            self._require_pool().map(
                 lambda r: self._detect(
                     self._lid_model, audio[int(r[0] * SAMPLE_RATE) : int(r[1] * SAMPLE_RATE)]
                 ),
@@ -255,7 +269,7 @@ class Transcriber:
     def submit(self, fn: Callable, *args) -> Future:
         """Run ``fn(*args)`` on the shared worker pool (loads the model first if needed)."""
         self._ensure_loaded()
-        return self._pool.submit(fn, *args)
+        return self._require_pool().submit(fn, *args)
 
     @property
     def has_language_model(self) -> bool:
@@ -345,7 +359,7 @@ class Transcriber:
         if audio:
             self._ensure_loaded()
             t0 = time.monotonic()
-            pool = self._pool
+            pool = self._require_pool()
             tracks = list(audio)
             regions = dict(
                 zip(tracks, pool.map(lambda t: find_speech(audio[t]), tracks), strict=True)
@@ -420,7 +434,9 @@ class Transcriber:
             diarizer = self._diarizer
         timing: dict = {}
         future = diarizer.submit(path, timing)
-        future.timing = timing  # filled in before the result is set (see Diarizer._safe)
+        # Ad-hoc attribute, read back with getattr. Filled in before the result is set
+        # (see Diarizer._safe).
+        future.timing = timing  # pyright: ignore[reportAttributeAccessIssue]
         return future
 
     def write_final(
