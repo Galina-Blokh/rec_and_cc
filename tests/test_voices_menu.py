@@ -388,3 +388,29 @@ def test_prune_does_not_hold_the_file_lock_while_checking_folders(tmp_path, monk
     voices.write_session_voices(make_session(tmp_path), {"Speaker 1": ANNA})
     assert voices.prune_session_voices() == 1
     assert held == [0]
+
+
+def test_stale_run_neither_names_nor_deletes_after_a_forget(tmp_path, monkeypatch):
+    from test_voices import SEGS, TURNS
+
+    from recandcc.transcribe.engine import Transcriber
+
+    _final(tmp_path, monkeypatch, speaker_names=True)
+    t = Transcriber(TranscriptionConfig(model="fake", speaker_names=True))
+    session = make_session(tmp_path)
+    voices.save_profile("Anna", ANNA)
+    stale = voices.forget_generation()
+    real = voices.profiles_if_current
+
+    def forget_after_loading(since, voices_dir=None):
+        profiles = real(since, voices_dir)
+        voices.delete_all_profiles()  # lands between the match and the write
+        return profiles
+
+    monkeypatch.setattr(voices, "profiles_if_current", forget_after_loading)
+    out = t._labelled(session, list(SEGS), TURNS, stale)
+    assert "Anna" not in {s.speaker for s in out}
+    monkeypatch.setattr(voices, "profiles_if_current", real)
+    voices.write_session_voices(session, {"Speaker 1": ANNA})  # stored after the forget
+    t._labelled(session, list(SEGS), None, stale)  # an old run with no voices to store
+    assert voices.read_session_voices(session.id)  # ...must not delete the newer ones

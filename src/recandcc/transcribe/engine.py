@@ -585,7 +585,8 @@ class Transcriber:
                 turns = diarization.result(timeout=self.diarize_wait_s)
             except TimeoutError:
                 log.info("session %s: speaker labels follow when diarization ends", session.id)
-                self._write(session, segments, duration)
+                with voices.NAMING_LOCK:
+                    self._write(session, segments, duration)
                 diarization.add_done_callback(
                     lambda f: self._relabel_later(session, segments, duration, f, gen)
                 )
@@ -596,6 +597,7 @@ class Transcriber:
             with voices.NAMING_LOCK:  # voices and transcript change together, not mid-naming
                 segments = self._labelled(session, segments, turns, gen)
                 self._write(session, segments, duration)
+            self._prune_voices()
         else:
             self._write(session, segments, duration)
         self._drop_audio(session)
@@ -634,6 +636,9 @@ class Transcriber:
                 log.exception("session %s: could not match voice profiles", session.id)
         speaker = SPEAKERS[diarized_track(session)]  # "Me" in a room session
         out, labels = label_speakers(segments, turns or [], speaker, names=names)
+        if names and gen is not None and gen != voices.forget_generation():
+            names = {}  # all voices were deleted meanwhile: no remembered names in the text
+            out, labels = label_speakers(segments, turns or [], speaker, names=names)
         try:  # opt-in only, in the private voices folder: lets `name-speaker` name them later
             # A lone speaker in a room session keeps "Me", which is never renamed: no voice.
             speakers = {
@@ -641,9 +646,10 @@ class Transcriber:
             }
             if speakers and Path(session.directory).exists():
                 voices.write_session_voices(session, speakers, since=gen)
-            else:  # never leave voices of an older transcript of this session behind
+            elif gen is None or gen == voices.forget_generation():
+                # never leave voices of an older transcript of this session behind (but not
+                # those stored after a forget that this run began before)
                 voices.delete_session_voices(session.id)
-            voices.prune_session_voices()  # of sessions whose folder was deleted
         except OSError:
             log.exception("session %s: could not update speaker voices", session.id)
         if not turns:
@@ -655,6 +661,14 @@ class Transcriber:
             len(names.keys() & labels.keys()),
         )
         return out
+
+    @staticmethod
+    def _prune_voices() -> None:
+        """Drop the voices of deleted sessions; outside NAMING_LOCK: it walks session folders."""
+        try:
+            voices.prune_session_voices()
+        except OSError:
+            log.exception("could not prune speaker voices")
 
     def _relabel_later(
         self,
@@ -677,6 +691,7 @@ class Transcriber:
                 if labelled != segments and Path(session.directory).exists():
                     write_outputs(session, labelled, duration, self.cfg.model)
                     log.info("session %s: transcript rewritten with speaker labels", session.id)
+            self._prune_voices()
             if getattr(future, "timing", None) and Path(session.directory).exists():
                 self._diarization_metrics(session, future)
                 session.save()
