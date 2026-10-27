@@ -141,8 +141,11 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   Windows the tray item opens a small window: type the words, press Enter, and
   double-click a match (time, speaker, snippet) to open it.
 - **Recent transcripts → Name speakers…** (only with `speaker_names = true`): pick a session
-  and a `Speaker N` (their first lines are shown to help), type a name. Same as
-  `recandcc name-speaker`. On Windows the tray shows small windows for the same steps.
+  and a `Speaker N` (their first lines are shown to help), type a name. On macOS, **Play
+  sample** in the name dialog plays a few seconds (up to 6 s) of that speaker from the
+  session's own audio while it is still kept (not while recording); the clip is a temp
+  file deleted after playback. Same as `recandcc name-speaker`. On Windows the tray shows
+  small windows for the same steps.
 - **Forget all voices…**: after a confirmation, deletes every voice profile and all saved
   session voices (`recandcc voices delete --all`), including those of sessions still waiting
   to be transcribed. Closing the confirmation, or leaving it until it times out, deletes nothing.

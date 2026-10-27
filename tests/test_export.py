@@ -144,6 +144,14 @@ def test_export_session_formats_and_private_mode(session):
         export.export_session(session, "odt")
 
 
+def test_clean_maps_surrogates_and_noncharacters_so_docx_still_exports(session):
+    assert export._clean("a\ud83db\uffffc\x01d") == "a\ufffdb\ufffdc d"
+    data = json.loads((session / "transcript.json").read_text("utf-8"))
+    data["segments"][0]["text"] = "x\uffff y"
+    (session / "transcript.json").write_text(json.dumps(data), "utf-8")
+    assert [p.name for p in export.export_session(session, "docx")] == ["transcript.docx"]
+
+
 def test_missing_or_broken_transcript(tmp_path):
     with pytest.raises(export.ExportError):
         export.export_docx(tmp_path)
@@ -185,7 +193,8 @@ def _controller(output_dir=None):
 
     ctrl = Controller.__new__(Controller)  # only the export wiring, no runtime
     ctrl.events, ctrl._export_lock = queue.Queue(), threading.Lock()
-    ctrl.cfg = type("C", (), {"output_dir": output_dir})()
+    export_cfg = type("E", (), {"template": ""})()
+    ctrl.cfg = type("C", (), {"output_dir": output_dir, "export": export_cfg})()
     return ctrl
 
 
@@ -193,7 +202,7 @@ def _controller(output_dir=None):
 def test_controller_export_posts_a_notice(session, monkeypatch, fmt):
     seen = []
 
-    def fake(folder, f, skipped):
+    def fake(folder, f, skipped, template=None):
         seen.append(f)
         (folder / "transcript.docx").write_text("x")
         return [folder / "transcript.docx"]
@@ -220,7 +229,7 @@ def test_controller_releases_the_lock_when_the_thread_cannot_start(session, monk
 
 
 def test_controller_export_logs_only_the_error_type(session, monkeypatch, caplog):
-    def boom(*_a):
+    def boom(*_a, **_kw):
         raise RuntimeError("secret words from the call")
 
     monkeypatch.setattr(export, "export_session", boom)
@@ -815,7 +824,7 @@ def test_markdown_variants(session):
         ("bullet", "plus"),
         ("num", "1. one"),
         ("num", "2. two"),
-        ("h2", "Sub"),
+        ("h3", "Sub"),
         ("note", "a_b_c"),
         ("p", "text"),
     ]

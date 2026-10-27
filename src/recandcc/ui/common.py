@@ -25,9 +25,9 @@ import sys
 import threading
 import time
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import fields
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -51,7 +51,7 @@ from ..config import (
     validate_settings,
 )
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
-from ..models import Mode, SessionInfo, TriggerKind, discard_session
+from ..models import Mode, SessionInfo, TriggerKind, discard_session, recording_lock_held
 from ..recorder import make_private_dir
 from ..retention import purge_old_audio, purge_transcribed_audio
 from ..sensitivity import PRESETS as SENSITIVITY_PRESETS
@@ -236,6 +236,78 @@ def untranscribed_sessions(output_dir: Path) -> list[SessionInfo]:
     return out
 
 
+# A track written this recently may belong to another writer (``recandcc record``, a
+# folder synced from another Mac): recovery waits until it has been quiet this long.
+RECOVER_QUIET_S = 120.0
+
+
+def recover_interrupted_sessions(
+    output_dir: Path,
+    *,
+    started_before: datetime,
+    busy: Callable[[], Iterable[Path | str]] = tuple,
+) -> list[SessionInfo]:
+    """Finish sessions a crash, force-quit or power loss cut off (session.json still has no
+    ``ended_at``), so ``untranscribed_sessions`` re-queues them; returns those finished.
+
+    ``ended_at`` becomes ``started_at`` plus the longest track's length (``sf.info`` reads
+    WAVs whose header was never finalised). Tracks with no frames leave ``tracks`` but stay
+    on disk; a session with no frames at all, or with a track that can't be read now (held
+    open, evicted by a sync client), is left as it is and retried at the next start.
+
+    Never touched: sessions that began at or after ``started_before`` (this app's start),
+    whose WAVs were written less than ``RECOVER_QUIET_S`` before it, that a live process
+    records into (``RECORDING_LOCK``), or that ``busy()`` lists (the live session and those
+    in flight; asked again just before each write). Blocking I/O: call it on a worker
+    thread."""
+    import soundfile as sf
+
+    def is_busy(d: Path) -> bool:
+        return d.resolve() in {Path(p).resolve() for p in busy()}
+
+    cutoff = started_before.timestamp()
+    out = []
+    for f in sorted(Path(output_dir).glob(f"*/*/{SessionInfo.FILENAME}")):
+        d = f.parent
+        try:
+            if (d / SessionInfo.DISCARD_MARKER).exists():
+                continue
+            s = SessionInfo.load(d)
+            if s.ended_at is not None or s.transcribed or s.started_at.timestamp() >= cutoff:
+                continue
+            if is_busy(d) or recording_lock_held(d):
+                continue
+        except Exception:  # noqa: BLE001 - unreadable: left alone
+            continue
+        longest, newest, kept = 0.0, float("-inf"), {}
+        try:
+            for track, name in s.tracks.items():
+                p = d / name
+                newest = max(newest, p.stat().st_mtime)
+                info = sf.info(str(p))
+                if info.frames > 0:
+                    kept[track] = name
+                    longest = max(longest, info.frames / info.samplerate)
+        except Exception:  # noqa: BLE001 - unreadable now (or deleted): retried next start
+            log.debug("interrupted session %s: a track can't be read; left alone", d.name)
+            continue
+        if not kept or newest >= cutoff - RECOVER_QUIET_S:  # no audio, or written lately
+            continue
+        try:
+            if is_busy(d):  # it may have become the live session meanwhile
+                continue
+            s.tracks = kept
+            s.ended_at = s.started_at + timedelta(seconds=longest)
+            s.update_metrics("recording", {"audio_s": round(longest, 1), "recovered": True})
+            s.save()
+        except Exception:
+            log.exception("could not save recovered session %s", d)
+            continue
+        log.info("recovered interrupted session %s (%.1fs)", d, longest)
+        out.append(s)
+    return out
+
+
 def purge_discarded_sessions(output_dir: Path) -> int:
     """Retry deleting sessions the user discarded but whose files were in use (session.json
     may be unreadable there); returns how many are still left."""
@@ -321,11 +393,38 @@ def chooser_script(labels: list[str], prompt: str, button: str) -> str:
     )
 
 
-def name_dialog_script(label: str) -> str:
+PLAY_SAMPLE = "Play sample"
+
+
+def name_dialog_script(label: str, sample: bool = False, answer: str = "") -> str:
+    """The name prompt; with `sample` a "Play sample" button too, after which the dialog is
+    shown again with the text typed so far (`answer`)."""
+    buttons = f'{{"Cancel", {as_str(PLAY_SAMPLE)}, "Save"}}' if sample else '{"Cancel", "Save"}'
     return (
-        f'display dialog {as_str(f"Name for {label}:")} default answer "" '
-        'with title "RecAndCC" buttons {"Cancel", "Save"} default button "Save"'
+        f"display dialog {as_str(f'Name for {label}:')} default answer {as_str(answer)} "
+        f'with title "RecAndCC" buttons {buttons} default button "Save"'
     )
+
+
+def name_dialog_answer(output: str) -> tuple[bool, str]:
+    """(play the sample?, typed text) from a ``name_dialog_script`` result; "" = cancelled."""
+    button, _, text = output.partition(", text returned:")
+    return button.strip() == f"button returned:{PLAY_SAMPLE}", text.strip()
+
+
+def ask_speaker_name(label: str, clip, ask: Callable[[str], str], play) -> str:
+    """Ask for `label`'s name on a dialog worker thread (``ask`` runs the AppleScript). With a
+    `clip` the dialog can play it (``play(clip)`` returns at once) and comes back with the
+    text typed so far, as often as the user likes; without one it is the plain prompt.
+    Returns the name, "" if cancelled or timed out."""
+    answer = ""
+    while True:
+        replay, answer = name_dialog_answer(
+            ask(name_dialog_script(label, clip is not None, answer))
+        )
+        if not (replay and clip is not None):
+            return answer
+        play(clip)
 
 
 # ----------------------------------------------------------------------- controller
@@ -739,6 +838,21 @@ class Controller:
     def speaker_names_enabled(self) -> bool:
         return self.cfg.transcription.speaker_names
 
+    @property
+    def sample_allowed(self) -> bool:
+        """A speaker sample plays only while nothing records: system capture leaves out only
+        our own process, so ``afplay`` would end up in the recording."""
+        return self.engine.state.status == IDLE
+
+    def speaker_clip(self, directory: Path, label: str):
+        """The label's audio sample (``ui.sample.Clip``) for the name dialog, or None while
+        recording or when the audio is gone. Call it on a worker thread (reads the WAV)."""
+        if not self.sample_allowed:
+            return None
+        from . import sample
+
+        return sample.find_clip(directory, label)
+
     def speakers_async(self, directory: Path) -> None:
         """List the session's speakers that have voice data, with their first lines; posts
         ``("speakers", directory, [(label, lines)])`` (the exception if it failed)."""
@@ -823,7 +937,9 @@ class Controller:
                         raise ExportError("No finished transcripts yet")
                     if not inside(target.parent, self.cfg.output_dir):
                         raise ExportError("That session is outside the transcripts folder")
-                    paths = export_session(target.parent, fmt, skipped)
+                    paths = export_session(
+                        target.parent, fmt, skipped, template=self.cfg.export.template
+                    )
                     if not all(p.is_file() for p in paths):  # e.g. the session was deleted
                         raise ExportError("The session folder changed during the export")
                     names = " and ".join(p.name for p in paths)
@@ -964,12 +1080,31 @@ class Controller:
         except Exception:
             log.exception("deleting leftover audio failed")
 
+    def _recover_interrupted(self) -> None:
+        """Give sessions an earlier run never stopped (crash, force-quit, power loss) an end
+        time, so they are re-queued. Never the live one: it started after this controller
+        (and is skipped by folder too, in case a room pre-roll moved its start earlier)."""
+
+        def busy() -> set[Path]:
+            live = self.engine.state.session_dir  # engine lock taken and released here
+            with self._lock:
+                out = set(self._in_flight)
+            return out | {Path(live)} if live else out
+
+        try:
+            recover_interrupted_sessions(
+                self.cfg.output_dir, started_before=self._started_at, busy=busy
+            )
+        except Exception:
+            log.exception("recovering interrupted sessions failed")
+
     def _resubmit_unfinished(self) -> None:
         # Purge first, on this same thread: once a re-queued session is transcribed, its
         # diarization may still need the WAVs, and the purge must not see it as leftover.
         self._resubmitting = True  # note_busy: untranscribed sessions may be about to queue
         try:
             self._purge_leftover_audio()
+            self._recover_interrupted()
             for s in untranscribed_sessions(self.cfg.output_dir):
                 log.info("re-queueing untranscribed session %s", s.directory)
                 self.tq.submit(s)
@@ -1115,7 +1250,8 @@ class Controller:
 
     def _maybe_reload_config(self) -> None:
         """Apply edits made to config.toml by hand (detection settings, output dir, hotkey,
-        languages, keep_audio, audio_retention_days, speaker_names, live_captions, [summary]).
+        languages, keep_audio, audio_retention_days, speaker_names, live_captions, [summary],
+        [export]).
         Read and apply are one step under ``_save_lock``: a menu write never interleaves."""
         hotkey_changed = False
         with self._save_lock:
@@ -1181,6 +1317,7 @@ class Controller:
             out[("summary", f.name)] = getattr(cfg.summary, f.name)
         for f in fields(cfg.search):  # [search] semantic: applies from the next search
             out[("search", f.name)] = getattr(cfg.search, f.name)
+        out[("export", "template")] = cfg.export.template  # read at each export
         for name in RELOADED_TRANSCRIPTION_KEYS:
             out[("transcription", name)] = getattr(cfg.transcription, name)
         tr = cfg.transcription
@@ -1221,6 +1358,7 @@ class Controller:
             "detection": self.cfg.detection,
             "summary": self.cfg.summary,
             "search": self.cfg.search,
+            "export": self.cfg.export,
             "transcription": self.cfg.transcription,
         }[owner]
 

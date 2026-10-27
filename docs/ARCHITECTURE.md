@@ -490,7 +490,21 @@ discard / too short ─► cancel() (nothing written) ─► live_end ─► dir
 ```
 
 At startup, sessions with `transcribed = false` (for example after quitting mid-queue) are
-queued again. Discarding a session drops a `.discarded` marker in its folder before
+queued again. A session an earlier run never stopped (crash, force-quit, power loss:
+`session.json` still has no `ended_at`) is finished first, on the same worker thread: its
+`ended_at` becomes `started_at` plus its longest track (`soundfile` reads a WAV whose header
+was never finalised), tracks without frames leave `tracks` (the files stay), and
+`metrics.recording.recovered = true`. Left alone (and retried at the next start): a session
+with no frames at all or with a track that can't be read now (held open, evicted by a sync
+client); one that began after this start, or whose WAVs were written less than
+`RECOVER_QUIET_S` (120 s) before it, since another writer may own it (a folder synced from
+another Mac); the live session and those in flight, asked again just before each write; and
+one holding a `.recording.lock` whose pid is alive (`recandcc record` keeps one while it
+records; a lock whose process is gone, or written before the last boot so that its pid may
+now be another process, is deleted). `recorder.stop()` saves `ended_at` before the recording
+metrics, so a full disk can't orphan a session.
+
+Discarding a session drops a `.discarded` marker in its folder before
 `recorder.stop()` (or, if that fails, renames `session.json` to it); the files are then
 deleted one by one on a background thread, the marker last. If some file can't be deleted
 (Windows locks an open WAV) the user gets a notice, the leftover is never transcribed or
