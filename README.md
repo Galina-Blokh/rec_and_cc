@@ -288,9 +288,11 @@ background after the transcript is final, and waits while you are recording, so 
 never slowed; it is downloaded once, pinned to an exact version, and nothing is sent anywhere.
 It is a draft: check names and dates against the transcript. Settings files saved while the
 previous default, Qwen2.5 1.5B Instruct (Apache-2.0, ~0.9 GB), was the default hold it without
-anyone choosing it, so it moves to the 4B (saved to `config.toml`, with a one-time notice),
-unless the 1.5B is downloaded and the 4B isn't: then the 1.5B is kept for now, so offline
-summaries keep working. The larger `model = "mlx-community/Qwen2.5-3B-Instruct-4bit"` (~1.7 GB,
+anyone choosing it, so it moves to the 4B once, at the first start (saved to `config.toml`,
+with a one-time notice that says how to keep the 1.5B). A `.summary-1p5b-migrated` file next to
+`config.toml` records the move, so a 1.5B set by hand afterwards is kept, cached or not. Until
+the move, while the 1.5B is downloaded and the 4B isn't, the 1.5B is kept, so offline summaries
+keep working. The larger `model = "mlx-community/Qwen2.5-3B-Instruct-4bit"` (~1.7 GB,
 also pinned) is under the Qwen Research licence: non-commercial use only. It was the default
 before that, and older settings files hold it the same way, so it is replaced by the default
 (saved to `config.toml`, with a one-time notice) unless you also set

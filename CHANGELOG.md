@@ -95,13 +95,17 @@ All notable changes to RecAndCC are documented here. The format is based on
 ### Changed
 - Meeting summaries default to Qwen3.5 4B (`mlx-community/Qwen3.5-4B-MLX-4bit`, Apache-2.0,
   pinned) instead of Qwen2.5 1.5B (maintainer decision, part of #4). Why: on the synthetic
-  mixed en/ru 1-hour fixture (`tests/test_summary_timing.py`) the 1.5B found none of the 3
-  planted action items and the 3B said "None.", while the 4B found all 3. Cost: a ~3.0 GB
-  download instead of ~0.9 GB, ~2.9 GB peak RAM, and about 2.5x slower. Migration: a settings
-  file that still holds the 1.5B (saved while it was the default) moves to the 4B, with the same
-  offline guard as the 3B: it is kept, with a one-time notice, while the 1.5B is cached and the
-  4B isn't. The 3B's migration now targets the 4B too. Hebrew `summary.language_models` routing
-  now hits the default anyway, so that entry is redundant unless `model` changes.
+  mixed en/ru 1-hour fixture (`tests/test_summary_timing.py`) the maintainer's measurement was
+  that the 1.5B found none of the 3 planted action items, the 3B said "None.", and the 4B found
+  all 3. A re-run on this fixture listed all 3 distinct planted tasks (its two Russian turns
+  restate two of them). Cost: a ~3.0 GB download instead of ~0.9 GB, ~2.9 GB peak
+  RAM, and about 2.5x slower. Migration: a settings file that still holds the 1.5B (saved while
+  it was the default) moves to the 4B once, at the first start, recorded by a
+  `.summary-1p5b-migrated` file next to `config.toml`; a 1.5B set by hand after that is kept,
+  cached or not. Until then, the offline guard keeps the 1.5B while it is cached and the 4B
+  isn't, with a one-time notice. The 3B's migration now targets the 4B too. Hebrew
+  `summary.language_models` routing now hits the default anyway, so that entry is redundant
+  unless `model` changes.
 - The macOS environment no longer installs torch (#69) or numba, llvmlite and scipy (#77),
   which mlx-whisper declares but RecAndCC never uses: `.venv` shrinks from 1.3 GB to
   559 MB (part of #3).

@@ -25,6 +25,7 @@ from recandcc.config import (
     SUMMARY_MODEL_KEPT,
     SUMMARY_MODEL_KEPT_PREVIOUS,
     SUMMARY_MODEL_SWITCHED,
+    SUMMARY_MODEL_SWITCHED_PREVIOUS,
     Config,
     SummaryConfig,
     load_config,
@@ -446,18 +447,40 @@ def test_saved_old_default_model_follows_the_new_default(tmp_path):
     assert load_config(path).summary.model == DEFAULT_SUMMARY_MODEL
 
 
-def test_saved_1_5b_default_moves_to_the_new_default(tmp_path):
+def test_the_first_start_moves_the_1_5b_once_and_writes_the_marker(tmp_path):
     # the 1.5B was the default until now: Config.save wrote it into configs nobody chose it for
     path = tmp_path / "config.toml"
+    moved = tmp_path / config_mod.PREVIOUS_MIGRATED_MARKER
     Config(summary=SummaryConfig(enabled=True, model=PREVIOUS_DEFAULT_SUMMARY_MODEL)).save(path)
     assert load_config(path).summary.model == DEFAULT_SUMMARY_MODEL  # CLI: in memory only
     assert load_config(path).summary.notice is None
+    assert not moved.exists()  # so the CLI loads record nothing
     cfg = load_config(path, migrate=True)
     assert cfg.summary.model == DEFAULT_SUMMARY_MODEL
-    assert cfg.summary.notice == SUMMARY_MODEL_SWITCHED  # summaries on: told once
-    assert load_config(path, migrate=True).summary.notice is None
+    assert cfg.summary.notice == SUMMARY_MODEL_SWITCHED_PREVIOUS  # summaries on: told once
+    assert (
+        "to keep the smaller 1.5B model, set summary.model back to "
+        "mlx-community/Qwen2.5-1.5B-Instruct-4bit" in cfg.summary.notice
+    )
+    assert moved.exists()
     text = path.read_text("utf-8")
     assert DEFAULT_SUMMARY_MODEL in text and PREVIOUS_DEFAULT_SUMMARY_MODEL not in text
+    assert load_config(path, migrate=True).summary.notice is None  # once
+
+
+def test_a_1_5b_set_back_after_the_move_is_kept_across_restarts(tmp_path):
+    path = tmp_path / "config.toml"
+    Config(summary=SummaryConfig(enabled=True, model=PREVIOUS_DEFAULT_SUMMARY_MODEL)).save(path)
+    load_config(path, migrate=True)  # the one-time move: the 4B, and its marker
+    # the user sets the 1.5B back by hand; it is not cached (the marker is what counts)
+    back = path.read_text("utf-8").replace(DEFAULT_SUMMARY_MODEL, PREVIOUS_DEFAULT_SUMMARY_MODEL)
+    path.write_text(back, "utf-8")
+    for _ in range(2):  # restarts, with the app's migrate and without it
+        cfg = load_config(path, migrate=True)
+        assert cfg.summary.model == PREVIOUS_DEFAULT_SUMMARY_MODEL
+        assert cfg.summary.notice is None
+    assert load_config(path).summary.model == PREVIOUS_DEFAULT_SUMMARY_MODEL
+    assert path.read_text("utf-8") == back  # kept as written: nothing is rewritten
 
 
 def test_accepted_qwen_research_licence_keeps_the_3b(tmp_path):
@@ -575,10 +598,11 @@ def test_kept_cached_3b_is_noticed_once(tmp_path):
     assert load_config(path, migrate=True).summary.notice is None  # once
 
 
-def test_cached_1_5b_is_kept_and_noticed_once_while_the_new_default_is_missing(tmp_path):
-    # the previous default, offline-safe like the 3B: nothing downloads the 4B by surprise
+def test_offline_1_5b_is_kept_and_writes_no_marker_until_the_4b_is_cached(tmp_path):
+    # the offline guard: the 1.5B is cached and the 4B isn't, so the move waits (no marker)
     _cache_model(config_mod.HF_CACHE_DIR, PREVIOUS_DEFAULT_SUMMARY_MODEL)
     path = tmp_path / "config.toml"
+    moved = tmp_path / config_mod.PREVIOUS_MIGRATED_MARKER
     Config(summary=SummaryConfig(enabled=True, model=PREVIOUS_DEFAULT_SUMMARY_MODEL)).save(path)
     before = path.read_text("utf-8")
     assert load_config(path).summary.notice is None  # CLI: no notice used up
@@ -587,8 +611,10 @@ def test_cached_1_5b_is_kept_and_noticed_once_while_the_new_default_is_missing(t
     assert cfg.summary.notice == SUMMARY_MODEL_KEPT_PREVIOUS
     assert load_config(path, migrate=True).summary.notice is None  # once
     assert path.read_text("utf-8") == before  # kept: config.toml is not rewritten
+    assert not moved.exists()  # the move hasn't happened, so nothing is recorded
     _cache_model(config_mod.HF_CACHE_DIR, DEFAULT_SUMMARY_MODEL)  # now the new default is too
     assert load_config(path, migrate=True).summary.model == DEFAULT_SUMMARY_MODEL
+    assert moved.exists()  # the move happens once, at the next start
 
 
 def test_unpinned_4b_snapshot_does_not_replace_a_cached_3b(tmp_path):

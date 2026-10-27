@@ -227,10 +227,18 @@ SUMMARY_MODEL_SWITCHED = (
     f'= "{QWEN_RESEARCH_SUMMARY_MODEL}" and summary.accept_qwen_research_licence = true '
     "in config.toml"
 )
+# The move from the 1.5B: the notice names the way back to it.
+SUMMARY_MODEL_SWITCHED_PREVIOUS = (
+    "Summary model switched to Qwen3.5 4B (Apache-2.0); to keep the smaller 1.5B model, set "
+    f"summary.model back to {PREVIOUS_DEFAULT_SUMMARY_MODEL} in config.toml"
+)
 SUMMARY_LICENCE_NOT_BOOL = "accept_qwen_research_licence must be a TOML boolean true, not {kind}"
-# Next to config.toml once the "kept the cached ..." notice was shown, one marker per model.
+# Next to config.toml: a one-time "kept the cached ..." notice (one marker per model), and the
+# record that the 1.5B was moved to the default. It is written after the move, so the move
+# happens once; a 1.5B set by hand after that is kept.
 SUMMARY_KEPT_MARKER = ".summary-3b-kept-noticed"
-PREVIOUS_KEPT_MARKER = ".summary-1.5b-kept-noticed"
+PREVIOUS_KEPT_MARKER = ".summary-1p5b-kept-noticed"
+PREVIOUS_MIGRATED_MARKER = ".summary-1p5b-migrated"
 SUMMARY_MODEL_KEPT = (
     "Keeping the cached Qwen2.5 3B summary model, which is non-commercial; set summary.model "
     f'= "{DEFAULT_SUMMARY_MODEL}" in config.toml to switch to the Apache-2.0 Qwen3.5 4B'
@@ -735,10 +743,12 @@ def load_config(path: Path | None = None, *, migrate: bool = False) -> Config:
 def _migrate_summary_model(summary: SummaryConfig, path: Path, *, persist: bool) -> None:
     """Replace the older defaults with the current one. Config.save wrote whichever was the
     default into every config.toml, so an unchosen one reads as set: the 3B (non-commercial,
-    unless its licence was accepted) and the Apache-2.0 1.5B. Each is kept while it is on disk
-    and the new default isn't, so an offline user's summaries keep working and nothing
-    downloads the new default by surprise. Otherwise the switch applies in memory; with
-    ``persist`` (the app's startup load) it is also written to config.toml (that key only),
+    unless its licence was accepted) and the Apache-2.0 1.5B. The 1.5B moves once: the move is
+    recorded by a marker next to config.toml, and a 1.5B set by hand after that is kept, cached
+    or not. Each older model is kept while it is on disk and the new default isn't, so an
+    offline user's summaries keep working and nothing downloads the new default by surprise
+    (a kept 1.5B writes no marker, so the move waits). Otherwise the switch applies in memory;
+    with ``persist`` (the app's startup load) it is also written to config.toml (that key only),
     and with summaries on ``summary.notice`` is set for a one-time notice (ui.common.Controller):
     after the switch, or the first time a model is kept (remembered by a marker file next to
     config.toml)."""
@@ -749,11 +759,14 @@ def _migrate_summary_model(summary: SummaryConfig, path: Path, *, persist: bool)
         log.warning("config: [summary] %s; using false", invalid)
         summary.accept_qwen_research_licence = False
     old = summary.model
+    moved = path.with_name(PREVIOUS_MIGRATED_MARKER)
     if old == QWEN_RESEARCH_SUMMARY_MODEL:
         if summary.accept_qwen_research_licence:
             return
         kept_notice, marker_name = SUMMARY_MODEL_KEPT, SUMMARY_KEPT_MARKER
     elif old == PREVIOUS_DEFAULT_SUMMARY_MODEL:
+        if moved.exists():  # moved once already: a 1.5B set by hand since then is the choice
+            return
         kept_notice, marker_name = SUMMARY_MODEL_KEPT_PREVIOUS, PREVIOUS_KEPT_MARKER
     else:
         return
@@ -775,14 +788,24 @@ def _migrate_summary_model(summary: SummaryConfig, path: Path, *, persist: bool)
     summary.model = DEFAULT_SUMMARY_MODEL
     if not persist:
         return
-    if invalid is not None and old == QWEN_RESEARCH_SUMMARY_MODEL:  # they meant to keep the 3B
+    if old == QWEN_RESEARCH_SUMMARY_MODEL and invalid is not None:  # they meant to keep the 3B
         summary.notice = f"{invalid}; {SUMMARY_MODEL_SWITCHED}"
     elif summary.enabled:
-        summary.notice = SUMMARY_MODEL_SWITCHED
+        summary.notice = (
+            SUMMARY_MODEL_SWITCHED_PREVIOUS
+            if old == PREVIOUS_DEFAULT_SUMMARY_MODEL
+            else SUMMARY_MODEL_SWITCHED
+        )
     try:
         set_string_line(path, "summary", "model", DEFAULT_SUMMARY_MODEL)  # keeps comments
     except (OSError, ValueError) as e:
         log.warning("could not write summary.model to %s: %s", path, type(e).__name__)
+        return
+    if old == PREVIOUS_DEFAULT_SUMMARY_MODEL:  # after the rewrite, so a failed one is retried
+        try:
+            moved.touch()
+        except OSError as e:
+            log.warning("could not write %s: %s", moved, type(e).__name__)
 
 
 def _toml_kind(value: Any) -> str:
