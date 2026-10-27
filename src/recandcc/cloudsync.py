@@ -23,6 +23,7 @@ import logging
 import ntpath
 import os
 import plistlib
+import posixpath
 import sys
 import time
 from collections.abc import Mapping
@@ -315,7 +316,8 @@ def linux_network_volume(path: str | os.PathLike, mounts: str | None = None) -> 
     """Longest matching mount point in /proc/mounts decides."""
     if mounts is None:
         mounts = Path("/proc/mounts").read_text(encoding="utf-8", errors="replace")
-    target = str(_absolute(path))
+    target = str(path)
+    target = posixpath.normpath(target if target.startswith("/") else str(_absolute(path)))
     best, best_type = "", ""
     for line in mounts.splitlines():
         parts = line.split()
