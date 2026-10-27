@@ -30,8 +30,9 @@ acceptance criteria.
       change (#97), MLX word timestamps (#116). Left: live speaker labels (PR #88), per-track
       labels, an audio sample in "Name speakers", and measuring DER on real meetings.
 - [ ] **Semantic search at scale**: shipped in #87 as opt-in; a query scores the stored vectors
-      in chunks of 2,048 rows (`SCAN_CHUNK`), so memory stays flat. Left: an approximate index
-      only if archives grow far past what a linear scan handles quickly.
+      in chunks of 2,048 rows (`SCAN_CHUNK`). Left: an approximate index only if archives grow
+      far past what a linear scan handles quickly (memory use: see `[search]` in
+      CONFIGURATION.md).
 - [x] **Room listening** ([#2](https://github.com/Galina-Blokh/rec_and_cc/issues/2)): auto-record conversations near the laptop, also with
       the screen locked: always-on mic VAD, pre-roll buffer, mic-track diarization; opt-in
       (the orange mic indicator stays on). Shipped in #64 (opt-in, off by default); locked-screen
