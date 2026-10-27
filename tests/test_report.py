@@ -1,4 +1,4 @@
-"""Build-report collector: metrics from a tiny fixture and price maths. No network."""
+"""Build-report scripts: metrics from a tiny fixture, rendering and price maths. No network."""
 
 import importlib.util
 import json
@@ -17,6 +17,7 @@ def _load(name):
 
 
 collect = _load("collect")
+render = _load("render")
 diff = _load("diff")
 
 
@@ -181,6 +182,65 @@ def test_sessions_count_prompts_and_dedupe_usage(tmp_path):
     assert (out["sessions"], out["subagents"], out["prompts"]) == (1, 1, 1)
     assert out["tokens"] == 12 and out["unlinked_cost"] == 0
     assert "secret" not in json.dumps(out)
+
+
+def test_render_produces_every_section(tmp_path):
+    raw = _data()
+    now = collect.ts("2026-10-26T14:00:00Z")
+    prs = collect.build_prs(raw, raw["runs"], now)
+    issues = collect.build_issues(raw["issues"], prs)
+    ledger = [
+        {
+            "sha": "a",
+            "merge": False,
+            "author": "dev",
+            "email": "e",
+            "at": "2026-10-26T10:00:00+00:00",
+            "subject": "feat: x",
+            "ai": True,
+        }
+    ]
+    sessions = collect.summarize_sessions({}, {})
+    data = {
+        "repo": "o/r",
+        "generated_at": "2026-10-26T14:00:00+00:00",
+        "window": {"start": "2026-10-26T10:00:00+00:00", "end": "2026-10-26T14:00:00+00:00"},
+        "refresh": {"on_merge": True, "minutes": 360},
+        "summary": collect.summarize(prs, issues, now),
+        "series": collect.series(prs, ledger),
+        "commits": collect.build_commits(ledger),
+        "ci": collect.build_ci(raw["runs"]),
+        "claude": sessions,
+        "docs": {"adrs": [], "roadmap": []},
+        "prs": prs,
+        "issues": issues,
+        "prices": {},
+        "sources": {"github_calls": 0, "ref": "origin/main"},
+    }
+    page = render.render(data)
+    for sid in (
+        "tldr",
+        "how",
+        "delivery",
+        "prd",
+        "size",
+        "cycle",
+        "quality",
+        "team",
+        "ai",
+        "lessons",
+        "deferrals",
+        "dq",
+        "recos",
+        "allprs",
+        "allissues",
+        "allci",
+        "sources",
+        "glossary",
+    ):
+        assert f'id="{sid}"' in page
+    assert "None" not in page.replace("NoneType", "")
+    assert "<script src" not in page and "https://cdn" not in page
 
 
 def test_diff_lists_moved_headline_figures():
