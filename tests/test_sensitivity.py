@@ -348,6 +348,8 @@ def level_vad(thr_db: float = -45.0, hang: int = 4):
 
 
 class Source:
+    scope = "all"  # read by the recorder for the system track
+
     def start(self, on_frames):
         self.cb = on_frames
 

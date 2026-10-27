@@ -22,3 +22,11 @@ def _private_search_index(tmp_path, monkeypatch):
     from recandcc import search
 
     monkeypatch.setattr(search, "INDEX_PATH", tmp_path / "search-index" / "search.sqlite3")
+
+
+@pytest.fixture(autouse=True)
+def _private_voices_dir(tmp_path_factory, monkeypatch):
+    """No test reads or writes the user's real voice profiles."""
+    from recandcc.transcribe import voices
+
+    monkeypatch.setattr(voices, "VOICES_DIR", tmp_path_factory.mktemp("voices"))

@@ -39,7 +39,15 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from .config import Config, DetectionConfig
-from .models import AudioProcess, Mode, SessionInfo, TriggerKind, discard_session, mark_discarded
+from .models import (
+    AppTarget,
+    AudioProcess,
+    Mode,
+    SessionInfo,
+    TriggerKind,
+    discard_session,
+    mark_discarded,
+)
 from .sensitivity import effective_min_active_s
 
 log = logging.getLogger(__name__)
@@ -116,6 +124,10 @@ class AppActivity:
     name: str
     kind: TriggerKind
     procs: list[AudioProcess]
+
+    def target(self) -> AppTarget:
+        """For a per-app tap: the key also matches helpers the app starts later."""
+        return AppTarget((self.key,), tuple(sorted({p.pid for p in self.procs if p.pid})))
 
 
 def group_activity(
@@ -398,10 +410,10 @@ class Engine:
             room_active = self._room_wanted() and clean and room.triggered()
             room_quiet = room.seconds_since_speech()
 
-        start_req: tuple[TriggerKind, str | None] | None = None
+        start_req: tuple[TriggerKind, str | None, AppTarget | None] | None = None
         stop_req = False
         prompt_evt: tuple[str, TriggerKind] | None = None
-        upgrade_req: str | None = None
+        upgrade_req: tuple[str, AppTarget] | None = None
         discard_req = False
         save = False
 
@@ -431,7 +443,7 @@ class Engine:
                     if self._rec is None:
                         self._prompt = None
                         self._rec = _Rec(None, None, TriggerKind.MANUAL, now, manual=True)
-                        start_req = (TriggerKind.MANUAL, None)
+                        start_req = (TriggerKind.MANUAL, None, None)
                         stop_req = False
                     else:
                         self._rec.manual = True  # pin the running session: no auto-stop
@@ -464,7 +476,8 @@ class Engine:
                         r.provisional = False  # recording since the prompt appeared: keep it
                     elif r is None:
                         self._rec = _Rec(p.key, p.name, p.kind, now, manual=False)
-                        start_req = (p.kind, p.name)
+                        a = apps.get(p.key)
+                        start_req = (p.kind, p.name, a.target() if a else AppTarget((p.key,)))
 
             # --- prompt expiry
             if self._prompt is not None and now >= self._prompt.deadline:
@@ -544,7 +557,7 @@ class Engine:
                     if self._prompt is not None and self._prompt.key == r.key:
                         self._prompt.key = a.key  # "Discard" still discards this session
                     r.key, r.name, r.kind = a.key, a.name, TriggerKind.CALL
-                    upgrade_req = a.name
+                    upgrade_req = (a.name, a.target())
                     break
 
             # --- new triggers
@@ -570,7 +583,7 @@ class Engine:
                     if m == Mode.AUTO:
                         log.info("auto-recording %s (%s)", a.name, a.kind)
                         self._rec = _Rec(a.key, a.name, a.kind, now, manual=False)
-                        start_req = (a.kind, a.name)
+                        start_req = (a.kind, a.name, a.target() if a.key != ROOM_KEY else None)
                     else:
                         # Record right away and ask whether to keep it: an unanswered or
                         # unseen prompt must not lose the start of a meeting.
@@ -579,7 +592,7 @@ class Engine:
                             self._prompt_seq, a.key, a.name, a.kind, now + det.ask_timeout_s
                         )
                         self._rec = _Rec(a.key, a.name, a.kind, now, manual=False, provisional=True)
-                        start_req = (a.kind, a.name)
+                        start_req = (a.kind, a.name, a.target() if a.key != ROOM_KEY else None)
                         prompt_evt = (a.name, a.kind)
                         log.info("recording %s (%s), asking whether to keep it", a.name, a.kind)
                     break
@@ -594,7 +607,7 @@ class Engine:
         if start_req is not None:
             self._do_start(*start_req)
         if upgrade_req is not None:
-            self._do_upgrade(upgrade_req)
+            self._do_upgrade(*upgrade_req)
         if prompt_evt is not None and self.on_prompt:
             try:
                 self.on_prompt(*prompt_evt)
@@ -706,7 +719,7 @@ class Engine:
                 "missing. Check the Permissions menu.",
             )
 
-    def _do_start(self, kind: TriggerKind, app: str | None) -> None:
+    def _do_start(self, kind: TriggerKind, app: str | None, target: AppTarget | None) -> None:
         room, mic_source = self.room, None
         if room is not None and room.running:
             if kind == TriggerKind.ROOM:
@@ -716,9 +729,9 @@ class Engine:
         self._preflight()
         try:
             if mic_source is not None:
-                session = self.recorder.start(kind, app, mic_source=mic_source)
+                session = self.recorder.start(kind, app, target=target, mic_source=mic_source)
             else:
-                session = self.recorder.start(kind, app)
+                session = self.recorder.start(kind, app, target=target)
         except Exception:
             log.exception("could not start recording")
             with self._lock:
@@ -744,12 +757,12 @@ class Engine:
             except Exception:
                 log.exception("on_session_end callback failed")
 
-    def _do_upgrade(self, app: str) -> None:
+    def _do_upgrade(self, app: str, target: AppTarget) -> None:
         upgrade = getattr(self.recorder, "upgrade_to_call", None)
         if upgrade is None:
             return
         try:
-            upgrade(app)
+            upgrade(app, target=target)
         except Exception:
             log.exception("could not add the microphone to the running session")
 

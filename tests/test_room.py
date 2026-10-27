@@ -359,6 +359,38 @@ def test_room_sessions_diarize_the_mic_track():
     assert diarized_track(session(TriggerKind.CALL)) == Track.OTHERS
 
 
+def test_room_transcript_numbers_and_names_the_speakers_on_the_mic(tmp_path):
+    from concurrent.futures import Future
+
+    from recandcc.config import TranscriptionConfig
+    from recandcc.models import Segment
+    from recandcc.transcribe import voices
+    from recandcc.transcribe.diarize import Turn, Turns
+    from recandcc.transcribe.engine import Transcriber
+
+    rng = np.random.default_rng(1)
+    anna, bob = (v / np.linalg.norm(v) for v in rng.normal(size=(2, 192)))
+    voices.save_profile("Anna", anna)
+    segs = [Segment(1, 4, "hi", "Me", "en"), Segment(6, 9, "yo", "Me", "en")]
+    segs.append(Segment(6, 8, "tv", "Others", "en"))  # system audio stays "Others"
+
+    def final(turns):
+        s = SessionInfo("r1", tmp_path, datetime.now(), TriggerKind.ROOM)
+        s.save()
+        t = Transcriber(TranscriptionConfig(model="fake", speaker_names=True))
+        done: Future = Future()
+        done.set_result(turns)
+        t.start_diarization = lambda _s: done
+        return [x.speaker for x in t.write_final(s, segs, 10.0)]
+
+    two = Turns([Turn(0, 5, 0), Turn(5, 10, 1)], centroids={0: anna, 1: bob})
+    assert final(two) == ["Anna", "Speaker 1", "Others"]
+    assert set(voices.read_session_voices("r1")) == {"Anna", "Speaker 1"}
+    one = Turns([Turn(0, 10, 0)], centroids={0: bob})  # one unknown person: stays "Me"
+    assert final(one) == ["Me", "Me", "Others"]
+    assert voices.read_session_voices("r1") == {}  # "Me" can't be named: no voice kept
+
+
 def test_menu_toggle_saves_warns_and_engine_owns_a_closed_room_monitor(tmp_path, monkeypatch):
     from recandcc.ui.common import ROOM_LISTENING_NOTICE, Controller, keep_prompt_text
 
