@@ -8,7 +8,7 @@ window: `detection.mode`, `output_dir`, and in `[transcription]` `languages`, `k
 `speaker_names`, `live` and `model` (a picker of the pinned names listed below; any other
 name is rejected), plus `live_captions`. A model change applies after the app restarts (the
 loaded model is kept until then); a model not on disk yet is downloaded once then, pinned and
-checksum-verified, on the transcription worker. `live` applies from the next session. Unknown keys are ignored, and missing keys take their default values.
+checksum-verified, on the transcription worker. `live` applies from the next session when set in the window; a hand edit of `transcription.live` applies at the next app start. Unknown keys are ignored, and missing keys take their default values.
 
 A menu change (or `recandcc autostart on/off`) writes only its own key, so other hand edits in
 the file are kept; like any save, it drops comments and rewrites the keys in a fixed order.

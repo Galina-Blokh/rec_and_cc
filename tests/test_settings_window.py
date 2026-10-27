@@ -322,6 +322,35 @@ def test_model_change_says_it_applies_after_a_restart(tmp_path, monkeypatch):
 
 
 @mac_only
+def test_switching_back_to_the_loaded_model_needs_no_restart(tmp_path, monkeypatch):
+    ctrl, path = make_ctrl(tmp_path, monkeypatch)
+    ctrl.apply_settings({"model": "medium"})  # saved earlier, not loaded yet
+    assert settings_window.snapshot(ctrl.cfg)["model"] == "medium"
+    values = dict(settings_window.snapshot(ctrl.cfg), model="large-v3-turbo")
+    fake_helper(tmp_path, monkeypatch, reply({"settings": "saved", "values": values}))
+    ctrl.open_settings_async()
+    ev = next_event(ctrl, {"settings_saved", "settings_fallback", "notice"})
+    assert ev == ("settings_saved", {"model": "large-v3-turbo"})  # no "Model saved" notice
+    assert ctrl.events.empty()
+    assert settings_window.snapshot(ctrl.cfg)["model"] == "large-v3-turbo"
+    assert load_config(path).transcription.model == "large-v3-turbo"
+
+
+def test_hand_edited_model_shows_in_the_window_but_is_not_loaded(tmp_path, monkeypatch):
+    ctrl, path = make_ctrl(tmp_path, monkeypatch)
+    ctrl.apply_settings({"model": "medium"})  # a Settings-window choice, not loaded yet
+    path.write_text('[transcription]\nmodel = "small"\n')
+    ctrl._config_mtime = -1.0
+    ctrl._maybe_reload_config()
+    assert settings_window.snapshot(ctrl.cfg)["model"] == "small"  # the hand edit wins
+    assert ctrl.cfg.transcription.model == "large-v3-turbo"  # still the loaded model
+    path.write_text('[transcription]\nmodel = "large-v3-turbo"\n')
+    ctrl._config_mtime = -1.0
+    ctrl._maybe_reload_config()
+    assert settings_window.snapshot(ctrl.cfg)["model"] == "large-v3-turbo"
+
+
+@mac_only
 def test_hand_edit_made_before_saving_is_still_reloaded(tmp_path, monkeypatch):
     ctrl, path = make_ctrl(tmp_path, monkeypatch)
     ctrl._config_mtime = -1.0  # the file changed on disk since the last reload

@@ -57,11 +57,13 @@ struct SettingsModel {
 
     var result: [String: Any] {
         let picked = settingsLanguages.map { $0.code }.filter { languages.contains($0) }
-        return [
+        var out: [String: Any] = [
             "mode": mode, "output_dir": outputDir, "languages": picked + otherLanguages,
             "keep_audio": keepAudio, "live": live, "live_captions": liveCaptions,
-            "speaker_names": speakerNames, "model": model,
+            "speaker_names": speakerNames,
         ]
+        if !model.isEmpty { out["model"] = model }  // no picker shown: nothing to send
+        return out
     }
 }
 
