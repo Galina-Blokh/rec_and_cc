@@ -33,6 +33,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
 | US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
 | US-23 | Sensitivity: room vs system audio | 🟡 presets only, no live meters (#7) |
+| US-29 | Right-to-left text readable in the Windows captions | 🟡 unit-tested, no hardware check (#6) |
 
 ---
 
@@ -342,3 +343,17 @@ noisy café.* (#7)
   hand edit not yet reloaded is applied first, so the click doesn't overwrite it.
 - **Not yet:** a settings window with live level meters, a per-source speech score, caption
   priority between the tracks.
+
+### US-29 Right-to-left text readable in the Windows captions
+*As a Hebrew speaker on Windows, I want mixed Hebrew/English/number captions to read
+correctly, even though Tk does no bidi.*
+
+- **Given** a Hebrew line in the Tk captions, **then** its text is reordered to visual order
+  with the speaker label at the right edge, and the line is right-justified.
+- **Given** English words or numbers inside Hebrew, **then** they keep their reading order
+  (`3.5`, `1,000` stay whole), brackets are mirrored, and no Unicode control characters
+  reach Tk.
+- **Given** an English or Russian line, **then** it is unchanged (`label<TAB>text`); macOS
+  captions and the transcript files are unchanged.
+- **Not yet:** a visual check on Windows hardware (#6); long RTL lines that wrap are reordered
+  as one line, so the wrap point may read oddly.
