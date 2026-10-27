@@ -138,3 +138,40 @@ def test_posix_second_instance_reports_already_running(tmp_path, opened):
     assert _new(path, opened).acquire()
     assert path.read_text() == str(os.getpid())
     assert _new(path, opened).acquire() is False
+
+
+class _Stop(Exception):
+    pass
+
+
+def _patch_run(monkeypatch, results):
+    calls = []
+
+    def acquire(self):
+        calls.append(1)
+        return results[min(len(calls), len(results)) - 1]
+
+    monkeypatch.setattr(_SingleInstance, "acquire", acquire)
+    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+    monkeypatch.setattr(cli, "_ACQUIRE_RETRY_S", 0)
+
+    def stop(*_a, **_k):
+        raise _Stop
+
+    monkeypatch.setattr(cli, "load_config", stop)
+    return calls
+
+
+def test_cmd_run_retries_past_a_transient_probe_lock(monkeypatch):
+    """A held_elsewhere() probe holds the lock for an instant; the app must not exit on it."""
+    calls = _patch_run(monkeypatch, [False, True])
+    with pytest.raises(_Stop):  # got past the lock to load_config
+        cli.cmd_run(None)
+    assert len(calls) == 2
+
+
+def test_cmd_run_still_exits_when_really_running(monkeypatch, capsys):
+    calls = _patch_run(monkeypatch, [False])
+    assert cli.cmd_run(None) == 1
+    assert len(calls) == cli._ACQUIRE_RETRIES
+    assert "already running" in capsys.readouterr().err

@@ -1,13 +1,15 @@
 """Audio retention: delete recordings' audio once it is no longer wanted.
 
 Only ``*.wav`` files of sessions that are fully transcribed are removed; transcripts
-(md/srt/json) and session.json are always kept. Sessions still recording or waiting for
-transcription are never touched.
+(md/srt/json) and session.json are always kept. Sessions still recording, waiting for
+transcription or (``purge_old_audio``) for a slow diarization's speaker labels are never
+touched.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,6 +20,9 @@ log = logging.getLogger("recandcc.retention")
 
 # Choices offered in the menu (days; 0 = never delete).
 RETENTION_CHOICES = (0, 1, 7, 30, 90)
+
+# Linked session folders already warned about (hourly purges would repeat it).
+_warned_outside: set[Path] = set()
 
 
 def _transcribed_sessions(output_dir: Path) -> Iterator[tuple[SessionInfo, datetime]]:
@@ -66,17 +71,38 @@ def _track_wavs(session: SessionInfo) -> list[Path]:
     return out
 
 
+def _labels_pending(directory: Path) -> bool:
+    """A slow diarization still reads this session's WAVs (a fresh labels-pending marker)."""
+    try:
+        mtime = (directory / SessionInfo.LABELS_PENDING_MARKER).stat().st_mtime
+    except OSError:
+        return False
+    return time.time() - mtime <= SessionInfo.LABELS_PENDING_MAX_S
+
+
 def purge_old_audio(output_dir: Path, days: int, now: datetime | None = None) -> list[Path]:
     """Delete audio of transcribed sessions that ended more than ``days`` days ago.
-    Returns the deleted files. ``days <= 0`` disables retention."""
+    Returns the deleted files. ``days <= 0`` disables retention. A session folder that
+    resolves outside ``output_dir`` (symlink, junction) and symlinked WAVs are skipped, so
+    nothing outside the transcripts folder is ever deleted."""
     if days <= 0 or not output_dir.is_dir():
         return []
     now = now or datetime.now().astimezone()
     cutoff = now - timedelta(days=days)
+    root = output_dir.resolve()
     deleted: list[Path] = []
     for session, ended in _transcribed_sessions(output_dir):
-        if ended <= cutoff:
-            _unlink_all(session.directory.glob("*.wav"), deleted)
+        if ended > cutoff:
+            continue
+        if not session.directory.resolve().is_relative_to(root):
+            if session.directory not in _warned_outside:  # once per folder per app run
+                _warned_outside.add(session.directory)
+                log.warning("session %s: skipping a folder linked from outside", session.id)
+            continue
+        if _labels_pending(session.directory):
+            continue
+        wavs = [w for w in session.directory.glob("*.wav") if not w.is_symlink()]
+        _unlink_all(wavs, deleted)
     if deleted:
         log.info("retention: deleted %d audio file(s) older than %d day(s)", len(deleted), days)
     return deleted

@@ -7,7 +7,9 @@ Thread layout per track::
 ``on_frames`` only measures the level (cheap numpy RMS) and enqueues a copy, so capture
 never blocks on disk I/O. Frame listeners (``add_listener``, used for live transcription) get
 the same copy on the capture thread and must only enqueue it. ``stop()`` stops the sources,
-sends a sentinel to each writer, joins them, and persists session.json.
+sends a sentinel to each writer, joins them, and persists session.json. A writer's backlog
+is bounded (``WRITER_BACKLOG_S``; overflow is written as silence) and so is the join
+(``FINISH_TIMEOUT_*``): a stalled disk never grows memory or freezes the caller.
 """
 
 from __future__ import annotations
@@ -33,7 +35,15 @@ import soundfile as sf
 
 from .capture.base import AudioSource
 from .config import Config
-from .models import SAMPLE_RATE, AppTarget, SessionInfo, Track, TriggerKind
+from .models import (
+    SAMPLE_RATE,
+    AppTarget,
+    SessionInfo,
+    Track,
+    TriggerKind,
+    clear_writing,
+    mark_writing,
+)
 
 log = logging.getLogger(__name__)
 
@@ -314,6 +324,16 @@ SystemSourceFactory = Callable[..., AudioSource]
 FrameListener = Callable[[Track, int, np.ndarray], None]
 # Captured audio kept per track to replay to a listener added after the session started.
 REPLAY_SECONDS = 10.0
+# Captured audio a track's writer may have waiting (a stalled disk: network volume, slow USB,
+# sleep). Beyond it new blocks are dropped and later written as silence (``_TrackWriter``).
+WRITER_BACKLOG_S = 120.0  # 120 s of float32 mono 16 kHz = ~7.7 MB per track
+# finish() waits this long plus a share of the remaining backlog, capped, then lets the writer
+# finish in the background so a stalled disk never freezes the engine thread.
+# Once dropping, keep dropping until the backlog is this far below the bound (at most half).
+WRITER_RESUME_BELOW_S = 10.0
+FINISH_TIMEOUT_S = 5.0
+FINISH_TIMEOUT_PER_BACKLOG_S = 0.1  # extra wait per second of audio still queued
+FINISH_TIMEOUT_MAX_S = 15.0
 
 
 def slugify(text: str | None, default: str = "session") -> str:
@@ -368,8 +388,18 @@ class _TrackWriter:
         self.source = source
         self.recorder = recorder
         self.replay_s = REPLAY_SECONDS  # longer for a room mic: listeners get its pre-roll
-        self.q: queue.Queue[np.ndarray | None] = queue.Queue()
-        self.frames_written = 0
+        # Audio blocks; an int is that many samples of silence (padding, dropped audio).
+        self.q: queue.Queue[np.ndarray | int | None] = queue.Queue()
+        self.frames_written = 0  # timeline position on disk, silence included
+        self._queued_in = 0  # samples of audio blocks queued (capture thread only)
+        self._queued_out = 0  # ... of which written (writer thread only)
+        self._gap = 0  # dropped samples not yet queued as silence (capture thread)
+        self.dropped_frames = 0  # audio lost to a full backlog, written as silence instead
+        self.abandoned = False  # finish() timed out: the writer completes in the background
+        self._finishing = False  # finish() sent the sentinel
+        self.late_frames = 0  # arrived after it (a source's reader outlived its stop timeout)
+        self._dropping = False  # dropping until the backlog falls to the low-water mark
+        self._drop_logged = False  # the first drop is logged by the writer, not capture
         self.frames_received = 0  # updated on the capture thread; ahead of frames_written
         self.backlog_max = 0  # most samples ever waiting for the writer (disk falling behind)
         self._padding = 0  # leading zeros (mid-session join): not counted as backlog
@@ -389,6 +419,9 @@ class _TrackWriter:
 
     def on_frames(self, frames: np.ndarray) -> None:  # capture thread: keep it cheap
         frames = np.asarray(frames, dtype=np.float32).reshape(-1)
+        if self._finishing:  # a straggler after the sentinel: counted (not the disk's fault)
+            self.late_frames += frames.size
+            return
         level = dbfs(frames)
         self.level_dbfs = level
         if frames.size:
@@ -404,7 +437,22 @@ class _TrackWriter:
                 self._recent_frames -= self._recent.popleft()[1].size
             for cb in self._listeners:
                 self._call(cb, start, block)
-        self.q.put(block)
+        # The room pre-roll arrives all at once in start(): never drop it.
+        limit = max(WRITER_BACKLOG_S, self.replay_s) * SAMPLE_RATE
+        backlog = self._queued_in - self._queued_out
+        if self._dropping:  # hysteresis: one contiguous gap per stall, not a choppy track
+            self._dropping = backlog > max(limit - WRITER_RESUME_BELOW_S * SAMPLE_RATE, limit / 2)
+        elif backlog + block.size > limit:
+            self._dropping = True
+        if self._dropping:
+            self._gap += block.size
+            self.dropped_frames += block.size  # no logging here: the log may be on that disk
+        else:
+            if self._gap:  # silence where audio was dropped keeps the tracks aligned
+                self.q.put_nowait(self._gap)
+                self._gap = 0
+            self._queued_in += block.size
+            self.q.put_nowait(block)
         written = self.frames_written  # an int written by the writer thread: atomic read
         if written >= self._padding:
             self.backlog_max = max(self.backlog_max, start + block.size - written)
@@ -433,8 +481,8 @@ class _TrackWriter:
         with self._tap_lock:
             self.frames_received += frames
         self._padding += frames
-        for i in range(0, frames, SAMPLE_RATE):
-            self.q.put(np.zeros(min(SAMPLE_RATE, frames - i), dtype=np.float32))
+        if frames:
+            self.q.put_nowait(frames)  # an int: no memory held for the zeros
 
     def _run(self) -> None:
         try:
@@ -442,8 +490,23 @@ class _TrackWriter:
                 block = self.q.get()
                 if block is None:
                     break
+                if self.dropped_frames and not self._drop_logged:  # once per track and session
+                    self._drop_logged = True  # finish() logs the total
+                    log.warning(
+                        "%s writer fell %gs behind (disk stalled?): new audio was dropped and "
+                        "is written as silence",
+                        self.track,
+                        WRITER_BACKLOG_S,
+                    )
+                if isinstance(block, int):
+                    for i in range(0, block, SAMPLE_RATE):
+                        n = min(SAMPLE_RATE, block - i)
+                        self._file.write(np.zeros(n, dtype=np.float32))
+                        self.frames_written += n
+                    continue
                 self._file.write(np.clip(block, -1.0, 1.0))
                 self.frames_written += block.size
+                self._queued_out += block.size
         except BaseException as e:  # disk full etc. — drain so capture isn't stuck
             self.error = e
             log.exception("writer %s failed", self.track)
@@ -452,9 +515,40 @@ class _TrackWriter:
         finally:
             self._file.close()
 
-    def finish(self) -> None:
-        self.q.put(None)
-        self.thread.join()
+    def finish(self) -> bool:
+        """Flush and close; False if the writer is still stuck after the timeout. It then
+        finishes on its own (daemon thread) and closes the file itself, so the track is
+        complete once the disk recovers; this session's folder is unique, so a later session
+        never writes to the same file."""
+        if self._finishing:  # called again: only wait
+            self.thread.join(FINISH_TIMEOUT_S)
+            return not self.thread.is_alive()
+        self._finishing = True
+        if self._gap:  # the track keeps its full length (sources are stopped by now)
+            self.q.put_nowait(self._gap)
+            self._gap = 0
+        self.q.put_nowait(None)
+        if self.dropped_frames:
+            log.warning(
+                "%s: %.1fs of audio dropped (disk too slow) and written as silence",
+                self.track,
+                self.dropped_frames / SAMPLE_RATE,
+            )
+        backlog_s = max(0, self._queued_in - self._queued_out) / SAMPLE_RATE
+        timeout = min(
+            FINISH_TIMEOUT_S + backlog_s * FINISH_TIMEOUT_PER_BACKLOG_S, FINISH_TIMEOUT_MAX_S
+        )
+        self.thread.join(timeout)
+        if not self.thread.is_alive():
+            return True
+        self.abandoned = True
+        log.warning(
+            "%s writer still busy after %.1fs (disk stalled?); %s completes in the background",
+            self.track,
+            timeout,
+            self.path.name,
+        )
+        return False
 
 
 class Recorder:
@@ -488,6 +582,7 @@ class Recorder:
         self._last_sound = 0.0
         # Peak |sample| per track of the most recently stopped session (incl. discarded).
         self.last_peaks: dict[Track, float] = {}
+        self.last_dropped: dict[Track, float] = {}  # seconds of audio lost per track
         self._listeners: tuple[FrameListener, ...] = ()
         self._sampler = None  # participants.ParticipantSampler, only for opted-in call sessions
 
@@ -541,6 +636,10 @@ class Recorder:
         """Tracks of the last stopped session that were digital silence the whole time
         (typically a missing microphone / system-audio permission)."""
         return [t for t, p in self.last_peaks.items() if p <= DIGITAL_SILENCE]
+
+    def dropped_tracks(self) -> list[Track]:
+        """Tracks of the last stopped session that lost audio to a stalled disk."""
+        return [t for t, s in self.last_dropped.items() if s > 0]
 
     def levels(self) -> dict[Track, float]:
         return {w.track: w.level_dbfs for w in list(self._writers)}
@@ -713,8 +812,11 @@ class Recorder:
                 w._padding = w.frames_received  # counted once the writer is past the replay
         except Exception:
             log.exception("could not start %s source", track)
-            w.finish()
-            path.unlink(missing_ok=True)
+            if w.finish():  # a writer still stuck has the file open (Windows can't unlink it)
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    log.warning("could not delete the unused %s file", track)
             return None
         session.tracks[track] = TRACK_FILES[track]
         return w
@@ -854,9 +956,23 @@ class Recorder:
             if self._sampler is sampler:  # cleared only now: no second helper can overlap
                 self._sampler = None
 
+    @staticmethod
+    def _finalize_later(directory: Path, stuck: list[_TrackWriter]) -> None:
+        """Mark the session as still being written until its stuck writers close their WAVs,
+        so it isn't transcribed from partial audio (the transcription queue waits for it)."""
+        mark_writing(directory)  # before session.json gets ended_at
+
+        def wait() -> None:
+            for w in stuck:
+                w.thread.join()
+            clear_writing(directory)
+
+        threading.Thread(target=wait, name="writer-finalize", daemon=True).start()
+
     def _stop(self) -> SessionInfo | None:
         with self._op_lock:
             session, writers = self._session, self._writers
+            self.last_peaks, self.last_dropped = {}, {}  # never a previous session's notice
             if session is None:
                 return None
             for w in writers:
@@ -866,33 +982,54 @@ class Recorder:
                     log.exception("stopping %s source failed", w.track)
             for w in writers:
                 w.finish()
+                if w.late_frames:  # a reader outlived its stop timeout: not the disk's fault
+                    log.debug("%s: %d frames arrived after the stop", w.track, w.late_frames)
+            if stuck := [w for w in writers if w.abandoned]:
+                self._finalize_later(session.directory, stuck)
             self._session, self._writers, self._listeners = None, [], ()
             self.last_peaks = {w.track: w.peak for w in writers}
+            self.last_dropped = {w.track: w.dropped_frames / SAMPLE_RATE for w in writers}
             session.ended_at = datetime.now().astimezone()
 
-            longest = max((w.frames_written for w in writers), default=0) / SAMPLE_RATE
-            if longest < self.min_session_s:
+            # A writer still stuck on the disk (abandoned) finishes its whole timeline later.
+            done = [w.frames_received if w.abandoned else w.frames_written for w in writers]
+            longest = max(done, default=0) / SAMPLE_RATE
+            if longest < self.min_session_s and not any(w.abandoned for w in writers):
                 log.info("discarding short session %s (%.1fs)", session.directory, longest)
                 shutil.rmtree(session.directory, ignore_errors=True)
                 return None
             for w in writers:  # drop empty tracks (e.g. a source that never delivered)
-                if w.frames_written == 0:
+                if w.frames_written == 0 and not w.abandoned:
                     w.path.unlink(missing_ok=True)
                     session.tracks.pop(w.track, None)
-            session.update_metrics(
-                "recording",
-                {
-                    "audio_s": round(longest, 1),
-                    # Effective: "all" also when a per-app tap fell back to the global one.
-                    "system_audio_scope": next(
-                        (w.scope or w.source.scope for w in writers if w.track == Track.OTHERS),
-                        None,
-                    ),
-                    "writer_backlog_max_s": {
-                        str(w.track): round(w.backlog_max / SAMPLE_RATE, 3) for w in writers
+            # ended_at reaches disk first, on its own: if the metrics write fails (a full
+            # disk), startup recovery still sees a finished session, and the engine still
+            # gets it back to submit.
+            try:
+                session.save()
+            except Exception:
+                log.exception("saving the end of %s failed", session.directory)
+            try:
+                session.update_metrics(
+                    "recording",
+                    {
+                        "audio_s": round(longest, 1),
+                        # Effective: "all" also when a per-app tap fell back to the global one.
+                        "system_audio_scope": next(
+                            (w.scope or w.source.scope for w in writers if w.track == Track.OTHERS),
+                            None,
+                        ),
+                        # Can exceed WRITER_BACKLOG_S: it includes dropped spans.
+                        "writer_backlog_max_s": {
+                            str(w.track): round(w.backlog_max / SAMPLE_RATE, 3) for w in writers
+                        },
+                        "writer_dropped_s": {  # audio lost to a stalled disk, as silence
+                            str(w.track): round(w.dropped_frames / SAMPLE_RATE, 3) for w in writers
+                        },
                     },
-                },
-            )
-            session.save()
+                )
+                session.save()
+            except Exception:
+                log.exception("saving recording metrics for %s failed", session.directory)
             log.info("recording stopped: %s (%.1fs)", session.directory, longest)
             return session

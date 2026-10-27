@@ -33,6 +33,9 @@ acceptance criteria.
       in chunks of 2,048 rows (`SCAN_CHUNK`). Left: an approximate index only if archives grow
       far past what a linear scan handles quickly (memory use: see `[search]` in
       CONFIGURATION.md).
+- [x] **Semantic search cache**: every query re-read all stored vectors from SQLite (about 150 MB at 100k
+      segments); now repeated queries reuse an in-process, token-invalidated vector cache
+      (capped at 100k segments, ~190 MB; larger archives stream as before).
 - [x] **Room listening** ([#2](https://github.com/Galina-Blokh/rec_and_cc/issues/2)): auto-record conversations near the laptop, also with
       the screen locked: always-on mic VAD, pre-roll buffer, mic-track diarization; opt-in
       (the orange mic indicator stays on). Shipped in #64 (opt-in, off by default); locked-screen
@@ -43,8 +46,8 @@ acceptance criteria.
       (keep the Python core, package it properly, switch engines only past a benchmark gate).
 - [ ] **Summaries, action items, search, export** ([#4](https://github.com/Galina-Blokh/rec_and_cc/issues/4)): local LLM (e.g. Qwen via
       MLX / llama.cpp), SQLite FTS search, DOCX/PDF export. Done: search, summaries (Apple
-      silicon), the meeting notes view and DOCX/PDF export (#75); left: export from the Windows
-      tray, a Windows summary backend.
+      silicon), the meeting notes view and DOCX/PDF export (#75; CLI, macOS menu and Windows
+      tray); left: a Windows summary backend.
 - ~~**Windows for real**~~ ([#5](https://github.com/Galina-Blokh/rec_and_cc/issues/5)): hardware test pass, per-app capture, installer,
       signing. Not planned: closed, no Windows hardware available; the Windows backends stay
       as they are and CI keeps running the fast suite on Windows.

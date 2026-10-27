@@ -67,6 +67,16 @@ def test_retention_labels():
     assert len({p.retention_label(d) for d in RETENTION_CHOICES}) == len(RETENTION_CHOICES)
 
 
+def test_retention_menu_checks_the_current_choice():
+    rows = p.retention_menu(30)
+    assert [d for d, _t, _on in rows] == list(RETENTION_CHOICES)
+    assert [t for d, t, on in rows if on] == ["30 days"]
+    hand_set = p.retention_menu(5)  # set by hand in config.toml: shown, checked, disabled
+    assert hand_set[:-1] == [(d, t, False) for d, t, _on in rows]
+    assert hand_set[-1] == (None, "5 days (from settings)", True)
+    assert len(p.retention_menu(0)) == len(RETENTION_CHOICES)  # offered: no extra row
+
+
 def test_permission_titles():
     assert p.permission_title("microphone", "granted") == "Microphone: ✅ granted"
     assert p.permission_title("microphone", "denied") == "Microphone: ❌ denied"
