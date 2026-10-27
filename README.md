@@ -279,8 +279,15 @@ has access. Access lists need an NTFS drive: on a FAT/exFAT USB stick or some ne
 shares anyone with access to the drive can read the recordings (RecAndCC warns you once per drive), so keep `output_dir` on a
 local NTFS drive.
 `~/Documents` may be synced by iCloud Drive ("Desktop & Documents Folders") on macOS, and
-`Documents` by OneDrive folder backup on Windows; set `output_dir` to a folder outside it if
-recordings must stay on this computer only.
+`Documents` by OneDrive folder backup on Windows. RecAndCC checks `output_dir` locally (no network)
+while it runs: if it lies in iCloud Drive (including "Desktop & Documents"),
+`~/Library/CloudStorage` (OneDrive, Dropbox, Google Drive, Box), `~/Dropbox`, `~/Google Drive`,
+`~/OneDrive*`, `~/Box`, `~/Box Sync` (case-insensitive, also through symlinks),
+or on Windows a OneDrive folder (including `Documents` / `Desktop` moved by OneDrive folder
+backup) or `%USERPROFILE%\Dropbox`, also through symlinks and junctions, it logs a warning and shows a
+one-time notification, and `recandcc config` prints the same warning. Other sync tools (for
+example a Google Drive drive letter on Windows) are not detected. Set `output_dir` to a
+local folder (for example `~/Transcribes`) if recordings must stay on this device only.
 
 ### Retention
 
