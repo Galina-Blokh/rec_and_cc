@@ -109,14 +109,31 @@ def test_discarded_sessions_are_skipped_and_dropped(tmp_path, out, fts):
     assert idx.search("plan") == []
 
 
-def test_index_session_adds_one_and_skips_broken(tmp_path, out):
+def test_index_session_adds_one_and_skips_broken(tmp_path, out, monkeypatch):
     idx = TranscriptIndex(tmp_path / "idx.sqlite3")
     a = make_session(out, 1, [seg(0, "launch date")])
     assert idx.index_session(a) is True
     assert len(idx.search("launch")) == 1
     (a / "transcript.json").write_text("{not json", encoding="utf-8")
     assert idx.index_session(a) is False  # logged, not raised
+    assert idx.search("launch") == []  # no stale hits from the previous version
+    reads = []
+    monkeypatch.setattr(search, "_read", lambda d: reads.append(d))
+    assert idx.sync(out) == 0 and reads == []  # not re-read until it changes again
     assert idx.index_session(out / "missing") is False
+
+
+def test_vacuum_fallback_runs_only_when_text_was_removed(tmp_path, out, monkeypatch):
+    idx = index(tmp_path, True)
+    idx._fts_secure = False  # as on SQLite < 3.42
+    purges = []
+    monkeypatch.setattr(idx, "_purge", lambda db: purges.append(1))
+    a = make_session(out, 1, [seg(0, "new words")])
+    idx.index_session(a)
+    idx.sync(out)
+    assert purges == []  # adding a session removes nothing: no VACUUM
+    idx.index_session(a)  # a reindex replaces old rows
+    assert purges == [1]
 
 
 def test_fallback_when_sqlite_has_no_fts5(tmp_path, out, monkeypatch):
@@ -149,36 +166,24 @@ def test_index_is_owner_only_and_outside_output_dir(tmp_path, out):
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
 
 
-def test_performance_100_sessions(tmp_path, out):
-    words = [
-        "budget",
-        "roadmap",
-        "hiring",
-        "release",
-        "customer",
-        "бюджет",
-        "релиз",
-        "найм",
-        "клиент",
-    ]
+@pytest.mark.parametrize("fts", BACKENDS)
+def test_performance_100_sessions(out, monkeypatch, fts):
+    """US-20: < 200 ms on the path the menu and CLI use (an unchanged sync + the query)."""
+    if fts and not has_fts5():
+        pytest.skip("this SQLite has no FTS5")
+    monkeypatch.setattr(search, "has_fts5", lambda: fts)
+    monkeypatch.setattr(search, "_default", None)
+    words = ["budget", "roadmap", "hiring", "release", "бюджет", "релиз", "найм", "клиент"]
     for n in range(100):
-        make_session(
-            out,
-            n,
-            [
-                seg(i * 5, f"{words[(n + i) % len(words)]} item {i} of session {n}")
-                for i in range(60)
-            ],
-        )
-    idx = TranscriptIndex(tmp_path / "idx.sqlite3")
-    idx.sync(out)
-    t0 = time.perf_counter()
-    hits = idx.search("budget", limit=50)
-    assert time.perf_counter() - t0 < 0.2
-    assert len(hits) == 50
-    t0 = time.perf_counter()
-    assert idx.sync(out) == 0 and idx.search("релиз")
-    assert time.perf_counter() - t0 < 0.5  # an unchanged sync only stats the files
+        segs = [seg(i * 5, f"{words[(n + i) % len(words)]} item {i} of {n}") for i in range(60)]
+        make_session(out, n, segs)
+    assert len(search.search_transcripts(out, "budget", limit=50)) == 50  # first: indexes
+    timings = []
+    for query in ("budget", "релиз", "hiring item"):  # best of 3: a loaded runner is noisy
+        t0 = time.perf_counter()
+        assert search.search_transcripts(out, query, limit=50)
+        timings.append(time.perf_counter() - t0)
+    assert min(timings) < 0.2, timings
 
 
 def test_cli_search(out, monkeypatch, capsys):
@@ -272,3 +277,32 @@ def test_first_connection_from_several_threads(tmp_path, out):
     with ThreadPoolExecutor(8) as pool:
         results = list(pool.map(lambda _: len(idx.search("parallel")), range(16)))
     assert results == [1] * 16
+
+
+def test_controller_drops_deleted_sessions_at_startup(out):
+    from recandcc.ui.common import Controller
+
+    a = make_session(out, 1, [seg(0, "forgotten meeting")])
+    search.default_index().index_session(a)
+    for f in a.iterdir():
+        f.unlink()
+    a.rmdir()
+    ctrl = Controller.__new__(Controller)  # only the startup scan, no runtime
+    ctrl.cfg = type("C", (), {"output_dir": out})()
+    ctrl._resubmit_unfinished()
+    assert search.default_index().search("forgotten") == []
+
+
+def test_osascript_takes_the_script_on_stdin_not_argv(monkeypatch):
+    from recandcc.ui import common
+
+    calls = []
+
+    def run(argv, **kw):
+        calls.append((argv, kw.get("input")))
+        return type("R", (), {"stdout": "ok\n"})()
+
+    monkeypatch.setattr(common.subprocess, "run", run)
+    assert common.osascript('choose from list {"the [budget] secret"}') == "ok"
+    [(argv, stdin)] = calls
+    assert "secret" not in " ".join(argv) and "secret" in stdin

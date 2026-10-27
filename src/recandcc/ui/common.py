@@ -206,10 +206,11 @@ def grant_permission(kind: str) -> str | None:
 
 
 def osascript(script: str, timeout: float | None = None) -> str:
-    """Run AppleScript, return stdout ('' on error/cancel)."""
+    """Run AppleScript, return stdout ('' on error/cancel). The script goes in on stdin, not
+    argv, so text in it (search results) isn't visible in the process list."""
     try:
         r = subprocess.run(
-            ["osascript", "-e", script], capture_output=True, text=True, timeout=timeout
+            ["osascript", "-"], input=script, capture_output=True, text=True, timeout=timeout
         )
         return r.stdout.strip()
     except Exception:
@@ -442,10 +443,13 @@ class Controller:
             self.tq.submit(session, finalize=lambda: live.finish(session))
 
     def _retention_loop(self) -> None:
-        """Delete expired audio at startup and then hourly (audio_retention_days)."""
+        """Delete expired audio at startup and then hourly (audio_retention_days); sync the
+        search index hourly too (half an hour in, clear of the startup sync)."""
         while not getattr(self, "_shut", False):
             self.purge_audio_now()
-            for _ in range(3600):  # sleep 1 h, but notice shutdown promptly
+            for i in range(3600):  # sleep 1 h, but notice shutdown promptly
+                if i == 1800:
+                    self._sync_index()
                 if getattr(self, "_shut", False):
                     return
                 time.sleep(1)
@@ -467,6 +471,17 @@ class Controller:
             purge_discarded_sessions(self.cfg.output_dir)
         except Exception:
             log.exception("deleting discarded sessions failed")
+        self._sync_index()
+
+    def _sync_index(self) -> None:
+        """Drop deleted and discarded sessions from the search index (at start, then hourly),
+        so their text doesn't wait for the next search to leave it."""
+        try:
+            from ..search import default_index
+
+            default_index().sync(self.cfg.output_dir)
+        except Exception:  # noqa: BLE001 - search is optional
+            log.exception("could not sync the search index")
 
     # --- periodic refresh (permissions, recent transcripts, config file)
     def refresh_async(self, force: bool = False) -> None:

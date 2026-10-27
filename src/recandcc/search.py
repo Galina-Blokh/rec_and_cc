@@ -148,15 +148,17 @@ class TranscriptIndex:
         discarded. True if it is indexed now."""
         d = Path(directory)
         f = d / TRANSCRIPT
+        parsed = None
+        if not (d / SessionInfo.DISCARD_MARKER).exists() and f.exists():
+            parsed = (_stamp(f), _read(d))  # file I/O outside the write lock
         with self._lock, contextlib.closing(self._connect()) as db:
-            if (d / SessionInfo.DISCARD_MARKER).exists() or not f.exists():
-                self._drop(db, str(d))
-                ok = False
-            else:
-                ok = self._index(db, d, _stamp(f))
+            removed = self._drop(db, str(d))
+            if parsed is not None:
+                self._write(db, d, *parsed)
             db.commit()
-            self._purge(db)
-            return ok
+            if removed:
+                self._purge(db)
+        return parsed is not None and parsed[1] is not None
 
     def sync(self, output_dir: Path) -> int:
         """Bring the index in line with <output_dir>/<day>/<session>/transcript.json;
@@ -168,57 +170,51 @@ class TranscriptIndex:
                     found[str(f.parent)] = _stamp(f)
             except OSError:
                 continue
-        changed = dropped = 0
-        with self._lock, contextlib.closing(self._connect()) as db:
+        with contextlib.closing(self._connect()) as db:
             known = {
                 folder: (stamp, fts)
                 for folder, stamp, fts in db.execute("SELECT folder, stamp, fts FROM sessions")
             }
+        todo = [f for f, stamp in found.items() if known.get(f) != (stamp, int(self.fts))]
+        # Read and parse outside the write lock, so a big first sync doesn't block indexing.
+        parsed = {f: _read(Path(f)) for f in todo}
+        with self._lock, contextlib.closing(self._connect()) as db:
+            removed = 0
             for folder in known.keys() - found.keys():
-                self._drop(db, folder)
-                dropped += 1
-            for folder, stamp in found.items():
-                if known.get(folder) != (stamp, int(self.fts)):
-                    changed += self._index(db, Path(folder), stamp)
+                removed += self._drop(db, folder)
+            for folder in todo:
+                removed += self._drop(db, folder)
+                self._write(db, Path(folder), found[folder], parsed[folder])
             db.commit()
-            if changed or dropped:
+            if removed:
                 self._purge(db)
+        changed = sum(p is not None for p in parsed.values())
         log.info("search index synced: %d sessions, %d updated", len(found), changed)
         return changed
 
-    def _drop(self, db: sqlite3.Connection, folder: str) -> None:
+    def _drop(self, db: sqlite3.Connection, folder: str) -> bool:
+        """Remove a session; True if it had segments (so there is text to purge)."""
         db.execute("DELETE FROM sessions WHERE folder = ?", (folder,))
         table = self._table  # a constant, never user input
-        db.execute(f"DELETE FROM {table} WHERE folder = ?", (folder,))  # noqa: S608
+        cur = db.execute(f"DELETE FROM {table} WHERE folder = ?", (folder,))  # noqa: S608
+        return cur.rowcount > 0
 
-    def _index(self, db: sqlite3.Connection, d: Path, stamp: str) -> bool:
+    def _write(self, db: sqlite3.Connection, d: Path, stamp: str, data: dict | None) -> None:
+        """Insert a parsed transcript (``_read``). An unreadable one (None) is recorded with
+        its stamp and no segments: no stale hits, and no re-read until it changes."""
         folder = str(d)
-        try:
-            data = json.loads((d / TRANSCRIPT).read_text(encoding="utf-8"))
-            segs = [
-                (folder, float(s["start"]), str(s["speaker"]), str(s["language"]), str(s["text"]))
-                for s in data.get("segments", [])
-            ]
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
-            log.warning("search: cannot index %s: %s", d, type(e).__name__)
-            return False
-        self._drop(db, folder)
+        data = data or {"segments": []}
         db.execute(
             "INSERT INTO sessions VALUES (?, ?, ?, ?, ?)",
             (folder, data.get("session_id", d.name), data.get("started_at", ""), stamp, self.fts),
         )
+        segs = data["segments"]
         if self.fts:
-            rows = []
-            for s in segs:
-                norm = _yo(s[4])
-                rows.append((norm, s[4] if norm != s[4] else None, *s[:4]))
+            rows = [(_yo(t), t if _yo(t) != t else None, folder, *rest) for t, *rest in segs]
             db.executemany("INSERT INTO seg_fts VALUES (?, ?, ?, ?, ?, ?)", rows)
         else:
-            db.executemany(
-                "INSERT INTO seg_plain VALUES (?, ?, ?, ?, ?, ?)",
-                [(*s, _fold(s[4])) for s in segs],
-            )
-        return True
+            rows = [(folder, *rest, t, _fold(t)) for t, *rest in segs]
+            db.executemany("INSERT INTO seg_plain VALUES (?, ?, ?, ?, ?, ?)", rows)
 
     # ------------------------------------------------------------------ queries
     def search(self, query: str, limit: int = 20) -> list[Hit]:
@@ -246,6 +242,25 @@ class TranscriptIndex:
                 rows = db.execute(sql, params).fetchall()
                 rows = [(*r[:6], _snippet(_mark(r[6], folded[0]))) for r in rows]
         return [Hit(Path(r[0]), r[1], r[2], float(r[3]), r[4], r[5], r[6]) for r in rows]
+
+
+def _read(d: Path) -> dict | None:
+    """A session's transcript.json as {session_id, started_at, segments: [(text, start,
+    speaker, language)]}, or None (logged) if it can't be read."""
+    try:
+        data = json.loads((d / TRANSCRIPT).read_text(encoding="utf-8"))
+        segs = [
+            (str(s["text"]), float(s["start"]), str(s["speaker"]), str(s["language"]))
+            for s in data.get("segments", [])
+        ]
+        return {
+            "session_id": str(data.get("session_id", d.name)),
+            "started_at": str(data.get("started_at", "")),
+            "segments": segs,
+        }
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        log.warning("search: cannot index %s: %s", d, type(e).__name__)
+        return None
 
 
 def _stamp(f: Path) -> str:

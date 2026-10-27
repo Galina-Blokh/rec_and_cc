@@ -408,7 +408,7 @@ class MacApp(rumps.App):
             self._notify("Search failed", str(hits))
             return
         if not hits:
-            self._notify("Search", f"No matches for “{query}”")
+            self._notify("Search", "No matches")  # not the query: _notify may log it
             return
         labels = [f"{i}. {search_hit_label(h)}"[:200] for i, h in enumerate(hits, 1)]
         script = (
@@ -420,7 +420,11 @@ class MacApp(rumps.App):
             number = osascript(script).partition(".")[0]
             if number.isdigit() and 0 < int(number) <= len(hits):
                 hit = hits[int(number) - 1]
-                open_path(hit.transcript if hit.transcript.exists() else hit.folder)
+                try:
+                    found = hit.transcript.exists()
+                except OSError:  # e.g. an unreachable volume
+                    found = False
+                open_path(hit.transcript if found else hit.folder)
 
         threading.Thread(target=run, daemon=True, name="search-results").start()
 
