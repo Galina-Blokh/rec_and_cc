@@ -1,4 +1,7 @@
-"""Unit tests for recandcc.transcribe (no Whisper model needed)."""
+"""Unit tests for recandcc.transcribe (no Whisper model needed).
+
+Stories: US-08, US-09, US-10, US-13.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,7 @@
-"""Models load from disk without contacting Hugging Face once downloaded."""
+"""Models load from disk without contacting Hugging Face once downloaded.
+
+Stories: US-14.
+"""
 
 import sys
 import types
