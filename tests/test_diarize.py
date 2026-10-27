@@ -558,6 +558,26 @@ def test_retention_waits_for_a_slow_diarization(tmp_path):
     assert not (d / "others.wav").exists()
 
 
+def test_labels_final_even_if_the_audio_cannot_be_deleted(tmp_path, monkeypatch):
+    """A WAV still open elsewhere (Windows: PermissionError) must not leave the marker
+    behind or keep after-labels callbacks waiting."""
+    s = _session_with_audio(tmp_path)
+    t = Transcriber(TranscriptionConfig(model="fake", keep_audio=False))
+    t.diarize_wait_s = 0.01
+    pending: Future = Future()
+    t.write_final(s, SEGS, 15.0, pending)
+    done = []
+    t.after_labels(s.directory, lambda: done.append(1))
+
+    def locked(session):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(t, "_drop_audio", locked)
+    pending.set_result(TURNS)
+    assert not (tmp_path / SessionInfo.LABELS_PENDING_MARKER).exists()
+    assert done == [1]
+
+
 def test_after_labels_waits_for_a_slow_diarization(tmp_path):
     s = _session_with_audio(tmp_path)
     t = Transcriber(TranscriptionConfig(model="fake"))

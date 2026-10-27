@@ -954,9 +954,14 @@ class Transcriber:
         except Exception:  # noqa: BLE001 - runs on the diarizer thread; must not raise
             log.exception("session %s: could not add speaker labels", session.id)
         finally:
-            if Path(session.directory).exists():
-                self._drop_audio(session)
-            _set_labels_pending(session.directory, False)
+            _set_labels_pending(session.directory, False)  # first: _drop_audio can raise
+            try:
+                if Path(session.directory).exists():
+                    self._drop_audio(session)
+            except Exception as e:  # noqa: BLE001 - e.g. a WAV still open on Windows
+                log.warning(
+                    "session %s: could not delete the audio (%s)", session.id, type(e).__name__
+                )
             self._labels_final(session)
 
 

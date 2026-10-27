@@ -285,14 +285,16 @@ class Engine:
         """Stop polling, finish any recording (submitting it for transcription)."""
         self._stop_evt.set()
         self._wake.set()
+        racing = False
         if self._thread is not None:
             self._thread.join(timeout)
+            racing = self._thread.is_alive()  # it may still stop a start that raced us
             self._thread = None
         with self._lock:
             rec = self._rec
             self._rec, self._prompt = None, None
         if rec is not None:
-            self._do_stop()
+            self._do_stop(racing=racing)
         if self.room is not None:
             self.room.close()
         try:
@@ -638,6 +640,8 @@ class Engine:
             self._do_stop()
         if start_req is not None:
             self._do_start(*start_req)
+            if self._stop_evt.is_set():
+                return  # shutting down: that session is stopped, so no prompt, no room mic
         if upgrade_req is not None:
             self._do_upgrade(*upgrade_req)
         if prompt_evt is not None and self.on_prompt:
@@ -805,7 +809,7 @@ class Engine:
             # shutdown() may have stopped waiting for us while start() ran: nobody else will
             # stop this session, so finish it now as shutdown would (kept and submitted).
             log.info("shutting down: stopping the recording that just started")
-            self._do_stop()
+            self._do_stop(racing=True)
             return
         with self._lock:
             if self._rec is not None:
@@ -877,7 +881,10 @@ class Engine:
                 f"Some files in {directory} are in use; they will be deleted at the next start",
             )
 
-    def _do_stop(self) -> None:
+    def _do_stop(self, *, racing: bool = False) -> None:
+        """``racing``: shutdown() and the engine thread may both stop the same session (its
+        start raced shutdown). The recorder hands the session to one of them; the other gets
+        None and must not report it as a failed stop or check silence a second time."""
         with self._lock:
             self._rec = None
         try:
@@ -886,6 +893,8 @@ class Engine:
             log.exception("could not stop recording cleanly")
             self._session_end(None, False)
             return
+        if session is None and racing:
+            return  # the other stop ended it (or will): it reports the session
         self._check_silent_tracks()
         self._session_end(session, session is not None)
         if session is None:
