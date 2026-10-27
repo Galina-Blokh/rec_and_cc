@@ -5,10 +5,11 @@ import threading
 import time
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from recandcc.config import Config, DetectionConfig
-from recandcc.engine import IDLE, RECORDING, Engine
+from recandcc.engine import IDLE, RECORDING, ROOM_RETRY_S, Engine
 from recandcc.models import AppTarget, AudioProcess, Mode, SessionInfo, Track, TriggerKind
 
 
@@ -969,6 +970,7 @@ class FakeRoom:
     def __init__(self):
         self.running = self.speech = self.fail = False
         self.quiet = 0.0  # seconds_since_speech()
+        self.stall = 0.0  # seconds_since_frame()
         self.opens = self.closes = self.resets = 0
 
     def start(self):
@@ -993,6 +995,9 @@ class FakeRoom:
 
     def seconds_since_speech(self):
         return self.quiet
+
+    def seconds_since_frame(self):
+        return self.stall
 
     def session_source(self):  # only its identity is checked: the fake recorder opens nothing
         raise AssertionError("not opened by the fake recorder")
@@ -1136,6 +1141,21 @@ def test_a_notification_chime_neither_stops_nor_blocks_room_listening():
     assert len(h.rec.starts) == 2 and h.room.resets == 0
 
 
+def test_a_call_app_ding_does_not_turn_a_room_session_into_a_call():
+    ding = AudioProcess(77, "com.tinyspeck.slackmacgap", "Slack", False, True)
+    h = _room_harness()
+    _start_room_session(h)
+    h.mon.procs = [ding]  # Electron keeps the output stream of a notification open a while
+    h.run(5)
+    h.mon.procs = []
+    h.run(25)  # people keep talking
+    assert h.rec.upgrades == [] and h.eng.state.kind == TriggerKind.ROOM
+    assert h.status == RECORDING and h.rec.stops == 0 and len(h.rec.starts) == 1
+    h.mon.procs = [AudioProcess(77, "com.tinyspeck.slackmacgap", "Slack", True, True)]
+    h.run(4)  # a real Slack huddle uses the mic: follow it
+    assert h.rec.upgrades == ["Slack"] and h.eng.state.kind == TriggerKind.CALL
+
+
 def test_discarding_a_room_prompt_discards_the_session_after_a_call_upgrade(tmp_path):
     h = _room_harness(Mode.ASK, app_modes={"us.zoom": Mode.AUTO})
     h.run(1)
@@ -1203,3 +1223,65 @@ def test_room_mic_failure_backs_off_and_shutdown_closes_it():
     assert h.room.opens == 1 and h.room.running
     h.eng.shutdown()
     assert not h.room.running
+
+
+class _StallingSource:
+    """Delivers one block when opened; the test pushes more while the device is healthy."""
+
+    def __init__(self):
+        self.cb = None
+
+    def start(self, on_frames):
+        self.cb = on_frames
+        on_frames(np.zeros(1600, dtype=np.float32))
+
+    def stop(self):
+        self.cb = None
+
+
+def _real_room_harness():
+    from recandcc.detect.room import RoomMonitor
+
+    h = _room_harness()
+    sources: list[_StallingSource] = []
+
+    def factory():
+        sources.append(_StallingSource())
+        return sources[-1]
+
+    silent = lambda audio: np.zeros(len(audio) // 512, dtype=np.float32)  # noqa: E731
+    h.room = h.eng.room = RoomMonitor(h.cfg.detection, factory, vad=silent, clock=h.clock)
+    return h, sources
+
+
+def test_an_idle_room_mic_that_stalls_is_reopened_and_backs_off():
+    h, sources = _real_room_harness()
+    try:
+        h.run(12)  # the device went away after one block: closed and reopened at once
+        assert len(sources) == 2 and sources[0].cb is None and h.room.running
+        h.run(3600)  # the new one stalls too: retry with back-off, not every few seconds
+        assert 10 < len(sources) <= 3600 / ROOM_RETRY_S + 2
+        assert h.status == IDLE
+    finally:
+        h.eng.shutdown()
+
+
+def test_a_healthy_room_mic_is_not_reopened_and_recovers_after_a_stall():
+    h, sources = _real_room_harness()
+    try:
+        h.eng.tick()  # opens the mic
+
+        def run_healthy(seconds):
+            for _ in range(seconds):
+                sources[-1].cb(np.zeros(1600, dtype=np.float32))
+                h.eng.tick()
+                h.clock.t += 1
+
+        run_healthy(600)
+        assert len(sources) == 1 and h.room.running
+        h.run(12)  # stalls once (AirPods disconnected): reopened at once
+        run_healthy(600)  # the new device works
+        h.run(12)  # a later stall reopens at once again: the back-off was reset
+        assert len(sources) == 3 and h.room.running
+    finally:
+        h.eng.shutdown()

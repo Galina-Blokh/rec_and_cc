@@ -56,6 +56,9 @@ OWN_AUDIO = ("recandcc", "rcc-audiotap")  # our own mic use (the room monitor) n
 # a room session mid-conversation.
 SYSTEM_SOUNDS = ("com.apple.systemsound", "com.apple.notificationcenter", "coreaudiod")
 ROOM_RETRY_S = 60.0  # wait this long before reopening a room-listening mic that failed
+# An idle room mic that delivers no frames this long has stalled (the device went away, e.g.
+# AirPods disconnected): close it and reopen. A reopened mic that stalls again backs off.
+ROOM_STALL_S = 10.0
 
 
 def _run_daemon(fn: Callable[[], None]) -> None:
@@ -240,6 +243,8 @@ class Engine:
         self.room = room_monitor
         self._room_retry_at = float("-inf")
         self._room_mic_busy = self._room_apps_busy = False  # engine thread only
+        self._room_stalled = False  # the room mic was last closed for a stall (engine thread)
+        self._room_opened_at = float("-inf")
         self._room_blockers: list[str] = []
         self._room_prev_busy = False
 
@@ -554,6 +559,10 @@ class Engine:
                 for a in apps.values():
                     if a.kind != TriggerKind.CALL:
                         continue
+                    # Only a call app that uses the mic turns a room session into a call:
+                    # a Slack/Teams ding keeps an output stream open for a few seconds.
+                    if r.kind == TriggerKind.ROOM and not any(p.input_active for p in a.procs):
+                        continue
                     if a.key != r.key and (
                         a.key in self._suppressed
                         or now - self._first_seen[a.key] < det.min_active_s
@@ -659,8 +668,19 @@ class Engine:
             # A room session's mic track is the monitor's stream: keep it open until it ends.
             idle = r is None
             want = self._room_wanted() and not self._room_mic_busy if idle else r.room_mic
+        if want and idle and room.running:
+            if room.seconds_since_frame() >= ROOM_STALL_S:
+                log.warning("room listening: the microphone stopped delivering audio")
+                room.close_mic()
+                if self._room_stalled:  # stalled again right after a reopen: back off
+                    self._room_retry_at = now + ROOM_RETRY_S
+                self._room_stalled = True
+            elif now - self._room_opened_at >= ROOM_STALL_S:
+                self._room_stalled = False  # it has delivered frames since it opened
         if want and not room.running and now >= self._room_retry_at:
-            if not room.start():
+            if room.start():
+                self._room_opened_at = now
+            else:
                 self._room_retry_at = now + ROOM_RETRY_S
         elif not want and room.running:
             room.close_mic()

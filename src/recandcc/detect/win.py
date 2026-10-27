@@ -15,7 +15,8 @@ opens/closes the microphone::
 
 So ``LastUsedTimeStop == 0 and LastUsedTimeStart != 0`` means "mic in use right now".
 Caveats: browsers report as the browser exe (good enough for us), stale entries can remain
-0 after a crash, and our own python.exe shows up while we record (filtered out below).
+0 after a crash, and our own python.exe shows up while we record (filtered out below; under
+a venv that is the base interpreter the venv launcher starts).
 
 COM must be initialised on each thread that calls into pycaw; we do it lazily per thread.
 """
@@ -44,7 +45,12 @@ _STATE_ACTIVE = 1
 class WinActivityMonitor(ActivityMonitor):
     def __init__(self) -> None:
         self._tls = threading.local()
-        self._own_exe = os.path.normcase(os.path.abspath(sys.executable))
+        # A venv's python.exe is a launcher: the base interpreter it starts as a child is what
+        # opens the mic, so the consent store may list either path. ntpath, not os.path: the
+        # registry holds Windows paths (and the tests run on every OS).
+        exes = (sys.executable, getattr(sys, "_base_executable", None) or sys.executable)
+        self._own_exes = {ntpath.normcase(ntpath.abspath(e)) for e in exes if e}
+        self._own_pids = {os.getpid(), os.getppid()}  # ourselves and that launcher
 
     def _ensure_com(self) -> None:
         if getattr(self._tls, "com", False):
@@ -134,6 +140,8 @@ class WinActivityMonitor(ActivityMonitor):
             # ad_value=None: protected processes yield None, not an AccessDenied instance
             for p in psutil.process_iter(["name"], ad_value=None):
                 name = p.info.get("name")
+                if p.pid in self._own_pids:  # another python.exe on the mic is not us
+                    continue
                 if isinstance(name, str) and name.lower() == exe_lower:
                     return p.pid
         except Exception:
@@ -153,7 +161,7 @@ class WinActivityMonitor(ActivityMonitor):
             log.exception("reading microphone consent store failed")
             mic = []
         for exe, full in mic:
-            if os.path.normcase(full) == self._own_exe:
+            if ntpath.normcase(full) in self._own_exes:
                 continue
             existing = procs.get(exe)
             if existing:

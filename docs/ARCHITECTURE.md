@@ -190,12 +190,14 @@ it. `started_at` is moved back by the replayed pre-roll. A room session records
 `max(room_preroll_s, room_window_s) + 5` s for listeners on room sessions, so live
 transcription, which attaches after `recorder.start()`, still gets the whole pre-roll. The `@` keeps
 `app_modes["@room"]` ("Always" on a room prompt) out of the substring matching of real apps.
-A call that starts during a room session upgrades it like a media session
-(`recorder.upgrade_to_call`; the mic is already there) and from then on the call's
+A call that starts during a room session (a call app that uses the mic; a Slack or Teams
+notification only plays) upgrades it like a media session (`recorder.upgrade_to_call`; the mic is already there) and from then on the call's
 inactivity rule applies; the monitor stays open because it is that session's mic. The
 pseudo-app's "last seen" is refreshed while the room talks or a room session records, so a
 session the user stopped or discarded stays suppressed until the room has been quiet for
-`stop_after_inactive_s`. If the mic can't be opened, the engine retries after 60 s. The menu
+`stop_after_inactive_s`. If the mic can't be opened, the engine retries after 60 s. An idle
+room mic that delivers no frames for 10 s (the device went away) is closed and reopened at
+once; if the new one stalls too, it retries after 60 s. The menu
 toggle goes through `Controller.set_room_listening`, which explains the always-on mic
 indicator, battery and consent each time it is turned on; the same notice appears at every
 start with room listening on and when a hand edit of `config.toml` turns it on.

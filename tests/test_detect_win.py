@@ -6,6 +6,7 @@ Stories: US-01, US-17, US-18.
 from __future__ import annotations
 
 import collections
+import ntpath
 import os
 import sys
 import threading
@@ -139,7 +140,7 @@ def fakes(monkeypatch):
 @pytest.fixture
 def mon():
     m = WinActivityMonitor()
-    m._own_exe = os.path.normcase(OWN_EXE)  # sys.executable is a POSIX path on macOS CI
+    m._own_exes = {ntpath.normcase(OWN_EXE)}  # sys.executable is a POSIX path on macOS CI
     return m
 
 
@@ -282,3 +283,30 @@ def test_close_uninit_error_is_swallowed(fakes, mon):
     mon.close()
     mon.snapshot()
     assert fakes.comtypes.inits == 2  # state was reset despite the error
+
+
+# ------------------------------------------------------------------ our own interpreter
+def test_venv_base_interpreter_counts_as_our_own_mic_use(fakes, monkeypatch):
+    # A uv venv's python.exe is a launcher that runs the base interpreter as a child: that
+    # child opens the mic, so the consent store records the base path, not sys.executable.
+    venv, base = r"C:\proj\.venv\Scripts\python.exe", r"C:\Python312\python.exe"
+    monkeypatch.setattr(sys, "executable", venv)
+    monkeypatch.setattr(sys, "_base_executable", base, raising=False)
+    m = WinActivityMonitor()
+    fakes.winreg.tree = mic_tree(
+        {}, {"C:#PYTHON312#python.exe": IN_USE, venv.replace("\\", "#"): IN_USE}
+    )
+    assert m.snapshot() == []
+
+
+def test_another_python_on_the_mic_never_gets_our_pid(fakes, monkeypatch):
+    monkeypatch.setattr(sys, "executable", OWN_EXE)
+    monkeypatch.setattr(sys, "_base_executable", r"C:\Python312\base\python.exe", raising=False)
+    ns = types.SimpleNamespace
+    fakes.procs = [
+        ns(pid=os.getpid(), info={"name": "python.exe"}),  # ourselves
+        ns(pid=os.getppid(), info={"name": "python.exe"}),  # our venv launcher
+        ns(pid=4242, info={"name": "python.exe"}),
+    ]
+    fakes.winreg.tree = mic_tree({}, {r"C:#Tools#python.exe": IN_USE})
+    assert [p.pid for p in WinActivityMonitor().snapshot()] == [4242]

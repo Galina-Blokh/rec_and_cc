@@ -250,6 +250,11 @@ class RoomMonitor:
             stall = self.clock() - self._last_frame_clock - STALL_GRACE_S
         return audio_s + max(0.0, stall)
 
+    def seconds_since_frame(self) -> float:
+        """Wall-clock seconds since the mic last delivered frames (or since it opened)."""
+        with self._lock:
+            return self.clock() - self._last_frame_clock
+
     def session_source(self) -> AudioSource:
         """An ``AudioSource`` for the room session's mic track: the pre-roll (last
         ``max(room_preroll_s, room_window_s)`` seconds), then the live frames. When it is
