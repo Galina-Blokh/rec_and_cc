@@ -352,6 +352,11 @@ def test_main_wires_config_and_writes_scores_only(tmp_path, monkeypatch, capsys)
     printed = capsys.readouterr().out
     assert "live all: p50 0.75 s, p90 0.95 s, max 1.0 s (2 segments)" in printed
     assert "live c: p50 0.75 s" in printed
+    monkeypatch.setattr(diarize, "model_path", lambda *a, **k: None)  # model not on disk
+    with pytest.raises(SystemExit):
+        ev.main([str(tmp_path), "--diarize-overlap", "--json", str(tmp_path / "o.json")])
+    assert "segmentation model is not on disk" in capsys.readouterr().err
+    monkeypatch.setattr(diarize, "model_path", lambda *a, **k: tmp_path)
     assert ev.main([str(tmp_path), "--diarize-overlap", "--json", str(tmp_path / "o.json")]) == 0
     assert seen["segmentation"] is True
     assert "да" not in out.read_text(encoding="utf-8") + printed  # no text

@@ -608,6 +608,15 @@ def main(argv: list[str] | None = None) -> int:
         cfg.backend, cfg.device = "mlx", "auto"
     elif args.backend == "cpu":
         cfg.backend, cfg.device = "faster-whisper", "cpu"
+    if args.diarize_overlap and not args.no_diarize:
+        from recandcc.transcribe.diarize import SEGMENTATION_MODEL, model_path
+
+        if (
+            model_path(SEGMENTATION_MODEL, download=False) is None
+        ):  # never download, never fall back
+            p.error(
+                "--diarize-overlap: the segmentation model is not on disk (nothing is downloaded)"
+            )
     transcriber = Transcriber(cfg)
     diarizer = None if args.no_diarize else Diarizer(segmentation=args.diarize_overlap)
     try:
