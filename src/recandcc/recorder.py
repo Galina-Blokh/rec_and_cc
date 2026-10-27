@@ -321,6 +321,8 @@ REPLAY_SECONDS = 10.0
 WRITER_BACKLOG_S = 120.0  # 120 s of float32 mono 16 kHz = ~7.7 MB per track
 # finish() waits this long plus a share of the remaining backlog, capped, then lets the writer
 # finish in the background so a stalled disk never freezes the engine thread.
+# Once dropping, keep dropping until the backlog is this far below the bound (at most half).
+WRITER_RESUME_BELOW_S = 10.0
 FINISH_TIMEOUT_S = 5.0
 FINISH_TIMEOUT_PER_BACKLOG_S = 0.1  # extra wait per second of audio still queued
 FINISH_TIMEOUT_MAX_S = 15.0
@@ -375,6 +377,8 @@ class _TrackWriter:
         self.dropped_frames = 0  # audio lost to a full backlog, written as silence instead
         self.abandoned = False  # finish() timed out: the writer completes in the background
         self._finishing = False  # finish() sent the sentinel
+        self._dropping = False  # dropping until the backlog falls to the low-water mark
+        self._drop_logged = False  # the first drop is logged by the writer, not capture
         self.frames_received = 0  # updated on the capture thread; ahead of frames_written
         self.backlog_max = 0  # most samples ever waiting for the writer (disk falling behind)
         self._padding = 0  # leading zeros (mid-session join): not counted as backlog
@@ -393,6 +397,9 @@ class _TrackWriter:
 
     def on_frames(self, frames: np.ndarray) -> None:  # capture thread: keep it cheap
         frames = np.asarray(frames, dtype=np.float32).reshape(-1)
+        if self._finishing:  # a straggler after the sentinel: counted, never silently lost
+            self.dropped_frames += frames.size
+            return
         level = dbfs(frames)
         self.level_dbfs = level
         if frames.size:
@@ -410,8 +417,14 @@ class _TrackWriter:
                 self._call(cb, start, block)
         # The room pre-roll arrives all at once in start(): never drop it.
         limit = max(WRITER_BACKLOG_S, self.replay_s) * SAMPLE_RATE
-        if self._queued_in - self._queued_out + block.size > limit:
-            self._drop(block.size)
+        backlog = self._queued_in - self._queued_out
+        if self._dropping:  # hysteresis: one contiguous gap per stall, not a choppy track
+            self._dropping = backlog > max(limit - WRITER_RESUME_BELOW_S * SAMPLE_RATE, limit / 2)
+        elif backlog + block.size > limit:
+            self._dropping = True
+        if self._dropping:
+            self._gap += block.size
+            self.dropped_frames += block.size  # no logging here: the log may be on that disk
         else:
             if self._gap:  # silence where audio was dropped keeps the tracks aligned
                 self.q.put_nowait(self._gap)
@@ -421,17 +434,6 @@ class _TrackWriter:
         written = self.frames_written  # an int written by the writer thread: atomic read
         if written >= self._padding:
             self.backlog_max = max(self.backlog_max, start + block.size - written)
-
-    def _drop(self, n: int) -> None:
-        """The writer is ``WRITER_BACKLOG_S`` behind: drop ``n`` samples (capture thread)."""
-        self._gap += n
-        self.dropped_frames += n
-        if self.dropped_frames == n:  # once per track and session; finish() logs the total
-            log.warning(
-                "%s writer is %gs behind (disk stalled?): dropping new audio, written as silence",
-                self.track,
-                WRITER_BACKLOG_S,
-            )
 
     def _call(self, cb: FrameListener, start: int, block: np.ndarray) -> None:
         try:
@@ -466,6 +468,14 @@ class _TrackWriter:
                 block = self.q.get()
                 if block is None:
                     break
+                if self.dropped_frames and not self._drop_logged:  # once per track and session
+                    self._drop_logged = True  # finish() logs the total
+                    log.warning(
+                        "%s writer fell %gs behind (disk stalled?): new audio was dropped and "
+                        "is written as silence",
+                        self.track,
+                        WRITER_BACKLOG_S,
+                    )
                 if isinstance(block, int):
                     for i in range(0, block, SAMPLE_RATE):
                         n = min(SAMPLE_RATE, block - i)
@@ -774,8 +784,11 @@ class Recorder:
                 w._padding = w.frames_received  # counted once the writer is past the replay
         except Exception:
             log.exception("could not start %s source", track)
-            w.finish()
-            path.unlink(missing_ok=True)
+            if w.finish():  # a writer still stuck has the file open (Windows can't unlink it)
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    log.warning("could not delete the unused %s file", track)
             return None
         session.tracks[track] = TRACK_FILES[track]
         return w
@@ -885,6 +898,7 @@ class Recorder:
                     "system_audio_scope": next(
                         (w.source.scope for w in writers if w.track == Track.OTHERS), None
                     ),
+                    # Can exceed WRITER_BACKLOG_S: it includes dropped spans.
                     "writer_backlog_max_s": {
                         str(w.track): round(w.backlog_max / SAMPLE_RATE, 3) for w in writers
                     },

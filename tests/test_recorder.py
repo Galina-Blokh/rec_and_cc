@@ -482,11 +482,12 @@ def test_stalled_writer_drops_beyond_the_bound_and_pads_with_silence(cfg, stalle
     w = rec._writers[0]
     assert w._queued_in == 8000  # the backlog stopped at the bound ...
     assert w.dropped_frames == len(sig) - 8000  # ... and every later sample is counted
-    drops = [r for r in caplog.records if "dropping new audio" in r.getMessage()]
-    assert len(drops) == 1 and drops[0].levelname == "WARNING"
 
     stalled_disk.set()  # the disk recovers
     assert _drained(w)
+    drops = [r for r in caplog.records if "new audio was dropped" in r.getMessage()]
+    assert len(drops) == 1 and drops[0].levelname == "WARNING"
+    assert drops[0].threadName == "writer-others"  # never logged on the capture thread
     w.on_frames(np.full(1600, 0.25, dtype=np.float32))  # the gap is queued before this block
     out = rec.stop()
     assert out is not None and not w.abandoned
@@ -536,3 +537,37 @@ def test_stop_keeps_a_session_whose_writer_is_stuck_from_the_start(cfg, stalled_
     w.thread.join(5)
     data, _ = sf.read(out.directory / "others.wav")
     assert len(data) == len(sig)
+
+
+def test_dropping_continues_until_the_backlog_falls_to_the_low_water_mark(cfg, stalled_disk):
+    rec, src = make(cfg, sine(0.5), min_session_s=0)  # exactly the bound: no drop yet
+    rec.start(TriggerKind.MEDIA, "Music")
+    assert src["sys"].done.wait(5)
+    w = rec._writers[0]
+    block = np.full(1600, 0.25, dtype=np.float32)
+    w.on_frames(block)  # over the bound: dropping starts
+    w._queued_out = 2000  # the writer caught up a little: 6000 queued, the block would fit
+    w.on_frames(block)
+    assert w.dropped_frames == 3200  # still dropping: one gap, not every other block
+    w._queued_out = 4000  # half the bound (the low-water mark here)
+    w.on_frames(block)
+    assert w.dropped_frames == 3200 and w._queued_in == 9600  # resumed
+    w._queued_out = 0  # (the writer, still blocked, has written nothing)
+    stalled_disk.set()
+    out = rec.stop()
+    assert out is not None
+    data, _ = sf.read(out.directory / "others.wav")
+    assert len(data) == 8000 + 3 * 1600
+    assert np.all(data[8000:11200] == 0)  # one contiguous gap
+    assert np.allclose(data[11200:], 0.25, atol=1e-3)
+
+
+def test_frames_after_the_sentinel_are_counted_as_dropped(cfg, stalled_disk):
+    rec, src = make(cfg, sine(0.2))
+    rec.start(TriggerKind.MEDIA, "Music")
+    assert src["sys"].done.wait(5)
+    w = rec._writers[0]
+    w.source.stop()
+    assert w.finish() is False
+    w.on_frames(np.ones(1600, dtype=np.float32))  # a straggler from the stopping source
+    assert w.dropped_frames == 1600 and w.frames_received == 3200

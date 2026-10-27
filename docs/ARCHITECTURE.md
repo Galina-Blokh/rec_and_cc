@@ -102,9 +102,12 @@ The app is built around one rule: **real-time audio threads never block**. Every
   touches the recorder.
 - A track's writer backlog is bounded (`WRITER_BACKLOG_S` = 120 s of audio queued). On a
   stalled disk the capture thread keeps calling `put_nowait`; past the bound it drops the
-  *newest* blocks (the queued audio is older and already in order), counts them, logs one
-  WARNING per track and session plus the total at stop, and queues the dropped span as
-  silence once the writer catches up, so `me.wav` and `others.wav` keep one timeline.
+  *newest* blocks (the queued audio is older and already in order) and keeps dropping until
+  the backlog falls 10 s below the bound (at most half of it), so a disk slightly slower than
+  real time gives one gap per stall, not choppy audio. It only counts them (no logging on the
+  capture thread); the writer logs one WARNING per track and session, `finish()` the total.
+  The dropped span is queued as silence once the writer catches up, so `me.wav` and
+  `others.wav` keep one timeline; frames arriving after the stop sentinel count as dropped.
   Silence (padding, dropped spans) is queued as a sample count, not as zero arrays.
 - `_TrackWriter.finish()` joins for 5 s + 0.1 s per second of queued audio, capped at 15 s.
   If the writer is still stuck it logs a WARNING and returns, so the engine thread is never
