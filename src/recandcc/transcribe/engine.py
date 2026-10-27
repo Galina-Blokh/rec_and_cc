@@ -186,6 +186,9 @@ class Transcriber:
     def _needs_detection(self) -> bool:
         return len(self.cfg.languages) != 1
 
+    # `cfg.languages` can be replaced from the menu while a transcription runs, so each step
+    # reads it once into a local (never len() then [0] on two different lists).
+
     def close(self) -> None:
         """Release the models and pool. The Transcriber reloads lazily if used again."""
         with self._init_lock:
@@ -200,33 +203,37 @@ class Transcriber:
 
     # -- steps -------------------------------------------------------------------------------
 
-    def _detect(self, model, piece: np.ndarray) -> tuple[str, float]:
+    def _detect(
+        self, model, piece: np.ndarray, langs: list[str] | None = None
+    ) -> tuple[str, float]:
+        langs = self.cfg.languages if langs is None else langs
         if isinstance(model, MlxWhisper):
-            return model.detect_language(piece, self.cfg.languages)
+            return model.detect_language(piece, langs)
         _, _, probs = model.detect_language(audio=piece)
-        return language_confidence(probs, self.cfg.languages)
+        return language_confidence(probs, langs)
 
     def _region_languages(
         self, audio: np.ndarray, regions: list[tuple[float, float]]
     ) -> list[tuple[str | None, float]]:
         """(language, confidence) per region, detected concurrently on the pool."""
-        if not self._needs_detection():
-            return [(self.cfg.languages[0], 1.0)] * len(regions)
+        langs = self.cfg.languages
+        if len(langs) == 1:
+            return [(langs[0], 1.0)] * len(regions)
         if self._lid_model is None:
             return [(None, 0.0)] * len(regions)  # decided per chunk by the main model
         det = list(
             self._require_pool().map(
                 lambda r: self._detect(
-                    self._lid_model, audio[int(r[0] * SAMPLE_RATE) : int(r[1] * SAMPLE_RATE)]
+                    self._lid_model, audio[int(r[0] * SAMPLE_RATE) : int(r[1] * SAMPLE_RATE)], langs
                 ),
                 regions,
             )
         )
-        langs = smooth_languages(regions, det, MIN_LANGUAGE_CONFIDENCE)
+        smoothed = smooth_languages(regions, det, MIN_LANGUAGE_CONFIDENCE)
         # an inherited language counts as "just confident enough"
         return [
             (lg, c if lg == d else MIN_LANGUAGE_CONFIDENCE)
-            for lg, (d, c) in zip(langs, det, strict=True)
+            for lg, (d, c) in zip(smoothed, det, strict=True)
         ]
 
     @staticmethod
@@ -281,11 +288,12 @@ class Transcriber:
     def detect_language(self, audio: np.ndarray, main: bool = False) -> tuple[str, float]:
         """(language, confidence) among cfg.languages. Uses the small language-ID model unless
         ``main`` is set or there is none. A single configured language is returned as is."""
-        if not self._needs_detection():
-            return self.cfg.languages[0], 1.0
+        langs = self.cfg.languages
+        if len(langs) == 1:
+            return langs[0], 1.0
         self._ensure_loaded()
         model = self._model if main or self._lid_model is None else self._lid_model
-        return self._detect(model, audio)
+        return self._detect(model, audio, langs)
 
     def transcribe_audio(
         self,

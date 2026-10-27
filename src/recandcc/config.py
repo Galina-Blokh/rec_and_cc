@@ -213,6 +213,15 @@ def normalize_languages(value) -> list[str]:
     return out
 
 
+def save_languages(languages: list, path: Path = CONFIG_PATH) -> None:
+    """Write only `transcription.languages` into config.toml, leaving every other key as it is
+    on disk (it may have been edited by hand since the app loaded it). Raises
+    FileNotFoundError if there is no file yet, ValueError if it is not valid TOML."""
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    data.setdefault("transcription", {})["languages"] = list(languages)
+    path.write_bytes(tomli_w.dumps(data).encode())
+
+
 def load_config(path: Path = CONFIG_PATH) -> Config:
     """Load config, creating a default file on first run. Unknown keys are ignored."""
     if not path.exists():
