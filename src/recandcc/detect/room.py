@@ -275,10 +275,13 @@ class RoomMonitor:
         return True
 
     def reset(self) -> None:
-        """Forget the pre-roll and the speech heard so far (an app is doing audio)."""
+        """Forget the pre-roll and the speech heard so far (an app is doing audio). The noise
+        floor is cleared too, in queue order, so speaker bleed from the app's playback never
+        becomes the room's floor; the engine calls this every tick while it holds off."""
         with self._lock:
             if self._ring or self._steps or self._processed:
                 self._reset_locked()
+                self._q.put(FLOOR_RESET)
 
     def close_mic(self) -> None:
         """Close the mic (the orange indicator goes off); ``start()`` reopens it."""
@@ -383,7 +386,13 @@ class RoomMonitor:
             if stream != self._stream:
                 return
             now = self.clock()
-            gap = now - self._last_frame_clock > GAP_S  # slept, or the stream stalled
+            # Slept, or the stream stalled. Outside a session, forget the audio from before
+            # the gap (pre-roll and speech history) before this block, so a session starting
+            # on wake never replays pre-sleep audio or triggers on pre-sleep speech. A session
+            # keeps its history: its stall shows up in seconds_since_speech().
+            gap = now - self._last_frame_clock > GAP_S
+            if gap and not self._taps:
+                self._reset_locked()
             self._last_frame_clock = now
             self._ring.append(block)
             self._ring_size += block.size

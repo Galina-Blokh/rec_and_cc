@@ -237,7 +237,7 @@ def quiet_room(seconds: float, seed: int = 0) -> np.ndarray:
     return (rng.standard_normal(int(seconds * SR)) * 0.001).astype(np.float32)  # ~-60 dB
 
 
-@functools.lru_cache(maxsize=64)
+@functools.lru_cache(maxsize=4)  # a 150 s 8-talker clip is ~10 MB
 def babble(seconds: float, talkers: int, seed: int = 0, level: float = 0.004) -> np.ndarray:
     rng = np.random.default_rng(seed)
     n = int(seconds * SR)
@@ -336,8 +336,11 @@ def monitor(outside: float, vad=None, calls: list | None = None, clock=None):
 BABBLE_VAD = level_vad(-70.0)  # everything above the -60 dB room counts as speech
 
 
+SLOW = pytest.mark.slow  # the full scenario matrix: `pytest -m slow`
+
+
 @pytest.mark.parametrize("outside", [0, 25, 50, 75])
-@pytest.mark.parametrize("voice", range(len(VOICES)))
+@pytest.mark.parametrize("voice", [0, pytest.param(1, marks=SLOW), pytest.param(2, marks=SLOW)])
 def test_a_conversation_fires_at_every_setting_quiet_and_in_a_cafe(outside, voice):
     over = 8 if outside >= 50 else 10  # the realistic edge: voices 8-10 dB over the café
     for bed, db in ((quiet_room(90, voice), 30), (babble(90, 4, seed=voice + 100), over)):
@@ -347,15 +350,16 @@ def test_a_conversation_fires_at_every_setting_quiet_and_in_a_cafe(outside, voic
 
 
 @pytest.mark.parametrize("talkers", [2, 4, 8])
-@pytest.mark.parametrize("outside", [25, 50])
-def test_babble_never_triggers_across_seeds(outside, talkers):
-    for seed in range(20):
+@pytest.mark.parametrize("outside", [25, 50, 75])
+@pytest.mark.parametrize("seeds", [range(3), pytest.param(range(3, 20), marks=SLOW)])
+def test_babble_never_triggers_across_seeds(outside, talkers, seeds):
+    for seed in seeds:
         mon, feed = monitor(outside, BABBLE_VAD)
         assert not feed(babble(150, talkers, seed=seed)), f"seed {seed}"
         mon.close()
 
 
-@pytest.mark.parametrize("outside", [25, 50])
+@pytest.mark.parametrize("outside", [25, 50, 75])
 def test_babble_and_a_fan_dont_retrigger_after_a_session(outside):
     calls: list = []
     mon, feed = monitor(outside, BABBLE_VAD, calls)
@@ -366,11 +370,12 @@ def test_babble_and_a_fan_dont_retrigger_after_a_session(outside):
     tap.start(lambda frames: None)
     tap.stop()
     assert not feed(babble(120, 4, seed=3))  # the café alone: no re-trigger
-    assert not feed(fan(60, seed=4))
+    if outside < 75:  # a fan switched on right after the café: Quiet room isn't for that
+        assert not feed(fan(60, seed=4))
     mon.close()
 
 
-@pytest.mark.parametrize("talkers", [2, 4, 8])
+@pytest.mark.parametrize("talkers", [4, pytest.param(2, marks=SLOW), pytest.param(8, marks=SLOW)])
 @pytest.mark.parametrize("outside", [25, 50, 75])
 def test_walking_into_a_cafe_without_reopening_the_mic(outside, talkers):
     mon, feed = monitor(outside, BABBLE_VAD)
@@ -386,6 +391,45 @@ def test_a_sleep_gap_relearns_the_floor(outside):
     feed(quiet_room(30))
     clock.t += 30  # the lid was closed; the stream resumes somewhere louder
     assert not feed(babble(120, 4, seed=8))
+    mon.close()
+
+
+def test_a_wake_gap_forgets_the_speech_and_audio_from_before_it():
+    clock = Clock()
+    mon, feed = monitor(75, clock=clock)  # Quiet room: 3 s of speech within 15 s
+    feed(quiet_room(10))
+    talk = conversation(4, quiet_room(4, 1), 30, seed=7)
+    talk[int(1.5 * SR) :] = quiet_room(2.5, 2)  # 1.5 s of speech: just under the trigger
+    assert not feed(talk)
+    clock.t += 60  # the lid was closed
+    after = conversation(4, quiet_room(4, 3), 30, seed=8)
+    after[int(1.5 * SR) :] = quiet_room(2.5, 4)  # another 1.5 s: together they'd trigger
+    assert not feed(after)  # the pre-sleep speech no longer counts
+    got: list[np.ndarray] = []
+    tap = mon.session_source()
+    tap.start(got.append)  # the pre-roll a session would start with
+    tap.stop()
+    preroll = np.concatenate(got)
+    assert preroll.size <= after.size and np.array_equal(preroll, after[-preroll.size :])
+    mon.close()
+
+
+def test_an_app_holding_off_the_room_doesnt_teach_the_floor_its_playback():
+    mon, feed = monitor(75)
+    feed(quiet_room(10))
+    for i in range(30):  # music plays; the engine holds the room off every tick
+        feed(babble(1, 8, seed=i, level=0.02))
+        mon.reset()
+    assert mon.wait_idle() and mon.floor.db is None  # the playback was never learnt
+    feed(quiet_room(4, 5))  # the app stopped: warm-up in the room again
+    assert feed(conversation(12, quiet_room(12, 6), 15, seed=9))  # a soft conversation
+    mon.close()
+
+
+def test_the_preroll_ring_stays_bounded_at_the_widest_window():
+    mon, feed = monitor(0)  # window 48 s at the lowest setting
+    feed(quiet_room(70))
+    assert 48 * SR <= mon._ring_size <= 48 * SR + 1600  # one 0.1 s block over at most
     mon.close()
 
 

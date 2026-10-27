@@ -356,6 +356,9 @@ noisy café.* (#7)
 - **Given** the place changes with the mic open (carried into a café, or after sleep), **then**
   the floor is relearnt (a level jump of the quieter moments, or a gap of over 5 s in the
   audio) and the new background doesn't start a recording at 25, 50 or 75.
+- **Given** the laptop slept, **then** the speech and audio from before the gap are forgotten:
+  nothing triggers on them and a session never starts with pre-sleep audio. **Given** an app
+  played audio (the room holds off), **then** its playback never becomes the room's floor.
 - **Then** a room session's live transcript starts with the whole pre-roll, even when a low
   outside sensitivity widened it beyond `room_preroll_s`.
 - **Given** the menu "Sensitivity" (Off / Quiet room / Normal / Noisy place), **then** the
