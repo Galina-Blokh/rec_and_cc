@@ -489,30 +489,20 @@ class Transcriber:
         still loading (live). ``words``: keep word timings in ``Segment.words`` (on MLX only
         when ``mlx_word_timestamps()``: mlx-whisper 0.4.3 with our numpy aligner)."""
         model = self._model_for(language, wait_for_model)
-        pieces: list[tuple[float, float, str, list[tuple[float, float, str]]]]
-        if isinstance(model, MlxWhisper):
-            if words and mlx_word_timestamps():
-                pieces = model.transcribe(audio, language, words=True)
-            else:
-                pieces = [(a, b, t, []) for a, b, t in model.transcribe(audio, language)]
-        else:
-            segments, _ = model.transcribe(
-                audio,
-                language=language,
-                vad_filter=False,
-                beam_size=beam_size,
-                condition_on_previous_text=False,
-                word_timestamps=words,
+        try:
+            pieces = self._pieces(model, audio, language, beam_size, words)
+        except Exception as e:
+            if not words:
+                raise
+            # One odd chunk must not fail the session: keep it whole (no words, never split).
+            log.warning(
+                "word timestamps failed (%s, %s) for the chunk at %.1f s; kept without words",
+                type(model).__name__,
+                type(e).__name__,
+                offset,
             )
-            pieces = [
-                (
-                    s.start,
-                    s.end,
-                    s.text,
-                    [(w.start, w.end, w.word) for w in getattr(s, "words", None) or []],
-                )
-                for s in segments
-            ]
+            log.debug("word timestamp failure", exc_info=True)
+            pieces = self._pieces(model, audio, language, beam_size, False)
         end_cap = max_end if max_end is not None else offset + len(audio) / SAMPLE_RATE
         out = []
         for start, end, raw, ws in pieces:
@@ -536,6 +526,33 @@ class Transcriber:
                     )
                 )
         return out
+
+    @staticmethod
+    def _pieces(
+        model: Any, audio: np.ndarray, language: str, beam_size: int, words: bool
+    ) -> list[tuple[float, float, str, list[tuple[float, float, str]]]]:
+        """(start, end, text, [(start, end, " word")]) per segment, relative to ``audio``."""
+        if isinstance(model, MlxWhisper):
+            if words and mlx_word_timestamps():
+                return model.transcribe(audio, language, words=True)
+            return [(a, b, t, []) for a, b, t in model.transcribe(audio, language)]
+        segments, _ = model.transcribe(
+            audio,
+            language=language,
+            vad_filter=False,
+            beam_size=beam_size,
+            condition_on_previous_text=False,
+            word_timestamps=words,
+        )
+        return [
+            (
+                s.start,
+                s.end,
+                s.text,
+                [(w.start, w.end, w.word) for w in getattr(s, "words", None) or []],
+            )
+            for s in segments
+        ]
 
     # -- public ------------------------------------------------------------------------------
 

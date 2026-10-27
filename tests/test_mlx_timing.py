@@ -34,6 +34,15 @@ def clean_timing(monkeypatch):
         lambda name, *a: None if name in ("numba", "scipy") else real_find_spec(name, *a),
     )
     monkeypatch.setattr(gpu, "_version_warned", False)
+
+    def fake_import():  # as import_mlx_whisper: register, then "import" transcribe
+        gpu._install_timing()
+        timing = sys.modules[KEY]
+        sys.modules["mlx_whisper.transcribe"] = types.SimpleNamespace(
+            add_word_timestamps=timing.add_word_timestamps
+        )
+
+    monkeypatch.setattr(gpu, "import_mlx_whisper", fake_import)
     yield
     sys.modules.pop(KEY, None)
     if saved is not None:
@@ -54,11 +63,18 @@ def test_other_mlx_whisper_version_keeps_words_off_and_warns_once(
         gpu._install_timing()
         assert not caplog.records  # importing alone (split off) only logs at DEBUG
         assert not gpu.mlx_word_timestamps()
-        sys.modules.pop(KEY)
         assert not gpu.mlx_word_timestamps()
     assert len([r for r in caplog.records if "0.5.0" in r.getMessage()]) == 1
     with pytest.raises(RuntimeError, match="word timestamps"):
         sys.modules[KEY].add_word_timestamps()
+
+
+def test_checking_words_never_registers_anything_itself(clean_timing, monkeypatch):
+    monkeypatch.setattr(gpu, "_install_timing", lambda: pytest.fail("not read-only"))
+    monkeypatch.setitem(
+        sys.modules, "mlx_whisper.transcribe", types.SimpleNamespace(add_word_timestamps=print)
+    )
+    assert gpu.mlx_word_timestamps() and KEY not in sys.modules
 
 
 def test_words_follow_what_mlx_whisper_transcribe_imported(clean_timing, monkeypatch):

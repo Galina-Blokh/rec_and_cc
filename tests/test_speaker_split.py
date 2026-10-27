@@ -194,20 +194,23 @@ def test_faster_whisper_words_are_requested_and_offset():
     assert model.calls[1]["word_timestamps"] is False
 
 
+class _FakeMlx(eng.MlxWhisper):
+    def __init__(self, ws=((0.0, 0.5, " a"), (0.5, 1.5, " b"))):
+        self.calls, self.ws = [], list(ws)
+
+    def transcribe(self, audio, language, words=False):
+        self.calls.append(words)
+        text = "".join(w for _, _, w in self.ws)
+        return [(0.0, 1.0, text, self.ws)] if words else [(0.0, 1.0, text)]
+
+    def close(self):
+        pass
+
+
 @pytest.mark.parametrize("aligner", [False, True])
 def test_mlx_requests_words_only_when_the_numpy_aligner_is_available(monkeypatch, aligner):
-    class FakeMlx(eng.MlxWhisper):
-        def __init__(self):
-            self.calls = []
-
-        def transcribe(self, audio, language, words=False):
-            self.calls.append(words)
-            if words:
-                return [(0.0, 1.0, " a b", [(0.0, 0.5, " a"), (0.5, 1.5, " b")])]
-            return [(0.0, 1.0, " a b")]
-
     monkeypatch.setattr(eng, "mlx_word_timestamps", lambda: aligner)
-    model = FakeMlx()
+    model = _FakeMlx()
     t = _transcriber(model)
     audio = np.zeros(SAMPLE_RATE, np.float32)
     out = t.transcribe_audio(audio, 10.0, "Others", "en", words=True)
@@ -233,6 +236,16 @@ def test_word_times_are_clamped_to_the_chunk_end():
     # a word was cut off, so the words no longer cover the text: unsplittable, nothing is lost
     assert out[0].text == "a b c" and out[0].words == []
     assert split_on_speaker_change(out, [Turn(0, 10.5, 0), Turn(10.5, 12, 1)]) == out
+
+
+def test_mlx_words_crossing_max_end_clear_the_segment_words(monkeypatch):
+    monkeypatch.setattr(eng, "mlx_word_timestamps", lambda: True)
+    t = _transcriber(_FakeMlx([(0.0, 0.5, " a"), (0.5, 1.5, " b"), (1.2, 1.4, " c")]))
+    audio = np.zeros(2 * SAMPLE_RATE, np.float32)
+    out = t.transcribe_audio(audio, 10.0, "Others", "en", max_end=11.0, words=True)
+    assert out[0].text == "a b c" and out[0].words == []  # same rule as faster-whisper
+    out = t.transcribe_audio(audio, 10.0, "Others", "en", max_end=12.0, words=True)
+    assert out[0].words == [(10.0, 10.5, " a"), (10.5, 11.5, " b"), (11.2, 11.4, " c")]
 
 
 def test_words_are_kept_when_nothing_is_cut():
@@ -441,3 +454,36 @@ def test_split_pieces_keep_the_transcript_in_time_order(tmp_path):
     assert [s.start for s in out] == [0.0, 3.0, 5.0]
     md = format_markdown(sess, out, 10.0)
     assert md.index("w0 w1") < md.index("hello") < md.index("w5 w6")
+
+
+def test_a_failing_word_pass_keeps_the_session_and_the_chunk_whole(tmp_path, monkeypatch, caplog):
+    """MLX word alignment raising on a chunk must not fail the session: that chunk is
+    transcribed again without words (unsplit), and the warning carries no transcript text."""
+    import logging
+
+    from test_transcribe import FakeModel, _install, _write_tracks
+
+    class Flaky(_FakeMlx):
+        def transcribe(self, audio, language, words=False):
+            self.calls.append(words)
+            if words:
+                raise IndexError("jump_times")
+            return [(0.0, len(audio) / SAMPLE_RATE, " secret words")]
+
+    regions = _write_tracks(tmp_path)
+    monkeypatch.setattr(eng, "find_speech", lambda a: regions)
+    monkeypatch.setattr(eng, "mlx_word_timestamps", lambda: True)
+    s = make_session(tmp_path, {eng.Track.ME: "me.wav", eng.Track.OTHERS: "others.wav"})
+    t = eng.Transcriber(TranscriptionConfig(model="fake", workers=2, split_on_speaker_change=True))
+    model = Flaky()
+    monkeypatch.setattr(t, "_ensure_loaded", lambda: _install(t, model, FakeModel()))
+    monkeypatch.setattr(t, "_word_tracks", lambda _s: (eng.Track.OTHERS,))
+    with caplog.at_level(logging.DEBUG, "recandcc.transcribe"):
+        segs = t.transcribe_session(s)
+    t.close()
+    others = [x for x in segs if x.speaker == "Others"]
+    assert others and all(x.text == "secret words" and x.words == [] for x in others)
+    assert True in model.calls and False in model.calls
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("word timestamps failed" in r.getMessage() for r in warnings)
+    assert not any("secret" in r.getMessage() for r in warnings)

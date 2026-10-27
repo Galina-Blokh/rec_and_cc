@@ -171,12 +171,20 @@ def _install_timing() -> None:
 
 def mlx_word_timestamps() -> bool:
     """Whether ``MlxWhisper.transcribe(..., words=True)`` works (not with the stub). Called
-    only when words are wanted (split_on_speaker_change), so a mismatch warns here, once."""
+    only when words are wanted (split_on_speaker_change), so a mismatch warns here, once.
+    Read-only: ``mlx_whisper.timing`` is registered only by ``import_mlx_whisper``."""
     global _version_warned
-    _install_timing()
-    # What mlx_whisper.transcribe really calls, once it is loaded; else what it will import.
-    owner = sys.modules.get("mlx_whisper.transcribe") or sys.modules.get("mlx_whisper.timing")
-    ok = getattr(owner, "add_word_timestamps", None) is not _stub_word_timestamps
+    if "mlx_whisper.transcribe" not in sys.modules:
+        try:
+            import_mlx_whisper()
+        except ImportError:
+            return False
+    # What mlx_whisper.transcribe really calls.
+    owner = sys.modules.get("mlx_whisper.transcribe")
+    ok = owner is not None and getattr(owner, "add_word_timestamps", None) not in (
+        None,
+        _stub_word_timestamps,
+    )
     if not ok and not _version_warned:
         _version_warned = True
         log.warning(
