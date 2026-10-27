@@ -327,3 +327,93 @@ def test_osascript_takes_the_script_on_stdin_not_argv(monkeypatch):
     assert common.osascript('choose from list {"the [budget] secret"}') == "ok"
     [(argv, stdin)] = calls
     assert "secret" not in " ".join(argv) and "secret" in stdin
+
+
+# ------------------------------------------------------------------ robustness (#151)
+def _corrupt(path: Path, how: str) -> None:
+    if how == "garbage":
+        path.write_bytes(b"this is not an sqlite file\x00" * 200)
+    else:  # truncated mid-file: the header still promises the lost pages
+        with path.open("r+b") as f:
+            f.truncate(path.stat().st_size // 2)
+
+
+@pytest.mark.parametrize("how", ["garbage", "truncated"])
+@pytest.mark.parametrize("fts", BACKENDS)
+def test_corrupt_index_file_is_rebuilt_by_the_next_sync(tmp_path, out, fts, how, caplog):
+    make_session(out, 1, [seg(0, "the quarterly budget")])
+    for n in range(2, 12):  # enough pages that a half-truncated file is missing some
+        make_session(out, n, [seg(float(i), f"filler line {n} {i} " * 8) for i in range(30)])
+    idx = index(tmp_path, fts)
+    idx.sync(out)
+    for side in (b"-wal", b"-shm", b"-journal"):
+        Path(os.fsdecode(bytes(idx.path) + side)).write_bytes(b"stale")
+    _corrupt(idx.path, how)
+    caplog.set_level(logging.DEBUG)
+    fresh = TranscriptIndex(idx.path, fts=fts)  # a new process (the CLI) ...
+    assert fresh.sync(out) == 11
+    assert [h.start for h in fresh.search("budget")] == [0.0]
+    assert not Path(str(idx.path) + "-wal").exists()
+    assert not Path(str(idx.path) + "-shm").exists()
+    assert not Path(str(idx.path) + "-journal").exists()
+    _corrupt(idx.path, how)  # ... and an index already in use (the app)
+    assert idx.sync(out) == 11
+    assert [h.start for h in idx.search("budget")] == [0.0]
+    assert stat.S_IMODE(idx.path.stat().st_mode) == 0o600 or sys.platform == "win32"
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings and all(str(tmp_path) not in r.getMessage() for r in warnings)
+    assert all("budget" not in r.getMessage() for r in caplog.records)
+
+
+def test_search_on_a_corrupt_index_rebuilds_it_instead_of_failing(tmp_path, out):
+    make_session(out, 1, [seg(0, "the quarterly budget")])
+    idx = index(tmp_path, True)
+    idx.sync(out)
+    _corrupt(idx.path, "garbage")
+    assert idx.search("budget") == []  # empty until the next sync, not an error
+    idx.sync(out)
+    assert len(idx.search("budget")) == 1
+
+
+def test_recovery_never_deletes_a_healthy_index(tmp_path, out):
+    """Two processes racing the recovery: the slower one finds the file already rebuilt (it
+    opens and checks fine now) and must not delete it."""
+    make_session(out, 1, [seg(0, "the quarterly budget")])
+    idx = index(tmp_path, True)
+    idx.sync(out)
+    before = idx.path.stat().st_ino
+    assert idx._recover() is False
+    assert idx.path.stat().st_ino == before and len(idx.search("budget")) == 1
+
+
+def test_locked_index_is_not_mistaken_for_a_corrupt_one(tmp_path, out, monkeypatch):
+    make_session(out, 1, [seg(0, "the quarterly budget")])
+    idx = index(tmp_path, True)
+    idx.sync(out)
+
+    def locked(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(idx, "_open", locked)
+    with pytest.raises(sqlite3.OperationalError):
+        idx.search("budget")
+    assert idx.path.exists() and idx.path.stat().st_size > 0
+
+
+@pytest.mark.parametrize("gone", ["missing", "file"])
+def test_unreachable_output_dir_keeps_the_index(tmp_path, out, gone):
+    a = make_session(out, 1, [seg(0, "the quarterly budget")])
+    make_session(out, 2, [seg(0, "the travel plan")])
+    idx = index(tmp_path, True)
+    assert idx.sync(out) == 2
+    away = tmp_path / "unmounted"
+    out.rename(away)  # an unmounted drive or an offline share
+    if gone == "file":
+        out.write_text("")  # not a directory
+    assert idx.sync(out) == 0
+    assert [h.folder for h in idx.search("budget")] == [a]
+    if gone == "file":
+        out.unlink()
+    away.rename(out)  # back online: nothing to re-read
+    assert idx.sync(out) == 0
+    assert [h.folder for h in idx.search("budget")] == [a]

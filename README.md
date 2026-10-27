@@ -402,7 +402,9 @@ Linux). It never blocks recording, and the log names the kind of share, not the 
   once; deleted by hand, at the next search, the next app start, or the app's hourly check,
   whichever comes first. Removed or replaced text is overwritten in
   `search.sqlite3`, so it can't be recovered from the file. To remove the whole index at
-  once, delete `search.sqlite3`; it is rebuilt from the transcripts on the next search.
+  once, delete `search.sqlite3`; it is rebuilt from the transcripts on the next search
+  (a damaged file is reset and rebuilt the same way). While the transcripts folder is
+  unreachable (an unmounted drive, an offline share) nothing is dropped from the index.
   With `speaker_names` on, its stored speaker voices are deleted at once (from Meeting
   notes) or the next time a transcript is written or a `recandcc voices` command runs.
 - `recandcc voices delete <name>` deletes that profile and removes the named voice from every

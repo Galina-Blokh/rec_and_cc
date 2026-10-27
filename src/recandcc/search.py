@@ -15,6 +15,10 @@ embedding in ``seg_vec``, computed outside the write lock right after the FTS up
 is embedded, stored or fused, and results are exactly the full-text ones; vectors left from
 an earlier opt-in are deleted at the next ``sync``.
 
+The index is a derived cache: a corrupt file (a crash, a full disk) is deleted and recreated,
+and the next ``sync`` rebuilds it. A missing or unlistable ``output_dir`` (an unmounted drive,
+an offline share) drops nothing.
+
 Every call opens its own connection, so any thread may use an index; writes are serialised
 by a lock (and by SQLite's file lock across processes, e.g. the app and the CLI). Transcript
 text is never logged.
@@ -33,7 +37,9 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from functools import wraps
 from pathlib import Path
+from typing import Concatenate
 
 import numpy as np
 import platformdirs
@@ -82,6 +88,37 @@ class Hit:
         return self.folder / "transcript.md"
 
 
+_CORRUPT_CODES = (11, 26)  # SQLITE_CORRUPT, SQLITE_NOTADB
+_SIDE_FILES = ("-wal", "-shm", "-journal")
+
+
+def _is_corrupt(e: sqlite3.Error) -> bool:
+    """A damaged file, not a busy or locked one (OperationalError is a DatabaseError too)."""
+    code = getattr(e, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return code & 0xFF in _CORRUPT_CODES
+    msg = str(e)
+    return "file is not a database" in msg or "disk image is malformed" in msg
+
+
+def _recovering[**P, R](
+    method: Callable[Concatenate[TranscriptIndex, P], R],
+) -> Callable[Concatenate[TranscriptIndex, P], R]:
+    """Run ``method``; if the index file turns out corrupt, recreate it and run it once more."""
+
+    @wraps(method)
+    def run(self: TranscriptIndex, *args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return method(self, *args, **kwargs)
+        except sqlite3.DatabaseError as e:
+            if not _is_corrupt(e):
+                raise
+            self._recover()
+            return method(self, *args, **kwargs)
+
+    return run
+
+
 def has_fts5() -> bool:
     try:
         with contextlib.closing(sqlite3.connect(":memory:")) as db:
@@ -128,6 +165,56 @@ class TranscriptIndex:
                         self._create(db)
                     self._ready = True
         return self._open()
+
+    def _recover(self) -> bool:
+        """Delete a corrupt index file (and its journal files) so the next connection
+        recreates it, schema and vector tables included. True if it was deleted. Holds the
+        write lock, so this process writes nothing meanwhile; across processes (the app and
+        the CLI) the file is deleted only if it still fails a check and is still the very file
+        that was checked, so a racing process never deletes the index another just rebuilt."""
+        with self._lock, self._init_lock:
+            try:
+                st = self.path.stat()
+            except OSError:
+                self._ready = False
+                return False  # already gone: the next connection recreates it
+            try:
+                with contextlib.closing(sqlite3.connect(self.path, timeout=10)) as db:
+                    ok = db.execute("PRAGMA quick_check(1)").fetchone()
+                corrupt = ok is None or ok[0] != "ok"
+            except sqlite3.DatabaseError as e:
+                if not _is_corrupt(e):
+                    raise
+                corrupt = True
+            if not corrupt:
+                return False  # someone rebuilt it meanwhile: keep it
+            try:
+                now = self.path.stat()
+                if (now.st_ino, now.st_mtime_ns, now.st_size) != (
+                    st.st_ino,
+                    st.st_mtime_ns,
+                    st.st_size,
+                ):
+                    return False  # replaced meanwhile
+                # Journals first: a stale hot journal next to a recreated file would be
+                # played back into it.
+                for side in _SIDE_FILES:
+                    Path(f"{self.path}{side}").unlink(missing_ok=True)
+                self.path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:  # e.g. still open by another process on Windows
+                log.warning(
+                    "search index %s is corrupt and could not be reset: %s",
+                    self.path.name,
+                    type(e).__name__,
+                )
+                raise
+            self._ready = False
+            log.warning(
+                "search index %s was corrupt; it is rebuilt by the next sync", self.path.name
+            )
+            return True
 
     def _owner_only(self) -> None:
         """Re-apply 0600 after a VACUUM rebuilt the file (it may come back with the umask)."""
@@ -191,6 +278,7 @@ class TranscriptIndex:
             self._owner_only()
 
     # ------------------------------------------------------------------ updates
+    @_recovering
     def index_session(self, directory: Path) -> bool:
         """(Re)index one session folder, or drop it when it has no transcript or was
         discarded. True if it is indexed now."""
@@ -209,6 +297,7 @@ class TranscriptIndex:
         self._kick_embed()
         return parsed is not None and parsed[1] is not None
 
+    @_recovering
     def sync(self, output_dir: Path) -> int:
         """Bring the index in line with <output_dir>/<day>/<session>/transcript.json;
         returns the number of sessions (re)indexed."""
@@ -219,6 +308,11 @@ class TranscriptIndex:
                     found[str(f.parent)] = _stamp(f)
             except OSError:
                 continue
+        try:  # listed after the glob: going offline during it also counts
+            os.listdir(output_dir)
+            reachable = True
+        except OSError:  # missing, not a directory, or unreadable
+            reachable = False
         with contextlib.closing(self._connect()) as db:
             known = {
                 folder: (stamp, fts)
@@ -229,7 +323,10 @@ class TranscriptIndex:
         parsed = {f: _read(Path(f)) for f in todo}
         with self._lock, contextlib.closing(self._connect()) as db:
             removed = 0
-            for folder in known.keys() - found.keys():
+            if not reachable and known:
+                # An unmounted drive or an offline share is never taken for a deletion.
+                log.info("search: output folder unreachable; keeping %d sessions", len(known))
+            for folder in known.keys() - found.keys() if reachable else ():
                 removed += self._drop(db, folder)
             for folder in todo:
                 removed += self._drop(db, folder)
@@ -494,6 +591,7 @@ class TranscriptIndex:
             return lexical[:limit]
         return fuse(lexical, semantic)[:limit]
 
+    @_recovering
     def _lexical(self, query: str, limit: int = 20) -> list[Hit]:
         """Segments containing every word of ``query`` (FTS5: prefix match, BM25-ranked;
         fallback: substring match, newest sessions first). ё and е match each other."""
