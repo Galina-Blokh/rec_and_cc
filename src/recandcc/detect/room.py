@@ -428,11 +428,18 @@ class RoomMonitor:
                 n = (audio.size // WINDOW) * WINDOW
                 chunk, rest = audio[:n], audio[n:]
                 pending, size = ([rest], rest.size) if rest.size else ([], 0)
-                margin = self.thresholds(self.det)[2]
-                levels = window_levels(chunk)
-                loud = None if margin is None else self.floor.loud(levels, margin)
-                if self.floor.add(levels, margin):
-                    loud = False  # the place got louder: this step is background
+                with self._lock:
+                    in_session = bool(self._taps)
+                # The gate decides what *starts* a session. While a room session records this
+                # stream, plain VAD decides when the talk has ended (room_stop_after_silence_s)
+                # and the floor is frozen, so a long lecture can't become "the background".
+                margin = None if in_session else self.thresholds(self.det)[2]
+                loud = None
+                if margin is not None:
+                    levels = window_levels(chunk)
+                    loud = self.floor.loud(levels, margin)
+                    if self.floor.add(levels, margin):
+                        loud = False  # the place got louder: this step is background
                 probs = np.zeros(n // WINDOW, np.float32)
                 if loud is None or loud:  # a step at the floor: skip the VAD
                     try:

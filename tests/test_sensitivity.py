@@ -408,6 +408,23 @@ def test_mic_opened_mid_conversation_and_long_talk_keep_counting():
     mon.close()
 
 
+def test_a_long_lecture_during_a_room_session_keeps_counting_as_speech():
+    mon, feed = monitor(50)
+    feed(quiet_room(10))  # the floor: a quiet room
+    tap = mon.session_source()  # a room session records this stream
+    tap.start(lambda frames: None)
+    rng = np.random.default_rng(3)
+    n = 120 * SR
+    # One fluent speaker, no pauses: few quiet moments for the floor to sit on.
+    voice = env_speech(n, rng, slot_ms=80, voiced=0.9, lo=0.6, hi=1.4) * 0.03
+    lecture = (voice + quiet_room(120, 4)).astype(np.float32)
+    feed(lecture)
+    # The silence stop (room_stop_after_silence_s) reads this: still talking after 2 min.
+    assert mon.seconds_since_speech() < 2
+    tap.stop()
+    mon.close()
+
+
 def test_lowest_setting_needs_more_than_a_few_remarks():
     mon, feed = monitor(0)  # 24 s of speech within 48 s
     sparse = conversation(90, quiet_room(90), 30)

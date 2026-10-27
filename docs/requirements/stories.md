@@ -332,6 +332,11 @@ noisy café.* (#7)
 
 - **Given** `outside_sensitivity` and `inside_sensitivity` are unset (the default), **then**
   detection behaves exactly as before: `min_active_s`, `room_speech_s`, no level gate.
+- **Given** *Normal* (50/50), **then** the thresholds are the plain ones, but unlike *Off* the
+  noise-floor gate and its ~3 s warm-up after each mic open apply.
+- **Given** a room session is recording, **then** the gate and floor are paused (frozen) and
+  plain voice detection decides when the talk has ended, so a long lecture never becomes
+  "background" and stops the session.
 - **Given** a sensitivity 0–100, **then** the threshold is scaled 4× at 0, 1× at 50 and
   0.25× at 100: inside scales `min_active_s`; outside scales `room_speech_s` (the window widens
   so speech is at most half of it, so even 0 triggers on a real conversation) and sets a

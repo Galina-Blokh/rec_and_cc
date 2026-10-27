@@ -218,7 +218,7 @@ under a conversation but on top of babble. It falls within a few quiet seconds a
 slowly; it restarts from the last 3 s when even their 30th percentile is more than half a
 margin above it (carried into a louder place), is cleared when the mic opens, and when
 `_on_frames` sees a wall-clock gap of over 5 s (sleep/wake; a marker through the VAD queue,
-so the callback never blocks). Until 3 s of history exist nothing counts. The constants were
+so the callback never blocks). Until 3 s of history exist nothing counts. The gate only decides what starts a session: while a room session's tap is attached, the worker skips it and freezes the floor, so the silence stop (`seconds_since_speech`) is plain VAD, as with no sensitivity set. The constants were
 tuned on seeded syllabic speech, a brown-noise fan and 2/4/8-talker babble
 (`test_sensitivity.py`). A room session's recorder replays the source's own pre-roll length
 (`_Tap.preroll_s`) to live transcription. Unset keeps every code path as it was.
