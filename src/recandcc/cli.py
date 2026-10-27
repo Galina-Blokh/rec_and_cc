@@ -425,7 +425,7 @@ def cmd_voices(args) -> int:
             print(f"{p.name}  ({p.count} session(s), updated {p.updated_at})")
         print(f"{len(profiles)} voice profile(s) in {voices.VOICES_DIR}")
     elif args.all:
-        n = voices.delete_all_profiles()
+        n = voices.forget_all()
         print(f"Deleted {n} voice profile(s) and all saved session voices.")
     elif not args.name:
         print("Name the profile to delete, or use --all.", file=sys.stderr)

@@ -15,7 +15,9 @@ opens/closes the microphone::
 
 So ``LastUsedTimeStop == 0 and LastUsedTimeStart != 0`` means "mic in use right now".
 Caveats: browsers report as the browser exe (good enough for us), stale entries can remain
-0 after a crash, and our own python.exe shows up while we record (filtered out below).
+0 after a crash, and our own python.exe shows up while we record. Whether an entry is ours
+is decided by PID, not by path: a running process with that exe name must be us (or our
+venv launcher). Another script on the same base interpreter is someone else's mic use.
 
 COM must be initialised on each thread that calls into pycaw; we do it lazily per thread.
 """
@@ -44,7 +46,10 @@ _STATE_ACTIVE = 1
 class WinActivityMonitor(ActivityMonitor):
     def __init__(self) -> None:
         self._tls = threading.local()
-        self._own_exe = os.path.normcase(os.path.abspath(sys.executable))
+        # ntpath, not os.path: the registry holds Windows paths (and the tests run on every
+        # OS). Only a fallback for when processes can't be listed; see _mic_owner.
+        exes = (sys.executable, getattr(sys, "_base_executable", None) or sys.executable)
+        self._own_exes = {ntpath.normcase(ntpath.abspath(e)) for e in exes if e}
 
     def _ensure_com(self) -> None:
         if getattr(self._tls, "com", False):
@@ -127,18 +132,50 @@ class WinActivityMonitor(ActivityMonitor):
         walk(_MIC_KEY + r"\NonPackaged", packaged=False)
         return users
 
-    def _pid_for_exe(self, exe_lower: str) -> int:
+    def _mic_owner(self, exe_lower: str, full: str) -> int | None:
+        """PID to report for a consent-store mic entry; None when it is our own mic use.
+
+        Processes whose exe path matches the entry are the candidates. The entry is ours when
+        one of them is us: our own pid, or our parent when that is the venv launcher
+        (its exe is sys.executable; the base interpreter it starts is us). The consent store
+        has one entry per exe path, so it can't tell us from another script on the same
+        interpreter (an IDE's language server always is): counting that as someone else on
+        the mic would keep closing our own room mic. A packaged app has its own exe. If no
+        path matches (8.3 short path, path unreadable), every process with that exe name is
+        a candidate and any other one makes it someone else's (pid 0 if none runs)."""
         try:
             import psutil  # pycaw dependency  # pyright: ignore[reportMissingModuleSource]
 
             # ad_value=None: protected processes yield None, not an AccessDenied instance
-            for p in psutil.process_iter(["name"], ad_value=None):
-                name = p.info.get("name")
-                if isinstance(name, str) and name.lower() == exe_lower:
-                    return p.pid
+            procs = [
+                (p.pid, p.info.get("exe"))
+                for p in psutil.process_iter(["name", "exe"], ad_value=None)
+                if isinstance(p.info.get("name"), str) and p.info["name"].lower() == exe_lower
+            ]
         except Exception:
             log.debug("process lookup for %s failed", exe_lower, exc_info=True)
-        return 0
+            return None if ntpath.normcase(full) in self._own_exes else 0
+
+        def norm(path) -> str | None:
+            return ntpath.normcase(ntpath.abspath(path)) if isinstance(path, str) else None
+
+        launcher = norm(sys.executable)
+        ppid = os.getppid()
+
+        def ours(pid: int, exe) -> bool:
+            return pid == os.getpid() or (pid == ppid and norm(exe) == launcher)
+
+        entry = norm(full)
+        matched = [c for c in procs if norm(c[1]) == entry]
+        if matched:
+            if any(ours(pid, exe) for pid, exe in matched):
+                return None
+            return matched[0][0]
+        # Only the exe name to go on: ours only if nothing else by that name runs.
+        foreign = [pid for pid, exe in procs if not ours(pid, exe)]
+        if foreign:
+            return foreign[0]
+        return None if procs else 0
 
     def snapshot(self) -> list[AudioProcess]:
         self._ensure_com()
@@ -153,7 +190,8 @@ class WinActivityMonitor(ActivityMonitor):
             log.exception("reading microphone consent store failed")
             mic = []
         for exe, full in mic:
-            if os.path.normcase(full) == self._own_exe:
+            pid = self._mic_owner(exe, full)
+            if pid is None:  # our own recording
                 continue
             existing = procs.get(exe)
             if existing:
@@ -166,7 +204,7 @@ class WinActivityMonitor(ActivityMonitor):
                 )
             else:
                 procs[exe] = AudioProcess(
-                    pid=self._pid_for_exe(exe),
+                    pid=pid,
                     bundle_id=exe,
                     name=exe,
                     input_active=True,

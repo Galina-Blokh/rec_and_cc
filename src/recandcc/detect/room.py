@@ -229,6 +229,7 @@ class RoomMonitor:
         self._processed = 0  # samples analysed by the VAD in this generation
         self._last_speech = 0  # sample index where speech was last heard
         self._last_frame_clock = clock()
+        self._frame_at = float("-inf")  # clock() of this stream's last frame (not reset())
         self._q: SimpleQueue = SimpleQueue()
         self._worker: threading.Thread | None = None
         self._closed = False
@@ -255,6 +256,7 @@ class RoomMonitor:
                 self._worker.start()
             self._stream += 1
             self._reset_locked()
+            self._frame_at = float("-inf")
             # Maybe another place now: warm up again. The worker clears the floor (in queue
             # order), so a step it is still finishing on the old stream can't add after it.
             self._q.put(FLOOR_RESET)
@@ -289,6 +291,7 @@ class RoomMonitor:
             src, self._source = self._source, None
             self._stream += 1
             self._reset_locked()
+            self._frame_at = float("-inf")
         if src is not None:
             self._stop_source(src)
             log.info("room listening: microphone closed")
@@ -345,6 +348,17 @@ class RoomMonitor:
             stall = self.clock() - self._last_frame_clock - STALL_GRACE_S
         return audio_s + max(0.0, stall)
 
+    def seconds_since_frame(self) -> float:
+        """Wall-clock seconds since the mic last delivered frames (or since it opened)."""
+        with self._lock:
+            return self.clock() - self._last_frame_clock
+
+    def last_frame_at(self) -> float:
+        """``clock()`` time the current mic stream last delivered frames; ``-inf`` if it
+        hasn't (unlike ``seconds_since_frame``, ``reset()`` doesn't move it)."""
+        with self._lock:
+            return self._frame_at
+
     def preroll_s(self) -> float:
         """Seconds of audio kept before a trigger: room_preroll_s, or the effective window
         if that is longer (low outside sensitivities widen it)."""
@@ -393,7 +407,7 @@ class RoomMonitor:
             gap = now - self._last_frame_clock > GAP_S
             if gap and not self._taps:
                 self._reset_locked()
-            self._last_frame_clock = now
+            self._last_frame_clock = self._frame_at = now
             self._ring.append(block)
             self._ring_size += block.size
             while self._ring and self._ring_size - self._ring[0].size >= keep:
