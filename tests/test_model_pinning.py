@@ -3,6 +3,7 @@
 Stories: US-14.
 """
 
+import re
 import sys
 import types
 from pathlib import Path
@@ -198,3 +199,9 @@ def test_refused_main_model_keeps_the_language_id_model(monkeypatch):
         with pytest.raises(UnpinnedModelError):
             t.ensure_loaded()
     assert loaded == [t.language_model]  # loaded once, not on every retry
+
+
+@pytest.mark.parametrize("repo", sorted(revisions.HF_REVISIONS))
+def test_pins_are_full_commit_shas(repo):
+    # a typo'd pin would only fail on a real download, long after merge
+    assert re.fullmatch(r"[0-9a-f]{40}", revisions.HF_REVISIONS[repo]), repo
