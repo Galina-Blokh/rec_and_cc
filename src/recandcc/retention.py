@@ -53,6 +53,8 @@ def _track_wavs(session: SessionInfo) -> list[Path]:
             log.warning("session %s: ignoring unexpected track name", session.id)
             continue
         path = session.directory / name
+        if not path.is_symlink() and not path.exists():
+            continue  # already deleted: the usual case, keep startup cheap
         if path.is_symlink() or path.resolve().parent != session.directory.resolve():
             log.warning("session %s: ignoring track outside its folder", session.id)
             continue

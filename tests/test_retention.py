@@ -113,9 +113,14 @@ def test_controller_purges_leftovers_at_startup_only_without_keep_audio(tmp_path
     cfg = Config(output_dir=tmp_path)
     cfg.transcription.keep_audio = keep_audio
     ctrl = Controller(cfg, monitor=Monitor(), recorder=object(), tq=Q(), start_threads=False)
+    this_run = make_session(tmp_path, "this_run", 0)  # may still be diarizing
+    s = SessionInfo.load(this_run)
+    s.ended_at = ctrl._started_at
+    s.save()
     ctrl._resubmit_unfinished()  # startup: purge leftovers, then re-queue the rest
 
     assert len(list(done.glob("*.wav"))) == (2 if keep_audio else 0)
+    assert len(list(this_run.glob("*.wav"))) == 2
     assert len(list(pending.glob("*.wav"))) == 2
 
 
