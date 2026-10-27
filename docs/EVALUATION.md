@@ -9,10 +9,10 @@ pipeline on a small set of real, consented speech, so that model, VAD and diariz
 
 | Metric | What it measures |
 |---|---|
-| **WER** per language | word edits / reference words, after lowercasing, removing punctuation and mapping ё → е. Each hypothesis segment counts toward the reference utterance it overlaps most. |
-| **Language-ID accuracy** | share of reference utterances whose matched speech was tagged (by duration) with the right language |
-| **DER** | missed + false-alarm + wrong-speaker time / reference speech time; 10 ms frames, no collar, best one-to-one speaker mapping (exact up to 6 speakers, greedy above) |
-| **RTF** | transcription time / audio duration (batch pipeline) |
+| **WER** per language | word edits / reference words, after lowercasing, removing punctuation and mapping ё → е. A hypothesis segment spanning several utterances has its words split between them by overlap; one overlapping none counts toward the nearest. |
+| **Language-ID accuracy** | share of reference utterances whose overlapping speech was mostly (by overlap time) tagged with the right language |
+| **DER** | missed + false-alarm + wrong-speaker time / reference speech time; 10 ms frames, no collar, best one-to-one speaker mapping (exact up to 12 speakers on the smaller side, greedy above) |
+| **RTF** | total transcription time / total audio duration (batch pipeline) |
 | **Diarization time** | seconds per clip |
 
 Live caption latency is not measured yet.

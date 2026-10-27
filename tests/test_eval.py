@@ -67,10 +67,23 @@ def test_text_scores_per_language_and_lid():
     assert s["ru"] == {"words": 3, "edits": 0, "utts": 1, "lid_ok": 0}
 
 
-def test_unmatched_segment_goes_to_nearest_utterance():
+def test_unmatched_segment_goes_to_nearest_utterance_without_language_vote():
     utts = [utt(0, 1, "one"), utt(10, 11, "two")]
-    groups = ev.match_segments(utts, [seg(8, 9, "two")])
-    assert groups[0] == [] and [s.text for s in groups[1]] == ["two"]
+    (w0, v0), (w1, v1) = ev.assign_words(utts, [seg(8, 9, "two", "ru")])
+    assert w0 == [] and w1 == ["two"] and v1 == {}
+
+
+def test_segment_spanning_utterances_is_split():
+    utts = [utt(0, 1, "hello"), utt(1, 2, "world")]
+    s = ev.text_scores(utts, [seg(0, 2, "Hello world")])
+    assert s["en"] == {"words": 2, "edits": 0, "utts": 2, "lid_ok": 2}
+
+
+def test_language_vote_weighs_overlap_not_segment_length():
+    utts = [utt(0, 10, "a b c d e f g h i j", "en"), utt(10, 12, "к л", "ru")]
+    segs = [seg(0, 10.5, "a b c d e f g h i j", "en"), seg(10.5, 12, "к л", "ru")]
+    s = ev.text_scores(utts, segs)  # the long en segment overlaps the ru utterance by 0.5 s only
+    assert s["ru"]["lid_ok"] == 1 and s["en"]["lid_ok"] == 1
 
 
 def test_missing_hypothesis_counts_all_words_and_no_lid():
@@ -93,23 +106,45 @@ def test_der_miss_false_alarm_confusion():
     assert d["der"] == pytest.approx(3.0 / 4.0)
 
 
+def test_der_many_speakers_is_exact_and_fast():
+    import time
+
+    ref = [(i, i + 1, f"R{i}") for i in range(7)]
+    hyp = [(i, i + 1, f"H{i}") for i in range(7)] + [(7 + i, 7.5 + i, f"X{i}") for i in range(13)]
+    t0 = time.monotonic()
+    d = ev.der(ref, hyp)
+    assert time.monotonic() - t0 < 2.0
+    assert d["confusion_s"] == 0.0 and d["false_alarm_s"] == pytest.approx(6.5)
+
+
+def test_best_mapping_beats_greedy():
+    # greedy takes 5 (row 0 -> col 0) and then 0; the optimum pairs 4 + 4
+    assert ev._best_mapping([[5, 4], [4, 0]]) == 8
+    assert ev._best_mapping([[1, 2, 3]]) == 3 and ev._best_mapping([]) == 0
+
+
 def test_der_no_reference():
     assert ev.der([], [])["der"] == 0.0
 
 
 class FakeTranscriber:
+    """Like the real one with keep_audio = false: drops the WAV after transcribing."""
+
     def __init__(self, segs):
         self.segs, self.sessions = segs, []
 
     def transcribe_session(self, session):
-        assert (session.directory / "others.wav").exists()
+        wav = session.directory / "others.wav"
+        assert wav.exists()
         self.sessions.append(session)
-        session.update_metrics("transcription", {"rtf": 0.1})
+        session.update_metrics("transcription", {"audio_s": 5.0, "elapsed_s": 0.5})
+        wav.unlink()
         return self.segs
 
 
 class FakeDiarizer:
     def diarize_file(self, path):
+        assert path.exists()  # runs before the transcriber can drop the audio
         return [Turn(0.0, 2.0, 0), Turn(3.0, 5.0, 1)]
 
 
@@ -135,12 +170,20 @@ def test_manifest_run_and_summary(tmp_path):
     result = ev.run_clip(clip, tr, FakeDiarizer())
     assert not tr.sessions[0].directory.exists()  # temporary copy removed
     assert (tmp_path / "c1.wav").exists()  # the eval clip itself is untouched
-    assert result["diarization"]["der"] == 0.0 and result["rtf"] == 0.1
+    assert result["diarization"]["der"] == 0.0 and result["elapsed_s"] == 0.5
     s = ev.summarize([result])
     assert s["languages"]["en"]["wer"] == 0.0
     assert s["languages"]["ru"]["wer"] == 0.5
     assert s["languages"]["all"] == {"wer": 0.25, "lid_accuracy": 1.0, "words": 4, "utterances": 2}
-    assert s["der"] == 0.0 and s["rtf_mean"] == 0.1
+    assert s["der"] == 0.0 and s["rtf"] == 0.1
+
+
+def test_rtf_weighs_clips_by_audio_length():
+    results = [
+        {"text": {}, "audio_s": 1.0, "elapsed_s": 1.0},  # RTF 1.0 on a 1 s clip
+        {"text": {}, "audio_s": 99.0, "elapsed_s": 9.9},  # RTF 0.1 on a 99 s clip
+    ]
+    assert ev.summarize(results)["rtf"] == pytest.approx(0.109)
 
 
 def test_manifest_rejects_bad_times(tmp_path):

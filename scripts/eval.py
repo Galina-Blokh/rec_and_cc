@@ -9,12 +9,13 @@ the real session pipeline (VAD, language ID, chunked Whisper) on a temporary cop
 speaker turns come from the real diarizer. Reported per language and overall:
 
 - WER: word edits / reference words, after normalisation (case, punctuation, ё -> е).
-  Hypothesis segments are matched to the reference utterance they overlap most.
+  Hypothesis words are split between the reference utterances their segment overlaps.
 - language-ID accuracy: share of utterances whose overlapping speech was tagged with the
-  reference language (by duration).
+  reference language (by overlap).
 - DER: missed + false-alarm + confused speaker time / reference speech time, 10 ms frames,
   no collar, best one-to-one speaker mapping.
-- speed: transcription real-time factor and diarization seconds per clip.
+- speed: transcription real-time factor (total time / total audio) and diarization
+  seconds per clip.
 
 Runs offline once the models are on disk. Prints scores only, never transcript text.
 """
@@ -22,7 +23,6 @@ Runs offline once the models are on disk. Prints scores only, never transcript t
 from __future__ import annotations
 
 import argparse
-import itertools
 import json
 import shutil
 import sys
@@ -91,19 +91,34 @@ def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
     return max(0.0, min(a1, b1) - max(a0, b0))
 
 
-def match_segments(utts: list[Utterance], segs: list[Segment]) -> list[list[Segment]]:
-    """Each hypothesis segment goes to the utterance it overlaps most (unmatched -> nearest)."""
-    out: list[list[Segment]] = [[] for _ in utts]
-    if not utts:
-        return out
+def assign_words(utts: list[Utterance], segs: list[Segment]) -> list[tuple[list[str], dict]]:
+    """Per utterance: the hypothesis words that belong to it and its language votes.
+
+    A segment spanning several utterances has its words split between them in time order, in
+    proportion to the overlap. A segment overlapping none goes to the nearest utterance (its
+    words still count for WER) but doesn't vote on the language. Votes are overlap seconds.
+    """
+    words: list[list[tuple[float, int, str]]] = [[] for _ in utts]
+    votes: list[dict[str, float]] = [defaultdict(float) for _ in utts]
     for s in segs:
-        scores = [_overlap(u.start, u.end, s.start, s.end) for u in utts]
-        best = max(range(len(utts)), key=scores.__getitem__)
-        if scores[best] == 0.0:
+        ws = normalize(s.text)
+        ov = [_overlap(u.start, u.end, s.start, s.end) for u in utts]
+        total = sum(ov)
+        if not utts:
+            break
+        if total == 0.0:
             mid = (s.start + s.end) / 2
-            best = min(range(len(utts)), key=lambda i: abs((utts[i].start + utts[i].end) / 2 - mid))
-        out[best].append(s)
-    return out
+            near = min(range(len(utts)), key=lambda i: abs((utts[i].start + utts[i].end) / 2 - mid))
+            words[near] += [(s.start, k, w) for k, w in enumerate(ws)]
+            continue
+        cum, lo = 0.0, 0
+        for i in sorted((i for i in range(len(utts)) if ov[i] > 0), key=lambda i: utts[i].start):
+            cum += ov[i]
+            hi = round(len(ws) * cum / total)
+            words[i] += [(s.start, k, w) for k, w in enumerate(ws[lo:hi], lo)]
+            votes[i][s.language] += ov[i]
+            lo = hi
+    return [([w for *_, w in sorted(ws)], dict(v)) for ws, v in zip(words, votes, strict=True)]
 
 
 def text_scores(utts: list[Utterance], segs: list[Segment]) -> dict[str, dict[str, float]]:
@@ -111,17 +126,13 @@ def text_scores(utts: list[Utterance], segs: list[Segment]) -> dict[str, dict[st
     acc: dict[str, dict[str, float]] = defaultdict(
         lambda: dict.fromkeys(("words", "edits", "utts", "lid_ok"), 0)
     )
-    for u, matched in zip(utts, match_segments(utts, segs), strict=True):
+    for u, (hyp, votes) in zip(utts, assign_words(utts, segs), strict=True):
         ref = normalize(u.text)
-        hyp = [w for s in sorted(matched, key=lambda s: s.start) for w in normalize(s.text)]
         a = acc[u.language]
         a["words"] += len(ref)
         a["edits"] += word_edits(ref, hyp)
         a["utts"] += 1
-        by_lang: dict[str, float] = defaultdict(float)
-        for s in matched:
-            by_lang[s.language] += max(s.end - s.start, 1e-3)
-        a["lid_ok"] += bool(by_lang) and max(by_lang, key=by_lang.__getitem__) == u.language
+        a["lid_ok"] += bool(votes) and max(votes, key=votes.__getitem__) == u.language
     return dict(acc)
 
 
@@ -132,6 +143,39 @@ def _frames(turns: list[tuple[float, float, str]], n: int) -> dict[str, np.ndarr
         mask = out.setdefault(spk, np.zeros(n, dtype=bool))
         mask[int(round(s / FRAME_S)) : int(round(e / FRAME_S))] = True
     return out
+
+
+def _best_mapping(m: list[list[int]]) -> int:
+    """Largest total of a one-to-one row/column matching of matrix ``m``.
+
+    Exact (dynamic programming over subsets of the smaller side) up to 12 speakers on that side;
+    greedy above, which can only overstate DER.
+    """
+    if m and len(m) > len(m[0]):
+        m = [list(col) for col in zip(*m, strict=True)]
+    rows = len(m)
+    if rows == 0:
+        return 0
+    if rows > 12:
+        cells = sorted(
+            ((v, i, j) for i, row in enumerate(m) for j, v in enumerate(row)), reverse=True
+        )
+        used_r, used_c, total = set(), set(), 0
+        for v, i, j in cells:
+            if i not in used_r and j not in used_c:
+                used_r.add(i), used_c.add(j)
+                total += v
+        return total
+    dp = {0: 0}  # bitmask of matched rows -> best total
+    for j in range(len(m[0])):
+        nxt = dict(dp)
+        for mask, v in dp.items():
+            for i in range(rows):
+                if not mask & (1 << i):
+                    k = mask | (1 << i)
+                    nxt[k] = max(nxt.get(k, 0), v + m[i][j])
+        dp = nxt
+    return max(dp.values())
 
 
 def der(ref: list[tuple[float, float, str]], hyp: list[tuple[float, float, str]]) -> dict:
@@ -145,22 +189,7 @@ def der(ref: list[tuple[float, float, str]], hyp: list[tuple[float, float, str]]
     false_alarm = int(np.maximum(h_count - r_count, 0).sum())
     rk, hk = list(r), list(h)
     overlap = {(a, b): int((r[a] & h[b]).sum()) for a in rk for b in hk}
-    small, large = (rk, hk) if len(rk) <= len(hk) else (hk, rk)
-
-    def score(pairs) -> int:
-        return sum(overlap[(a, b) if small is rk else (b, a)] for a, b in pairs)
-
-    if len(small) <= 6:
-        best = max(
-            (score(zip(small, p, strict=False)) for p in itertools.permutations(large, len(small))),
-            default=0,
-        )
-    else:  # greedy: an upper bound on DER for many speakers
-        used, best = set(), 0
-        for (a, b), v in sorted(overlap.items(), key=lambda kv: -kv[1]):
-            if a not in used and b not in used:
-                used |= {a, b}
-                best += v
+    best = _best_mapping([[overlap[(a, b)] for b in hk] for a in rk])
     confusion = int(np.minimum(r_count, h_count).sum()) - best
     err = miss + false_alarm + confusion
     return {
@@ -185,17 +214,18 @@ def run_clip(clip: Clip, transcriber, diarizer) -> dict:
         )
         shutil.copyfile(clip.audio, Path(tmp) / f"{clip.track}.wav")
         session.save()
-        segs = transcriber.transcribe_session(session)
-        result = {"id": clip.id, "track": str(clip.track)}
-        result.update(text=text_scores(clip.utterances, segs))
-        result["rtf"] = session.metrics.get("transcription", {}).get("rtf")
-        if clip.track is Track.OTHERS and diarizer is not None:
-            t0 = time.monotonic()
+        result: dict = {"id": clip.id, "track": str(clip.track)}
+        if clip.track is Track.OTHERS and diarizer is not None:  # before the transcriber
+            t0 = time.monotonic()  # may drop the audio (keep_audio = false)
             turns = diarizer.diarize_file(Path(tmp) / f"{clip.track}.wav")
             result["diarization_s"] = round(time.monotonic() - t0, 2)
             if turns is not None:
                 ref = [(u.start, u.end, u.speaker) for u in clip.utterances]
                 result["diarization"] = der(ref, [(t.start, t.end, str(t.speaker)) for t in turns])
+        segs = transcriber.transcribe_session(session)
+        result["text"] = text_scores(clip.utterances, segs)
+        m = session.metrics.get("transcription", {})
+        result["audio_s"], result["elapsed_s"] = m.get("audio_s"), m.get("elapsed_s")
     return result
 
 
@@ -218,11 +248,12 @@ def summarize(results: list[dict]) -> dict:
     d = [r["diarization"] for r in results if "diarization" in r]
     speech = sum(x["speech_s"] for x in d)
     errors = sum(x["der"] * x["speech_s"] for x in d)
-    rtfs = [r["rtf"] for r in results if r.get("rtf") is not None]
+    timed = [r for r in results if r.get("audio_s") and r.get("elapsed_s") is not None]
+    audio = sum(r["audio_s"] for r in timed)
     return {
         "languages": per_lang,
         "der": round(errors / speech, 4) if speech else None,
-        "rtf_mean": round(sum(rtfs) / len(rtfs), 3) if rtfs else None,
+        "rtf": round(sum(r["elapsed_s"] for r in timed) / audio, 3) if audio else None,
         "clips": len(results),
     }
 
@@ -241,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = load_config().transcription
     cfg.diarize = False  # DER is measured on the diarizer directly
+    cfg.keep_audio = True  # only a temporary copy; the clip itself is never touched
     if args.model:
         cfg.model = args.model
     clips = load_manifest(args.root.expanduser())
@@ -255,7 +287,7 @@ def main(argv: list[str] | None = None) -> int:
     report = {"model": cfg.model, "summary": summarize(results), "clips": results}
     args.json.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     s = report["summary"]
-    print(f"model {cfg.model}, {s['clips']} clips, mean RTF {s['rtf_mean']}, DER {s['der']}")
+    print(f"model {cfg.model}, {s['clips']} clips, RTF {s['rtf']}, DER {s['der']}")
     for lang, v in s["languages"].items():
         print(f"  {lang:<4} WER {v['wer']}  language-ID {v['lid_accuracy']}  ({v['words']} words)")
     print(f"details: {args.json}")
