@@ -60,7 +60,7 @@ def parse(raw: dict) -> Template:
     section. Unknown top-level keys are ignored."""
     default = Template()
     sections = raw.get("sections", list(default.sections))
-    if not isinstance(sections, list) or not all(s in SECTIONS for s in sections):
+    if not isinstance(sections, list) or not sections or not all(s in SECTIONS for s in sections):
         raise ValueError("sections")
     headings = raw.get("headings", {})
     if not isinstance(headings, dict) or not all(
@@ -81,18 +81,28 @@ def load_template(setting: str | Path | None) -> Template | None:
     path is taken from the config folder. Any problem logs one warning and returns None."""
     if not setting or not str(setting).strip():
         return None
-    path = Path(str(setting).strip()).expanduser()
-    if not path.is_absolute():
-        path = CONFIG_DIR / path
+    path = Path(str(setting).strip())
     try:
+        path = path.expanduser()  # RuntimeError for an unknown "~user"
+        if not path.is_absolute():
+            path = CONFIG_DIR / path
+        path = path.resolve()  # a path you choose: ~, .. and absolute paths are all fine
         if not path.is_file():  # a directory or a FIFO must not be opened (it could block)
             raise ValueError("not a file")
         with path.open("rb") as f:
             blob = f.read(_MAX_BYTES + 1)
         if len(blob) > _MAX_BYTES:
             raise ValueError("too large")
-        return parse(tomllib.loads(blob.decode("utf-8-sig")))
-    except (OSError, ValueError, UnicodeDecodeError) as e:  # TOMLDecodeError is a ValueError
+        tpl = parse(tomllib.loads(blob.decode("utf-8-sig")))
+        if "transcript" not in tpl.sections:
+            log.info("export template omits the transcript")
+        return tpl
+    except (
+        OSError,
+        ValueError,
+        RuntimeError,
+        UnicodeDecodeError,
+    ) as e:  # TOMLDecodeError is a ValueError
         # the exception type only: a TOML error message can quote the file's text
         log.warning(
             "export template %s not used (%s); using the default layout", path, type(e).__name__

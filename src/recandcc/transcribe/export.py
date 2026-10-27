@@ -340,8 +340,11 @@ def _layout(
             continue
         blocks = list(parts[name])
         custom = tpl.headings.get(name)
-        if custom and blocks and blocks[0][0] in ("h1", "h2"):
-            blocks[0] = (blocks[0][0], custom)
+        if custom and blocks:  # the configured heading always shows
+            if blocks[0][0] in ("h1", "h2"):
+                blocks[0] = (blocks[0][0], custom)
+            else:
+                blocks.insert(0, ("h1" if name == "summary" else "h2", custom))
         out.extend(blocks)
         if shown and name == shown[-1]:
             out.extend(parts["note"])

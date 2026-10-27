@@ -8,7 +8,7 @@ All notable changes to RecAndCC are documented here. The format is based on
 
 ### Added
 - Custom DOCX/PDF export templates (`[export] template`): title format, section order and
-  headings, header/footer line, from a local TOML file; unchanged without one (US-25, #4).
+  headings, header/footer line, from a local TOML file; unchanged without one (US-25, #4). `###` headings in `summary.md` now parse as their own level (`h3`) so they no longer start the action items.
 - Opt-in semantic transcript search (`[search] semantic = true`): a pinned, checksum-verified
   multilingual sentence model, downloaded once, merged with full-text results (#4).
 - RecAndCC is licensed under the Apache License 2.0 (`LICENSE`, `NOTICE`); completes #17.

@@ -126,8 +126,31 @@ def test_sections_can_be_left_out(session, tmp_path):
     (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
     tpl = write_tpl(tmp_path, 'sections = ["summary"]\n')
     assert texts(session, str(tpl)) == [*PLAIN[:2], "Summary", "We agreed to ship on Friday.", NOTE]
-    tpl = write_tpl(tmp_path, "sections = []\n")
-    assert texts(session, str(tpl)) == PLAIN[:2]
+    tpl = write_tpl(tmp_path, "sections = []\n")  # empty = invalid: default layout
+    assert texts(session, str(tpl)) == WITH_SUMMARY
+
+
+def test_omitting_the_transcript_is_honoured_and_logged(session, tmp_path, caplog):
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    tpl = write_tpl(tmp_path, 'sections = ["action_items"]\n')
+    with caplog.at_level(logging.INFO):
+        out = texts(session, str(tpl))
+    assert "[00:00:00] Me: Hello team" not in out
+    assert [r.getMessage() for r in caplog.records if "omits" in r.getMessage()] == [
+        "export template omits the transcript"
+    ]
+
+
+def test_a_custom_heading_shows_without_a_leading_heading(session, tmp_path):
+    (session / "summary.md").write_text("Just text.\n\n## Action items\n\n- Do it\n", "utf-8")
+    tpl = write_tpl(tmp_path, 'sections = ["summary"]\n[headings]\nsummary = "Overview"\n')
+    assert texts(session, str(tpl))[2:4] == ["Overview", "Just text."]
+
+
+def test_unknown_user_in_the_path_falls_back(session, caplog):
+    with caplog.at_level(logging.WARNING):
+        assert texts(session, "~nosuchuser_zz/t.toml") == PLAIN
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
 
 
 @pytest.mark.parametrize(
