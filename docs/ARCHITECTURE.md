@@ -225,12 +225,18 @@ it. `started_at` is moved back by the replayed pre-roll. A room session records
 `max(room_preroll_s, room_window_s) + 5` s for listeners on room sessions, so live
 transcription, which attaches after `recorder.start()`, still gets the whole pre-roll. The `@` keeps
 `app_modes["@room"]` ("Always" on a room prompt) out of the substring matching of real apps.
-A call that starts during a room session upgrades it like a media session
-(`recorder.upgrade_to_call`; the mic is already there) and from then on the call's
+A call that starts during a room session (a call app that uses the mic, or plays audio for
+15 s, as in a muted call; a Slack or Teams notification plays for only a few seconds)
+upgrades it like a media session (`recorder.upgrade_to_call`; the mic is already there) and
+from then on the call's
 inactivity rule applies; the monitor stays open because it is that session's mic. The
 pseudo-app's "last seen" is refreshed while the room talks or a room session records, so a
 session the user stopped or discarded stays suppressed until the room has been quiet for
-`stop_after_inactive_s`. If the mic can't be opened, the engine retries after 60 s. The menu
+`stop_after_inactive_s`. If the mic can't be opened, the engine retries after 60 s. An idle
+room mic that delivers no frames for 10 s (the device went away) is closed and reopened at
+once; if the new one stalls too, it retries after 60 s. A reopened mic counts as healthy
+again only once frames arrive 10 s after the open, so a dead device that sends one block
+while it opens still backs off. The menu
 toggle goes through `Controller.set_room_listening`, which explains the always-on mic
 indicator, battery and consent each time it is turned on; the same notice appears at every
 start with room listening on and when a hand edit of `config.toml` turns it on.
@@ -309,14 +315,31 @@ disk, nothing touches the network (tested with all network access blocked).
 
 **Word-level split.** Whisper segments can span a speaker change. Opt-in
 (`split_on_speaker_change = false` by default, like `diarize_overlap`: word timing costs CPU
-time and is unmeasured). On the batch path (`live = false`, CLI, re-queue) the faster-whisper
-backend runs with word timestamps (requested only for the diarized tracks, decided once per
-session in `_word_tracks` with a single model-on-disk check; never for live phrases, whose
-latency matters, and never on MLX: its word timing needs numba and scipy, see
-ADR 0011), `merge.split_on_speaker_change` cuts a segment at the word boundary where the
+time and is unmeasured). On the batch path (`live = false`, CLI, re-queue) Whisper runs with
+word timestamps (requested only for the diarized tracks, decided once per session in
+`_word_tracks` with a single model-on-disk check; never for live phrases, whose latency
+matters), `merge.split_on_speaker_change` cuts a segment at the word boundary where the
 turn-dominant speaker changes, before `label_speakers`. Runs under 1 s and under 3 words are
 absorbed by neighbours; text is rebuilt from the words; segments without words and `Me` are
 untouched. Words live in `Segment.words` (memory only, not in `transcript.json`).
+On MLX, upstream `mlx_whisper/timing.py` needs numba and scipy, which are excluded (ADR 0011),
+so `transcribe/mlx_timing.py` is a copy of its `find_alignment` / `add_word_timestamps`
+(mlx-whisper 0.4.3; MIT, © 2022 OpenAI Whisper, © 2023 Apple mlx-examples, licence in the
+file header) on the numpy kernels in `_align_np.py`. `gpu.import_mlx_whisper` registers it
+as `mlx_whisper.timing`; for any other mlx-whisper version it registers a stub instead, logs
+one warning and MLX segments keep no words. The alignment runs inside `mlx_whisper.transcribe`
+on the GPU thread under `MLX_LOCK`: one extra forward pass per window plus the CPU median
+filter and DTW, during which live captions and the summary model wait. mlx-whisper never
+loads tuned alignment heads, so every head of the decoder's last half is used (40 on turbo,
+320 on large-v3); `capped_heads` keeps at most 64 (last layer first, evenly spaced) to bound
+that cost. This differs from upstream, and its accuracy on large models (large-v3, ivrit) is
+unmeasured; turbo's 40 heads are unaffected. Either way MLX word times are approximate (untuned
+heads): split points can be 0.3–1 s off, less precise than faster-whisper's. If the word pass raises on a chunk, that chunk
+is transcribed again without words (a warning with no text), so it stays whole; the failed
+lazy faster-whisper generator is closed first. After the first such failure the rest of the
+session runs without words (one warning per session). The alignment stays under `MLX_LOCK`: it runs
+inside `mlx_whisper.transcribe`, and releasing the lock mid-call would be riskier. The version is read from `mlx_whisper/_version.py` (a frozen bundle has no
+dist-info), and a test pins the SHA-256 of upstream `timing.py` so an upgrade forces a review.
 
 **Speaker names (opt-in, `speaker_names`, `voices.py`).** Diarization also returns each
 speaker's centroid (unit mean of its window embeddings). With the option on, the final pass
@@ -330,6 +353,16 @@ by session id, with the session folder: pruned once it is deleted) live in the o
 to a cloud drive. A transcript written without labels or with the option off deletes its
 session's centroids. `name-speaker` marks the session as folded into the profile before it
 changes the profile, so a failure partway can't count one session twice. All of it runs on the diarizer / writer threads, after the audio threads.
+Locking: `voices.NAMING_LOCK` (in-process) serialises everything that changes a session's
+speaker labels — finalize/relabel, `name-speaker`, the call-app rename and "Forget all
+voices" (`forget_all`, so a forget comes after any of them and no forgotten name is written
+after it). The voices folder has an OS file lock for every store change (shared with the
+CLI); it is polled before the in-process `voices.LOCK` is taken, and slow session-folder
+checks happen outside it. Finalize waits for it at most once (`LOCK_WAIT_S`), then labels
+with numbers only and skips the voice writes. Every forget bumps a `generation` file; a
+session records the generation when it starts recording, and every voice or name write for
+it, and the names put into its transcript, are dropped if a forget came since. Profiles and
+session files carry their generation, so a file a failed forget left behind never matches.
 `intro_hints.py` only reads a transcript: `recandcc speakers` suggests a name for a
 `Speaker N` who introduces themself in their first 2 minutes ("I'm Anna", "Меня зовут Анна",
 "קוראים לי דנה"); strict patterns, nothing stored, renamed or logged.
