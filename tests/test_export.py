@@ -309,7 +309,7 @@ def test_concurrent_exports_of_one_session_are_serialised(session):
 
 
 def test_a_pdf_failure_other_than_the_font_keeps_the_docx(session, monkeypatch):
-    def boom(folder, loaded=None):
+    def boom(folder, loaded=None, summary=None):
         raise RuntimeError("Привет, секрет")
 
     monkeypatch.setattr(export, "export_pdf", boom)
@@ -542,3 +542,281 @@ def test_pdf_safe_text_keeps_a_placeholder_after_zwj_and_normalises_controls():
     out = export.pdf_safe_text("\U0001f468‍中", font)
     assert [c in "?�" for c in out] == [True, True]
     assert export.pdf_safe_text("a\r\nb\rc\x00d\x07e", font) == "a\nb\ncde"
+
+
+SUMMARY_MD = (
+    "# Summary\n\nWe agreed to ship on Friday.\n\n## Action items\n\n"
+    "- Anna sends the release notes\n\n_Generated on this computer by m; it can be wrong._\n"
+)
+SUMMARY_HE = (
+    "# סיכום\n\n\u2067סיכמנו לשחרר ביום שישי\u2069\n\n## משימות\n\n- \u2067לשלוח הערות\u2069\n"
+)
+
+
+def test_docx_without_summary_is_unchanged_in_structure(session):
+    plain = [p.text for p in Document(str(export.export_docx(session))).paragraphs]
+    assert "Transcript" not in plain and "Summary" not in plain
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    with_summary = [p.text for p in Document(str(export.export_docx(session))).paragraphs]
+    assert with_summary[:2] == plain[:2]  # title and meta line
+    assert with_summary[-len(plain[2:]) :] == plain[2:]  # transcript paragraphs untouched
+
+
+def test_docx_puts_summary_and_action_items_before_the_transcript(session):
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    texts = [p.text for p in Document(str(export.export_docx(session))).paragraphs]
+    for needle in ("Summary", "Action items", "Anna sends the release notes", "Transcript"):
+        assert needle in texts
+    assert texts.index("Action items") < texts.index("Transcript")
+    assert texts.index("Transcript") < texts.index("[00:00:00] Me: Hello team")
+
+
+def test_docx_hebrew_summary_is_bidi_without_isolates(session):
+    (session / "summary.md").write_text(SUMMARY_HE, "utf-8")
+    doc = Document(str(export.export_docx(session)))
+    by_text = {p.text: p for p in doc.paragraphs}
+    p = by_text["סיכמנו לשחרר ביום שישי"]
+    assert p._p.pPr.find(qn("w:bidi")) is not None
+    assert "לשלוח הערות" in by_text and "\u2067" not in "".join(by_text)
+
+
+@pytest.mark.skipif(not have_font(), reason="no system font with Latin/Cyrillic/Hebrew")
+def test_pdf_has_summary_first_and_hebrew_survives(session):
+    from pypdf import PdfReader
+
+    def pdf_text() -> str:
+        return "\n".join(
+            pg.extract_text() for pg in PdfReader(str(export.export_pdf(session))).pages
+        )
+
+    assert "Action items" not in pdf_text()
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    text = pdf_text()
+    assert "Action items" in text and "Anna sends the release notes" in text
+    assert text.index("Action items") < text.index("Hello team")
+    (session / "summary.md").write_text(SUMMARY_HE, "utf-8")
+    text = pdf_text()
+    assert "\u05dc\u05e9\u05dc\u05d5\u05d7 \u05d4\u05e2\u05e8\u05d5\u05ea" in text
+    assert text.index("\u05de\u05e9\u05d9\u05de\u05d5\u05ea") < text.index("Hello team")
+
+
+def test_an_unreadable_summary_is_ignored(session):
+    (session / "summary.md").write_bytes(b"\xff\xfe not utf-8 \x80")
+    assert export.load_summary(session) == []
+    assert export.export_docx(session).is_file()
+
+
+def test_summary_over_the_cap_is_skipped(session, caplog):
+    (session / "summary.md").write_text("# Summary\n" + "x" * export._MAX_SUMMARY_BYTES, "utf-8")
+    with caplog.at_level("DEBUG", logger="recandcc.transcribe.export"):
+        assert export.load_summary(session) == []
+    (session / "summary.md").write_text("# Summary\nbody\n", "utf-8")
+    assert export.load_summary(session)
+
+
+def test_a_malformed_summary_logs_only_the_error_type(session, caplog):
+    (session / "summary.md").write_bytes(b"\x80secret words")
+    with caplog.at_level("DEBUG", logger="recandcc.transcribe.export"):
+        assert export.load_summary(session) == []
+    assert "UnicodeDecodeError" in caplog.text and "secret" not in caplog.text
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_a_linked_summary_or_folder_is_refused(session, tmp_path):
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Summary\nsecret\n", "utf-8")
+    (session / "summary.md").symlink_to(outside)
+    assert export.load_summary(session) == []
+    link = tmp_path / "linked"
+    link.symlink_to(session)
+    (session / "summary.md").unlink()
+    (session / "summary.md").write_text("# Summary\nbody\n", "utf-8")
+    assert export.load_summary(link) == []
+
+
+def test_a_bom_does_not_hide_the_heading(session):
+    (session / "summary.md").write_bytes(b"\xef\xbb\xbf# Summary\n\nBody\n")
+    assert export.load_summary(session)[0] == ("h1", "Summary")
+
+
+def test_markdown_variants(session):
+    (session / "summary.md").write_text(
+        "-\n* star\n+ plus\n1. one\n2) two\n### Sub\n_a_b_c_\ntext\n", "utf-8"
+    )
+    assert export.load_summary(session) == [
+        ("bullet", "star"),
+        ("bullet", "plus"),
+        ("num", "1. one"),
+        ("num", "2. two"),
+        ("h2", "Sub"),
+        ("note", "a_b_c"),
+        ("p", "text"),
+    ]
+
+
+def test_docx_summary_bullet_and_note_directions(session):
+    (session / "summary.md").write_text(
+        "- Anna לשלוח הערות\n- Anna sends notes\n_נוצר במחשב_\n",
+        "utf-8",
+    )
+    paras = Document(str(export.export_docx(session))).paragraphs
+    he = next(p for p in paras if p.text.startswith("Anna ל"))  # mixed, Hebrew majority
+    en = next(p for p in paras if p.text == "Anna sends notes")
+    note = next(p for p in paras if p.text == "נוצר במחשב")
+    assert he._p.pPr.find(qn("w:bidi")) is not None
+    assert en._p.pPr is None or en._p.pPr.find(qn("w:bidi")) is None
+    rpr = note.runs[0]._r.rPr
+    assert rpr.find(qn("w:i")) is not None and rpr.find(qn("w:iCs")) is not None
+
+
+@pytest.mark.skipif(not have_font(), reason="no system font with Latin/Cyrillic/Hebrew")
+def test_pdf_hebrew_bullet_sits_at_the_right_margin(session):
+    import re
+
+    from pypdf import PdfReader
+    from pypdf.generic import ContentStream
+
+    (session / "summary.md").write_text(
+        "# s\n\n- \u05dc\u05e9\u05dc\u05d5\u05d7 \u05d4\u05e2\u05e8\u05d5\u05ea\n", "utf-8"
+    )
+    page = PdfReader(str(export.export_pdf(session))).pages[0]
+    font = next(iter(page["/Resources"]["/Font"].values())).get_object()
+    cmap = font["/ToUnicode"].get_object().get_data().decode("latin-1")
+    code = {int(c, 16): chr(int(u, 16)) for c, u in re.findall(r"<(\w{4})>\s*<(\w{4})>", cmap)}
+    glyphs: list[tuple[float, str]] = []  # (x, char), one per glyph the PDF draws
+    x = 0.0
+    for operands, op in ContentStream(page.get_contents(), page.pdf).operations:
+        if op == b"Td":
+            x = float(operands[0])
+        elif op == b"Tm":
+            x = float(operands[4])
+        elif op == b"Tj" and operands[0]:
+            glyphs.append(
+                (x, code.get(int.from_bytes(operands[0].encode("latin-1")[:2], "big"), ""))
+            )
+    row = [(gx, ch) for gx, ch in glyphs if ch == "\u2022" or "\u05d0" <= ch <= "\u05ea"]
+    assert any(ch == "\u2022" for _, ch in row)
+    assert max(row)[1] == "\u2022"  # the rightmost glyph on the line is the bullet
+
+
+def test_a_pending_or_older_summary_is_not_exported(session):
+    import os
+
+    from recandcc.transcribe.summary import PENDING_MARKER
+
+    summary = session / "summary.md"
+    summary.write_text(SUMMARY_MD, "utf-8")
+    assert export.load_summary(session)
+    (session / PENDING_MARKER).touch()  # being redone, e.g. after a speaker rename
+    assert export.load_summary(session) == []
+    (session / PENDING_MARKER).unlink()
+    t = (session / "transcript.json").stat().st_mtime
+    os.utime(summary, (t - 10, t - 10))  # the transcript was redone after the summary
+    assert export.load_summary(session) == []
+    assert "Action items" not in [
+        p.text for p in Document(str(export.export_docx(session))).paragraphs
+    ]
+
+
+@pytest.mark.skipif(not have_font(), reason="no system font with Latin/Cyrillic/Hebrew")
+def test_pdf_export_survives_a_corrupt_summary(session):
+    (session / "summary.md").write_bytes(b"\xff\xfe\x00 broken \x80")
+    assert export.export_pdf(session).read_bytes().startswith(b"%PDF")
+
+
+def test_docx_bidi_is_in_schema_order(session):
+    (session / "summary.md").write_text(SUMMARY_HE, "utf-8")
+    doc = Document(str(export.export_docx(session)))
+    order = ["pStyle", "numPr", "bidi", "spacing", "ind", "jc"]
+    checked = 0
+    for p in doc.paragraphs:
+        ppr = p._p.pPr
+        if ppr is None or ppr.find(qn("w:bidi")) is None:
+            continue
+        tags = [c.tag.split("}")[1] for c in ppr]
+        assert tags == sorted(tags, key=order.index)
+        checked += 1
+    assert checked >= 3
+    bullet = next(
+        p
+        for p in doc.paragraphs
+        if p.text == "\u05dc\u05e9\u05dc\u05d5\u05d7 \u05d4\u05e2\u05e8\u05d5\u05ea"
+    )
+    tags = [c.tag.split("}")[1] for c in bullet._p.pPr]
+    assert tags[:2] == ["pStyle", "numPr"] or tags[0] == "pStyle"
+    assert tags.index("bidi") > tags.index("pStyle")
+
+
+def test_numbered_items_keep_their_numbers(session):
+    (session / "summary.md").write_text("# s\n\n1. first\n2) second\n", "utf-8")
+    texts = [p.text for p in Document(str(export.export_docx(session))).paragraphs]
+    assert "1. first" in texts and "2. second" in texts
+
+
+def test_numbered_hebrew_item_is_bidi(session):
+    (session / "summary.md").write_text("# s\n\n1. \u05dc\u05e9\u05dc\u05d5\u05d7\n", "utf-8")
+    p = next(
+        p for p in Document(str(export.export_docx(session))).paragraphs if p.text.startswith("1.")
+    )
+    assert p._p.pPr.find(qn("w:bidi")) is not None
+
+
+def test_both_formats_make_the_same_summary_decision(session, monkeypatch, caplog):
+    import os
+
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    real = export.export_docx
+
+    def docx_then_retranscribe(*a, **kw):
+        out = real(*a, **kw)
+        t = (session / "transcript.json").stat().st_mtime + 100
+        os.utime(session / "transcript.json", (t, t))  # transcript redone mid-export
+        return out
+
+    monkeypatch.setattr(export, "export_docx", docx_then_retranscribe)
+    seen = []
+    real_pdf = export.export_pdf
+    monkeypatch.setattr(
+        export,
+        "export_pdf",
+        lambda f, loaded=None, summary=None: seen.append(summary) or real_pdf(f, loaded, summary),
+    )
+    export.export_session(session)
+    assert seen and seen[0]  # the PDF got the same, non-empty summary as the DOCX
+    assert any(
+        p.text == "Action items" for p in Document(str(session / "transcript.docx")).paragraphs
+    )
+
+
+def test_a_stale_summary_is_logged_with_the_reason_only(session, caplog):
+    import logging
+    import os
+
+    summary = session / "summary.md"
+    summary.write_text(SUMMARY_MD, "utf-8")
+    t = (session / "transcript.json").stat().st_mtime
+    os.utime(summary, (t - 10, t - 10))
+    with caplog.at_level(logging.DEBUG, logger="recandcc.transcribe.export"):
+        assert export.load_summary(session) == []
+    assert "older than the transcript" in caplog.text
+    assert "Action items" not in caplog.text
+
+
+def test_a_year_is_not_a_numbered_item(session):
+    (session / "summary.md").write_text("2026. The budget was approved\n12. real item\n", "utf-8")
+    assert export.load_summary(session) == [
+        ("p", "2026. The budget was approved"),
+        ("num", "12. real item"),
+    ]
+
+
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_pdf_summary_text_also_gets_a_placeholder(session):
+    from pypdf import PdfReader
+
+    if 0xE000 in export._font_cmap(export.find_font()):
+        pytest.skip("font covers the private-use probe")
+    (session / "summary.md").write_text("# Summary\n\nShip on Friday  ok.\n", "utf-8")
+    pdf = export.export_pdf(session)
+    got = "\n".join(pg.extract_text() for pg in PdfReader(str(pdf)).pages)
+    assert "" not in got and ("Friday ? ok" in got or "Friday � ok" in got)

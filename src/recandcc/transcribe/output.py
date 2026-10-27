@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import threading
+import time
 from dataclasses import fields
 from pathlib import Path
 
@@ -144,13 +148,26 @@ def write_outputs(
 def write_live_markdown(session: SessionInfo, segments: list[Segment], duration: float) -> Path:
     """Rewrite transcript.md of a session that is still recording (atomically)."""
     return atomic_write(
-        Path(session.directory) / MD_NAME, format_markdown(session, segments, duration, live=True)
+        Path(session.directory) / MD_NAME,
+        format_markdown(session, segments, duration, live=True),
+        tries=1,  # on the live worker: never sleep, the next update rewrites it
     )
 
 
-def atomic_write(path: Path, text: str) -> Path:
+def atomic_write(path: Path, text: str, tries: int = 5) -> Path:
     """Write via a temp file + rename, so readers never see a half-written file."""
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        for attempt in range(tries):
+            try:
+                tmp.replace(path)
+                break
+            except PermissionError:  # Windows: a reader or antivirus holds the file
+                if attempt + 1 == tries:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+    finally:
+        with contextlib.suppress(OSError):  # a scanner may still hold it; the real error wins
+            tmp.unlink(missing_ok=True)
     return path
