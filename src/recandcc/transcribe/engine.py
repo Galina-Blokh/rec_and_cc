@@ -518,6 +518,12 @@ class Transcriber:
         for start, end, raw, ws in pieces:
             text = raw.strip()
             if text:
+                # Both backends' words as (start, end, " word"), in session time.
+                kept = [
+                    (round(offset + a, 3), round(min(offset + b, end_cap), 3), w)
+                    for a, b, w in ws
+                    if offset + a < end_cap
+                ]
                 out.append(
                     Segment(
                         start=round(offset + start, 3),
@@ -525,11 +531,8 @@ class Transcriber:
                         text=text,
                         speaker=speaker,
                         language=language,
-                        words=[
-                            (round(offset + a, 3), round(min(offset + b, end_cap), 3), w)
-                            for a, b, w in ws
-                            if offset + a < end_cap
-                        ],
+                        # words were cut off: the text is whole, so never split it
+                        words=kept if len(kept) == len(ws) else [],
                     )
                 )
         return out
