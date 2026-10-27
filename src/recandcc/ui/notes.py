@@ -59,7 +59,9 @@ def summary_excerpt(text: str, limit: int = EXCERPT_CHARS) -> str:
     """The first text of a summary.md as one line (headings and list marks dropped)."""
     words: list[str] = []
     for line in text.splitlines():
-        line = line.strip().lstrip("#*->").strip()
+        if line.lstrip().startswith("#"):
+            continue  # headings ("# Summary", "## Action items")
+        line = line.strip().lstrip("*-").strip()
         if line:
             words += line.split()
         if sum(len(w) + 1 for w in words) > limit:

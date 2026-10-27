@@ -70,7 +70,7 @@ def test_summary_md_adds_an_excerpt_and_an_open_action(tmp_path):
         "# Summary\n\n- Budget agreed\n- " + "word " * 50, encoding="utf-8"
     )
     (note,) = notes.scan_notes(tmp_path)
-    assert note.has_summary and note.excerpt.startswith("Summary Budget agreed word")
+    assert note.has_summary and note.excerpt.startswith("Budget agreed word")
     assert len(note.excerpt) <= notes.EXCERPT_CHARS and note.excerpt.endswith("…")
     assert notes.note_columns(note)[-1] == "transcribed, summary"
     assert "Open summary" in notes.note_actions(note)
@@ -142,7 +142,9 @@ def test_mac_dialog_scripts_quote_titles_and_parse_choices(tmp_path):
 def _ctrl(tmp_path, session_dir=None, pending=0):
     c = Controller.__new__(Controller)  # only the notes wiring: no runtime
     c.cfg = types.SimpleNamespace(
-        output_dir=tmp_path, transcription=types.SimpleNamespace(live=False)
+        output_dir=tmp_path,
+        transcription=types.SimpleNamespace(live=False),
+        summary=types.SimpleNamespace(enabled=False),
     )
     c._lock, c._in_flight, c._notes_scanning = threading.RLock(), set(), threading.Lock()
     c._live, c.transcriber = None, None

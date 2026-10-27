@@ -35,8 +35,13 @@ All notable changes to RecAndCC are documented here. The format is based on
 - "Meeting notes…" in the menu and the Windows tray: past sessions newest first, with
   open transcript / summary, reveal, rename (`title` in `session.json`) and delete to the
   Trash (#4).
+- Opt-in local meeting summaries (`[summary] enabled = true`, Apple silicon): `summary.md`
+  with a short summary and action items after each transcript, from a pinned Qwen2.5 3B
+  model via mlx-lm; `recandcc summarize <session_dir>` (#4).
 - Speaker names that carry over between sessions, from opt-in local voice profiles; name a
   speaker once from the CLI (#62).
+- `recandcc speakers` suggests a name when a speaker introduces themself in their first
+  2 minutes (English, Russian, Hebrew); only a hint, nothing is stored (#1).
 - Hebrew in `transcription.languages`, with right-to-left captions and transcripts (#60).
 - Record only the app that triggered a session with `detection.system_audio_scope = "app"`
   (macOS per-app audio tap) (#63, #65).
@@ -47,6 +52,9 @@ All notable changes to RecAndCC are documented here. The format is based on
 - ADR 0011: stack and packaging after v0.1 (Proposed) (#57).
 
 ### Changed
+- The macOS environment no longer installs torch (#69) or numba, llvmlite and scipy (#77),
+  which mlx-whisper declares but RecAndCC never uses: `.venv` shrinks from 1.3 GB to
+  559 MB (part of #3).
 - Menu-bar presentation logic moved out of the AppKit/pystray shells into `ui/present.py`,
   so it is unit-tested on every platform (#67).
 - CI type-checks `src/` with pyright and enforces a 70 % coverage floor on non-UI code
