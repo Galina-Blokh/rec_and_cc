@@ -131,8 +131,10 @@ class WinActivityMonitor(ActivityMonitor):
         try:
             import psutil  # pycaw dependency  # pyright: ignore[reportMissingModuleSource]
 
-            for p in psutil.process_iter(["name"]):
-                if (p.info.get("name") or "").lower() == exe_lower:
+            # ad_value=None: protected processes yield None, not an AccessDenied instance
+            for p in psutil.process_iter(["name"], ad_value=None):
+                name = p.info.get("name")
+                if isinstance(name, str) and name.lower() == exe_lower:
                     return p.pid
         except Exception:
             log.debug("process lookup for %s failed", exe_lower, exc_info=True)
@@ -172,7 +174,7 @@ class WinActivityMonitor(ActivityMonitor):
                 )
         return list(procs.values())
 
-    def close(self) -> None:
+    def release_thread(self) -> None:
         if getattr(self._tls, "com", False):
             try:
                 import comtypes  # pyright: ignore[reportMissingImports]
@@ -181,3 +183,6 @@ class WinActivityMonitor(ActivityMonitor):
             except Exception:
                 log.debug("CoUninitialize failed", exc_info=True)
             self._tls.com = False
+
+    def close(self) -> None:
+        self.release_thread()

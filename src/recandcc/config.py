@@ -151,6 +151,19 @@ class TranscriptionConfig:
     allow_unpinned_models: bool = False
 
 
+DEFAULT_SUMMARY_MODEL = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+
+
+@dataclass
+class SummaryConfig:
+    # Write summary.md (short summary + action items) after each final transcript, with a
+    # local LLM (mlx-lm, Apple silicon only). Off by default: it costs ~2 GB of RAM and a
+    # one-time ~1.7 GB model download.
+    enabled: bool = False
+    model: str = DEFAULT_SUMMARY_MODEL  # pinned in transcribe/revisions.py, or a local path
+    max_tokens: int = 400  # longest generated answer (summary, action list, chunk notes)
+
+
 @dataclass
 class Config:
     output_dir: Path = DEFAULT_OUTPUT_DIR
@@ -161,6 +174,7 @@ class Config:
     live_captions: bool = True
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
+    summary: SummaryConfig = field(default_factory=SummaryConfig)
 
     def save(self, path: Path = CONFIG_PATH) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -297,7 +311,8 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     tr.languages = normalize_languages(raw)
     if tr.languages != raw:
         tr._raw_languages = raw  # type: ignore[attr-defined]  # written back by save()
+    summary = _build(SummaryConfig, data.pop("summary", {}))
     cfg = _build(Config, data)
     cfg.output_dir = Path(cfg.output_dir).expanduser()
-    cfg.detection, cfg.transcription = det, tr
+    cfg.detection, cfg.transcription, cfg.summary = det, tr, summary
     return cfg

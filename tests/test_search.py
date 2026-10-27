@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from recandcc import cli, search
+from recandcc.config import Config
 from recandcc.models import Segment, SessionInfo, TriggerKind
 from recandcc.search import TranscriptIndex, has_fts5
 from recandcc.transcribe.output import write_outputs
@@ -203,7 +204,7 @@ def test_controller_indexes_after_transcription_and_searches_off_thread(tmp_path
 
     a = make_session(out, 1, [seg(0, "kickoff notes")])
     ctrl = Controller.__new__(Controller)  # only the search wiring, no runtime
-    ctrl.events, ctrl.cfg = queue.Queue(), type("C", (), {"output_dir": out})()
+    ctrl.events, ctrl.cfg = queue.Queue(), Config(output_dir=out)
     ctrl.refresh_async = lambda force=False: None
     ctrl._on_transcribed(SessionInfo.load(a), [])
     assert ctrl.events.get(timeout=1)[0] == "transcribed"

@@ -262,6 +262,7 @@ class Controller:
         self._save_lock = threading.Lock()  # menu writes to config.toml
         self._settings_lock = threading.Lock()  # one settings window at a time
         self._lang_lock = threading.Lock()  # transcription.languages + its raw spelling
+        self._summaries = None  # SummaryQueue, created on the first summary
         self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
         # global shortcut
         self._hotkey_lock = threading.Lock()
@@ -389,6 +390,21 @@ class Controller:
             threading.Thread(
                 target=self._index_session, args=(session.directory,), daemon=True, name="search"
             ).start()
+            if self.cfg.summary.enabled:
+                self._summarize(session.directory)
+
+    def _summarize(self, directory: Path) -> None:
+        """Queue summary.md for a final transcript (local LLM, own background thread)."""
+        summaries = getattr(self, "_summaries", None)
+        if summaries is None:
+            from ..transcribe.summary import SummaryQueue
+
+            summaries = self._summaries = SummaryQueue(
+                self.cfg,
+                notify=self.post_notice,
+                busy=lambda: self.engine.state.status != IDLE,  # never during a recording
+            )
+        summaries.submit(directory)
 
     # --- transcript search (worker threads; results arrive as a "search" event)
     @staticmethod
