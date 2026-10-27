@@ -768,6 +768,8 @@ class Recorder:
             new = self.system_factory(target)
             if new.scope == "app":  # not on Windows
                 new.start(on_frames)
+                # Bounded wait (SCOPE_WAIT_S, once per upgrade, engine thread only) under
+                # _op_lock: a concurrent stop() waits that long rather than race the swap.
                 confirmed = new.confirmed_scope(SCOPE_WAIT_S) == "app"
             else:
                 confirmed = False
@@ -785,6 +787,8 @@ class Recorder:
             _stop_quietly(new)
             return False
         w.source, w.scope = new, "all→app"
+        # Audio between the old tap's stop and gate.set() is dropped and this pad is computed
+        # before the gate opens, so Others may drift a few tens of ms against Me.
         lead = max(x.frames_received for x in self._writers) - w.frames_received
         if lead > 0:
             w.pad_silence(lead)
