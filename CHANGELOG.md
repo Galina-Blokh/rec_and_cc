@@ -9,6 +9,9 @@ All notable changes to RecAndCC are documented here. The format is based on
 ### Added
 - Opt-in semantic transcript search (`[search] semantic = true`): a pinned, checksum-verified
   multilingual sentence model, downloaded once, merged with full-text results (#4).
+- Meeting summaries on Windows and Linux: the default Qwen2.5 1.5B Instruct runs on the CPU
+  through onnxruntime-genai, as a pinned, checksum-verified int4 ONNX build downloaded once;
+  Apple silicon keeps MLX (#4).
 - RecAndCC is licensed under the Apache License 2.0 (`LICENSE`, `NOTICE`); completes #17.
 
 ### Fixed

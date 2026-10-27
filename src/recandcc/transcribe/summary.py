@@ -1,6 +1,7 @@
 """Local meeting summaries: ``summary.md`` (short summary + action items) next to a transcript.
 
-Opt-in (``summary.enabled``). A small instruct model runs through mlx-lm on Apple silicon,
+Opt-in (``summary.enabled``). A small instruct model runs through mlx-lm on Apple silicon
+(elsewhere on the CPU through onnxruntime-genai, see summary_cpu.py and create_generator),
 pinned in revisions.py and loaded offline-first like Whisper (gpu.local_model_path). Long
 transcripts are summarised map-reduce: notes per chunk, then the summary and the action list
 from the notes. Everything runs on one background ``summary`` thread; logs never contain
@@ -60,9 +61,22 @@ class Generator(Protocol):
     def __call__(self, messages: Messages, max_tokens: int) -> str: ...
 
 
+class ModelGenerator(Generator, Protocol):
+    model_name: str
+
+    def close(self) -> None: ...
+
+
 def download_notice(model: str) -> str:
-    """The one-time download notice, with the size when ``model`` is a pinned one."""
-    size = DOWNLOAD_SIZES.get(model)
+    """The one-time download notice, with the size when ``model`` is a pinned one (of the
+    build this machine downloads: MLX, or the CPU one in summary_cpu)."""
+    sizes = DOWNLOAD_SIZES
+    if not mlx_lm_available():
+        from . import summary_cpu
+
+        if summary_cpu.cpu_available():
+            sizes = summary_cpu.DOWNLOAD_SIZES
+    size = sizes.get(model)
     return f"Downloading the summary model ({size + ', ' if size else ''}once)"
 
 
@@ -207,7 +221,9 @@ def summarize_session(directory: Path, cfg: Config, generate: Generator | None =
     t0 = time.monotonic()
     owned = None
     if generate is None:  # the real model, freed again after this session
-        generate = owned = MlxGenerator(cfg.summary.model, cfg.transcription.allow_unpinned_models)
+        generate = owned = create_generator(
+            cfg.summary.model, cfg.transcription.allow_unpinned_models
+        )
     try:
         language, summary, items = summarize(segments, generate, cfg.summary.max_tokens)
     finally:
@@ -266,6 +282,20 @@ def mlx_lm_available() -> bool:
         and platform.machine() == "arm64"
         and importlib.util.find_spec("mlx_lm") is not None
     )
+
+
+def create_generator(
+    model: str, allow_unpinned: bool = False, on_download: Callable[[], None] | None = None
+) -> ModelGenerator:
+    """The summary model's generator on this machine: mlx-lm on Apple silicon, else the CPU
+    one (onnxruntime-genai, summary_cpu.py, imported only here). With neither, MlxGenerator,
+    whose load() says why summaries can't run."""
+    if not mlx_lm_available():
+        from . import summary_cpu
+
+        if summary_cpu.cpu_available():
+            return summary_cpu.CpuGenerator(model, allow_unpinned, on_download)
+    return MlxGenerator(model, allow_unpinned, on_download)
 
 
 class MlxGenerator:
@@ -393,7 +423,7 @@ class SummaryQueue:
         gen = self.generate
         if gen is None:
             model = self.cfg.summary.model  # a config reload may change it while we wait
-            gen = owned = MlxGenerator(
+            gen = owned = create_generator(
                 model,
                 self.cfg.transcription.allow_unpinned_models,
                 on_download=lambda: self.notify("Summary model", download_notice(model)),

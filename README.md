@@ -268,7 +268,7 @@ enabled = false              # true = summary.md with action items after each me
 
 ### Meeting summaries (opt-in)
 
-With `[summary] enabled = true` (Apple silicon), each finished transcript also gets a
+With `[summary] enabled = true`, each finished transcript also gets a
 `summary.md` in its folder: a few sentences about the meeting and an **Action items** list
 (who does what, by when), written in the meeting's main language (English or Russian).
 Summaries support English and Russian only: the Qwen models tried write unusable Hebrew
@@ -280,8 +280,12 @@ sent anywhere. It is a draft: check names and dates against the transcript. The 
 Research licence: non-commercial use only. It was the default before, and older settings
 files hold it without anyone choosing it, so it is replaced by the default (saved to `config.toml`, with a one-time notice) unless
 you also set `accept_qwen_research_licence = true` under `[summary]`. If the 3B is already
-downloaded and the new default isn't, it is kept for now, so offline summaries keep working. On Windows, or
-offline before the model is downloaded, the summary is skipped with a notice. It waits for
+downloaded and the new default isn't, it is kept for now, so offline summaries keep working. On Windows
+(and Linux) the same 1.5B model runs on the CPU through onnxruntime-genai, as a pinned,
+checksum-verified int4 ONNX build (~1.8 GB, downloaded once); it is much slower than on Apple
+silicon (about 10 minutes for an hour-long meeting on a fast CPU), and only the default model has
+a CPU build. Offline before the model is downloaded, or on an Intel Mac, the summary is skipped
+with a notice. It waits for
 the speaker labels (a slow diarization delays it), a summary cut short by quitting is redone
 at the next start (a `.summary-pending` marker in the session folder; a `.summary-source` file records a fingerprint of the transcript text the summary was made from), and after
 `recandcc name-speaker` the app redoes an existing `summary.md` with the new name once idle. Renaming a speaker in the menu, or call-app names, keeps the existing summary, whose text may still mention the old label. Old summaries are not given a fingerprint afterwards: one computed now could describe a transcript that already differs from what the summary was made from.
@@ -369,7 +373,7 @@ models load from disk without contacting anything (tested with all network acces
 | Each session's speaker voices (only with `speaker_names = true`) | `…/RecAndCC/voices/sessions/` | `%LOCALAPPDATA%\RecAndCC\voices\sessions\` |
 | Speaker-diarization model | `~/Library/Caches/RecAndCC/models/` | `%LOCALAPPDATA%\RecAndCC\Cache\models\` |
 | Whisper models (shared Hugging Face cache) | `~/.cache/huggingface/hub/models--*whisper*` | `%USERPROFILE%\.cache\huggingface\hub\` |
-| Summary model (only with summaries on) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-*-Instruct-4bit` | not used |
+| Summary model (only with summaries on) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-*-Instruct-4bit` | `%LOCALAPPDATA%\RecAndCC\Cache\models\onnx-community--Qwen2.5-1.5B-Instruct-*` |
 | Old summary model, unused after the switch to the 1.5B default (~1.7 GB, safe to delete unless you kept the 3B with `accept_qwen_research_licence = true`) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-3B-Instruct-4bit` | not used |
 | Launch at login | `~/Library/LaunchAgents/com.gblokh.recandcc.plist` | registry `HKCU\…\CurrentVersion\Run\RecAndCC` |
 

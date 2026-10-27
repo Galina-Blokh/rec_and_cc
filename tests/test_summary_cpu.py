@@ -1,5 +1,8 @@
 """CPU summaries (onnxruntime-genai) for machines without MLX, with a fake backend and a fake
-hub: no real model, no network. Issue #4."""
+hub: no real model, no network. Issue #4.
+
+Stories: US-27.
+"""
 
 from __future__ import annotations
 
@@ -175,7 +178,7 @@ def test_pinned_download_once_then_offline(hub, og):
 def test_checksum_mismatch_keeps_nothing(hub, og, monkeypatch):
     bad = _fake_model(sha={"onnx/model.onnx": "0" * 64})
     monkeypatch.setattr(summary_cpu, "CPU_MODELS", {"m/qwen": bad})
-    with pytest.raises(summary.ModelUnavailable):
+    with pytest.raises(summary_cpu.ModelUnavailable):
         CpuGenerator("m/qwen").load()
     assert not [p for p in bad.folder.rglob("*") if p.is_file() and "model" in p.name]
 
@@ -192,7 +195,7 @@ def test_corrupt_file_on_disk_is_downloaded_again(hub, og):
 def test_oversized_download_is_refused(hub, og, monkeypatch):
     small = _fake_model(files={"onnx/model.onnx": WEIGHTS[:10], "tokenizer.json": TOKENIZER})
     monkeypatch.setattr(summary_cpu, "CPU_MODELS", {"m/qwen": small})
-    with pytest.raises(summary.ModelUnavailable):
+    with pytest.raises(summary_cpu.ModelUnavailable):
         CpuGenerator("m/qwen").load()
 
 
@@ -204,7 +207,7 @@ def test_search_options_and_prompt(hub, og):
 
 
 def test_model_without_cpu_build_or_local_folder(hub, og, tmp_path):
-    with pytest.raises(summary.ModelUnavailable, match="no CPU build"):
+    with pytest.raises(summary_cpu.ModelUnavailable, match="no CPU build"):
         CpuGenerator("mlx-community/gemma-4-e4b-it-4bit").load()
     (tmp_path / "genai_config.json").write_text("{}", "utf-8")
     gen = CpuGenerator(str(tmp_path))
@@ -244,3 +247,16 @@ def test_without_onnxruntime_genai_summaries_are_unavailable(monkeypatch):
     monkeypatch.setattr(summary_cpu, "cpu_available", lambda: False)
     with pytest.raises(summary.SummaryUnavailable, match="onnxruntime-genai"):
         CpuGenerator("m/qwen").load()
+
+
+@pytest.mark.parametrize(
+    ("mlx", "cpu", "size"), [(True, True, "~0.9 GB"), (False, True, "~1.8 GB")]
+)
+def test_download_notice_names_the_size_of_the_build_downloaded_here(monkeypatch, mlx, cpu, size):
+    from recandcc.config import DEFAULT_SUMMARY_MODEL
+
+    monkeypatch.setattr(summary, "mlx_lm_available", lambda: mlx)
+    monkeypatch.setattr(summary_cpu, "cpu_available", lambda: cpu)
+    assert summary.download_notice(DEFAULT_SUMMARY_MODEL) == (
+        f"Downloading the summary model ({size}, once)"
+    )
