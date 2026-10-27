@@ -192,3 +192,18 @@ def test_reload_waits_for_a_click_between_its_mark_and_its_set(tmp_path, monkeyp
     assert ctrl.cfg.live_captions is False
     assert load_config(path).live_captions is False
     assert not ctrl._dirty
+
+
+def test_a_failing_then_step_is_logged_and_leaves_no_mark(tmp_path, monkeypatch, caplog):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+
+    def boom():
+        raise RuntimeError("purge failed")
+
+    ctrl.menu_set("live_captions", False, title="Captions", then=boom)
+    for t in threading.enumerate():
+        if t.name == "save-config":
+            t.join(5)
+    assert "live_captions = false" in path.read_text()
+    assert not ctrl._dirty
+    assert "after-save step for live_captions failed" in caplog.text

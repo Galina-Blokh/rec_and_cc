@@ -1254,7 +1254,10 @@ class Controller:
             finally:
                 self._mark_dirty(keys, -1)
             if then is not None:
-                then()
+                try:
+                    then()
+                except Exception:  # a daemon thread would drop it silently
+                    log.exception("after-save step for %s failed", ", ".join(keys))
 
         t = threading.Thread(target=run, name="save-config")
         t.daemon = True
