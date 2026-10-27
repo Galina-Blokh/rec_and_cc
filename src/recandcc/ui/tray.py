@@ -469,6 +469,7 @@ def tk_dialog(
     Cancel, close, timeout or when Tk fails. ``danger``: Cancel has the focus and Return does
     not confirm. UNTESTED (written without access to Windows)."""
     result = None
+    root = None
     try:
         import tkinter as tk
 
@@ -521,6 +522,9 @@ def tk_dialog(
         root.mainloop()
     except Exception as e:  # labels may quote a transcript: log the type only
         log.warning("dialog failed (tkinter unavailable?): %s", type(e).__name__)
+        if root is not None:  # a widget failed after Tk(): don't leave an orphan window
+            with contextlib.suppress(Exception):
+                root.destroy()
         return None
     return result
 
