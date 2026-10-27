@@ -303,7 +303,10 @@ class Engine:
             handed_off = not self._thread_exited
             self._stop_on_exit = handed_off
         if handed_off:
-            log.warning("shutting down: the engine thread is busy; it stops the recording")
+            log.warning(
+                "shutting down: the engine thread is busy; it stops the recording if it "
+                "finishes before the app exits"
+            )
         elif rec is not None:
             self._do_stop()
         if self.room is not None:
@@ -704,7 +707,7 @@ class Engine:
         while another process uses the mic. While an app does audio, forget what was heard,
         so neither the pre-roll nor the speech window carry it into a room session."""
         room = self.room
-        if room is None:
+        if room is None or self._stop_evt.is_set():  # quitting: never reopen the mic
             return
         with self._lock:
             r = self._rec
