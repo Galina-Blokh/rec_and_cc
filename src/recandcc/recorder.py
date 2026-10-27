@@ -385,6 +385,7 @@ class _TrackWriter:
         self.dropped_frames = 0  # audio lost to a full backlog, written as silence instead
         self.abandoned = False  # finish() timed out: the writer completes in the background
         self._finishing = False  # finish() sent the sentinel
+        self.late_frames = 0  # arrived after it (a source's reader outlived its stop timeout)
         self._dropping = False  # dropping until the backlog falls to the low-water mark
         self._drop_logged = False  # the first drop is logged by the writer, not capture
         self.frames_received = 0  # updated on the capture thread; ahead of frames_written
@@ -405,8 +406,8 @@ class _TrackWriter:
 
     def on_frames(self, frames: np.ndarray) -> None:  # capture thread: keep it cheap
         frames = np.asarray(frames, dtype=np.float32).reshape(-1)
-        if self._finishing:  # a straggler after the sentinel: counted, never silently lost
-            self.dropped_frames += frames.size
+        if self._finishing:  # a straggler after the sentinel: counted (not the disk's fault)
+            self.late_frames += frames.size
             return
         level = dbfs(frames)
         self.level_dbfs = level
@@ -880,11 +881,7 @@ class Recorder:
     def _finalize_later(directory: Path, stuck: list[_TrackWriter]) -> None:
         """Mark the session as still being written until its stuck writers close their WAVs,
         so it isn't transcribed from partial audio (the transcription queue waits for it)."""
-        try:
-            mark_writing(directory)  # before session.json gets ended_at
-        except OSError as e:
-            log.warning("could not mark a session as still writing (%s)", type(e).__name__)
-            return
+        mark_writing(directory)  # before session.json gets ended_at
 
         def wait() -> None:
             for w in stuck:
@@ -896,6 +893,7 @@ class Recorder:
     def _stop(self) -> SessionInfo | None:
         with self._op_lock:
             session, writers = self._session, self._writers
+            self.last_peaks, self.last_dropped = {}, {}  # never a previous session's notice
             if session is None:
                 return None
             for w in writers:
@@ -905,6 +903,8 @@ class Recorder:
                     log.exception("stopping %s source failed", w.track)
             for w in writers:
                 w.finish()
+                if w.late_frames:  # a reader outlived its stop timeout: not the disk's fault
+                    log.debug("%s: %d frames arrived after the stop", w.track, w.late_frames)
             if stuck := [w for w in writers if w.abandoned]:
                 self._finalize_later(session.directory, stuck)
             self._session, self._writers, self._listeners = None, [], ()

@@ -115,13 +115,15 @@ The app is built around one rule: **real-time audio threads never block**. Every
   before that leaves the file without a final header). Session folders are unique, so a later
   session never shares a file with it. `stop()` judges such a track by the samples it received
   (its full timeline), never discards it as short or empty, and never deletes its folder.
-- Such a session's folder holds `.writing` (this run's token) until a `writer-finalize`
-  thread has joined its stuck writers. The transcription queue waits for it up to 10 s on its
-  own thread, then moves the job to the back of the queue (dropped at shutdown, re-queued at
-  the next start, where a marker from an earlier run no longer blocks). Live captions don't
-  flush/diarize it; the queue transcribes it from the final WAVs instead.
+- Such a session is "still writing" (an in-memory set in `models.py`, plus a `.writing` file
+  as a hint for crash recovery) until a `writer-finalize` thread has joined its stuck writers.
+  The transcription queue waits for it up to 10 s on its own thread, then moves the job to the
+  back of the queue (dropped at shutdown, re-queued at the next start, where a leftover file
+  doesn't block). Live captions don't flush/diarize it; the queue transcribes the final WAVs.
 - `writer_dropped_s` per track goes into the session metrics; `Recorder.dropped_tracks()`
-  makes the engine post one "Some audio was not recorded" notice after that stop.
+  makes the engine post one "Some audio was not recorded" notice after that stop. Frames that
+  arrive after the stop sentinel (a reader outliving its stop timeout) count as `late_frames`,
+  logged at DEBUG, not as dropped.
 - AppKit objects are touched only on the main thread. Worker threads post events that the
   main-thread timer applies.
 - Engine → Controller: `on_session_start(session)` / `on_session_end(session | None, kept)`

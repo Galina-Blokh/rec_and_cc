@@ -116,12 +116,11 @@ class TranscriptionQueue:
                 except Exception:  # noqa: BLE001
                     log.exception("on_done callback failed")
 
-    @staticmethod
-    def _audio_final(session: SessionInfo) -> bool:
+    def _audio_final(self, session: SessionInfo) -> bool:
         """Wait (bounded, on this thread) while a stuck writer still finishes the WAVs."""
         deadline = time.monotonic() + WRITING_WAIT_S
         while still_writing(session.directory):
-            if time.monotonic() >= deadline:
+            if self._closed or time.monotonic() >= deadline:  # shutdown: don't hold it up
                 return False
             time.sleep(WRITING_POLL_S)
         return True

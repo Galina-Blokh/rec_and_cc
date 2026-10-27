@@ -562,7 +562,7 @@ def test_dropping_continues_until_the_backlog_falls_to_the_low_water_mark(cfg, s
     assert np.allclose(data[11200:], 0.25, atol=1e-3)
 
 
-def test_frames_after_the_sentinel_are_counted_as_dropped(cfg, stalled_disk):
+def test_frames_after_the_sentinel_are_counted_as_late_not_dropped(cfg, stalled_disk):
     rec, src = make(cfg, sine(0.2))
     rec.start(TriggerKind.MEDIA, "Music")
     assert src["sys"].done.wait(5)
@@ -570,7 +570,8 @@ def test_frames_after_the_sentinel_are_counted_as_dropped(cfg, stalled_disk):
     w.source.stop()
     assert w.finish() is False
     w.on_frames(np.ones(1600, dtype=np.float32))  # a straggler from the stopping source
-    assert w.dropped_frames == 1600 and w.frames_received == 3200
+    assert w.late_frames == 1600 and w.dropped_frames == 0  # no "disk too slow" notice
+    assert w.frames_received == 3200
 
 
 def test_a_stuck_session_is_marked_still_writing_and_reports_dropped_audio(cfg, stalled_disk):
@@ -586,6 +587,7 @@ def test_a_stuck_session_is_marked_still_writing_and_reports_dropped_audio(cfg, 
     assert still_writing(out.directory)  # not final: the queue won't transcribe it yet
     assert out.metrics["recording"]["writer_dropped_s"] == {"others": 2.5}
     assert rec.dropped_tracks() == [Track.OTHERS]
+    assert rec.stop() is None and rec.dropped_tracks() == []  # not repeated by a no-op stop
     stalled_disk.set()
     deadline = time.monotonic() + 5
     while still_writing(out.directory) and time.monotonic() < deadline:
