@@ -113,8 +113,8 @@ Menu items:
   headsets switch to their call profile) and about 6 s of speech within 15 s near the laptop
   starts a recording, as in Auto/Ask mode, including the 15 s before it (system audio is
   recorded too, as for calls). It stops after 90 s without speech. Apps take precedence:
-  nothing starts while an app plays or uses the mic, and a room recording stops if an app
-  you switched off or stopped starts. Tell the people in the room: recording them may need
+  nothing starts while another app plays or uses the mic (music too), and a room recording
+  stops if an app you switched off, stopped or ignore starts. Tell the people in the room: recording them may need
   their consent.
 - **Sensitivity** (Off by default): presets *Quiet room / Normal / Noisy place* for how
   readily the room (microphone) and app audio start a recording; a noisy place needs more

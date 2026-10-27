@@ -229,6 +229,8 @@ class Engine:
         self.room = room_monitor
         self._room_retry_at = float("-inf")
         self._room_mic_busy = self._room_apps_busy = False  # engine thread only
+        self._room_blockers: list[str] = []
+        self._room_prev_busy = False
 
         self._wake = threading.Event()
         self._stop_evt = threading.Event()
@@ -372,17 +374,28 @@ class Engine:
         now = self.clock()
         min_active = effective_min_active_s(self.det)  # inside sensitivity
         room = self.room
-        # Other processes using the mic (even ignored or switched-off ones): the room mic would
-        # hear exactly what the user excluded, so room listening holds off (see _sync_room).
-        mic_users = [
+        # Any other process doing audio (even an ignored or switched-off one): the room mic
+        # would hear exactly that, so room listening holds off. Mic users close the room mic,
+        # players reset what it heard (see _sync_room).
+        busy = [
             p
             for p in procs
-            if p.input_active and p.pid not in self.own_pids and not match_pattern(OWN_AUDIO, p)
+            if (p.input_active or p.output_active)
+            and p.pid not in self.own_pids
+            and not match_pattern(OWN_AUDIO, p)
         ]
-        self._room_mic_busy, self._room_apps_busy = bool(mic_users), bool(apps)
+        was_busy, self._room_prev_busy = self._room_prev_busy, bool(busy)
+        self._room_mic_busy = any(p.input_active for p in busy)
+        self._room_apps_busy = bool(busy) or was_busy  # one more reset after they stop
+        names = sorted({p.name or p.bundle_id for p in busy})
+        if names != self._room_blockers and self.room is not None and self.det.room_listening:
+            log.info("room listening holds off for: %s", ", ".join(names) or "nothing")
+        self._room_blockers = names
         room_active, room_quiet = False, 0.0
         if room is not None and room.running:
-            room_active = self._room_wanted() and not (mic_users or apps) and room.triggered()
+            # A clean snapshot after a busy one first: detection lags the audio by ~1-2 s.
+            clean = not busy and not was_busy
+            room_active = self._room_wanted() and clean and room.triggered()
             room_quiet = room.seconds_since_speech()
 
         start_req: tuple[TriggerKind, str | None] | None = None
@@ -487,8 +500,11 @@ class Engine:
                 if not is_room and r.key not in apps and now - last >= inactive_s:
                     log.info("stopping: %s inactive for %.0fs", r.name, now - last)
                     stop_req = True
-                elif is_room and self._room_excluded_locked(mic_users, apps):
+                elif is_room and self._room_excluded_locked(busy, apps):
                     log.info("stopping the room session: an excluded app is doing audio")
+                    stop_req = True
+                elif is_room and not self._room_wanted():
+                    log.info("stopping the room session: room listening was turned off")
                     stop_req = True
                 elif is_room and r.room_mic and room_quiet >= det.room_stop_after_silence_s:
                     log.info("stopping: no speech in the room for %.0fs", room_quiet)
@@ -525,6 +541,8 @@ class Engine:
                     ):
                         continue
                     log.info("call detected during %s recording: now following %s", r.kind, a.name)
+                    if self._prompt is not None and self._prompt.key == r.key:
+                        self._prompt.key = a.key  # "Discard" still discards this session
                     r.key, r.name, r.kind = a.key, a.name, TriggerKind.CALL
                     upgrade_req = a.name
                     break
@@ -589,9 +607,10 @@ class Engine:
         det = self.det
         return bool(det.room_listening) and Mode(det.mode) != Mode.OFF and det.record_mic != "never"
 
-    def _room_excluded_locked(self, mic_users, apps: dict[str, AppActivity]) -> bool:
+    def _room_excluded_locked(self, busy, apps: dict[str, AppActivity]) -> bool:
         """A room session must stop: a process uses the mic or an app does audio that the user
-        excluded (ignored, switched off, stopped). A call that may upgrade the session is fine."""
+        excluded (ignored, switched off, stopped). A call that may upgrade the session, or an
+        app that may record (not off, not stopped), is fine."""
         det = self.det
 
         def allowed(key: str) -> bool:
@@ -602,11 +621,11 @@ class Engine:
                 and effective_mode(det, key, a.procs) != Mode.OFF
             )
 
-        for p in mic_users:
+        for p in busy:
             c = classify(p, det, self.own_pids)
-            if c is None or c[1] != TriggerKind.CALL or not allowed(c[0]):
+            if c is None or not allowed(c[0]) or (p.input_active and c[1] != TriggerKind.CALL):
                 return True
-        return not all(allowed(k) for k in apps)
+        return False
 
     def _sync_room(self, now: float) -> None:
         """Engine thread, outside the lock: open the room mic while idle and wanted, and not

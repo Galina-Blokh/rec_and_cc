@@ -155,15 +155,19 @@ room is on the mic, so diarization numbers the speakers of the `Me` track in roo
 (`transcribe/engine.py: diarized_track`).
 
 **Precedence.** In `tick()` sustained room speech is a candidate `@room`, appended *after*
-the app candidates and only when nothing records or asks, **no (non-ignored) app is doing
-audio** and no other process uses the mic (even one the user switched off, stopped, or that
-is ignored, such as Voice Memos): the mic would hear exactly what the user excluded. So while
-another process uses the mic, the monitor's mic is closed (nothing is heard or kept), and
-while an app does audio its pre-roll and speech window are reset every tick, so neither can
-carry that audio into a room session once the app stops. A running room session stops as
-soon as a process uses the mic or an app does audio that the user excluded; a call that may
-still upgrade it (debouncing, mode not `off`) is allowed. Ignored apps that only play
-(Spotify) don't block it: their vocals can start a room session. A room session records
+the app candidates and only when nothing records or asks and **no other process is doing
+audio** (even one the user switched off, stopped, or that is ignored, such as Voice Memos or
+Spotify): the mic would hear exactly that. While another process uses the mic, the
+monitor's mic is closed (nothing is heard or kept); while one plays, its pre-roll and speech
+window are reset every tick, and once more on the first clean snapshot (detection lags the
+audio by ~1-2 s), which must come before room speech can trigger. A running room session
+stops as soon as a process uses the mic or plays audio that the user excluded, or room
+listening is turned off; a call that may still upgrade it (debouncing, mode not `off`) and
+an app that may record are allowed. Detection latency still lets up to ~2 s of excluded
+audio into a running room session before it stops; a session pinned with the shortcut
+(manual) skips these checks like any manual session. When a call upgrades a room session
+that is still asking "Keep it?", the prompt follows the session, so Discard still discards
+it. `started_at` is moved back by the replayed pre-roll. A room session records
 `Others` (system audio) too, so a call can upgrade it without a gap. The writers keep
 `max(room_preroll_s, room_window_s) + 5` s for listeners on room sessions, so live
 transcription, which attaches after `recorder.start()`, still gets the whole pre-roll. The `@` keeps

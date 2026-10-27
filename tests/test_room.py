@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime
 
 import numpy as np
 import soundfile as sf
@@ -321,7 +322,9 @@ def test_room_session_keeps_the_preroll_and_pads_the_other_track(tmp_path):
         (mic,) = sources
         ramp = np.arange(6 * SR, dtype=np.float32) / (8 * SR)  # unique, < 1 for the WAV
         mic.push(ramp[: 4 * SR])
+        before = datetime.now().astimezone()
         session = rec.start(TriggerKind.ROOM, "Room", mic_source=mon.session_source)
+        assert 3.9 < (before - session.started_at).total_seconds() < 4.5  # incl. pre-roll
         heard: list[tuple] = []  # live transcription attaches after start(): whole pre-roll
         rec.add_listener(lambda track, start, block: heard.append((track, start, block.size)))
         mic.push(ramp[4 * SR :])
@@ -338,12 +341,13 @@ def test_room_session_keeps_the_preroll_and_pads_the_other_track(tmp_path):
     # ... and the system track starts with that much silence, so both stay aligned.
     assert len(others) == 5 * SR and not others[: 4 * SR].any() and others[4 * SR :].all()
     assert SessionInfo.load(session.directory).trigger_kind == TriggerKind.ROOM
+    started = SessionInfo.load(session.directory).started_at  # when the audio begins
+    assert abs((out.started_at - started).total_seconds()) < 1e-3
     me_heard = [(start, n) for track, start, n in heard if track == Track.ME]
     assert me_heard[0][0] == 0 and sum(n for _, n in me_heard) == 6 * SR
 
 
 def test_room_sessions_diarize_the_mic_track():
-    from datetime import datetime
     from pathlib import Path
 
     from recandcc.transcribe.engine import diarized_track

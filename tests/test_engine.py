@@ -1010,18 +1010,27 @@ def test_room_never_records_what_an_app_switched_off_or_stopped_is_doing():
     h.mon.procs = []
     h.eng.tick()  # reopened with nothing heard: the call's speech can't start a session
     assert h.room.running and h.rec.starts == []
-    h.mon.procs = [CHROME]  # a video the user switched off, through the speakers
-    h.room.speech = True
-    h.run(5)
-    assert h.rec.starts == [] and h.room.running and h.room.resets >= 5
+    for procs in ([CHROME], [SPOTIFY]):  # a video switched off; an ignored player
+        h.mon.procs = procs
+        h.room.speech = True
+        h.run(5)
+        assert h.rec.starts == [] and h.room.running and h.room.resets >= 5
     h.mon.procs = [AudioProcess(999, "python", "python3", True, False)]  # our own room mic
+    h.room.speech = True
+    h.eng.tick()  # the first clean snapshot: detection lags, so one more reset first
+    assert h.rec.starts == [] and not h.room.speech
     h.room.speech = True
     h.eng.tick()
     assert h.rec.starts == [(TriggerKind.ROOM, "Room")]
 
 
-def test_room_session_stops_when_an_excluded_app_starts():
-    for procs in ([ZOOM], [VOICE_MEMOS], [CHROME]):
+def test_room_session_stops_when_an_excluded_app_starts_or_listening_is_off():
+    h = _room_harness()
+    _start_room_session(h)
+    h.cfg.detection.room_listening = False  # unticked during a room session
+    h.eng.tick()
+    assert h.status == IDLE and h.rec.stops == 1 and not h.room.running
+    for procs in ([ZOOM], [VOICE_MEMOS], [CHROME], [SPOTIFY]):
         h = _room_harness(app_modes={"us.zoom": Mode.OFF, "com.google.chrome": Mode.OFF})
         _start_room_session(h)
         h.mon.procs = procs
@@ -1032,6 +1041,22 @@ def test_room_session_stops_when_an_excluded_app_starts():
     h.mon.procs = [ZOOM]
     h.run(4)
     assert h.rec.stops == 0 and h.rec.upgrades == ["zoom.us"]
+
+
+def test_discarding_a_room_prompt_discards_the_session_after_a_call_upgrade(tmp_path):
+    h = _room_harness(Mode.ASK, app_modes={"us.zoom": Mode.AUTO})
+    h.run(1)
+    h.room.speech = True
+    h.eng.tick()
+    assert h.prompts == [("Room", TriggerKind.ROOM)]
+    h.rec.upgrades = []
+    h.rec.upgrade_to_call = h.rec.upgrades.append
+    h.mon.procs = [ZOOM]
+    h.run(4)
+    assert h.rec.upgrades == ["zoom.us"]
+    h.eng.respond("ignore")  # the user still sees the room prompt: discard means discard
+    h.eng.tick()
+    assert h.rec.stops == 1 and h.q.submitted == []
 
 
 def test_stopped_room_session_stays_stopped_while_the_talk_goes_on():
