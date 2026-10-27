@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import json
 import logging
 import math
 import os
+import re
 import sys
 import tempfile
 import time
@@ -209,8 +211,9 @@ SUMMARY_MODEL_REVISIONS = {
 # (HF_HUB_CACHE / HF_HOME). Tests point it at a tmp folder.
 HF_CACHE_DIR: Path | None = None
 SUMMARY_MODEL_SWITCHED = (
-    "Summary model switched to Qwen2.5 1.5B (Apache-2.0); set "
-    "summary.accept_qwen_research_licence = true to keep the 3B"
+    "Summary model switched to Qwen2.5 1.5B (Apache-2.0); to keep the 3B, set summary.model "
+    f'= "{QWEN_RESEARCH_SUMMARY_MODEL}" and summary.accept_qwen_research_licence = true '
+    "in config.toml"
 )
 SUMMARY_LICENCE_NOT_BOOL = "accept_qwen_research_licence must be a TOML boolean true, not {kind}"
 # Next to config.toml once the "kept the cached 3B" notice was shown.
@@ -405,6 +408,37 @@ def save_keys(path: Path | None, updates: dict[str, Any]) -> float:
         if not changed:  # only absent keys were removed: leave the file as it is
             return path.stat().st_mtime
         return _write_atomic(path, tomli_w.dumps(data).encode())
+
+
+_TABLE_RE = re.compile(r"^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$")
+
+
+def set_string_line(path: Path | None, table: str, key: str, value: str) -> float:
+    """Set ``key = "value"`` in ``[table]`` by rewriting only that one line, so a hand-edited
+    config.toml keeps its comments and layout. Falls back to save_keys (which drops comments)
+    when the line isn't a plain one-line string (or is missing). Returns the new mtime."""
+    path = (CONFIG_PATH if path is None else path).resolve()
+    if not path.exists():
+        raise FileNotFoundError(path)
+    line_re = re.compile(
+        rf"^(\s*{re.escape(key)}\s*=\s*)(\"(?:[^\"\\]|\\.)*\"|'[^']*')(\s*(?:#.*)?)$"
+    )
+    with _file_lock(path.with_name(f".{path.name}.lock")):
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines(keepends=True)
+        current = None
+        for i, line in enumerate(lines):
+            body = line.rstrip("\r\n")
+            if m := _TABLE_RE.match(body):
+                current = m.group(1)
+                continue
+            if current == table and (m := line_re.match(body)):
+                lines[i] = f"{m.group(1)}{json.dumps(value)}{m.group(3)}{line[len(body) :]}"
+                new = "".join(lines)
+                if tomllib.loads(new).get(table, {}).get(key) == value:  # it parsed as meant
+                    return _write_atomic(path, new.encode())
+                break
+    return save_keys(path, {f"{table}.{key}": value})
 
 
 LOCK_TIMEOUT = 10.0  # seconds a writer waits for the config lock before giving up
@@ -693,8 +727,8 @@ def _migrate_summary_model(summary: SummaryConfig, path: Path, *, persist: bool)
             summary.notice = SUMMARY_MODEL_KEPT
         return
     log.info(
-        "summary.model %s (the old default, non-commercial licence) -> %s; set "
-        "summary.accept_qwen_research_licence = true to keep it",
+        "summary.model %s (the old default, non-commercial licence) -> %s; to keep it, set "
+        "summary.model back to it and summary.accept_qwen_research_licence = true",
         summary.model,
         DEFAULT_SUMMARY_MODEL,
     )
@@ -706,7 +740,7 @@ def _migrate_summary_model(summary: SummaryConfig, path: Path, *, persist: bool)
     elif summary.enabled:
         summary.notice = SUMMARY_MODEL_SWITCHED
     try:
-        save_keys(path, {"summary.model": DEFAULT_SUMMARY_MODEL})
+        set_string_line(path, "summary", "model", DEFAULT_SUMMARY_MODEL)  # keeps comments
     except (OSError, ValueError) as e:
         log.warning("could not write summary.model to %s: %s", path, type(e).__name__)
 

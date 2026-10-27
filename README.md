@@ -279,7 +279,8 @@ sent anywhere. It is a draft: check names and dates against the transcript. The 
 `model = "mlx-community/Qwen2.5-3B-Instruct-4bit"` (~1.7 GB, also pinned) is under the Qwen
 Research licence: non-commercial use only. It was the default before, and older settings
 files hold it without anyone choosing it, so it is replaced by the default (saved to `config.toml`, with a one-time notice) unless
-you also set `accept_qwen_research_licence = true` under `[summary]`. If the 3B is already
+you also set `accept_qwen_research_licence = true` under `[summary]` (after a switch, set
+`model` back to the 3B as well; only that line is rewritten, so comments stay). If the 3B is already
 downloaded and the new default isn't, it is kept for now, so offline summaries keep working. On Windows, or
 offline before the model is downloaded, the summary is skipped with a notice. It waits for
 the speaker labels (a slow diarization delays it), a summary cut short by quitting is redone

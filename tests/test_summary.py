@@ -444,6 +444,50 @@ def test_old_default_switch_is_saved_with_only_that_key(tmp_path):
     assert load_config(path, migrate=True).summary.model == DEFAULT_SUMMARY_MODEL
 
 
+HAND_EDITED = f"""# my settings, edited by hand
+output_dir = "/tmp/x"  # where transcripts go
+
+[summary]
+# summaries on for work calls
+enabled = true
+model = "{QWEN_RESEARCH_SUMMARY_MODEL}"  # the old default
+max_tokens = 400
+
+[transcription]
+model = "base"  # must stay
+"""
+
+
+def test_switch_rewrites_only_the_model_line_and_keeps_comments(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(HAND_EDITED, "utf-8")
+    assert load_config(path, migrate=True).summary.model == DEFAULT_SUMMARY_MODEL
+    expected = HAND_EDITED.replace(QWEN_RESEARCH_SUMMARY_MODEL, DEFAULT_SUMMARY_MODEL)
+    assert path.read_text("utf-8") == expected  # every comment and other line unchanged
+    assert load_config(path).transcription.model == "base"
+
+
+def test_model_line_falls_back_to_a_key_save_when_not_a_plain_line(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(f'summary = {{ model = "{QWEN_RESEARCH_SUMMARY_MODEL}" }}\n', "utf-8")
+    config_mod.set_string_line(path, "summary", "model", DEFAULT_SUMMARY_MODEL)
+    assert load_config(path).summary.model == DEFAULT_SUMMARY_MODEL
+
+
+def test_following_the_switch_notice_keeps_the_3b(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(HAND_EDITED, "utf-8")
+    assert load_config(path, migrate=True).summary.notice == SUMMARY_MODEL_SWITCHED
+    # do what the notice says: set summary.model back to the 3B and accept its licence
+    assert f'summary.model = "{QWEN_RESEARCH_SUMMARY_MODEL}"' in SUMMARY_MODEL_SWITCHED
+    assert "summary.accept_qwen_research_licence = true" in SUMMARY_MODEL_SWITCHED
+    text = path.read_text("utf-8").replace(DEFAULT_SUMMARY_MODEL, QWEN_RESEARCH_SUMMARY_MODEL)
+    path.write_text(text.replace("max_tokens", "accept_qwen_research_licence = true\nmax_tokens"))
+    cfg = load_config(path, migrate=True)
+    assert cfg.summary.model == QWEN_RESEARCH_SUMMARY_MODEL and cfg.summary.notice is None
+    assert QWEN_RESEARCH_SUMMARY_MODEL in path.read_text("utf-8")
+
+
 def test_cli_loads_switch_in_memory_only(tmp_path):
     # a CLI command run first after the upgrade must not use up the app's one-time notice
     path = tmp_path / "config.toml"
