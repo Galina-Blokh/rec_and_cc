@@ -1,5 +1,6 @@
 """Stories: US-01, US-02, US-03, US-04, US-05, US-06, US-07, US-16, US-17."""
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -739,6 +740,45 @@ def test_discard_marks_before_stop_and_always_deletes(tmp_path, outcome):
     h.eng.tick()
     assert h.rec.marked_at_stop  # a crash during stop() can't leave it recoverable
     assert h.status == IDLE and not h.rec.dir.exists() and h.q.submitted == []
+
+
+def test_discard_of_vanished_too_short_session_schedules_no_delete(tmp_path):
+    """stop() already removed it; a late delete could hit a new session reusing the name."""
+    h = Harness(Mode.ASK)
+    h.rec = h.eng.recorder = RealDirRecorder(tmp_path, "too_short")
+    scheduled = []
+    h.eng.run_in_background = scheduled.append
+    h.mon.procs = [CHROME]
+    h.run(4)
+    real_stop = h.rec.stop
+
+    def stop_and_remove():
+        real_stop()
+        shutil.rmtree(h.rec.dir)  # Recorder.stop() deleted the whole folder
+        return None
+
+    h.rec.stop = stop_and_remove
+    h.eng.respond("ignore")
+    h.eng.tick()
+    assert h.status == IDLE and scheduled == [] and not h.rec.dir.exists()
+
+
+def test_background_discard_error_is_logged_not_raised(tmp_path, monkeypatch, caplog):
+    import recandcc.engine as engine
+
+    def boom(directory):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(engine, "discard_session", boom)
+    h = Harness(Mode.ASK)
+    h.rec = h.eng.recorder = RealDirRecorder(tmp_path, "ok")
+    h.mon.procs = [CHROME]
+    h.run(4)
+    with caplog.at_level("ERROR", logger="recandcc.engine"):
+        h.eng.respond("ignore")
+        h.eng.tick()  # inline run_in_background: would raise here if not caught
+    assert h.status == IDLE
+    assert any("could not delete discarded" in r.message and r.exc_info for r in caplog.records)
 
 
 def test_discard_deletes_off_the_engine_thread(tmp_path, monkeypatch):
