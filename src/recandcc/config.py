@@ -105,6 +105,10 @@ class DetectionConfig:
     # nothing is lost while you decide. Unanswered prompt: "record" keeps it, "ignore" discards.
     ask_timeout_action: str = "record"
     record_mic: str = "calls"  # "always" | "calls" | "never"
+    # "all": the Others track records everything the Mac plays. "app": only the app that
+    # triggered the session (macOS; falls back to "all" for manual sessions, when the app has
+    # no audio process yet, and on Windows).
+    system_audio_scope: str = "all"
     call_apps: list[str] = field(default_factory=lambda: list(DEFAULT_CALL_APPS))
     media_apps: list[str] = field(default_factory=lambda: list(DEFAULT_MEDIA_APPS))
     ignore_apps: list[str] = field(default_factory=lambda: list(DEFAULT_IGNORE_APPS))
@@ -136,6 +140,9 @@ class TranscriptionConfig:
     # Split "Others" into "Speaker 1", "Speaker 2", ... in the final transcript (offline
     # speaker diarization). Live captions keep showing "Others".
     diarize: bool = True
+    # Remember speakers' voices so that a speaker named once (`recandcc name-speaker`) is named
+    # in later sessions. Off by default: voice profiles are biometric data. See voices.py.
+    speaker_names: bool = False
     # Transcribe while recording: text appears ~1-2 s after each phrase, and the final
     # transcript is ready right when the session stops (no post-session pass).
     live: bool = True

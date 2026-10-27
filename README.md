@@ -9,7 +9,9 @@ account, nothing uploaded.
   so the transcript knows who spoke: `Me` / `Others`.
 - 🗣️ **Speaker labels** for the other side: in a 5-person call, `Others` is split into
   `Speaker 1`, `Speaker 2`, … in the final transcript (offline speaker diarization, a few
-  seconds per hour of audio). Live captions keep showing `Others`.
+  seconds per hour of audio). Live captions keep showing `Others`. Opt in to
+  `speaker_names` and name a speaker once (`recandcc name-speaker`): later sessions
+  recognize that voice and write `Anna` instead of `Speaker 2`.
 - 🌍 **English and Russian** are detected automatically, even when the language switches
   mid-meeting. **Hebrew** can be added (`languages = ["en", "ru", "he"]`): captions and
   transcripts show it right to left. Hebrew accuracy with the stock model is not yet tuned.
@@ -177,6 +179,13 @@ capture your room. If a call starts while a video is already being recorded, the
 becomes a call: the microphone joins in, lined up in time, and the recording follows the call
 instead of stopping when the video ends. You can change this with `record_mic` in the settings.
 
+System audio (`Others`) is everything the Mac plays, so a notification sound or a video in
+another tab ends up in the recording too. On macOS, `system_audio_scope = "app"` records only
+the app that started the session (Zoom, the browser tab's browser…) and its helper
+processes; if a call starts during a video, both apps are recorded. Manual recordings always
+take everything, and so does FaceTime (its calls play through a system process). It is off
+by default until it has been checked with Zoom, Teams and Meet calls.
+
 ## Settings
 
 `~/Library/Application Support/RecAndCC/config.toml` (Windows:
@@ -215,6 +224,9 @@ repo):
 | `recandcc devices` | List audio devices |
 | `recandcc autostart on\|off\|status` | Launch at login |
 | `recandcc config` | Show the config path and contents |
+| `recandcc speakers <session_dir>` | List a transcript's speakers with their first lines |
+| `recandcc name-speaker <session_dir> "Speaker 2" "Anna"` | Name a speaker: rewrites that transcript and saves Anna's voice profile, so later sessions say `Anna` (needs `speaker_names = true`) |
+| `recandcc voices list\|delete <name>\|delete --all` | List or delete saved voice profiles |
 
 ## Privacy & consent
 
@@ -251,6 +263,8 @@ models load from disk without contacting anything (tested with all network acces
 | Settings (`config.toml`) | `~/Library/Application Support/RecAndCC/` | `%LOCALAPPDATA%\RecAndCC\` |
 | Search index (`search.sqlite3`: a copy of the transcript text, owner-only) | `~/Library/Application Support/RecAndCC/` | `%LOCALAPPDATA%\RecAndCC\` |
 | Logs (events, app names, file paths) | `~/Library/Logs/RecAndCC/` | `%LOCALAPPDATA%\RecAndCC\Logs\` |
+| Voice profiles (only with `speaker_names = true`; biometric data, owner-only) | `~/Library/Application Support/RecAndCC/voices/` | `%LOCALAPPDATA%\RecAndCC\voices\` |
+| Each session's speaker voices (only with `speaker_names = true`) | `…/RecAndCC/voices/sessions/` | `%LOCALAPPDATA%\RecAndCC\voices\sessions\` |
 | Speaker-diarization model | `~/Library/Caches/RecAndCC/models/` | `%LOCALAPPDATA%\RecAndCC\Cache\models\` |
 | Whisper models (shared Hugging Face cache) | `~/.cache/huggingface/hub/models--*whisper*` | `%USERPROFILE%\.cache\huggingface\hub\` |
 | Launch at login | `~/Library/LaunchAgents/com.gblokh.recandcc.plist` | registry `HKCU\…\CurrentVersion\Run\RecAndCC` |
@@ -259,8 +273,15 @@ The folders RecAndCC creates for recordings (the transcripts folder, each day an
 session) are readable only by you (`0700` on macOS). A transcripts folder that already
 existed keeps its permissions; tighten it with `chmod 700 ~/Documents/Transcribes`.
 `~/Documents` may be synced by iCloud Drive ("Desktop & Documents Folders") on macOS, and
-`Documents` by OneDrive folder backup on Windows; set `output_dir` to a folder outside it if
-recordings must stay on this computer only.
+`Documents` by OneDrive folder backup on Windows. RecAndCC checks `output_dir` locally (no network)
+while it runs: if it lies in iCloud Drive (including "Desktop & Documents"),
+`~/Library/CloudStorage` (OneDrive, Dropbox, Google Drive, Box), `~/Dropbox`, `~/Google Drive`,
+`~/OneDrive*`, `~/Box`, `~/Box Sync` (case-insensitive, also through symlinks),
+or on Windows a OneDrive folder (including `Documents` / `Desktop` moved by OneDrive folder
+backup) or `%USERPROFILE%\Dropbox`, also through symlinks and junctions, it logs a warning and shows a
+one-time notification, and `recandcc config` prints the same warning. Other sync tools (for
+example a Google Drive drive letter on Windows) are not detected. Set `output_dir` to a
+local folder (for example `~/Transcribes`) if recordings must stay on this device only.
 
 ### Retention
 
@@ -281,8 +302,9 @@ macOS:
 
 ```bash
 rm -rf ~/Documents/Transcribes                    # recordings + transcripts (or your output_dir)
+uv run recandcc voices delete --all               # voice data only (also removed below)
 rm -f  ~/Library/Application\ Support/RecAndCC/search.sqlite3  # search index
-rm -rf ~/Library/Application\ Support/RecAndCC    # settings (and the search index)
+rm -rf ~/Library/Application\ Support/RecAndCC    # settings, voice profiles and the search index
 rm -rf ~/Library/Logs/RecAndCC                    # logs
 rm -rf ~/Library/Caches/RecAndCC                  # speaker model
 rm -rf ~/.cache/huggingface/hub/models--*whisper* # Whisper models (if no other app uses them)

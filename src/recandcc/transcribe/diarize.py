@@ -13,7 +13,8 @@ Pipeline (CPU only; ~2 s for 13 min of audio on an M5 Max, see docs/ARCHITECTURE
 
 ``assign_speakers`` then gives every "Others" transcript segment the speaker it overlaps
 most, numbered "Speaker 1", "Speaker 2", ... by first appearance. With a single speaker the
-label stays "Others".
+label stays "Others". With ``speaker_names`` on, speakers that match a voice profile
+(voices.py) are named instead of numbered.
 
 The embedding model is downloaded once (sha256-verified) into the platform cache dir
 (``MODELS_DIR``); after that nothing here touches the network. If the download fails (offline)
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import bisect
 import hashlib
+import itertools
 import logging
 import os
 import threading
@@ -86,6 +88,15 @@ class Turn:
     start: float
     end: float
     speaker: int
+
+
+class Turns(list):
+    """The turns of one diarization (a ``list[Turn]``) plus each speaker's voice centroid (the
+    unit mean of its windows' embeddings), which voices.py matches against voice profiles."""
+
+    def __init__(self, turns=(), centroids: dict[int, np.ndarray] | None = None) -> None:
+        super().__init__(turns)
+        self.centroids = centroids or {}
 
 
 # --------------------------------------------------------------------------- model files
@@ -189,6 +200,17 @@ def cluster_embeddings(
     return np.argmax(x @ centroids.T, axis=1)
 
 
+def speaker_centroids(embeddings: np.ndarray, labels: np.ndarray) -> dict[int, np.ndarray]:
+    """Speaker id -> unit mean of its (normalised) embedding rows."""
+    x = np.asarray(embeddings, dtype=np.float32)
+    x = x / np.maximum(np.linalg.norm(x, axis=1, keepdims=True), 1e-9)
+    out = {}
+    for k in np.unique(labels).tolist():
+        c = x[labels == k].mean(axis=0)
+        out[int(k)] = c / max(float(np.linalg.norm(c)), 1e-9)
+    return out
+
+
 def _average_linkage(x: np.ndarray, min_similarity: float) -> list[np.ndarray]:
     """Agglomerative clustering of unit vectors; merges while the average pairwise cosine
     similarity of the closest two clusters is >= `min_similarity`. Returns index arrays."""
@@ -227,14 +249,30 @@ def _average_linkage(x: np.ndarray, min_similarity: float) -> list[np.ndarray]:
 
 
 def assign_speakers(
-    segments: Sequence[Segment], turns: Sequence[Turn], speaker: str = OTHERS
+    segments: Sequence[Segment],
+    turns: Sequence[Turn],
+    speaker: str = OTHERS,
+    names: dict[int, str] | None = None,
 ) -> list[Segment]:
     """Relabel the `speaker` ("Others") segments with the diarized speaker they overlap most
     (the nearest turn if none overlaps), numbered "Speaker 1", "Speaker 2", ... by first
-    appearance. If they all map to one speaker (or there are no turns), nothing changes."""
+    appearance. If they all map to one speaker (or there are no turns), nothing changes.
+    `names`: speaker id -> name (matched voice profiles), used instead of a number."""
+    return label_speakers(segments, turns, speaker, names)[0]
+
+
+def label_speakers(
+    segments: Sequence[Segment],
+    turns: Sequence[Turn],
+    speaker: str = OTHERS,
+    names: dict[int, str] | None = None,
+) -> tuple[list[Segment], dict[int, str]]:
+    """``assign_speakers`` plus the label given to each speaker id that got segments (a lone
+    unnamed speaker keeps `speaker`)."""
     segments = list(segments)
     if not turns:
-        return segments
+        return segments, {}
+    names = names or {}
     turns = sorted(turns, key=lambda t: (t.start, t.end))
     starts = [t.start for t in turns]
     longest = max(t.end - t.start for t in turns)
@@ -242,15 +280,24 @@ def assign_speakers(
     for idx, seg in enumerate(segments):
         if seg.speaker == speaker:
             picks[idx] = _best_speaker(seg, turns, starts, longest)
-    if len(set(picks.values())) < 2:
-        return segments
-    numbers: dict[int, int] = {}
+    ids = set(picks.values())
+    if not ids:
+        return segments, {}
+    if len(ids) == 1 and not ids & names.keys():
+        return segments, {ids.pop(): speaker}
+    taken = {n.casefold() for n in names.values()}
+    numbers = (f"Speaker {n}" for n in itertools.count(1))
+    free = (label for label in numbers if label.casefold() not in taken)  # no duplicate labels
+    labels: dict[int, str] = {}
     for idx in sorted(picks, key=lambda i: (segments[i].start, segments[i].end, i)):
-        numbers.setdefault(picks[idx], len(numbers) + 1)
-    return [
-        replace(seg, speaker=f"Speaker {numbers[picks[i]]}") if i in picks else seg
+        k = picks[idx]
+        if k not in labels:
+            labels[k] = names[k] if k in names else next(free)
+    out = [
+        replace(seg, speaker=labels[picks[i]]) if i in picks else seg
         for i, seg in enumerate(segments)
     ]
+    return out, labels
 
 
 def _best_speaker(seg: Segment, turns: Sequence[Turn], starts: list[float], longest: float) -> int:
@@ -342,7 +389,8 @@ class Diarizer:
 
         embeddings = np.stack(list(pool.map(embed, windows)))
         labels = cluster_embeddings(embeddings, np.array([e - s for s, e in windows]))
-        turns = [
+        turns = Turns(centroids=speaker_centroids(embeddings, labels))
+        turns += [
             Turn(round(s, 3), round(e, 3), int(k))
             for (s, e), k in zip(windows, labels, strict=True)
         ]
@@ -405,8 +453,11 @@ __all__ = [
     "MODELS_DIR",
     "Diarizer",
     "Turn",
+    "Turns",
     "assign_speakers",
     "cluster_embeddings",
+    "label_speakers",
     "model_path",
+    "speaker_centroids",
     "speech_windows",
 ]

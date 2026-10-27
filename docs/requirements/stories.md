@@ -22,13 +22,14 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-11 | Live captions and live transcript | ✅ |
 | US-12 | Speaker labels for the other side | ✅ |
 | US-13 | Readable transcripts in private folders | 🟡 owner-only not enforced on Windows (#37) |
-| US-14 | Works offline, nothing leaves the device | 🟡 no warning for synced folders yet (#41) |
+| US-14 | Works offline, nothing leaves the device | ✅ |
 | US-15 | Delete old audio automatically | ✅ |
 | US-16 | Permissions set up from the app | ✅ |
 | US-17 | Always on, visible state | ✅ |
 | US-18 | Runs on Windows | 🟡 untested on hardware (#5) |
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 stock model, no Hebrew test set (#6) |
 | US-20 | Search my transcripts | 🟡 search only; summaries, export planned (#4) |
+| US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
 
 ---
 
@@ -99,6 +100,11 @@ while I decide.*
 - **Then** the mic is labelled `Me` and system audio `Others`, as separate WAV tracks.
 - **Given** the mic picks up the speakers, **then** echoed `Others` speech is not shown again
   as `Me`, live or in the final transcript.
+- **Given** `system_audio_scope = "app"` on macOS, **when** an app triggers a session,
+  **then** `Others` records only that app's processes (also helpers that start later), and a
+  call joining a media session adds the call app. Manual sessions, FaceTime, an app without
+  an audio process, an outdated helper or a failing per-app tap record all system audio
+  instead, and session.json records which scope was used.
 
 ### US-09 English and Russian detected automatically
 - **Given** `languages = ["en", "ru"]`, **then** each speech region gets its own language,
@@ -143,7 +149,8 @@ while I decide.*
   checksum is rejected). A custom repo without a pin is refused unless
   `allow_unpinned_models = true`.
 - **Then** RecAndCC uploads nothing itself. The default output folder may still be synced
-  by iCloud or OneDrive; the README warns, the app doesn't yet (#41).
+  by iCloud or OneDrive; the app detects that locally and warns once (log, notification,
+  `recandcc config`), suggesting a local folder.
 - **Then** this is enforced end to end: `test_offline_e2e.py` records and transcribes a
   session (live and batch) with sockets and DNS blocked; only the speaker-model download
   is attempted, and it fails fast, leaving "Others".
@@ -209,3 +216,26 @@ open transcripts one by one.*
   never contain the searched or found text.
 - **Not yet:** summaries and action items with a local LLM, DOCX/PDF export, a notes window,
   a search window on Windows (#4).
+
+### US-21 Speaker names remembered across sessions
+*As the owner, I want to name a speaker once and see that name in later transcripts, so that
+I don't have to work out who `Speaker 2` was every time.*
+
+- **Given** `speaker_names = false` (default), **then** no voice data is stored anywhere
+  (voice profiles are biometric data).
+- **Given** `speaker_names = true`, **when** a final transcript is diarized, **then**
+  each speaker's voice centroid is kept in the owner-only app-data `voices/` folder (never
+  in `output_dir`), and
+  `recandcc speakers <session>` lists the speakers with their first lines.
+- **When** I run `recandcc name-speaker <session> "Speaker 2" "Anna"`, **then** that
+  session's `transcript.md`, `.srt` and `.json` say `Anna`, and Anna's voice profile is saved
+  (or updated as a running mean) in the owner-only app-data `voices/` folder, never in
+  `output_dir`.
+- **Given** a profile, **when** a later session has a speaker whose voice matches it clearly
+  (cosine similarity ≥ threshold and a margin over the next profile), **then** that speaker
+  is labelled `Anna`; otherwise `Speaker N`. Each name is used once per session; `Me` is
+  never relabelled.
+- **Then** `recandcc voices list`, `voices delete <name>` and `voices delete --all` show and
+  delete the profiles (`--all` also deletes every session's voices).
+- **Not yet:** naming from the menu with a voice sample, names from the call app, overlap
+  handling and an accuracy measurement on real speech (#1, #13).

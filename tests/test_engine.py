@@ -1,4 +1,4 @@
-"""Stories: US-01, US-02, US-03, US-04, US-05, US-06, US-07, US-16, US-17."""
+"""Stories: US-01, US-02, US-03, US-04, US-05, US-06, US-07, US-08, US-16, US-17."""
 
 import shutil
 import threading
@@ -9,7 +9,7 @@ import pytest
 
 from recandcc.config import Config, DetectionConfig
 from recandcc.engine import IDLE, RECORDING, Engine
-from recandcc.models import AudioProcess, Mode, SessionInfo, Track, TriggerKind
+from recandcc.models import AppTarget, AudioProcess, Mode, SessionInfo, Track, TriggerKind
 
 
 class FakeClock:
@@ -46,12 +46,14 @@ class FakeRecorder:
         self.silence = 0.0
         self.fail = False
         self.silent = []
+        self.targets = []
 
-    def start(self, kind, app=None):
+    def start(self, kind, app=None, target=None):
         if self.fail:
             raise RuntimeError("boom")
         self.is_recording = True
         self.starts.append((kind, app))
+        self.targets.append(target)
         from datetime import datetime
 
         return SessionInfo(
@@ -464,8 +466,13 @@ def test_monitor_closed_on_the_engine_thread():
 # --- a call starting during a media recording -------------------------------------------
 def _upgrade_harness():
     h = Harness(mode=Mode.AUTO)
-    h.rec.upgrades = []
-    h.rec.upgrade_to_call = h.rec.upgrades.append
+    h.rec.upgrades, h.rec.upgrade_targets = [], []
+
+    def upgrade(app, target=None):
+        h.rec.upgrades.append(app)
+        h.rec.upgrade_targets.append(target)
+
+    h.rec.upgrade_to_call = upgrade
     return h
 
 
@@ -477,6 +484,8 @@ def test_call_during_media_recording_upgrades_session():
     h.mon.procs = [CHROME, ZOOM]
     h.run(4)
     assert h.rec.upgrades == ["zoom.us"]
+    # The call app's processes join a per-app Others track (both apps get recorded).
+    assert h.rec.upgrade_targets == [AppTarget(("us.zoom",), (10,))]
     assert h.eng.state.kind == TriggerKind.CALL and h.eng.state.app == "zoom.us"
     assert h.rec.stops == 0  # same session continues
     # The video stops but the call goes on: the session must keep recording.
@@ -738,8 +747,8 @@ class RealDirRecorder(FakeRecorder):
         super().__init__()
         self.dir, self.outcome, self.marked_at_stop = root / DAY / "s", outcome, None
 
-    def start(self, kind, app=None):
-        self.session = super().start(kind, app)
+    def start(self, kind, app=None, target=None):
+        self.session = super().start(kind, app, target)
         self.session.directory = self.dir
         return _fill(self.session)
 
@@ -893,3 +902,29 @@ def test_save_cut_short_keeps_the_previous_session_json(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         s.save()
     assert SessionInfo.load(tmp_path).trigger_app is None and _no_temp(tmp_path)
+
+
+# --- per-app system audio (US-08): the engine hands the trigger app to the recorder -------
+def test_start_passes_the_trigger_apps_processes_as_target():
+    h = Harness(mode=Mode.AUTO)
+    renderer = AudioProcess(
+        pid=21,
+        bundle_id="com.google.Chrome.helper",
+        name="Google Chrome Helper (Renderer)",
+        input_active=False,
+        output_active=True,
+    )
+    h.mon.procs = [renderer, CHROME]
+    h.run(4)
+    assert h.rec.targets == [AppTarget(("com.google.chrome",), (11, 21))]
+
+
+def test_ask_mode_and_manual_sessions_pass_the_right_target():
+    h = Harness(mode=Mode.ASK)
+    h.mon.procs = [ZOOM]
+    h.run(4)
+    assert h.rec.targets == [AppTarget(("us.zoom",), (10,))]
+    h2 = Harness(mode=Mode.AUTO)
+    h2.eng.start_manual()
+    h2.eng.tick()
+    assert h2.rec.targets == [None]  # manual: no app, the recorder records everything
