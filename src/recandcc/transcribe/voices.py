@@ -476,6 +476,7 @@ def _names_path(session_id: str, voices_dir: Path | None) -> Path:
     return _dir(voices_dir) / "sessions" / f"{h}.names.json"
 
 
+@_locked
 def write_session_names(
     session: SessionInfo, names: list[str], voices_dir: Path | None = None
 ) -> None:
