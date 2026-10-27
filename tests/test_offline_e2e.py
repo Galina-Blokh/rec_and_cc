@@ -7,7 +7,8 @@ Whisper model. Blocked, and recorded as an attempt:
   traffic; AF_UNIX and the loopback pair ``socket.socketpair`` builds on Windows are allowed),
 - ``sendto`` / ``sendmsg`` (UDP never calls connect), ``socket.create_connection``,
 - DNS: ``getaddrinfo``, ``gethostbyname``, ``gethostbyname_ex``,
-- launching programs (``subprocess.Popen``, ``os.system``), e.g. a curl.
+- launching programs (``subprocess.Popen``, ``os.system``), e.g. a curl; only the app's own
+  audio helper (``rcc-audiotap``, permission checks) may run.
 Not covered: C extensions that open sockets themselves, and names bound before the test
 (``from socket import getaddrinfo``). The only attempt allowed is the one-time speaker-model
 download in ``diarize._download``, and only its connection to the model host; it must fail
@@ -27,6 +28,7 @@ import threading
 import time
 import traceback
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlparse
 
 import numpy as np
@@ -36,6 +38,7 @@ from test_recorder import FakeSource
 
 from recandcc.config import Config, TranscriptionConfig
 from recandcc.models import SAMPLE_RATE, Mode
+from recandcc.native import HELPER_NAME
 from recandcc.recorder import Recorder
 from recandcc.transcribe import diarize
 from recandcc.ui.common import Controller
@@ -132,8 +135,13 @@ def net(monkeypatch):
 
         return deny
 
+    real_popen_init = subprocess.Popen.__init__
+
     def popen_init(self, args, *a, **k):
-        raise guard.deny("subprocess.Popen", (args if isinstance(args, str) else args[0],))
+        program = args if isinstance(args, str) else str(args[0])
+        if Path(program).name == HELPER_NAME:  # our own audio helper: local, no network
+            return real_popen_init(self, args, *a, **k)
+        raise guard.deny("subprocess.Popen", (program,))
 
     def system(command):
         raise guard.deny("os.system", (command,))
@@ -195,11 +203,14 @@ def test_guard_blocks_and_names_the_caller(net):
         socket.gethostbyname("example.com")
     with pytest.raises(OSError, match="subprocess.Popen"):
         subprocess.run(["curl", "https://example.com"], check=False)
+    with pytest.raises(OSError, match="subprocess.Popen"):  # same name elsewhere is not ours
+        subprocess.run(["/tmp/x/curl"], check=False)
     with pytest.raises(OSError, match="os.system"):
         os.system("curl https://example.com")  # noqa: S605 - blocked by the guard
     assert [a.api for a in net.attempts][4:] == [
         "socket.sendto",
         "socket.gethostbyname",
+        "subprocess.Popen",
         "subprocess.Popen",
         "os.system",
     ]
