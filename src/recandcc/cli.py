@@ -363,7 +363,7 @@ def cmd_config(args) -> int:
     if provider:
         print(f"# WARNING: {warning_text(cfg.output_dir, provider)}")
     kind = network_volume(cfg.output_dir)
-    if kind:
+    if isinstance(kind, str):
         print(f"# WARNING: {network_warning_text(cfg.output_dir, kind)}")
     return 0
 
