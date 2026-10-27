@@ -89,7 +89,7 @@ def load_note(directory: Path) -> Note | None:
         if (d / SessionInfo.DISCARD_MARKER).exists():
             return None
         info = SessionInfo.load(d)
-    except (OSError, ValueError, KeyError, TypeError):
+    except Exception:  # noqa: BLE001 - one broken session.json must not hide the rest
         return None
     speakers, languages, duration = _transcript_facts(d / TRANSCRIPT_JSON)
     if duration is None and info.ended_at is not None:
@@ -157,12 +157,10 @@ def action_target(note: Note, action: str) -> Path:
     return note.directory / names[action] if action in names else note.directory
 
 
-def rename_session(directory: Path, title: str) -> SessionInfo:
-    """Store a display title in session.json ("" goes back to the default title)."""
-    info = SessionInfo.load(directory)
-    info.title = " ".join(title.split())[:TITLE_CHARS]
-    info.save()
-    return info
+def rename_session(directory: Path, title: str) -> None:
+    """Store a display title in session.json ("" goes back to the default title); only the
+    ``title`` key changes, so metrics written meanwhile are kept."""
+    SessionInfo.set_title(directory, " ".join(title.split())[:TITLE_CHARS])
 
 
 def move_to_trash(path: Path) -> bool:
@@ -186,7 +184,8 @@ def move_to_trash(path: Path) -> bool:
     return False
 
 
-def _win_recycle(path: Path) -> bool:
+def shfileop_struct() -> type[ctypes.Structure]:
+    """SHFILEOPSTRUCTW (shellapi.h); built on demand, wintypes is Windows-oriented."""
     from ctypes import wintypes
 
     class SHFILEOPSTRUCTW(ctypes.Structure):
@@ -203,15 +202,22 @@ def _win_recycle(path: Path) -> bool:
             ("lpszProgressTitle", wintypes.LPCWSTR),
         ]
 
+    return SHFILEOPSTRUCTW
+
+
+def _win_recycle(path: Path) -> bool:
+    from ctypes import wintypes
+
+    op_type = shfileop_struct()
     # FO_DELETE with FOF_ALLOWUNDO (Recycle Bin) | NOCONFIRMATION | SILENT, plus
     # FOF_WANTNUKEWARNING: if the bin can't take it (too big, no bin on that drive) Windows
     # asks before deleting for good instead of doing it silently; "No" aborts.
     # pFrom is a list ending in an empty string: the buffer adds the second NUL.
     buf = ctypes.create_unicode_buffer(str(Path(path).resolve()) + "\0")
     flags = 0x40 | 0x10 | 0x4 | 0x4000
-    op = SHFILEOPSTRUCTW(wFunc=3, pFrom=ctypes.cast(buf, wintypes.LPCWSTR), fFlags=flags)
+    op = op_type(wFunc=3, pFrom=ctypes.cast(buf, wintypes.LPCWSTR), fFlags=flags)
     fn = ctypes.windll.shell32.SHFileOperationW  # pyright: ignore[reportAttributeAccessIssue]
-    fn.argtypes, fn.restype = [ctypes.POINTER(SHFILEOPSTRUCTW)], ctypes.c_int
+    fn.argtypes, fn.restype = [ctypes.POINTER(op_type)], ctypes.c_int
     return fn(ctypes.byref(op)) == 0 and not op.fAnyOperationsAborted
 
 
@@ -220,18 +226,41 @@ def can_trash() -> bool:
 
 
 def delete_session(directory: Path, output_dir: Path) -> str:
-    """Delete a session: "trashed", "deleted" (permanently) or "failed" (left as it was).
-    No Trash here, or a Trash move that took only part of the folder (a locked file on
-    Windows) -> ``discard_session`` finishes it. Blocking: call it off the UI thread."""
+    """Delete a session folder (blocking: call it off the UI thread). Returns
+    - "trashed": all of it is in the Trash;
+    - "deleted": deleted for good (no Trash here, or ``discard_session`` finished a move
+      that took only part of the folder, e.g. a locked file on Windows);
+    - "partial": marked discarded, but some files are in use; the rest goes at next start;
+    - "refused": a link or not inside ``output_dir``; "failed": the Trash refused it and
+      the folder is still there."""
     d = Path(directory)
     if d.is_symlink() or Path(output_dir).resolve() not in d.resolve().parents:
         log.warning("refusing to delete %s: not a folder inside the output folder", d.name)
-        return "failed"  # never follow a link out of output_dir
-    if can_trash() and move_to_trash(d) and not d.exists():
-        return "trashed"
-    if can_trash() and (d / SessionInfo.FILENAME).exists():
-        return "failed"
-    return "deleted" if discard_session(d) else "failed"
+        return "refused"  # never follow a link out of output_dir
+    if can_trash():
+        moved = move_to_trash(d)
+        if not d.exists():
+            return "trashed"
+        if not moved and (d / SessionInfo.FILENAME).exists():
+            return "failed"
+    return "deleted" if discard_session(d) else "partial"
+
+
+DELETE_NOTICES = {  # delete_session result -> (title, message); none for a clean delete
+    "partial": ("Meeting partly deleted", "Some files are in use; they go at the next start."),
+    "refused": (
+        "Could not delete the meeting",
+        "Its folder is a link or outside the output folder.",
+    ),
+    "failed": ("Could not delete the meeting", "The Trash refused it; nothing was deleted."),
+}
+
+
+def delete_notice(result: str) -> tuple[str, str] | None:
+    """The notice for a delete_session result (None: it went where the prompt said)."""
+    if result == "deleted" and can_trash():
+        return "Meeting deleted for good", "Part of it couldn't go to the Trash."
+    return DELETE_NOTICES.get(result)
 
 
 def delete_prompt(note: Note) -> str:

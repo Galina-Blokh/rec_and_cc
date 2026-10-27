@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import queue
 import shutil
+import sys
 import threading
 import types
 from datetime import datetime, timedelta
@@ -17,11 +18,20 @@ from pathlib import Path
 
 import pytest
 
-from recandcc.models import SessionInfo, Track, TriggerKind
+from recandcc.models import SessionInfo, Track, TriggerKind, discard_session
 from recandcc.ui import notes
 from recandcc.ui.common import Controller
 
 T0 = datetime(2026, 10, 26, 14, 3, 12)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_side_effects(monkeypatch):
+    """Nothing here reaches the real Trash, search index or voice profiles, even if a guard
+    regresses: tests that need them patch these again."""
+    monkeypatch.setattr(notes, "move_to_trash", lambda p: False)
+    monkeypatch.setattr(Controller, "_index_session", staticmethod(lambda d: None))
+    monkeypatch.setattr(Controller, "_prune_voices", staticmethod(lambda: None))
 
 
 def make_session(out: Path, name: str, start: datetime, app: str | None = "zoom.us", **kw):
@@ -114,6 +124,15 @@ def test_delete_uses_the_trash_or_discard_session(tmp_path, monkeypatch):
     (s.directory / "me.wav").write_bytes(b"x")
     monkeypatch.setattr(notes, "move_to_trash", lambda p: (p / "session.json").unlink())
     assert notes.delete_session(s.directory, tmp_path) == "deleted" and not s.directory.exists()
+    assert notes.delete_notice("deleted")[0] == "Meeting deleted for good"
+    # ... and if a file stays locked: marked, the rest goes at the next start
+    s = make_session(tmp_path, "153000_zoom-us", T0)
+    monkeypatch.setattr(notes, "discard_session", lambda d: False)
+    assert notes.delete_session(s.directory, tmp_path) == "partial"
+    monkeypatch.setattr(notes, "discard_session", discard_session)
+    assert notes.delete_notice("trashed") is None
+    assert notes.delete_notice("failed")[1].endswith("nothing was deleted.")
+    shutil.rmtree(s.directory)
     s = make_session(tmp_path, "160000_zoom-us", T0)
     monkeypatch.setattr(notes.sys, "platform", "linux")  # no Trash: deleted for good
     assert "permanently" in notes.delete_prompt(notes.scan_notes(tmp_path)[0])
@@ -228,11 +247,51 @@ def test_delete_refuses_links_and_folders_outside_the_output_folder(tmp_path):
     out, elsewhere = tmp_path / "out", tmp_path / "elsewhere"
     s = make_session(elsewhere, "140312_zoom-us", T0)
     (out / "2026-10-26").mkdir(parents=True)
+    assert notes.delete_session(s.directory, out) == "refused"
     link = out / "2026-10-26" / "140312_zoom-us"
-    link.symlink_to(s.directory, target_is_directory=True)
-    assert notes.delete_session(link, out) == "failed"
-    assert notes.delete_session(s.directory, out) == "failed"
+    try:
+        link.symlink_to(s.directory, target_is_directory=True)
+    except OSError:
+        pytest.skip("no symlink rights (Windows without developer mode)")
+    assert notes.delete_session(link, out) == "refused"
     assert (s.directory / "session.json").exists()
+    assert notes.delete_notice("refused")[0] == "Could not delete the meeting"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows shell struct")
+def test_shfileop_struct_matches_shellapi():
+    import ctypes
+
+    op = notes.shfileop_struct()
+    wide = ctypes.sizeof(ctypes.c_void_p) == 8
+    assert ctypes.sizeof(op) == (56 if wide else 30)
+    assert op.fFlags.offset == (24 if wide else 16)  # pyright: ignore[reportAttributeAccessIssue]
+    assert op.fAnyOperationsAborted.offset == (28 if wide else 18)  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def test_broken_session_json_is_skipped_and_odd_titles_ignored(tmp_path):
+    good = make_session(tmp_path, "140312_zoom-us", T0)
+    bad = make_session(tmp_path, "150000_zoom-us", T0 + timedelta(hours=1))
+    raw = json.loads((bad.directory / "session.json").read_text("utf-8"))
+    (bad.directory / "session.json").write_text(json.dumps({**raw, "tracks": []}), "utf-8")
+    raw = json.loads((good.directory / "session.json").read_text("utf-8"))
+    (good.directory / "session.json").write_text(json.dumps({**raw, "title": 5}), "utf-8")
+    (note,) = notes.scan_notes(tmp_path)
+    assert note.directory == good.directory and note.title == "zoom.us"
+    assert "zoom.us" in notes.rename_script(note)
+
+
+def test_rename_changes_only_the_title(tmp_path):
+    s = make_session(tmp_path, "140312_zoom-us", T0)
+    s.update_metrics("diarization", {"speakers": 2})
+    s.save()
+    notes.rename_session(s.directory, "First")
+    assert SessionInfo.load(s.directory).metrics["diarization"] == {"speakers": 2}
+    after_first = SessionInfo.load(s.directory)  # e.g. the CLI, holding title "First"
+    notes.rename_session(s.directory, "Second")
+    after_first.save()
+    s.save()  # loaded before any rename
+    assert SessionInfo.load(s.directory).title == "Second"
 
 
 def test_mac_dialog_flow(tmp_path):

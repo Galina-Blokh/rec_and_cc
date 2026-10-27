@@ -326,8 +326,10 @@ local folder (for example `~/Transcribes`) if recordings must stay on this devic
 - `audio_retention_days = N` (menu → **Delete audio after**: Never / 1 / 7 / 30 / 90 days)
   deletes the audio N days after transcription; `0` keeps it forever.
 - Transcripts are never deleted automatically. Delete a session from **Meeting notes…**
-  (it goes to the Trash, where audio and transcript stay recoverable until you empty it) or
-  by deleting its folder. Deleted from Meeting notes, its text leaves the search index at
+  (it goes to the Trash, where audio and transcript stay recoverable until you empty it;
+  its stored speaker voices are deleted at once and don't come back with "Put Back"; in a
+  cloud-synced folder the provider's own recycle bin keeps a copy too; where Windows can't
+  recycle it, it asks before deleting for good) or by deleting its folder. Deleted from Meeting notes, its text leaves the search index at
   once; deleted by hand, at the next search, the next app start, or the app's hourly check,
   whichever comes first. Removed or replaced text is overwritten in
   `search.sqlite3`, so it can't be recovered from the file. To remove the whole index at

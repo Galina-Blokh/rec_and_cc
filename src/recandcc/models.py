@@ -30,6 +30,9 @@ _REPLACE_TRIES, _REPLACE_WAIT_S = 5, 0.05
 
 # Guards SessionInfo.metrics updates against a concurrent save (several pipeline threads).
 _METRICS_LOCK = threading.RLock()
+# Serialises session.json writes in this process, so a title change (set_title) can't land
+# between a save's read of the on-disk title and its replace.
+_SAVE_LOCK = threading.Lock()
 
 
 class Mode(StrEnum):
@@ -110,6 +113,7 @@ class SessionInfo:
     # JSON values. Absent in session.json files written before it existed.
     metrics: dict[str, dict] = field(default_factory=dict)
     # Display title the user gave it in Meeting notes (None: never renamed, "": reset).
+    # Changed only by set_title; save() keeps whatever title the file already has.
     title: str | None = None
 
     FILENAME = "session.json"
@@ -122,37 +126,32 @@ class SessionInfo:
             self.metrics[stage] = {**self.metrics.get(stage, {}), **values}
 
     def save(self) -> None:
-        # Keep a rename made meanwhile through another copy (best effort, no lock: Meeting
-        # notes refuses renames while a session records or waits to be transcribed).
         with _METRICS_LOCK:
             data = asdict(self)
-        if self.title is None:  # into the file only: the next save looks again
+        with _SAVE_LOCK:
+            # The title on disk wins: a copy loaded before (or after) a rename never undoes it.
             with contextlib.suppress(OSError, ValueError, AttributeError):
                 on_disk = json.loads((self.directory / self.FILENAME).read_text("utf-8"))
                 data["title"] = on_disk.get("title")
+            self._write(data)
+
+    @classmethod
+    def set_title(cls, directory: Path, title: str) -> None:
+        """Change only the ``title`` key of a session.json ("" resets it)."""
+        d = Path(directory)
+        with _SAVE_LOCK:
+            data = json.loads((d / cls.FILENAME).read_text(encoding="utf-8"))
+            data["title"] = title
+            _replace_json(d / cls.FILENAME, json.dumps(data, indent=2, ensure_ascii=False))
+
+    def _write(self, data: dict) -> None:
         data["directory"] = str(self.directory)
         data["started_at"] = self.started_at.isoformat()
         data["ended_at"] = self.ended_at.isoformat() if self.ended_at else None
         data["tracks"] = {str(k): v for k, v in self.tracks.items()}
-        text = json.dumps(data, indent=2, ensure_ascii=False)
-        target = self.directory / self.FILENAME
-        # Atomic, so a crash mid-write can't leave a truncated session.json; unique per
-        # process and thread (the app and the CLI may both save).
-        tmp = self.directory / f"{self.FILENAME}.{os.getpid()}.{threading.get_ident()}.tmp"
-        try:
-            tmp.write_text(text, encoding="utf-8")
-            for attempt in range(_REPLACE_TRIES):
-                try:
-                    os.replace(tmp, target)
-                    return
-                except PermissionError:  # Windows: someone (antivirus, a reader) has it open
-                    if attempt + 1 < _REPLACE_TRIES:
-                        time.sleep(_REPLACE_WAIT_S)
-            log.warning("%s stays in use; writing it in place", target)
-            target.write_text(text, encoding="utf-8")
-        finally:
-            with contextlib.suppress(OSError):
-                tmp.unlink(missing_ok=True)
+        _replace_json(
+            self.directory / self.FILENAME, json.dumps(data, indent=2, ensure_ascii=False)
+        )
 
     @classmethod
     def load(cls, directory: Path) -> SessionInfo:
@@ -167,8 +166,28 @@ class SessionInfo:
             tracks={Track(k): v for k, v in data.get("tracks", {}).items()},
             transcribed=data.get("transcribed", False),
             metrics=data.get("metrics") or {},
-            title=data.get("title"),
+            title=t if isinstance(t := data.get("title"), str) else None,
         )
+
+
+def _replace_json(target: Path, text: str) -> None:
+    """Write ``target`` atomically, so a crash mid-write can't leave it truncated; the temp
+    name is unique per process and thread (the app and the CLI may both save)."""
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        for attempt in range(_REPLACE_TRIES):
+            try:
+                os.replace(tmp, target)
+                return
+            except PermissionError:  # Windows: someone (antivirus, a reader) has it open
+                if attempt + 1 < _REPLACE_TRIES:
+                    time.sleep(_REPLACE_WAIT_S)
+        log.warning("%s stays in use; writing it in place", target)
+        target.write_text(text, encoding="utf-8")
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
 
 
 def mark_discarded(directory: Path) -> None:

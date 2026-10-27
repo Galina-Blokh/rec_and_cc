@@ -390,7 +390,9 @@ class TkNotes:
                         "Rename meeting", "New title (empty: the default):",
                         initialvalue=note.title, parent=win,
                     )  # fmt: skip
-                return messagebox.askyesno("Delete meeting", notes_ui.delete_prompt(note))
+                return messagebox.askyesno(
+                    "Delete meeting", notes_ui.delete_prompt(note), parent=win
+                )
 
             def selected() -> int:
                 return tree.index(f) if (f := tree.focus()) else -1

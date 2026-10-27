@@ -292,8 +292,10 @@ so that I don't have to dig through dated folders.*
   still load) and an empty title goes back to the default.
 - **When** I delete a session and confirm, **then** its folder goes to the Trash / Recycle
   Bin (permanently via `discard_session` where there is none), it leaves the search index,
-  the recent list and the stored speaker voices; if the Trash refuses, nothing is deleted
-  and I am told. A folder that is a link, or not inside `output_dir`, is never deleted.
+  the recent list and the stored speaker voices (those don't come back from the Trash).
+  If the Trash refuses it, nothing is deleted and I am told. If the Trash takes only part
+  of it, the rest is deleted for good (files in use: at the next start) and I am told. A
+  folder that is a link, or not inside `output_dir`, is never deleted.
 - **Given** a session from its start until its transcription is done, **then** rename and
   delete are refused with a notice.
 - **Then** logs never contain titles, excerpts or transcript text.

@@ -461,22 +461,24 @@ class Controller:
         notice and a fresh ``notes`` list."""
 
         def run() -> None:
-            from .notes import delete_session, rename_session, scan_notes
+            from .notes import delete_notice, delete_session, rename_session, scan_notes
 
+            if action not in ("rename", "delete"):
+                log.error("unknown meeting action %r", action)
+                return
             if why := self.note_busy(directory):
                 self.events.put(("notice", "Can't change this meeting", why))
                 return
             try:
                 if action == "rename":
                     rename_session(directory, title)
-                else:
+                elif action == "delete":
                     result = delete_session(directory, self.cfg.output_dir)
                     self._index_session(directory)  # gone: drops it from the search index
                     self._prune_voices()
                     self.refresh_async(force=True)
-                    if result == "failed":
-                        why = "Nothing was deleted; use Reveal folder to delete it by hand."
-                        self.events.put(("notice", "Could not delete the meeting", why))
+                    if notice := delete_notice(result):
+                        self.events.put(("notice", *notice))
             except Exception as e:  # noqa: BLE001
                 log.error("meeting %s failed for %s: %s", action, directory.name, type(e).__name__)
                 self.events.put(("notice", f"Could not {action} the meeting", directory.name))
@@ -541,10 +543,16 @@ class Controller:
         log.info("live transcription on for %s", sid)
 
     def _on_session_end(self, session: SessionInfo | None, kept: bool) -> None:
-        if not kept:  # dropped: the engine deletes it (session None: forget dropped folders)
+        if not kept:
+            # Dropped: the engine deletes it. Without a session (the recorder failed to stop)
+            # forget every folder but a running one; queued sessions stay busy via note_busy's
+            # pending() check.
+            live_dir = self.engine.state.session_dir
             with self._lock:
-                gone = {Path(session.directory)} if session else set()
-                self._in_flight -= gone | {d for d in self._in_flight if not d.exists()}
+                if session is not None:
+                    self._in_flight.discard(Path(session.directory))
+                else:
+                    self._in_flight = {d for d in self._in_flight if str(d) == live_dir}
         live, self._live = self._live, None
         if live is None:
             return
