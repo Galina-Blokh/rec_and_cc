@@ -41,6 +41,7 @@ across platforms.
 | `transcribe/` | VAD chunking, language ID, parallel Whisper, merge + echo removal, md/srt/json output, background queue, live transcription (`live.py`) |
 | `transcribe/diarize.py` | Offline speaker diarization of the `Others` track (speaker embeddings + clustering) and `Others` → `Speaker N` relabelling of the final transcript; one-time, checksum-verified model download |
 | `hotkey.py` | Global start/stop shortcut: parses `hotkey`, runs `rcc-audiotap hotkey` (macOS) or `RegisterHotKey` (Windows) |
+| `cloudsync.py` | Is `output_dir` synced to iCloud / OneDrive / File Provider? Local path checks only; the controller warns once per folder |
 | `permissions.py` | Query, request and open settings for mic and system-audio permissions |
 | `ui/` | `common.Controller` (platform-independent glue) + `present.py` (pure presenter logic: menu titles and check marks, notice texts, the ask dialog script and its answers, toast placement) + `mac.py` (rumps) / `tray.py` (pystray) / `toast_mac.py`, thin shells that only apply it |
 | `ui/captions*.py` | Live captions window: `captions.py` (pure logic: ordering, trimming, header, panel frame, speaker colours) + `captions_mac.py` (floating non-activating NSPanel); Windows uses a Tk window in `tray.py` |
@@ -95,6 +96,15 @@ except the app itself, through a private aggregate device. The helper converts t
 A process tap delivers **no IO cycles while nothing is playing**. To keep the "others" track
 aligned with the mic track and continuous on disk, the helper fills those gaps with zeros,
 paced by the wall clock.
+
+With `detection.system_audio_scope = "app"` the engine passes the trigger app as an
+`AppTarget` (pattern + pids) through `Recorder.start` to `create_system_source(target)`, and
+the helper taps only those processes (`CATapDescription(stereoMixdownOfProcesses:)`). Each
+second it re-matches the pattern and updates the running tap's description, so browser or
+Electron helpers that start later are included; `pid` / `match` lines on its stdin add a
+second app when a call upgrades a media session. No process object yet, or a failing
+per-app tap, falls back to the global tap
+([ADR 0012](adr/0012-per-app-system-audio-tap.md)).
 
 ### Permissions belong to RecAndCC, not Terminal/python
 macOS (TCC) attributes permission requests to the *responsible process*. `RecAndCC.app`'s

@@ -279,10 +279,15 @@ def cmd_search(args) -> int:
 
 
 def cmd_config(args) -> int:
-    load_config()  # creates the default file on first run
+    from .cloudsync import cloud_sync_provider, warning_text
+
+    cfg = load_config()  # creates the default file on first run
     print(f"# {CONFIG_PATH}\n")
     print(CONFIG_PATH.read_text(encoding="utf-8"))
     print(f"# logs: {LOG_FILE}")
+    provider = cloud_sync_provider(cfg.output_dir)
+    if provider:
+        print(f"# WARNING: {warning_text(cfg.output_dir, provider)}")
     return 0
 
 
@@ -397,7 +402,9 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("action", choices=["on", "off", "status"])
     a.set_defaults(func=cmd_autostart)
 
-    sub.add_parser("config", help="print config path and contents").set_defaults(func=cmd_config)
+    sub.add_parser(
+        "config", help="print config path and contents (warns if output_dir is cloud-synced)"
+    ).set_defaults(func=cmd_config)
     _add_speaker_commands(sub)
     return p
 
