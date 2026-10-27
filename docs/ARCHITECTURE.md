@@ -166,6 +166,17 @@ are deleted only after that, if `keep_audio = false`). No WAV (deleted) or `diar
 skipped, retried at most every 10 minutes, and transcripts keep `Others`. Once it is on
 disk, nothing touches the network (tested with all network access blocked).
 
+**Speaker names (opt-in, `speaker_names`, `voices.py`).** Diarization also returns each
+speaker's centroid (unit mean of its window embeddings). With the option on, the final pass
+names a speaker whose centroid matches a voice profile (cosine ≥ 0.6 and 0.1 ahead of the
+next profile; each name once per session, `Me` never; numbers skip names) and saves the
+session's centroids, so `recandcc name-speaker` can name a speaker later without re-running
+diarization. Profiles (running mean + count + embedding model, one JSON file per name) and the
+session centroids (`sessions/`, keyed by session id) live in the owner-only (0700/0600)
+`platformdirs.user_data_dir("RecAndCC")/voices`, never in `output_dir`, which may be synced
+to a cloud drive. A transcript written without labels or with the option off deletes its
+session's centroids. All of it runs on the diarizer / writer threads, after the audio threads.
+
 ### Mixed English/Russian
 Whisper normally detects one language per 30 s window. Instead:
 1. Silero VAD splits each track into speech regions.

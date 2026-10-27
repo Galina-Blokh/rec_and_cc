@@ -291,6 +291,80 @@ def cmd_config(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------- speaker names
+def cmd_speakers(args) -> int:
+    from .models import SessionInfo
+    from .transcribe import voices
+
+    directory = Path(args.session_dir).expanduser()
+    try:
+        speakers = voices.session_speakers(directory)
+        known = voices.read_session_voices(SessionInfo.load(directory).id)
+    except (OSError, ValueError) as e:
+        print(f"Can't read the transcript: {e}", file=sys.stderr)
+        return 1
+    for label, lines in speakers:
+        print(f"{label}{'' if label in known else '  (no voice data)'}")
+        for line in lines:
+            print(f"    {line[:100]}")
+    if not speakers:
+        print("No other speakers in this transcript.")
+    return 0
+
+
+def cmd_name_speaker(args) -> int:
+    if not load_config().transcription.speaker_names:
+        print("Voice profiles are off: set transcription.speaker_names = true.", file=sys.stderr)
+        return 1
+    from .transcribe import voices
+
+    try:
+        p = voices.name_speaker(Path(args.session_dir).expanduser(), args.label, args.name)
+    except (OSError, ValueError, KeyError) as e:
+        print(f"Can't name {args.label!r}: {e}", file=sys.stderr)
+        return 1
+    print(f"{args.label} is now {p.name} (voice profile from {p.count} session(s)).")
+    return 0
+
+
+def cmd_voices(args) -> int:
+    from .transcribe import voices
+
+    if args.action == "list":
+        profiles = voices.load_profiles()
+        for p in profiles:
+            print(f"{p.name}  ({p.count} session(s), updated {p.updated_at})")
+        print(f"{len(profiles)} voice profile(s) in {voices.VOICES_DIR}")
+    elif args.all:
+        n = voices.delete_all_profiles()
+        print(f"Deleted {n} voice profile(s) and all saved session voices.")
+    elif not args.name:
+        print("Name the profile to delete, or use --all.", file=sys.stderr)
+        return 1
+    elif not voices.delete_profile(args.name):
+        print(f"No voice profile named {args.name!r}.", file=sys.stderr)
+        return 1
+    else:
+        print(f"Deleted the voice profile of {args.name}.")
+    return 0
+
+
+def _add_speaker_commands(sub) -> None:
+    s = sub.add_parser("speakers", help="list a session's speakers with their first lines")
+    s.add_argument("session_dir")
+    s.set_defaults(func=cmd_speakers)
+    n = sub.add_parser("name-speaker", help='name a speaker, e.g. "Speaker 2" "Anna"')
+    n.add_argument("session_dir")
+    n.add_argument("label", help='the label in the transcript, e.g. "Speaker 2"')
+    n.add_argument("name")
+    n.set_defaults(func=cmd_name_speaker)
+    v = sub.add_parser("voices", help="list or delete saved voice profiles")
+    v.add_argument("action", choices=["list", "delete"])
+    v.add_argument("name", nargs="?")
+    v.add_argument("--all", action="store_true", help="with delete: every profile")
+    v.set_defaults(func=cmd_voices)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="recandcc", description="Record calls/videos locally and transcribe them."
@@ -330,6 +404,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "config", help="print config path and contents (warns if output_dir is cloud-synced)"
     ).set_defaults(func=cmd_config)
+    _add_speaker_commands(sub)
     return p
 
 
