@@ -627,3 +627,22 @@ def test_names_are_pruned_with_their_session_and_deleted_with_all_voices(tmp_pat
     voices.write_session_names(s, ["Anna"])
     voices.delete_all_profiles()
     assert voices.read_session_names(s.id) == []
+
+
+def test_turning_the_option_off_mid_call_stops_sampling_and_drops_names():
+    state = {"on": True}
+    reads = []
+    s = participants.ParticipantSampler(
+        TARGET,
+        active=lambda: state["on"],
+        read=lambda t: reads.append(1) or ["Anna"],
+        interval=0.01,
+        first_after=0,
+    )
+    s.start()
+    wait_for(lambda: s._names == ["Anna"])
+    state["on"] = False
+    wait_for(lambda: s._names == [])
+    n = len(reads)
+    time.sleep(0.1)
+    assert len(reads) <= n + 1 and s.stop() == []  # at most one sample was already in flight
