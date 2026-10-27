@@ -192,7 +192,7 @@ class SummaryConfig:
 
 @dataclass
 class Config:
-    output_dir: Path = DEFAULT_OUTPUT_DIR
+    output_dir: Path = field(default_factory=lambda: DEFAULT_OUTPUT_DIR)
     autostart: bool = False
     # Global start/stop shortcut. ⌃⌥R by default: ⌘⇧R would override Chrome/Safari shortcuts.
     hotkey: str = "<ctrl>+<alt>+r"
@@ -202,7 +202,8 @@ class Config:
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
     summary: SummaryConfig = field(default_factory=SummaryConfig)
 
-    def save(self, path: Path = CONFIG_PATH) -> None:
+    def save(self, path: Path | None = None) -> None:
+        path = CONFIG_PATH if path is None else path
         path.parent.mkdir(parents=True, exist_ok=True)
         data = asdict(self)
         data["output_dir"] = str(self.output_dir)
@@ -271,14 +272,17 @@ def normalize_language_models(value) -> dict[str, str]:
     return out
 
 
-def save_keys(path: Path, updates: dict[str, Any]) -> float:
+def save_keys(path: Path | None, updates: dict[str, Any]) -> float:
     """Write only the dotted keys in ``updates`` ("transcription.languages": [...]) into
     config.toml, leaving every other key's value exactly as it is on disk (it may have been
     edited by hand since the app loaded it). Like every save, it drops TOML comments and
-    rewrites the file in tomli_w's key order. Returns the new file's mtime. Raises
-    FileNotFoundError if there is no file yet, ValueError if it is not valid TOML or a key's
+    rewrites the file in tomli_w's key order. ``path=None`` means CONFIG_PATH, read at call
+    time. Returns the new file's mtime. Raises FileNotFoundError if there is no file yet,
+    ValueError if it is not valid TOML or a key's
     parent is not a table."""
-    path = path.resolve()  # a symlinked config.toml stays a symlink
+    path = (
+        CONFIG_PATH if path is None else path
+    ).resolve()  # a symlinked config.toml stays a symlink
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     for dotted, value in updates.items():
         *parents, leaf = dotted.split(".")
@@ -307,13 +311,14 @@ def _write_atomic(path: Path, payload: bytes) -> float:
     return mtime
 
 
-def save_languages(languages: list, path: Path = CONFIG_PATH) -> None:
+def save_languages(languages: list, path: Path | None = None) -> None:
     """Write only `transcription.languages` (see `save_keys`)."""
     save_keys(path, {"transcription.languages": list(languages)})
 
 
-def load_config(path: Path = CONFIG_PATH) -> Config:
+def load_config(path: Path | None = None) -> Config:
     """Load config, creating a default file on first run. Unknown keys are ignored."""
+    path = CONFIG_PATH if path is None else path
     if not path.exists():
         cfg = Config()
         cfg.save(path)

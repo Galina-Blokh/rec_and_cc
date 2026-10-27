@@ -34,6 +34,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "pyinstaller>=6.22.3",
     "pyright>=1.1.414",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
@@ -71,6 +72,7 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "S"]
 "src/recandcc/ui/tray.py" = ["S606", "S607"]
 # Report scripts build HTML from long template strings; E501 there hurts readability.
 "scripts/report/*.py" = ["E501"]
+"scripts/pyinstaller_spike.py" = ["S603"]
 
 [tool.pyright]
 typeCheckingMode = "basic"
