@@ -40,6 +40,7 @@ def fake_windows(monkeypatch):
         recmod, "_volume_root_and_acl_support", lambda path: ("E:\\", state["persists"])
     )
     monkeypatch.setattr(recmod, "_warned", set())
+    monkeypatch.setattr(recmod, "_privacy_notice", {"pending": False, "sent": False})
     return type("FakeWindows", (), {"calls": calls, "state": state})
 
 
@@ -74,6 +75,7 @@ def test_windows_sid_failure_falls_back_to_plain_mkdir_and_warns_once(
     monkeypatch.setattr(recmod, "_IS_WINDOWS", True)
     monkeypatch.setattr(recmod, "_current_user_sid", no_sid)  # real _win_mkdir_owner_only
     monkeypatch.setattr(recmod, "_warned", set())
+    monkeypatch.setattr(recmod, "_privacy_notice", {"pending": False, "sent": False})
     with caplog.at_level(logging.WARNING, logger="recandcc.recorder"):
         make_private_dir(tmp_path / "a" / "b")
     assert (tmp_path / "a" / "b").is_dir()
@@ -87,7 +89,47 @@ def test_windows_volume_without_persistent_acls_warns_once(fake_windows, tmp_pat
         make_private_dir(tmp_path / "out" / "day2")
     assert (tmp_path / "out" / "day2").is_dir()  # recording goes on
     assert len(caplog.records) == 1
-    assert "E:\\" in caplog.text and "does not keep file permissions" in caplog.text
+    assert "E:\\" in caplog.text and "may not keep file permissions" in caplog.text
+
+
+def test_error_already_exists_maps_to_file_exists(tmp_path):
+    e = recmod._exists_error(183, tmp_path / "x")
+    assert isinstance(e, FileExistsError) and e.filename == str(tmp_path / "x")
+    assert recmod._exists_error(5, tmp_path / "x") is None  # access denied: WinError
+
+
+def test_concurrent_create_burns_no_warning_or_notice(fake_windows, monkeypatch, tmp_path, caplog):
+    def concurrent(path):  # another thread won the race: CreateDirectoryW -> 183
+        path.mkdir()
+        raise recmod._exists_error(183, path)
+
+    monkeypatch.setattr(recmod, "_win_mkdir_owner_only", concurrent)
+    with caplog.at_level(logging.WARNING, logger="recandcc.recorder"):
+        make_private_dir(tmp_path / "out")
+    assert (tmp_path / "out").is_dir()
+    assert not caplog.records and not recmod._warned
+    assert recmod.take_privacy_notice() is None
+
+
+def test_unknown_acl_support_is_treated_as_not_private(fake_windows, monkeypatch, tmp_path, caplog):
+    def broken(path):
+        raise OSError("GetVolumeInformationW failed")
+
+    monkeypatch.setattr(recmod, "_volume_root_and_acl_support", broken)
+    with caplog.at_level(logging.WARNING, logger="recandcc.recorder"):
+        make_private_dir(tmp_path / "out")
+    assert (tmp_path / "out").is_dir()
+    assert len(caplog.records) == 1 and "file permissions" in caplog.text
+
+
+def test_not_private_folder_yields_one_notice_per_process(fake_windows, tmp_path):
+    assert recmod.take_privacy_notice() is None
+    fake_windows.state["persists"] = False
+    make_private_dir(tmp_path / "a")
+    title, message = recmod.take_privacy_notice()
+    assert "other users" in title and "NTFS" in message
+    make_private_dir(tmp_path / "b")
+    assert recmod.take_privacy_notice() is None  # once per process
 
 
 def test_windows_ntfs_volume_does_not_warn(fake_windows, tmp_path, caplog):

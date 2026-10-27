@@ -12,6 +12,7 @@ sends a sentinel to each writer, joins them, and persists session.json.
 
 from __future__ import annotations
 
+import errno
 import logging
 import queue
 import re
@@ -36,15 +37,35 @@ log = logging.getLogger(__name__)
 
 PRIVATE_DIR_MODE = 0o700  # owner-only on POSIX; Windows gets an owner-only DACL instead
 _IS_WINDOWS = sys.platform == "win32"  # module flag so tests can fake Windows safely
+_ERROR_ALREADY_EXISTS = 183
 _FILE_PERSISTENT_ACLS = 0x8  # GetVolumeInformationW file-system flag
 _warned: set[str] = set()  # privacy warnings already logged (once per process / volume)
 _acl_volumes: dict[str, bool] = {}  # volume root -> persists ACLs
 
 
-def _warn_once(key: str, msg: str, *args: object) -> None:
+_privacy_notice = {"pending": False, "sent": False}  # one user-visible notice per process
+PRIVACY_NOTICE = (
+    "Recordings may be readable by other users",
+    "RecAndCC couldn't make its recording folder private (no owner-only access list on this "
+    "drive). Keep output_dir on a local NTFS drive; see the log for details.",
+)
+
+
+def _warn_not_private(key: str, msg: str, *args: object) -> None:
+    """Log a folder-not-private warning once per key and flag one notice for the UI."""
     if key not in _warned:
         _warned.add(key)
         log.warning(msg, *args)
+    if not _privacy_notice["sent"]:
+        _privacy_notice["pending"] = True
+
+
+def take_privacy_notice() -> tuple[str, str] | None:
+    """``(title, message)`` once per process after a folder couldn't be made private."""
+    if _privacy_notice["pending"] and not _privacy_notice["sent"]:
+        _privacy_notice.update(pending=False, sent=True)
+        return PRIVACY_NOTICE
+    return None
 
 
 @cache
@@ -100,6 +121,13 @@ def owner_only_sddl(user_sid: str) -> str:
     return f"D:P(A;OICI;FA;;;{user_sid})(A;OICI;FA;;;SY)"
 
 
+def _exists_error(err: int, path: Path) -> FileExistsError | None:
+    """``FileExistsError`` if ``CreateDirectoryW`` failed with ERROR_ALREADY_EXISTS (183)."""
+    if err == _ERROR_ALREADY_EXISTS:
+        return FileExistsError(errno.EEXIST, "folder already exists", str(path))
+    return None
+
+
 def _win_mkdir_owner_only(path: Path) -> None:
     """Create one folder with an owner-only DACL in a single call (no permissive window)."""
     sddl = owner_only_sddl(_current_user_sid())
@@ -136,7 +164,8 @@ def _win_mkdir_owner_only(path: Path) -> None:
     try:
         sa = SecurityAttributes(ctypes.sizeof(SecurityAttributes), sd, False)
         if not k32.CreateDirectoryW(str(path), ctypes.byref(sa)):
-            raise ctypes.WinError(ctypes.get_last_error())  # 183 -> FileExistsError
+            err = ctypes.get_last_error()
+            raise _exists_error(err, path) or ctypes.WinError(err)
     finally:
         k32.LocalFree(sd)
 
@@ -190,26 +219,26 @@ def _mkdir_private(path: Path) -> None:
         try:
             _win_mkdir_owner_only(path)
         except FileExistsError:
-            raise
+            raise  # created concurrently / something in the way: not a privacy problem
         except Exception as e:  # keep recording, just warn
-            _warn_once(
+            path.mkdir(mode=PRIVATE_DIR_MODE)  # FileExistsError here burns no warning
+            _warn_not_private(
                 "acl-fallback",
                 "could not create %s with an owner-only ACL (%s); recordings may be readable "
                 "by other users",
                 path,
                 e,
             )
-            path.mkdir(mode=PRIVATE_DIR_MODE)
             return
         try:
             root, persists = _volume_root_and_acl_support(path)
-        except Exception as e:
+        except Exception as e:  # can't tell: assume the worst
+            root, persists = path.anchor or str(path), False
             log.debug("could not check ACL support for %s: %s", path, e)
-            return
         if not persists:
-            _warn_once(
+            _warn_not_private(
                 f"no-acl:{root}",
-                "%s does not keep file permissions (e.g. FAT/exFAT): recordings in %s are "
+                "%s may not keep file permissions (e.g. FAT/exFAT): recordings in %s may be "
                 "readable by other users",
                 root,
                 path,
@@ -431,6 +460,10 @@ class Recorder:
         with self._lvl_lock:
             last = self._last_sound
         return max(0.0, self.clock() - last) if self.is_recording else 0.0
+
+    def privacy_notice(self) -> tuple[str, str] | None:
+        """``(title, message)`` once per process if a session folder couldn't be made private."""
+        return take_privacy_notice()
 
     def silent_tracks(self) -> list[Track]:
         """Tracks of the last stopped session that were digital silence the whole time

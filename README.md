@@ -262,7 +262,7 @@ transcripts folder that already existed keeps its permissions; tighten it with
 `chmod 700 ~/Documents/Transcribes`. On Windows, the simplest fix is to let RecAndCC create a
 new folder (point `output_dir` at a path that doesn't exist yet); `icacls <folder>` shows who
 has access. Access lists need an NTFS drive: on a FAT/exFAT USB stick or some network
-shares anyone with access to the drive can read the recordings (RecAndCC logs a warning once), so keep `output_dir` on a
+shares anyone with access to the drive can read the recordings (RecAndCC shows a warning once), so keep `output_dir` on a
 local NTFS drive.
 `~/Documents` may be synced by iCloud Drive ("Desktop & Documents Folders") on macOS, and
 `Documents` by OneDrive folder backup on Windows; set `output_dir` to a folder outside it if

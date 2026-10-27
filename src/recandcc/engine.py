@@ -558,6 +558,16 @@ class Engine:
                 "RecAndCC has no microphone access — grant it in the Permissions menu.",
             )
 
+    def _check_private_folder(self) -> None:
+        # Recording goes on (#37) but the user should know the folder isn't private.
+        take = getattr(self.recorder, "privacy_notice", None)
+        try:
+            notice = take() if take is not None else None
+        except Exception:
+            return
+        if notice:
+            self._notice(*notice)
+
     def _check_silent_tracks(self) -> None:
         silent = getattr(self.recorder, "silent_tracks", None)
         if silent is None:
@@ -605,6 +615,7 @@ class Engine:
             if self._rec is not None:
                 self._rec.session = session
                 self._rec.started = self.clock()
+        self._check_private_folder()
         if self.on_session_start:
             try:
                 self.on_session_start(session)
