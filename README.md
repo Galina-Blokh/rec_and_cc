@@ -111,7 +111,8 @@ The menu-bar icon shows the state:
 | ⏳ | Transcriptions in progress (number = queued sessions) |
 | ⚠️ (prefix) | A needed permission is missing |
 
-Menu items:
+Menu items (macOS menu bar; the Windows tray has the same items unless marked *macOS only*):
+- **Record now** (Windows tray, only while an Ask prompt is pending): answers it with "record".
 - **Mode → Off / Ask / Auto**
 - **Start recording / Stop recording  ⌃⌥R**: manual control. A manual recording only stops
   when you stop it. The global shortcut **⌃⌥R** (Control+Option+R; Ctrl+Alt+R on Windows) does the same from
@@ -138,9 +139,8 @@ Menu items:
   any language); pick a match to open its transcript. Same as `recandcc search`. On
   Windows the tray item opens a small window: type the words, press Enter, and
   double-click a match (time, speaker, snippet) to open it.
-- **Export latest transcript (DOCX + PDF)** (macOS menu and Windows tray): writes
-  `transcript.docx` and `transcript.pdf` next to the newest transcript. Same as
-  `recandcc export`.
+- **Export latest transcript (DOCX + PDF)**: writes `transcript.docx` and `transcript.pdf`
+  next to the newest transcript. Same as `recandcc export`.
 - **Meeting notes…**: your past sessions, newest first, with title (the app that triggered
   it, or one you gave it), date and time, duration, speakers, languages and whether it is
   transcribed. Pick one to open its transcript or `summary.md` (if there is one; its first
@@ -155,15 +155,18 @@ Menu items:
   languages speech is detected among (`languages` in the settings). Applies at once, also to
   the rest of a recording in progress; at least one stays ticked unless Any is chosen. Codes
   you added in the settings by hand are kept and listed as "Also from settings".
-- **Delete audio after** (macOS menu and Windows tray): Never / 1 / 7 / 30 / 90 days. Audio of transcribed recordings is
+- **Use names from the call app** (*macOS only*, off by default): see
+  [Names from the call app](#names-from-the-call-app).
+- **Delete audio after**: Never / 1 / 7 / 30 / 90 days. Audio of transcribed recordings is
   deleted after that many days; transcripts are always kept. Any number of days can be set as
   `audio_retention_days` in the settings.
-- **Settings…** (needs the rebuilt helper, `./native/macos/build.sh`): a window for mode,
+- **Settings…** (*macOS only*; needs the rebuilt helper, `./native/macos/build.sh`): a window for mode,
   transcripts folder, languages, keep audio, live captions and speaker names. Saved values
   apply at once. Without it, the app opens `config.toml` instead.
-- **Edit config.toml**: opens `config.toml` (changes to detection settings, `hotkey` and
-  `languages` apply live).
-- **Quit RecAndCC**
+- **Edit config.toml** (**Edit settings** in the Windows tray): opens `config.toml` (changes
+  to detection settings, `hotkey` and `languages` apply live).
+- **Reveal logs**: shows the log folder in Finder / Explorer.
+- **Quit RecAndCC** (**Quit** in the Windows tray)
 
 ### Live captions
 
@@ -276,10 +279,10 @@ repo):
 | Command | What it does |
 |---|---|
 | `recandcc run` | Start the menu-bar app (what RecAndCC.app runs) |
-| `recandcc record --seconds 60 [--no-mic]` | Record now without the UI; prints the text live as it is spoken, then the transcript path |
+| `recandcc record --seconds 60 [--no-mic] [--no-transcribe] [-v]` | Record now without the UI; prints the text live as it is spoken, then the transcript path. `--no-transcribe` only records; `-v` shows INFO logs |
 | `recandcc transcribe <session_dir>` | (Re-)transcribe a recorded session |
 | `recandcc summarize <session_dir>` | Write the session's `summary.md` (summary + action items) with the local model |
-| `recandcc monitor` | Live view of which apps do audio and how the rules classify them. Use it to tune the app lists |
+| `recandcc monitor [--interval 1.0]` | Live view of which apps do audio and how the rules classify them. Use it to tune the app lists |
 | `recandcc export <session-folder> [--format docx\|pdf\|both]` | Write `transcript.docx` and/or `transcript.pdf` next to the session's transcript (speakers, timestamps, Hebrew right to left); the PDF needs a system font with Latin, Cyrillic and Hebrew (Arial or DejaVu Sans) |
 | `recandcc search "<words>" [--limit N]` | Search all transcripts; prints each match's date, time in the recording, speaker, the text and the transcript path |
 | `recandcc devices` | List audio devices |
