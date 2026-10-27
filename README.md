@@ -459,3 +459,9 @@ Windows needs no system-audio permission. The microphone is controlled in
 - [docs/ROADMAP.md](docs/ROADMAP.md): what's next
 - [CHANGELOG.md](CHANGELOG.md): what changed in each version
 - [SECURITY.md](SECURITY.md): reporting security issues, threat model
+
+## License
+
+Apache-2.0, see [LICENSE](LICENSE). Bundled third-party attributions are in [NOTICE](NOTICE).
+
+Third-party dependencies keep their own licences, e.g. fpdf2 (PDF export) is LGPL-3.0, installed as a separate package rather than bundled (see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)).

@@ -1,0 +1,10 @@
+RecAndCC
+Copyright 2026 Galina Blokh
+
+This product is licensed under the Apache License 2.0 (see LICENSE).
+
+Included third-party code:
+
+- src/recandcc/transcribe/_align_np.py: numpy reimplementation derived from openai/whisper
+  (Copyright (c) 2022 OpenAI) and ml-explore/mlx-examples (Copyright (c) 2023 Apple Inc.),
+  both under the MIT License. The MIT notice is kept in that file.
