@@ -402,17 +402,32 @@ def test_menu_toggle_saves_warns_and_engine_owns_a_closed_room_monitor(tmp_path,
         def submit(self, *_a, **_k):
             pass
 
+    import recandcc.ui.common as common
+
+    path = tmp_path / "config.toml"
+    monkeypatch.setattr(common, "CONFIG_PATH", path)  # never the user's real settings
     cfg = Config(output_dir=tmp_path)
     saved = threading.Event()
-    monkeypatch.setattr(cfg, "save", lambda *a, **k: saved.set())
+    real_save = cfg.save
+
+    def save(p=path):
+        assert p == path
+        real_save(p)
+        saved.set()
+
+    monkeypatch.setattr(cfg, "save", save)
     ctrl = Controller(cfg, monitor=Monitor(), recorder=object(), tq=Q(), start_threads=False)
     assert isinstance(ctrl.engine.room, RoomMonitor) and not ctrl.engine.room.running
     ctrl._perm = {"microphone": "denied"}
     ctrl.set_room_listening(True)
     assert cfg.detection.room_listening and saved.wait(2)
+    assert load_config(path).detection.room_listening  # saved to the temporary config
     assert ctrl.events.get_nowait() == ("notice", "Room listening on", ROOM_LISTENING_NOTICE)
     assert ctrl.events.get_nowait()[1] == "Room listening can't hear anything"
+    saved.clear()
     ctrl.set_room_listening(False)
-    assert not cfg.detection.room_listening and ctrl.events.empty()  # no notice when off
+    assert not cfg.detection.room_listening and saved.wait(2)
+    assert not load_config(path).detection.room_listening
+    assert ctrl.events.empty()  # no notice when off
     text = keep_prompt_text("Room", TriggerKind.ROOM, "record")
     assert "a conversation near the laptop" in text
