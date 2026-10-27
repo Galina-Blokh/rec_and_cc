@@ -47,7 +47,8 @@ All notable changes to RecAndCC are documented here. The format is based on
 - Record only the app that triggered a session with `detection.system_audio_scope = "app"`
   (macOS per-app audio tap) (#63, #65).
 - `scripts/eval.py`: WER per language, language-ID accuracy, DER and RTF on a local,
-  consented speech set; see `docs/EVALUATION.md` (#34).
+  consented speech set; see `docs/EVALUATION.md` (#34). `--live` adds live caption latency
+  (p50 / p90 / max) by replaying each clip through the live transcriber (#13).
 - Requirements docs: intent, user stories with acceptance criteria, and a traceability table
   from stories to modules and tests, checked by a test (#33, #35).
 - ADR 0011: stack and packaging after v0.1 (Proposed) (#57).
