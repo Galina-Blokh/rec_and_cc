@@ -244,10 +244,12 @@ def _summary_is_stale(pin: _Pin, transcript_mtime: float | None = None) -> str:
     try:
         with os.fdopen(_open_read(pin, SOURCE_NAME), "rb") as f:
             recorded = f.read().decode("utf-8").strip()
+        if not recorded:
+            raise ValueError("empty fingerprint")
         with os.fdopen(_open_read(pin, JSON_NAME), "rb") as f:
             segs = json.loads(f.read().decode("utf-8")).get("segments", [])
         return "" if transcript_fingerprint(segs) == recorded else "transcript text changed"
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, TypeError):
         pass  # no (or unreadable) fingerprint: an old session
     try:
         mtime = transcript_mtime

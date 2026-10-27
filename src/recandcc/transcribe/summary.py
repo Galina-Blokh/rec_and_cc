@@ -206,6 +206,8 @@ def summarize_session(directory: Path, cfg: Config, generate: Generator | None =
     finally:
         if owned is not None:
             owned.close()
+    with contextlib.suppress(OSError):  # an old fingerprint must not sit next to a new summary
+        (directory / SOURCE_NAME).unlink(missing_ok=True)
     path = atomic_write(
         directory / SUMMARY_NAME, format_summary(language, summary, items, cfg.summary.model)
     )
