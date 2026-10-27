@@ -713,3 +713,9 @@ def test_live_transcription_never_requests_word_timestamps(tmp_path):
     live.finish(session, timeout=10)
     assert asked  # the live path did transcribe
     assert not any(kw.get("words") for kw in asked)
+
+
+def test_per_track_hints_replace_the_diarizers(monkeypatch):
+    d = _fake_diarizer(monkeypatch, min_speakers=3)  # two voices, forced into three
+    assert len({t.speaker for t in d.diarize(_voices_track()) or []}) == 3
+    assert len({t.speaker for t in d.diarize(_voices_track(), (0, 0)) or []}) == 2

@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 from dataclasses import fields
 from datetime import datetime
 from pathlib import Path
@@ -57,6 +58,7 @@ from ..sensitivity import apply_preset, current_preset, room_trigger
 from ..settings_window import (
     SettingsUnavailable,
     close_settings,
+    offered_models,
     raise_settings,
     run_settings,
 )
@@ -340,9 +342,19 @@ def _privatize_new_folder(path: Path) -> None:
 
 # transcription keys a hand edit applies live (models and device need a restart)
 RETENTION_KEY = "transcription.audio_retention_days"
+
+
+def _is_days(value: object) -> bool:
+    """A usable ``audio_retention_days``: a whole number (``True`` is not one)."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 # Settings-window fields that are NO_ROLLBACK_KEYS: a successful window save writes them.
 WINDOW_KEYS = {"live_captions": "live_captions", "mode": "detection.mode"}
 RELOADED_TRANSCRIPTION_KEYS = ("keep_audio", "audio_retention_days", "speaker_names")
+MODEL_CHANGE_NOTICE = (
+    "Applies after RecAndCC restarts; a model not on disk yet is downloaded once then."
+)
 
 
 class Controller:
@@ -360,10 +372,14 @@ class Controller:
     ):
         self.cfg = cfg
         self.events: queue.Queue[tuple] = queue.Queue()
+        notice = cfg.summary.notice
+        if notice:  # load_config(migrate=True) switched or kept an old-default 3B: once
+            self.post_notice("Summary model", notice)
         self._lock = threading.Lock()
         self._perm: dict[str, str] = {}
         self._recent: list[Path] = []
         self._export_lock = threading.Lock()
+        self._retention_lock = threading.Lock()  # one menu purge at a time
         self._refreshing = False
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
@@ -891,7 +907,10 @@ class Controller:
         """Delete expired audio at startup and then hourly (audio_retention_days); sync the
         search index hourly too (half an hour in, clear of the startup sync)."""
         while not getattr(self, "_shut", False):
-            self.purge_audio_now()
+            try:  # one failure must not end the hourly purge and index sync for good
+                self.purge_audio_now()
+            except Exception:
+                log.exception("audio retention failed")
             for i in range(3600):  # sleep 1 h, but notice shutdown promptly
                 if i == 1800:
                     self._sync_index()
@@ -899,26 +918,40 @@ class Controller:
                     return
                 time.sleep(1)
 
-    def purge_audio_now(self, days: int | None = None) -> None:
-        """Delete expired audio. Without ``days``, use the in-memory retention, but not while
-        a menu save of it is pending: a value that may never be saved must not delete audio
-        (the save's own purge, or the next hourly run, follows)."""
-        if days is None:
-            with self._dirty_lock:
-                if RETENTION_KEY in self._dirty:
-                    return
-            days = self.cfg.transcription.audio_retention_days
+    def purge_audio_now(self, days: int | None = None) -> list[Path]:
+        """Delete audio older than ``days`` now; the deleted WAVs (none if it failed or was
+        skipped). A menu click passes its own saved value: memory may already hold a newer,
+        unsaved click. Without ``days`` (startup, the hourly loop) use the in-memory retention,
+        but only when config.toml holds that same value: not while a menu save of it is pending
+        or pinned unsaved, and not after a failed save left an unsaved click in memory (e.g.
+        config.toml was unreadable, so nothing could be restored). A value that was never
+        saved must not delete audio; the save's own purge, or the next hourly run, follows."""
         try:
-            purge_old_audio(self.cfg.output_dir, days)
+            if days is None:
+                with self._dirty_lock:
+                    if RETENTION_KEY in self._dirty or RETENTION_KEY in self._unsaved:
+                        return []
+                days = self.cfg.transcription.audio_retention_days
+                if not _is_days(days):  # e.g. a hand-written "7": treated as not on disk
+                    log.warning("audio_retention_days is not a whole number; purge skipped")
+                    return []
+                if days > 0 and self._retention_on_disk() != days:
+                    log.info("retention: the current value is not in config.toml; purge skipped")
+                    return []
+            return purge_old_audio(self.cfg.output_dir, days)
         except Exception:
             log.exception("audio retention failed")
+            return []
 
-    def save_retention(self) -> None:
-        """Menu "Delete audio after" (worker thread): save the in-memory retention, then purge
-        with the value that was written, only if the write succeeded."""
-        saved = self.write_settings(RETENTION_KEY)
-        if saved is not None:
-            self.purge_audio_now(saved[RETENTION_KEY])
+    def _retention_on_disk(self) -> int | None:
+        """``audio_retention_days`` as config.toml holds it, or None when the file is missing
+        or unreadable. A plain parse: no lock, no default file, no config warnings."""
+        try:
+            raw = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            value = raw.get("transcription", {}).get("audio_retention_days", 0)
+            return value if _is_days(value) else None
+        except Exception:  # missing, mid-edit TOML, unreadable
+            return None
 
     def _purge_leftover_audio(self) -> None:
         """keep_audio = false: delete WAVs left behind by transcribed sessions (e.g. the app
@@ -1118,6 +1151,11 @@ class Controller:
                         if key == ("top", "hotkey") and value != now[key]:
                             hotkey_changed = True
                         setattr(self._reload_target(owner), name, value)
+            # transcription.model is not reloaded (the loaded model stays until a restart), but
+            # the Settings window shows what is on disk, a hand edit included
+            tr = self.cfg.transcription
+            on_disk = new.transcription.model
+            tr._pending_model = None if on_disk == tr.model else on_disk  # type: ignore[attr-defined]
             if self.cfg.detection.room_listening and not was_listening:  # turned on by hand
                 self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
         if hotkey_changed:  # re-registering the listener may block: outside the lock
@@ -1407,7 +1445,7 @@ class Controller:
                     return
                 if not raw:  # cancelled, closed, or nothing changed
                     return
-                updates = validate_settings(raw)
+                updates = validate_settings(raw, offered_models())
                 if "output_dir" in updates:
                     _privatize_new_folder(updates["output_dir"])
                     make_private_dir(updates["output_dir"])
@@ -1423,6 +1461,8 @@ class Controller:
                         "keep_audio": tr.keep_audio,
                         "speaker_names": tr.speaker_names,
                         "languages": list(tr.languages),
+                        "live": tr.live,
+                        "model": getattr(tr, "_pending_model", None),
                     }
                     old = {k: v for k, v in old.items() if k in fields}
                     old_raw = getattr(tr, "_raw_languages", None)
@@ -1451,6 +1491,9 @@ class Controller:
                         self.apply_settings({"mode": updates["mode"]})
                 if "output_dir" in updates:
                     self.refresh_async(force=True)  # cloud-sync warning for the new folder
+                if "model" in updates and updates["model"] != self.cfg.transcription.model:
+                    # the loaded model is kept until the app restarts
+                    self.post_notice("Model saved", MODEL_CHANGE_NOTICE)
                 self.events.put(("settings_saved", updates))
             except SettingsUnavailable as e:
                 log.info("native settings unavailable: %s", e)
@@ -1486,6 +1529,11 @@ class Controller:
             tr.keep_audio = updates["keep_audio"]
         if "speaker_names" in updates:
             tr.speaker_names = updates["speaker_names"]
+        if "live" in updates:  # read at each session start
+            tr.live = updates["live"]
+        if "model" in updates:  # written to config.toml; loaded at the next app start
+            pending = None if updates["model"] == tr.model else updates["model"]
+            tr._pending_model = pending  # type: ignore[attr-defined]
         if "languages" in updates:
             with self._lang_lock:
                 tr._raw_languages = None  # type: ignore[attr-defined]
@@ -1571,6 +1619,44 @@ class Controller:
         self.save_settings(
             "detection.outside_sensitivity", "detection.inside_sensitivity", title="Sensitivity"
         )
+
+    def set_retention(self, days: int) -> None:
+        """ "Delete audio after" menu (both shells): apply ``days`` in memory at once (the menu
+        check reads it), then save only this key and purge expired audio on a worker, with
+        this click's value. Audio is deleted only once the choice is saved and only if it is
+        still the current choice (a quick second click supersedes this one). A failed save is
+        rolled back by ``_restore_from_disk`` alone (this save holds the key's only pending
+        mark, as ``save_settings`` does); this method only asks the menus to re-render."""
+        days = int(days)
+        self._mark_dirty((RETENTION_KEY,), 1)  # a reload before the write must keep the click
+        self.cfg.transcription.audio_retention_days = days
+
+        def apply() -> None:
+            try:
+                saved = self._write_settings(RETENTION_KEY, title="Delete audio after")
+            finally:
+                self._mark_dirty((RETENTION_KEY,), -1)
+            if saved is None:  # rolled back (or kept for a newer click): the shells re-render
+                self.events.put(("retention_changed",))  # on the UI thread (cached tray menu)
+                return
+            # purge by the value actually written: an earlier worker may have written a newer
+            # click's value, and memory may already hold a later, still unsaved one
+            value = saved.get(RETENTION_KEY)
+            with self._retention_lock:  # serialises menu purges; the check sees the latest
+                if not _is_days(value) or self.cfg.transcription.audio_retention_days != value:
+                    return  # a newer click owns the setting now
+                if self._retention_on_disk() != value:
+                    return  # a later save wrote another value; memory may be an unsaved click
+                if n := len({wav.parent for wav in self.purge_audio_now(value) or ()}):
+                    # count only: a mis-click is visible, no session names or text
+                    what = f"{n} session" + ("s" if n != 1 else "")
+                    self.post_notice("Delete audio after", f"Deleted audio of {what}")
+
+        try:
+            threading.Thread(target=apply, daemon=True, name="retention-set").start()
+        except BaseException:
+            self._mark_dirty((RETENTION_KEY,), -1)  # apply() will never unmark
+            raise
 
     def sensitivity_preset(self) -> str | None:
         return current_preset(self.cfg.detection)

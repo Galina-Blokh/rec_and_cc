@@ -12,6 +12,8 @@ Meeting notes: ``TkNotes``, the same pattern (list, open/rename/delete via the C
 Transcript search: ``TkSearch``, a small window on its own Tk thread (query entry, results
 list); the search runs on a Controller worker and its hits arrive as a ``search`` event,
 which the poll thread forwards to the window's queue (UNTESTED on Windows as well).
+Export and "Delete audio after" use the same Controller calls as the macOS menu
+(``export_async`` on a worker, its result a ``notice``; ``set_retention``).
 Global shortcut (default Ctrl+Shift+R): ``hotkey.WinHotkeyListener``, owned by the Controller;
 the Start/Stop item shows it after a tab (Win32 menus right-align text after ``\t``).
 """
@@ -66,6 +68,7 @@ from .present import (
     live_transcript_target,
     prompt_notice,
     record_item_title,
+    retention_menu,
     search_hit_row,
     search_open_target,
     search_status,
@@ -562,6 +565,14 @@ class TrayApp:
             rows = language_menu(self.cfg.transcription.languages)
             return [language_item(*row) for row in rows]
 
+        def retention_item(days: int | None, title: str, on: bool):
+            action = None if days is None else lambda: self._set_retention(days)
+            return Item(title, action, checked=lambda _i: on, radio=True, enabled=days is not None)
+
+        def retention():  # rebuilt on each update_menu(): the check follows the setting
+            rows = retention_menu(self.cfg.transcription.audio_retention_days)
+            return [retention_item(*row) for row in rows]
+
         def perms():
             perm = self.ctrl.permissions
             items = [
@@ -631,9 +642,11 @@ class TrayApp:
             Item("Open transcripts folder", self._open_folder),
             Item("Recent transcripts", pystray.Menu(recent)),
             Item("Search transcripts…", lambda: self.search.post("ask")),
+            Item("Export latest transcript (DOCX + PDF)", lambda: self.ctrl.export_async()),
             Item("Meeting notes…", lambda: self.ctrl.notes_async()),
             Item("Permissions", pystray.Menu(perms)),
             Item("Languages", pystray.Menu(languages)),
+            Item("Delete audio after", pystray.Menu(retention)),
             Item("Launch at login", self._toggle_login, checked=lambda _i: autostart.is_enabled()),
             Item("Edit settings", lambda: open_path(CONFIG_PATH, True)),
             Item("Reveal logs", lambda: reveal_logs()),
@@ -644,6 +657,10 @@ class TrayApp:
     def _open_folder(self) -> None:
         if err := open_output_folder(self.cfg.output_dir):
             self._notify("Can't open transcripts folder", err)
+
+    def _set_retention(self, days: int) -> None:
+        self.ctrl.set_retention(days)
+        self.icon.update_menu()  # Win32 caches the native menu: move the radio check now
 
     def _toggle_captions(self) -> None:
         self.cfg.live_captions = not self.cfg.live_captions
@@ -725,6 +742,8 @@ class TrayApp:
                 self.search.post("results", ev[1], ev[2])  # failures and no matches too
             elif ev[0] == "notes":
                 self.notes.post("notes", ev[1])
+            elif ev[0] == "retention_changed":  # e.g. reverted after a failed save
+                self.icon.update_menu()
             elif ev[0] == "transcribed":
                 _, s, res = ev
                 self._notify(

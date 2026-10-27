@@ -1,7 +1,8 @@
 """Local meeting summaries: ``summary.md`` (short summary + action items) next to a transcript.
 
 Opt-in (``summary.enabled``). A small instruct model runs through mlx-lm on Apple silicon,
-pinned in revisions.py and loaded offline-first like Whisper (gpu.local_model_path). Long
+pinned in revisions.py and loaded offline-first like Whisper (gpu.local_model_path); with
+``summary.language_models`` the transcript's main spoken language picks it. Long
 transcripts are summarised map-reduce: notes per chunk, then the summary and the action list
 from the notes. Everything runs on one background ``summary`` thread; logs never contain
 transcript or summary text.
@@ -24,7 +25,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
-from ..config import Config
+from ..config import DEFAULT_SUMMARY_MODEL, QWEN_RESEARCH_SUMMARY_MODEL, Config
 from ..models import Segment, SessionInfo, is_rtl
 from .output import JSON_NAME, PDI, RLI, atomic_write, paragraphs
 
@@ -41,7 +42,16 @@ SOURCE_NAME = ".summary-source"
 # (which holds gpu.MLX_LOCK) stays within ~1-2 s.
 CHUNK_CHARS = 8_000
 PREFILL_STEP = 512  # prompt tokens per prefill step (lower peak memory than mlx-lm's 2048)
-DOWNLOAD_NOTICE = "Downloading the summary model (~1.7 GB, once)"
+# One-time download size of each offered (pinned) summary model, for the download notice.
+MODEL_SIZES = {
+    DEFAULT_SUMMARY_MODEL: "~0.9 GB",
+    QWEN_RESEARCH_SUMMARY_MODEL: "~1.7 GB",
+    "mlx-community/Qwen3.5-4B-MLX-4bit": "~3.0 GB",
+}
+# Thought-block markers of thinking models (Qwen3/3.5; Gemma 4's channel). Summaries run
+# with thinking off; a thought block that still shows up is cut from every answer.
+THOUGHT_MARKERS = (("<think>", "</think>"), ("<|channel>thought", "<channel|>"))
+CUT_OFF = "the summary model ran out of tokens while thinking"
 MAX_ROUNDS = 3  # reduce rounds before the notes are cut to fit
 LANGUAGE_NAMES = {"en": "English", "ru": "Russian", "he": "Hebrew"}
 # (summary heading, action items heading, "none") per language; English otherwise.
@@ -59,18 +69,64 @@ class Generator(Protocol):
     def __call__(self, messages: Messages, max_tokens: int) -> str: ...
 
 
+def download_notice(model: str) -> str:
+    """The one-time download notice, with the size when ``model`` is a pinned one."""
+    size = MODEL_SIZES.get(model)
+    return f"Downloading the summary model ({size + ', ' if size else ''}once)"
+
+
 class SummaryUnavailable(RuntimeError):
     """No summary model can run here (platform, missing model offline); the message is a
     fixed reason without any transcript text."""
 
 
+class ModelUnavailable(SummaryUnavailable):
+    """This summary model can't be downloaded or loaded (another one may still work)."""
+
+
 def main_language(segments: list[Segment]) -> str:
-    """The language with the most text ("en" if none is known)."""
-    chars: dict[str, int] = {}
+    """The language with the most speech time ("en" if none is known). It picks both the
+    summary's language (prompt, headings) and its model (summary_model). Overlapping
+    segments (Me and Others at once) count their shared time once."""
+    spans: dict[str, list[tuple[float, float]]] = {}
     for s in segments:
-        if s.language:
-            chars[s.language] = chars.get(s.language, 0) + len(s.text)
-    return max(chars, key=lambda k: chars[k]) if chars else "en"
+        if s.language and s.end > s.start:
+            spans.setdefault(s.language, []).append((s.start, s.end))
+    secs: dict[str, float] = {}
+    for lang, intervals in spans.items():
+        total, reach = 0.0, float("-inf")
+        for start, end in sorted(intervals):
+            if end > reach:
+                total += end - max(start, reach)
+                reach = end
+        secs[lang] = total
+    return max(secs, key=lambda k: secs[k]) if secs else "en"
+
+
+def summary_model(cfg: Config, segments: list[Segment]) -> str:
+    """``summary.language_models`` entry of the main language, else ``summary.model``. An
+    entry that is neither pinned (revisions.py) nor a local path is ignored with a warning,
+    unless ``transcription.allow_unpinned_models`` is on."""
+    from .revisions import revision
+
+    model = cfg.summary.language_models.get(main_language(segments))
+    if model is None:
+        return cfg.summary.model
+    if revision(model) or Path(model).exists() or cfg.transcription.allow_unpinned_models:
+        return model
+    log.warning("ignoring unpinned summary.language_models model %s; using summary.model", model)
+    return cfg.summary.model
+
+
+def strip_thinking(text: str, markers=THOUGHT_MARKERS) -> str:
+    """The answer after any thought block (``(start, end)`` in ``markers``). Raises
+    SummaryUnavailable if a thought never ended: no answer, so no summary.md saying "none"."""
+    for start, end in markers:
+        if end in text:
+            text = text.rsplit(end, 1)[1]
+        elif start in text:
+            raise SummaryUnavailable(CUT_OFF)
+    return text.strip()
 
 
 def transcript_lines(segments: list[Segment]) -> list[str]:
@@ -101,11 +157,15 @@ def chunk_lines(lines: list[str], max_chars: int = 0) -> list[str]:
     return chunks
 
 
-def build_messages(task: str, text: str, language: str, part: str = "") -> Messages:
-    """Chat messages for ``task`` ("notes", "summary" or "actions") in ``language``."""
+def build_messages(
+    task: str, text: str, language: str, part: str = "", room: bool = False
+) -> Messages:
+    """Chat messages for ``task`` ("notes", "summary" or "actions") in ``language``.
+    ``room``: a room session whose mic speakers are numbered, so no line is 'Me'."""
     lang = LANGUAGE_NAMES.get(language, f"the language with code '{language}'")
+    owner = "the owner is one of the numbered speakers in the room" if room else "'Me' is the owner"
     system = (
-        "You summarise meeting transcripts. Lines are 'Speaker: text'; 'Me' is the owner. "
+        f"You summarise meeting transcripts. Lines are 'Speaker: text'; {owner}. "
         f"Always answer in {lang}, even if parts of the input are in another language. "
         "Use only facts from the input; do not invent names, dates or tasks."
     )
@@ -130,7 +190,9 @@ def build_messages(task: str, text: str, language: str, part: str = "") -> Messa
     ]
 
 
-def _reduce(lines: list[str], generate: Generator, language: str, max_tokens: int) -> str:
+def _reduce(
+    lines: list[str], generate: Generator, language: str, max_tokens: int, room: bool = False
+) -> str:
     """Map step: replace the text by chunk notes until it fits in one chunk."""
     chunks = chunk_lines(lines)
     for _ in range(MAX_ROUNDS):
@@ -138,7 +200,7 @@ def _reduce(lines: list[str], generate: Generator, language: str, max_tokens: in
             break
         n = len(chunks)
         notes = [
-            generate(build_messages("notes", c, language, f"{i} of {n}"), max_tokens)
+            generate(build_messages("notes", c, language, f"{i} of {n}", room), max_tokens)
             for i, c in enumerate(chunks, 1)
         ]
         chunks = chunk_lines(notes)
@@ -159,15 +221,17 @@ def action_items(answer: str) -> list[str]:
 
 
 def summarize(
-    segments: list[Segment], generate: Generator, max_tokens: int = 400
+    segments: list[Segment], generate: Generator, max_tokens: int = 400, room: bool = False
 ) -> tuple[str, str, list[str]]:
-    """(language, summary, action items) of a transcript."""
+    """(language, summary, action items) of a transcript. ``room``: the session started as a
+    room session; if its mic speakers were numbered (no 'Me' line), the prompts say so."""
     language = main_language(segments)
-    text = _reduce(transcript_lines(segments), generate, language, max_tokens)
+    room = room and not any(s.speaker == "Me" for s in segments)
+    text = _reduce(transcript_lines(segments), generate, language, max_tokens, room)
     if not text:
         return language, "", []
-    summary = generate(build_messages("summary", text, language), max_tokens).strip()
-    items = action_items(generate(build_messages("actions", text, language), max_tokens))
+    summary = generate(build_messages("summary", text, language, room=room), max_tokens).strip()
+    items = action_items(generate(build_messages("actions", text, language, room=room), max_tokens))
     return language, summary, items
 
 
@@ -191,26 +255,61 @@ def format_summary(language: str, summary: str, items: list[str], model: str) ->
     return "\n".join(out) + "\n"
 
 
-def summarize_session(directory: Path, cfg: Config, generate: Generator | None = None) -> Path:
+def summarize_session(
+    directory: Path,
+    cfg: Config,
+    generate: Generator | None = None,
+    on_download: Callable[[str], None] | None = None,
+    before_call: Callable[[], None] | None = None,
+) -> Path:
     """Write ``summary.md`` for the final transcript in ``directory``; returns its path.
-    Raises SummaryUnavailable if no model can run (nothing is written then)."""
+    Raises SummaryUnavailable if no model can run (nothing is written then). Without
+    ``generate``, the routed model (summary_model) is loaded on first use and freed when done,
+    so only one summary model is ever in memory; ``on_download(model)`` runs before its
+    one-time download. A routed model that can't be downloaded or loaded falls back once to
+    ``summary.model``. ``before_call`` runs before each model call."""
     directory = Path(directory)
     data = json.loads((directory / JSON_NAME).read_text(encoding="utf-8"))
     segments = [Segment(**s) for s in data.get("segments", [])]
-    t0 = time.monotonic()
-    owned = None
-    if generate is None:  # the real model, freed again after this session
-        generate = owned = MlxGenerator(cfg.summary.model, cfg.transcription.allow_unpinned_models)
+    model = summary_model(cfg, segments)
     try:
-        language, summary, items = summarize(segments, generate, cfg.summary.max_tokens)
-    finally:
-        if owned is not None:
+        room = SessionInfo.load(directory).started_as_room
+    except Exception as e:  # noqa: BLE001 - only a hint for the prompt
+        log.debug("no session.json for the summary prompt (%s)", type(e).__name__)
+        room = False
+    t0 = time.monotonic()
+
+    def run(gen: Generator) -> tuple[str, str, list[str]]:
+        def call(messages: Messages, max_tokens: int) -> str:
+            if before_call is not None:
+                before_call()
+            return gen(messages, max_tokens)
+
+        return summarize(segments, call, cfg.summary.max_tokens, room)
+
+    def run_model(name: str) -> tuple[str, str, list[str]]:
+        notice = on_download
+        hook = None if notice is None else lambda: notice(name)
+        owned = MlxGenerator(name, cfg.transcription.allow_unpinned_models, hook)
+        try:  # the real model, freed again after this session
+            return run(owned)
+        finally:
             owned.close()
+
+    if generate is not None:
+        language, summary, items = run(generate)
+    else:
+        try:
+            language, summary, items = run_model(model)
+        except ModelUnavailable:
+            if model == cfg.summary.model:
+                raise
+            log.info("summary model %s unavailable; using %s", model, cfg.summary.model)
+            model = cfg.summary.model
+            language, summary, items = run_model(model)
     with contextlib.suppress(OSError):  # an old fingerprint must not sit next to a new summary
         (directory / SOURCE_NAME).unlink(missing_ok=True)
-    path = atomic_write(
-        directory / SUMMARY_NAME, format_summary(language, summary, items, cfg.summary.model)
-    )
+    path = atomic_write(directory / SUMMARY_NAME, format_summary(language, summary, items, model))
     with contextlib.suppress(OSError):  # no fingerprint: export falls back to the mtime rule
         atomic_write(directory / SOURCE_NAME, transcript_fingerprint(data.get("segments", [])))
     log.info(
@@ -287,11 +386,19 @@ class MlxGenerator:
             path = local_model_path(self.model_name, self.allow_unpinned, self.on_download)
         except Exception as e:  # noqa: BLE001 - offline, unpinned, broken cache
             log.info("summary model %s unavailable: %s", self.model_name, type(e).__name__)
-            raise SummaryUnavailable("the summary model is not on disk or can't be loaded") from e
+            raise ModelUnavailable("the summary model is not on disk or can't be loaded") from e
         from mlx_lm import load  # pyright: ignore[reportMissingImports]
 
-        with MLX_LOCK:
-            self._model, self._tokenizer = load(path)[:2]
+        try:
+            with MLX_LOCK:
+                self._model, self._tokenizer = load(path)[:2]
+        except Exception as e:  # noqa: BLE001 - e.g. a model type this mlx-lm doesn't know
+            log.info("summary model %s failed to load: %s", self.model_name, type(e).__name__)
+            raise ModelUnavailable("this mlx-lm can't load the summary model") from e
+        thinks = getattr(self._tokenizer, "has_thinking", None)  # see __call__
+        if thinks is None:
+            log.warning("this mlx-lm doesn't say whether %s is a thinking model", self.model_name)
+        log.debug("summary model %s thinks: %s", self.model_name, thinks)
 
     def __call__(self, messages: Messages, max_tokens: int) -> str:
         if self._model is None:
@@ -305,25 +412,39 @@ class MlxGenerator:
 
         model: Any = self._model
         tokenizer: Any = self._tokenizer
-        prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
-        steps = stream_generate(
-            model,
-            tokenizer,
-            prompt,
-            max_tokens=max_tokens,
-            prefill_step_size=PREFILL_STEP,
-            logits_processors=make_logits_processors(repetition_penalty=1.1),
-        )
-        out = []
-        while True:
-            with MLX_LOCK:  # the prefill, then one token at a time
-                step = next(steps, None)
-            if step is None:
-                return "".join(out).strip()
-            out.append(step.text)
+
+        def generate(think: bool | None, budget: int) -> str:
+            kw = {} if think is None else {"enable_thinking": think}
+            prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, **kw)
+            steps = stream_generate(
+                model,
+                tokenizer,
+                prompt,
+                max_tokens=budget,
+                prefill_step_size=PREFILL_STEP,
+                logits_processors=make_logits_processors(repetition_penalty=1.1),
+            )
+            out = []
+            while True:
+                with MLX_LOCK:  # the prefill, then one token at a time
+                    step = next(steps, None)
+                if step is None:
+                    return "".join(out)
+                out.append(step.text)
+
+        # A thinking model (mlx-lm's TokenizerWrapper.has_thinking, e.g. Qwen3.5) answers with
+        # thinking off: mlx-lm would turn it on by default. Missing or non-bool has_thinking =
+        # not a thinking model (load() warns when missing): the template's defaults, so the
+        # default Qwen2.5's prompt is unchanged. Thought markers are stripped either way.
+        thinking = getattr(tokenizer, "has_thinking", False) is True
+        markers = THOUGHT_MARKERS
+        start, end = getattr(tokenizer, "think_start", None), getattr(tokenizer, "think_end", None)
+        if thinking and isinstance(start, str) and isinstance(end, str):
+            markers = (*markers, (start, end))
+        return strip_thinking(generate(False if thinking else None, max_tokens), markers)
 
     def close(self) -> None:
-        """Free the model, so its ~2 GB don't stay resident between sessions."""
+        """Free the model, so its 1-3 GB don't stay resident between sessions."""
         if self._model is None:
             return
         self._model = self._tokenizer = None
@@ -382,24 +503,13 @@ class SummaryQueue:
             time.sleep(self.poll_s)
 
     def _job(self, directory: Path) -> None:
-        owned = None
-        gen = self.generate
-        if gen is None:
-            gen = owned = MlxGenerator(
-                self.cfg.summary.model,
-                self.cfg.transcription.allow_unpinned_models,
-                on_download=lambda: self.notify("Summary model", DOWNLOAD_NOTICE),
-            )
-
-        def gated(messages: Messages, max_tokens: int) -> str:
-            self._wait_idle()  # a recording started: pause between model calls
-            return gen(messages, max_tokens)
-
-        try:
-            summarize_session(directory, self.cfg, gated)
-        finally:
-            if owned is not None:
-                owned.close()
+        summarize_session(  # reads cfg now: a config reload may have changed the model
+            directory,
+            self.cfg,
+            self.generate,
+            on_download=lambda model: self.notify("Summary model", download_notice(model)),
+            before_call=self._wait_idle,  # a recording started: pause between model calls
+        )
 
     def _loop(self) -> None:
         while True:
