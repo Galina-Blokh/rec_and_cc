@@ -27,9 +27,10 @@ acceptance criteria.
       segmentation and adaptive speaker counting for large meetings; live speaker labels.
 - [ ] **Semantic search at scale**: every query loads all vectors (about 150 MB at 100k
       segments); use a memory-mapped or cached vector matrix for large archives.
-- [ ] **Room listening** ([#2](https://github.com/Galina-Blokh/rec_and_cc/issues/2)): auto-record conversations near the laptop, also with
+- [x] **Room listening** ([#2](https://github.com/Galina-Blokh/rec_and_cc/issues/2)): auto-record conversations near the laptop, also with
       the screen locked: always-on mic VAD, pre-roll buffer, mic-track diarization; opt-in
-      (the orange mic indicator stays on).
+      (the orange mic indicator stays on). Shipped in #64 (opt-in, off by default); locked-screen
+      behaviour, idle CPU and battery still to verify on hardware.
 - [ ] **Architecture review** ([#3](https://github.com/Galina-Blokh/rec_and_cc/issues/3)): languages and packaging: self-contained,
       Developer-ID-signed app now; benchmark whisper.cpp / WhisperKit vs MLX; possible Rust +
       Tauri or native-UI rewrite. Review and staged plan: [ADR 0011](adr/0011-stack-and-packaging-after-v0-1.md)

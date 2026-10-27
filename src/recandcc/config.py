@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import sys
 import tomllib
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
+from typing import Any
 
 import platformdirs
 import tomli_w
@@ -109,6 +112,14 @@ class DetectionConfig:
     # triggered the session (macOS; falls back to "all" for manual sessions, when the app has
     # no audio process yet, and on Windows).
     system_audio_scope: str = "all"
+    # Room listening (opt-in): while idle, keep the mic open and start a "room" session when
+    # people talk near the laptop: room_speech_s of speech within room_window_s.
+    room_listening: bool = False
+    room_speech_s: float = 6.0
+    room_window_s: float = 15.0
+    room_preroll_s: float = 15.0  # audio before the trigger kept at the session's start
+    room_stop_after_silence_s: float = 90.0  # no speech this long ends a room session
+    room_vad_threshold: float = 0.5  # Silero speech probability that counts as speech
     call_apps: list[str] = field(default_factory=lambda: list(DEFAULT_CALL_APPS))
     media_apps: list[str] = field(default_factory=lambda: list(DEFAULT_MEDIA_APPS))
     ignore_apps: list[str] = field(default_factory=lambda: list(DEFAULT_IGNORE_APPS))
@@ -144,6 +155,10 @@ class TranscriptionConfig:
     # speakers is picked automatically within [min_speakers, max_speakers]. 0 = no hint.
     min_speakers: int = 0
     max_speakers: int = 0
+    # Opt-in: find speaker changes without a pause and overlapped speech with a segmentation
+    # model (6 MB, downloaded once when on); off or without the model: fixed ~2 s windows.
+    # Off by default until it is measured on real meetings (#13). ADR 0014.
+    diarize_overlap: bool = False
     # Remember speakers' voices so that a speaker named once (`recandcc name-speaker`) is named
     # in later sessions. Off by default: voice profiles are biometric data. See voices.py.
     speaker_names: bool = False
@@ -261,13 +276,45 @@ def normalize_language_models(value) -> dict[str, str]:
     return out
 
 
-def save_languages(languages: list, path: Path = CONFIG_PATH) -> None:
-    """Write only `transcription.languages` into config.toml, leaving every other key as it is
-    on disk (it may have been edited by hand since the app loaded it). Raises
-    FileNotFoundError if there is no file yet, ValueError if it is not valid TOML."""
+def save_keys(path: Path, updates: dict[str, Any]) -> float:
+    """Write only the dotted keys in ``updates`` ("transcription.languages": [...]) into
+    config.toml, leaving every other key's value exactly as it is on disk (it may have been
+    edited by hand since the app loaded it). Like every save, it drops TOML comments and
+    rewrites the file in tomli_w's key order. Returns the new file's mtime. Raises
+    FileNotFoundError if there is no file yet, ValueError if it is not valid TOML or a key's
+    parent is not a table."""
+    path = path.resolve()  # a symlinked config.toml stays a symlink
     data = tomllib.loads(path.read_text(encoding="utf-8"))
-    data.setdefault("transcription", {})["languages"] = list(languages)
-    path.write_bytes(tomli_w.dumps(data).encode())
+    for dotted, value in updates.items():
+        *parents, leaf = dotted.split(".")
+        table = data
+        for name in parents:
+            table = table.setdefault(name, {})
+            if not isinstance(table, dict):
+                raise ValueError(f"{name} in {path} is not a table")
+        table[leaf] = value
+    return _write_atomic(path, tomli_w.dumps(data).encode())
+
+
+def _write_atomic(path: Path, payload: bytes) -> float:
+    """Replace ``path`` in one step, so a crash mid-write never leaves half a config. Returns
+    the new file's mtime."""
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
+        tmp.write_bytes(payload)
+        with contextlib.suppress(OSError):
+            os.chmod(tmp, path.stat().st_mode & 0o777)  # keep the user's file mode
+        mtime = tmp.stat().st_mtime  # os.replace keeps it
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return mtime
+
+
+def save_languages(languages: list, path: Path = CONFIG_PATH) -> None:
+    """Write only `transcription.languages` (see `save_keys`)."""
+    save_keys(path, {"transcription.languages": list(languages)})
 
 
 def load_config(path: Path = CONFIG_PATH) -> Config:
@@ -280,6 +327,14 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     det = _build(DetectionConfig, data.pop("detection", {}))
     det.mode = Mode(det.mode)
     det.app_modes = {k: Mode(v) for k, v in det.app_modes.items()}
+    if det.room_speech_s > det.room_window_s:  # could never trigger: say so, and clamp
+        log.warning(
+            "room_speech_s (%s) is longer than room_window_s (%s); using %s",
+            det.room_speech_s,
+            det.room_window_s,
+            det.room_window_s,
+        )
+        det.room_speech_s = det.room_window_s
     tr = _build(TranscriptionConfig, data.pop("transcription", {}))
     raw = tr.languages
     tr.languages = normalize_languages(raw)

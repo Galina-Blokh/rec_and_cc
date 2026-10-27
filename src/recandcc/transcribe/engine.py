@@ -27,7 +27,7 @@ import numpy as np
 
 from ..config import TranscriptionConfig
 from ..metrics import log_session_metrics, rounded
-from ..models import SAMPLE_RATE, Segment, SessionInfo, Track
+from ..models import SAMPLE_RATE, Segment, SessionInfo, Track, TriggerKind
 from . import voices
 from .chunking import Chunk, find_speech, load_track, merge_labelled, slice_chunk
 from .diarize import Diarizer, Turn, label_speakers
@@ -50,11 +50,28 @@ SPEAKERS = {Track.ME: ME, Track.OTHERS: OTHERS}
 # which is refused by config, is not retried).
 ROUTE_RETRY_S = 300.0
 LANGUAGE_NAMES = {"he": "Hebrew", "en": "English", "ru": "Russian"}  # for notices
+
+
+def diarized_track(session: SessionInfo) -> Track:
+    """The track whose speakers get numbered: "Others", except in a room session (also one
+    a call upgraded later), where everyone in the room is on the mic ("Me")."""
+    room = session.trigger_kind == TriggerKind.ROOM or session.started_as_room
+    return Track.ME if room else Track.OTHERS
+
+
 LANGUAGE_ID_MODEL = "base"  # small multilingual model used only for per-region language ID
 MIN_LANGUAGE_CONFIDENCE = 0.75  # below this a chunk's language is re-checked with the main model
 # How long writing the final transcript waits for speaker diarization. If it takes longer, the
 # transcript is written with "Others" right away and rewritten with speaker labels when ready.
 DIARIZE_WAIT_S = 5.0
+# A summary waiting this long for a diarization that never ends is dropped from memory; its
+# .summary-pending marker gets it summarised (with "Others") by the app's idle re-scan.
+LABEL_WAIT_MAX_S = 3600.0
+
+
+def _dir_key(directory) -> str:
+    """A session folder as a dict key, the same for every spelling (no disk access)."""
+    return os.path.normcase(os.path.abspath(directory))
 
 
 def auto_parallelism(workers: int = 0, cores: int | None = None) -> tuple[int, int]:
@@ -99,7 +116,9 @@ class Transcriber:
         self._routed: dict[str, Any] = {}
         self._route_retry: dict[str, float] = {}
         self._route_noticed: set[str] = set()
-        self._route_lock = threading.Lock()
+        self._route_lock = threading.Lock()  # held for a whole routed load (or download)
+        # Guards storing a routed model against close(), which never waits for _route_lock.
+        self._store_lock = threading.Lock()
         self.clock = time.monotonic
         # (title, message) toast from any thread, e.g. the controller's post_notice
         self.on_notice: Callable[[str, str], None] | None = None
@@ -107,6 +126,9 @@ class Transcriber:
         # model -> load seconds, not yet reported in a session's metrics (the session that
         # waited for the load gets them)
         self._load_times: dict[str, float] = {}
+        # session folder -> (since, callbacks waiting for a slow diarization's relabelled
+        # transcript), see after_labels; under _init_lock
+        self._label_waiters: dict[str, tuple[float, list[Callable[[], None]]]] = {}
 
     # -- models ------------------------------------------------------------------------------
 
@@ -227,7 +249,14 @@ class Transcriber:
             if name not in self._routed and self.clock() >= self._route_retry.get(name, 0.0):
                 model = self._load_routed(name, language, main)
                 if model is not None:
-                    self._routed[name] = model
+                    with self._store_lock:
+                        closed = self._model is not main
+                        if not closed:
+                            self._routed[name] = model
+                    if closed:  # close() ran during the load: drop the late result
+                        if isinstance(model, MlxWhisper):
+                            model.close()
+                        return None
             return self._routed.get(name)
 
     def start_prefetch(self) -> None:
@@ -242,6 +271,8 @@ class Transcriber:
                 self._routed_model(name, language, main, wait=False)
 
     def _load_routed(self, name: str, language: str, main):
+        if self._model is not main:  # closed meanwhile: don't start a download now
+            return None
         try:
             if isinstance(main, MlxWhisper):
                 t0 = time.monotonic()
@@ -251,6 +282,8 @@ class Transcriber:
                 return model
             return self._load(ct2_repo(name))
         except Exception as e:  # noqa: BLE001 - the main model still transcribes this language
+            if self._model is not main:  # closed meanwhile (e.g. its GPU thread shut down)
+                return None
             permanent = isinstance(e, UnpinnedModelError)
             self._route_retry[name] = float("inf") if permanent else self.clock() + ROUTE_RETRY_S
             log.warning(
@@ -282,16 +315,23 @@ class Transcriber:
     def close(self) -> None:
         """Release the models and pool. The Transcriber reloads lazily if used again."""
         with self._init_lock:
+            main = self._model
             if self._pool:
                 self._pool.shutdown(wait=True)
-            with self._route_lock:
+            # Not _route_lock: a routed load (or download) may hold it for minutes, and close()
+            # runs on the UI thread at Quit. A load that finishes later sees the transcriber
+            # closed and drops its result.
+            with self._store_lock:
                 routed, self._routed, self._route_retry = self._routed, {}, {}
+                self._model = None
             for model in routed.values():
                 if isinstance(model, MlxWhisper):
                     model.close()  # before the main model, whose GPU thread it shares
-            if isinstance(self._model, MlxWhisper):
-                self._model.close()
-            self._pool, self._model, self._lid_model = None, None, None
+            if isinstance(main, MlxWhisper):
+                # Waits only for GPU jobs already queued, e.g. a routed weight load (seconds);
+                # a routed download runs on its own thread (MlxWhisper.load) and never here.
+                main.close()
+            self._pool, self._lid_model = None, None
             diarizer, self._diarizer = self._diarizer, None
         if diarizer is not None:
             diarizer.close(wait=True)  # lets a pending transcript relabel finish (seconds)
@@ -528,18 +568,20 @@ class Transcriber:
     # -- final transcript + speaker diarization ----------------------------------------------
 
     def start_diarization(self, session: SessionInfo) -> Future | None:
-        """Start diarizing the session's "Others" track in the background (CPU threads).
-        None if disabled (cfg.diarize) or there is no others track on disk."""
+        """Start diarizing the session's ``diarized_track`` in the background (CPU threads).
+        None if disabled (cfg.diarize) or that track is not on disk."""
         if not self.cfg.diarize:
             return None
-        name = session.tracks.get(Track.OTHERS)
+        name = session.tracks.get(diarized_track(session))
         path = Path(session.directory) / name if name else None
         if path is None or not path.exists():
             return None
         with self._init_lock:
             if self._diarizer is None:
                 self._diarizer = Diarizer(
-                    min_speakers=self.cfg.min_speakers, max_speakers=self.cfg.max_speakers
+                    min_speakers=self.cfg.min_speakers,
+                    max_speakers=self.cfg.max_speakers,
+                    segmentation=self.cfg.diarize_overlap,
                 )
             diarizer = self._diarizer
         timing: dict = {}
@@ -576,6 +618,8 @@ class Transcriber:
             except TimeoutError:
                 log.info("session %s: speaker labels follow when diarization ends", session.id)
                 self._write(session, segments, duration)
+                with self._init_lock:  # before the callback, which may run right away
+                    self._label_waiters[_dir_key(session.directory)] = (self.clock(), [])
                 diarization.add_done_callback(
                     lambda f: self._relabel_later(session, segments, duration, f)
                 )
@@ -587,6 +631,36 @@ class Transcriber:
         self._write(session, segments, duration)
         self._drop_audio(session)
         return segments
+
+    def after_labels(self, directory: Path, fn: Callable[[], None]) -> None:
+        """Run ``fn`` once the session's transcript has its final speaker labels: now, or
+        (on the diarizer thread) after a slow diarization has rewritten it."""
+        with self._init_lock:
+            if self._waiting_for_labels(directory):
+                self._label_waiters[_dir_key(directory)][1].append(fn)
+                return
+        fn()
+
+    def labels_pending(self, directory: Path) -> bool:
+        """True while a slow diarization will still rewrite this session's transcript."""
+        with self._init_lock:
+            return self._waiting_for_labels(directory)
+
+    def _waiting_for_labels(self, directory: Path) -> bool:  # under _init_lock
+        now = self.clock()
+        for key, (since, _fns) in list(self._label_waiters.items()):
+            if now - since > LABEL_WAIT_MAX_S:  # never finished (hung): stop waiting
+                del self._label_waiters[key]
+        return _dir_key(directory) in self._label_waiters
+
+    def _labels_final(self, session: SessionInfo) -> None:
+        with self._init_lock:
+            waiters = self._label_waiters.pop(_dir_key(session.directory), (0.0, []))[1]
+        for fn in waiters:
+            try:
+                fn()
+            except Exception:  # noqa: BLE001 - runs on the diarizer thread
+                log.exception("session %s: a speaker-label callback failed", session.id)
 
     def _write(self, session: SessionInfo, segments: list[Segment], duration: float) -> None:
         write_outputs(session, segments, duration, self.cfg.model)
@@ -614,10 +688,14 @@ class Transcriber:
                 names = voices.match_profiles(centroids, voices.load_profiles())
             except Exception:  # noqa: BLE001 - names are optional; numbers still work
                 log.exception("session %s: could not match voice profiles", session.id)
-        out, labels = label_speakers(segments, turns or [], names=names)
+        speaker = SPEAKERS[diarized_track(session)]  # "Me" in a room session
+        out, labels = label_speakers(segments, turns or [], speaker, names=names)
         try:  # opt-in only, in the private voices folder: lets `name-speaker` name them later
-            if centroids and labels and Path(session.directory).exists():
-                speakers = {lbl: centroids[k] for k, lbl in labels.items() if k in centroids}
+            # A lone speaker in a room session keeps "Me", which is never renamed: no voice.
+            speakers = {
+                lbl: centroids[k] for k, lbl in labels.items() if k in centroids and lbl != ME
+            }
+            if speakers and Path(session.directory).exists():
                 voices.write_session_voices(session, speakers)
             else:  # never leave voices of an older transcript of this session behind
                 voices.delete_session_voices(session.id)
@@ -653,6 +731,7 @@ class Transcriber:
         finally:
             if Path(session.directory).exists():
                 self._drop_audio(session)
+            self._labels_final(session)
 
 
 def transcribe_directory(path: Path, cfg: TranscriptionConfig) -> list[Segment]:

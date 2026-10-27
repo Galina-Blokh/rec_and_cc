@@ -50,6 +50,7 @@ class TriggerKind(StrEnum):
     CALL = "call"
     MEDIA = "media"
     MANUAL = "manual"
+    ROOM = "room"  # people talking near the laptop, no app involved (room listening)
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,7 @@ class Segment:
     text: str
     speaker: str  # "Me", "Others" (later: "Speaker 1", ...)
     language: str  # ISO 639-1 code, e.g. "en", "ru", "he"
+    overlap: bool = False  # diarization: two other speakers at once (json only, when True)
 
 
 def is_rtl(language: str, text: str = "") -> bool:
@@ -112,6 +114,9 @@ class SessionInfo:
     # Pipeline measurements, by stage ("recording", "live", "transcription", ...): plain
     # JSON values. Absent in session.json files written before it existed.
     metrics: dict[str, dict] = field(default_factory=dict)
+    # Started by room listening, even if a call upgraded it later: everyone in the room is on
+    # the mic track. Absent (False) in older session.json files.
+    started_as_room: bool = False
     # Display title the user gave it in Meeting notes (None: never renamed, "": reset).
     # Changed only by set_title; save() keeps whatever title the file already has.
     title: str | None = None
@@ -173,6 +178,7 @@ class SessionInfo:
             tracks={Track(k): v for k, v in data.get("tracks", {}).items()},
             transcribed=data.get("transcribed", False),
             metrics=data.get("metrics") or {},
+            started_as_room=data.get("started_as_room", False),
             title=t if isinstance(t := data.get("title"), str) else None,
         )
 

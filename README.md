@@ -117,6 +117,14 @@ Menu items:
   manual recording, and a small toast confirms it. Change or disable it with `hotkey` in the
   settings.
 - **Show live captions**: on/off switch for the floating captions window (saved to settings).
+- **Listen for conversations in the room** (off by default): while nothing records, the mic
+  stays on (macOS shows the orange dot the whole time; it costs some battery, and Bluetooth
+  headsets switch to their call profile) and about 6 s of speech within 15 s near the laptop
+  starts a recording, as in Auto/Ask mode, including the 15 s before it (system audio is
+  recorded too, as for calls). It stops after 90 s without speech. Apps take precedence:
+  nothing starts while another app plays or uses the mic (music too), and a room recording
+  stops if an app you switched off, stopped or ignore starts. Tell the people in the room: recording them may need
+  their consent.
 - **Open live transcript**: opens the current (or last) live session's `transcript.md`.
 - **Recent transcripts**: the last 10, click to open.
 - **Search transcripts…**: full-text search across all your transcripts (English, Russian,
@@ -166,7 +174,7 @@ shows captions only once the model has loaded (a few seconds).
 ### In-person meetings: press ⌃⌥R
 
 A meeting in a room doesn't make any app play or capture audio, so nothing triggers a
-recording. Press **⌃⌥R** (Control+Option+R) when it starts and again when it ends. It works in every app, needs
+recording unless **Listen for conversations in the room** is on. Otherwise press **⌃⌥R** (Control+Option+R) when it starts and again when it ends. It works in every app, needs
 no extra permission (no Accessibility / Input Monitoring), and uses the physical R key, so it
 works with a Russian keyboard layout too. While RecAndCC runs, the shortcut belongs to it, so
 the default avoids ⌘⇧R (hard reload in Chrome, Reader in Safari). If another app already
@@ -242,7 +250,10 @@ With `[summary] enabled = true` (Apple silicon), each finished transcript also g
 Hebrew). A small local model (Qwen2.5 3B, 4-bit, ~1.7 GB) does it in the background after
 the transcript is final, and waits while you are recording, so captions are never slowed; it is downloaded once, pinned to an exact version, and nothing is
 sent anywhere. It is a draft: check names and dates against the transcript. On Windows, or
-offline before the model is downloaded, the summary is skipped with a notice.
+offline before the model is downloaded, the summary is skipped with a notice. It waits for
+the speaker labels (a slow diarization delays it), a summary cut short by quitting is redone
+at the next start (a `.summary-pending` marker in the session folder), and after
+`recandcc name-speaker` the app redoes an existing `summary.md` with the new name once idle.
 
 ## Command line
 
