@@ -38,6 +38,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-28 | Browse past meetings | 🟡 Windows window untested on Windows hardware (none available) |
 | US-29 | Right-to-left text readable in the Windows captions | 🟡 unit-tested, no hardware check (#6) |
 | US-30 | Change common settings in a window | 🟡 claimed (#3): macOS spike, not on Windows |
+| US-34 | Warn when recordings go to a network volume | 🟡 claimed (#3): detection is fake-tested, no real share or Windows drive checked |
 
 ---
 
@@ -472,3 +473,17 @@ to edit `config.toml` by hand.*
 - **Then** the window shows no transcript or audio content, uses no network and asks for no
   new permission.
 - **Not yet:** Windows, the other keys (detection tuning, hotkey editing), a two-way protocol.
+
+### US-34 Warn when recordings go to a network volume
+*As the owner, I want a warning when my transcripts folder is on a network share, so that I
+know recordings and transcripts leave this computer.*
+
+- **Given** `output_dir` is on an SMB, AFP, NFS or WebDAV mount (macOS), a UNC path or a
+  mapped network drive (Windows), or an NFS/CIFS/SSHFS mount (Linux), **when** the app starts,
+  `output_dir` changes (also from Settings) or the menu refreshes, **then** a notification
+  says so and suggests a local folder; it is shown once per folder, and `recandcc config`
+  prints the same warning.
+- **Then** recording is never blocked, the check asks the OS about the volume (no subprocess, no traffic of its own; a dead mount
+  is probed on a side thread with a short wait, so the menu never hangs) and
+  logs contain the kind of share but never the path.
+- **Not yet:** shares that a sync or FUSE tool presents as a local disk are not detected.
