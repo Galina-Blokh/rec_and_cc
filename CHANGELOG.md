@@ -9,6 +9,7 @@ All notable changes to RecAndCC are documented here. The format is based on
 ### Added
 - Opt-in semantic transcript search (`[search] semantic = true`): a pinned, checksum-verified
   multilingual sentence model, downloaded once, merged with full-text results (#4).
+- RecAndCC is licensed under the Apache License 2.0 (`LICENSE`, `NOTICE`); completes #17.
 
 ### Security
 - CI installs exactly what `uv.lock` pins (`uv sync --locked` / `uv run --locked`), and its

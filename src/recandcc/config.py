@@ -339,24 +339,40 @@ def save_keys(path: Path | None, updates: dict[str, Any]) -> float:
         return _write_atomic(path, tomli_w.dumps(data).encode())
 
 
+LOCK_TIMEOUT = 10.0  # seconds a writer waits for the config lock before giving up
+_LOCK_POLL = 0.05
+
+
+class ConfigLockTimeout(OSError):
+    """The config lock stayed held (a hung ``recandcc`` process?) past ``LOCK_TIMEOUT``.
+    An OSError, so callers' "could not be written" handlers cover it."""
+
+
 @contextlib.contextmanager
 def _file_lock(lock_path: Path) -> Iterator[None]:
     """Hold an exclusive advisory lock on ``lock_path`` (a sidecar file that is never
-    replaced), so read-modify-writes from the app and the CLI don't lose each other's keys."""
+    replaced), so read-modify-writes from the app and the CLI don't lose each other's keys.
+    Waits at most ``LOCK_TIMEOUT``, then raises ConfigLockTimeout: a hung holder must not
+    freeze the UI's settings saves forever."""
     with open(lock_path, "a+b") as f:
+        deadline = time.monotonic() + LOCK_TIMEOUT
         if sys.platform == "win32":
             import msvcrt
 
-            while True:  # LK_LOCK gives up after ~10 s; keep waiting like flock does
+            while True:
                 try:
                     f.seek(0)
-                    msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
                     break
                 except OSError as e:
-                    # LK_LOCK reports "still held after ~10 s" as EDEADLOCK; anything else
-                    # (a real permission error) would otherwise retry forever.
-                    if e.errno != errno.EDEADLK:
+                    # A held lock is EACCES (or EDEADLK); anything else is a real error.
+                    if e.errno not in (errno.EACCES, errno.EDEADLK):
                         raise
+                    if time.monotonic() >= deadline:
+                        raise ConfigLockTimeout(
+                            f"{lock_path.name} is held by another process"
+                        ) from e
+                    time.sleep(_LOCK_POLL)
             try:
                 yield
             finally:
@@ -365,7 +381,16 @@ def _file_lock(lock_path: Path) -> Iterator[None]:
         else:
             import fcntl
 
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            while True:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as e:
+                    if time.monotonic() >= deadline:
+                        raise ConfigLockTimeout(
+                            f"{lock_path.name} is held by another process"
+                        ) from e
+                    time.sleep(_LOCK_POLL)
             try:
                 yield
             finally:
@@ -402,8 +427,10 @@ def _write_atomic(path: Path, payload: bytes) -> float:
             f.write(payload)
             f.flush()
             os.fsync(f.fileno())
-        with contextlib.suppress(OSError):
+        try:
             os.chmod(tmp, path.stat().st_mode & 0o777)  # keep the user's file mode
+        except OSError as e:
+            log.debug("could not keep the file mode of %s (errno %s)", path.name, e.errno)
         mtime = tmp.stat().st_mtime  # os.replace keeps it
         _replace(tmp, path)
     except BaseException:
