@@ -15,11 +15,13 @@ from recandcc.ui.captions import (
     CaptionBuffer,
     CaptionLine,
     clean_text,
+    default_frame,
     fmt_mmss,
     format_line,
     header_text,
     is_at_bottom,
     should_auto_hide,
+    speaker_rgb,
 )
 
 
@@ -93,6 +95,24 @@ def test_should_auto_hide():
     assert not should_auto_hide(None, 100.0)
     assert not should_auto_hide(95.0, 100.0)
     assert should_auto_hide(90.0, 100.0)
+
+
+def test_default_frame_is_bottom_center_and_fits_the_screen():
+    assert default_frame(None) == (200.0, 120.0, 760.0, 190.0)
+    x, y, w, h = default_frame((0.0, 25.0, 1440.0, 875.0))
+    assert (w, h) == (760.0, 190.0)
+    assert x == (1440.0 - 760.0) / 2
+    assert y == 25.0 + 90.0
+    x, _, w, _ = default_frame((100.0, 0.0, 800.0, 600.0))  # narrow screen: 80% of width
+    assert w == 640.0
+    assert x == 100.0 + 80.0
+
+
+def test_speaker_colors():
+    assert speaker_rgb("Me") == (0.55, 0.86, 0.62)
+    assert speaker_rgb("Others") == (0.52, 0.74, 1.0)
+    assert speaker_rgb("Speaker 2") == (0.85, 0.75, 0.5)
+    assert speaker_rgb("?") == (0.85, 0.75, 0.5)
 
 
 def test_hebrew_lines_are_right_to_left():

@@ -23,11 +23,12 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-12 | Speaker labels for the other side | ✅ |
 | US-13 | Readable transcripts in private folders | ✅ |
 | US-14 | Works offline, nothing leaves the device | 🟡 no warning for synced folders yet (#41) |
-| US-15 | Delete old audio automatically | 🟡 `keep_audio = false` can miss a crash (#38) |
+| US-15 | Delete old audio automatically | ✅ |
 | US-16 | Permissions set up from the app | ✅ |
 | US-17 | Always on, visible state | ✅ |
 | US-18 | Runs on Windows | 🟡 untested on hardware (#5) |
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 stock model, no Hebrew test set (#6) |
+| US-20 | Search my transcripts | 🟡 search only; summaries, export planned (#4) |
 
 ---
 
@@ -150,9 +151,9 @@ while I decide.*
 ### US-15 Delete old audio automatically
 - **Given** `audio_retention_days = N` (menu: Never / 1 / 7 / 30 / 90), **then** WAVs of
   transcribed sessions older than N days are deleted; transcripts are always kept.
-- **Given** `keep_audio = false`, **then** WAVs are deleted right after transcription.
-- **Not yet:** when diarization is slow, deletion waits for it in memory; if the app quits
-  or crashes first, the WAVs stay (until `audio_retention_days` removes them, if set) (#38).
+- **Given** `keep_audio = false`, **then** WAVs are deleted right after transcription. WAVs
+  left behind (the app quit before a slow diarization finished, or a delete failed) are
+  deleted at the next startup; audio of sessions not yet transcribed is never deleted.
 
 ### US-16 Permissions set up from the app
 - **Given** first run on macOS, **then** a setup dialog requests Microphone and System audio.
@@ -189,3 +190,21 @@ while I decide.*
 - **Not yet:** the Windows (Tk) captions only right-justify Hebrew lines; Tk does no bidi
   reordering, so the label stays left of the Hebrew text and the glyph order is unverified
   on real hardware (#6).
+
+### US-20 Search my transcripts
+*As the owner, I want to find what was said in any past meeting, so that I don't have to
+open transcripts one by one.*
+
+- **Given** transcripts in `output_dir`, **when** I search for words (menu **Search
+  transcripts…** on macOS, or `recandcc search "<words>"`), **then** I get the segments that
+  contain all of them, best match first, each with its session, time in the recording,
+  speaker and a snippet; choosing one opens its transcript.
+- **Given** English or Russian text, **then** matching ignores case and diacritics and
+  matches word prefixes (`бюдж` finds `бюджет`).
+- **Given** 100+ sessions, **then** a search returns in < 200 ms.
+- **When** a transcript is final, **then** it is indexed in the background; a changed
+  transcript is re-indexed and a deleted or discarded session leaves the index.
+- **Then** the index is local and owner-only, outside `output_dir` (never synced), and logs
+  never contain the searched or found text.
+- **Not yet:** summaries and action items with a local LLM, DOCX/PDF export, a notes window,
+  a search window on Windows (#4).
