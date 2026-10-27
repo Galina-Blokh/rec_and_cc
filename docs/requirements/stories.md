@@ -32,6 +32,8 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
 | US-26 | Name speakers and forget voices from the menu | 🟡 macOS menu, first lines instead of an audio sample; Windows tray not yet (#1) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
+| US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
+| US-28 | Browse past meetings | 🟡 Windows window untested on hardware (#5) |
 | US-29 | Right-to-left text readable in the Windows captions | 🟡 unit-tested, no hardware check (#6) |
 
 ---
@@ -228,7 +230,7 @@ open transcripts one by one.*
   transcript is re-indexed and a deleted or discarded session leaves the index.
 - **Then** the index is local and owner-only, outside `output_dir` (never synced), and logs
   never contain the searched or found text.
-- **Not yet:** summaries and action items with a local LLM, DOCX/PDF export, a notes window
+- **Not yet:** summaries and action items with a local LLM, DOCX/PDF export
   (#4).
 
 ### US-21 Speaker names remembered across sessions
@@ -299,8 +301,65 @@ its transcript, so that I know what was decided and who does what without reread
 - **Then** logs never contain transcript or summary text.
 - **Given** a 1-hour en/ru meeting on an M-series Mac, **then** the summary is ready within
   ~1–2 min, offline.
-- **Not yet:** Windows/CPU backend (llama.cpp), a quality evaluation on real meetings,
-  summaries in the meeting-notes window (#4).
+- **Not yet:** Windows/CPU backend (llama.cpp), a quality evaluation on real meetings (#4).
+
+### US-22 Room listening (opt-in)
+*As the owner, I want a conversation next to the laptop (an in-person meeting) recorded
+without pressing anything, like a call, and only when I have turned that on.* (#2, with #58)
+
+- **Given** a fresh install (`room_listening = false`), **then** the microphone is never
+  opened while nothing records.
+- **Given** room listening is on and nothing records, **when** nobody speaks or I make a
+  short remark (less than `room_speech_s` of speech within `room_window_s`), **then**
+  nothing is recorded; **when** people talk for `room_speech_s` (6 s) within
+  `room_window_s` (15 s), **then** a `room` session starts (Auto), or starts and asks whether
+  to keep it (Ask).
+- **Then** the session's audio begins up to `room_preroll_s` (15 s) before the trigger, so
+  the first sentence is kept, with no gap or overlap, and the other track stays aligned.
+- **Then** the mic is never opened twice: a room session records the monitor's own stream,
+  and the monitor's mic is closed before any other session opens one.
+- **Given** an app is doing audio or another app uses the mic (even one I switched off,
+  stopped or that is ignored), **then** room speech starts nothing, the room mic is closed
+  while the other app uses it, and nothing it heard reaches a later room session; a call
+  that starts during a room session turns it into that call's session, without a second
+  session, and an excluded app starting during a room session (or turning room listening
+  off) stops it.
+- **Given** a room session, **then** it stops after `room_stop_after_silence_s` (90 s)
+  without speech; after a manual stop or a discard it doesn't restart until the room was
+  quiet for `stop_after_inactive_s`.
+- **Given** a room session, **then** the final transcript numbers the speakers on the mic
+  track (`Speaker 1`, `Speaker 2`, …).
+- **Given** the menu item "Listen for conversations in the room", **then** it switches the
+  setting (saved) and closes or reopens the mic; turning it on explains the always-on mic
+  indicator, the battery cost and consent, and warns if mic access is denied.
+- **Then** speech detection runs on its own thread (the audio thread only copies frames);
+  nothing about the room audio is logged beyond on/off states, and nothing leaves the device.
+- **Not yet:** verified with the screen locked; idle CPU and battery impact measured.
+
+### US-28 Browse past meetings
+*As the owner, I want to see my past meetings in one place and open, rename or delete them,
+so that I don't have to dig through dated folders.*
+
+- **When** I choose **Meeting notes…** (macOS menu or Windows tray), **then** I see the
+  sessions in `output_dir`, newest first, each with its title (the triggering app, "Manual
+  recording", or the title I gave it), date and time, duration, speakers, languages and
+  whether it is transcribed; discarded sessions are not listed. The folder is read off the
+  UI thread.
+- **Given** a session folder with a `summary.md`, **then** its first lines show as an
+  excerpt and I can open it; without one the listing works the same, minus that action.
+- **When** I pick a session, **then** I can open its transcript, reveal its folder, rename
+  it or delete it. A rename is stored as `title` in `session.json` (older files without it
+  still load) and an empty title goes back to the default.
+- **When** I delete a session and confirm, **then** its folder goes to the Trash / Recycle
+  Bin (permanently via `discard_session` where there is none), it leaves the search index,
+  the recent list and the stored speaker voices (those don't come back from the Trash).
+  If the Trash refuses it, nothing is deleted and I am told. If the Trash takes only part
+  of it, the rest is deleted for good (files in use: at the next start) and I am told. A
+  folder that is a link, or not inside `output_dir`, is never deleted.
+- **Given** a session from its start until its transcription is done, **then** rename and
+  delete are refused with a notice.
+- **Then** logs never contain titles, excerpts or transcript text.
+- **Not yet:** a native macOS window (it is a pair of dialogs) (#4).
 
 ### US-29 Right-to-left text readable in the Windows captions
 *As a Hebrew speaker on Windows, I want mixed Hebrew/English/number captions to read

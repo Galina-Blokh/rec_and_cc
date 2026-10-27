@@ -8,6 +8,7 @@ Record / Always / Ignore buttons (own Tk root on its own thread, auto-closes aft
 ``ask_timeout_s``), and the "Record now" menu item while a prompt is pending.
 Live captions: ``TkCaptions``, a topmost tkinter window on its own Tk thread, fed through a
 queue from the ``live_start`` / ``live`` / ``live_end`` events (UNTESTED as well).
+Meeting notes: ``TkNotes``, the same pattern (list, open/rename/delete via the Controller).
 Transcript search: ``TkSearch``, a small window on its own Tk thread (query entry, results
 list); the search runs on a Controller worker and its hits arrive as a ``search`` event,
 which the poll thread forwards to the window's queue (UNTESTED on Windows as well).
@@ -31,6 +32,7 @@ from .. import autostart
 from ..config import CONFIG_PATH
 from ..engine import PROMPTING, RECORDING
 from ..models import Mode, TriggerKind
+from . import notes as notes_ui
 from .captions import CaptionBuffer, header_text, should_auto_hide, tk_parts
 from .common import (
     ONBOARDING_TEXT,
@@ -38,6 +40,7 @@ from .common import (
     PERM_LABELS,
     PERM_TITLES,
     PROMPT_BUTTONS,
+    ROOM_ITEM,
     Controller,
     keep_prompt_text,
     open_output_folder,
@@ -311,6 +314,134 @@ class TkSearch:
         root.mainloop()
 
 
+class TkNotes:
+    """ "Meeting notes…" window. UNTESTED (written without access to Windows).
+
+    Like ``TkSearch``: one thread owns its own ``Tk`` root and all tkinter calls; others only
+    ``post()`` ``("notes", notes)`` (show the window with a fresh list). Scans, opening files,
+    rename and delete go to ``ctrl`` (worker threads), which posts the next list as an event.
+    """
+
+    POLL_MS = 150
+    COLUMNS = (  # id, heading, width; the order of notes.note_columns
+        ("title", "Title", 200),
+        ("when", "Date", 120),
+        ("dur", "Duration", 70),
+        ("who", "Speakers", 150),
+        ("lang", "Languages", 70),
+        ("status", "Status", 80),
+    )
+
+    def __init__(self, ctrl):
+        self.ctrl = ctrl
+        self._q: queue.Queue = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self.notes: list = []
+        self.failed = False
+
+    def post(self, *cmd) -> None:
+        if self.failed:
+            return
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._run, daemon=True, name="notes-tk")
+            self._thread.start()
+        self._q.put(cmd)
+
+    def act(self, index: int, action: str, ask=None) -> None:
+        """Run ``action`` (one of ``notes.ACTIONS``) on row ``index``; ``ask(kind, note)``
+        (Tk thread) returns the new title / True to delete, or None to cancel."""
+        if not 0 <= index < len(self.notes):
+            return
+        note = self.notes[index]
+        if action == "Rename…":
+            if (title := ask and ask("rename", note)) is not None:
+                self.ctrl.note_action_async(note.directory, "rename", title)
+        elif action == "Delete…":
+            if ask and ask("delete", note):
+                self.ctrl.note_action_async(note.directory, "delete")
+        elif action in notes_ui.note_actions(note):
+            target = notes_ui.action_target(note, action)
+            threading.Thread(target=open_path, args=(target,), daemon=True).start()
+
+    def _run(self) -> None:
+        try:
+            import tkinter as tk
+            from tkinter import messagebox, simpledialog, ttk
+
+            root = tk.Tk()
+            root.withdraw()
+            win = tk.Toplevel(root)
+            win.withdraw()
+            win.title("Meeting notes")
+            win.geometry("760x400")
+            win.protocol("WM_DELETE_WINDOW", win.withdraw)
+            tree = ttk.Treeview(win, columns=[c[0] for c in self.COLUMNS], show="headings")
+            tree.pack(fill="both", expand=True, padx=8, pady=8)
+            for col, head, width in self.COLUMNS:
+                tree.heading(col, text=head)
+                tree.column(col, width=width, stretch=col == "title")
+            excerpt = tk.Label(win, anchor="w", justify="left", padx=8, wraplength=740)
+            excerpt.pack(fill="x")
+            bar = tk.Frame(win, padx=8, pady=8)
+            bar.pack(fill="x")
+
+            def ask(kind, note):
+                if kind == "rename":
+                    return simpledialog.askstring(
+                        "Rename meeting", "New title (empty: the default):",
+                        initialvalue=note.title, parent=win,
+                    )  # fmt: skip
+                return messagebox.askyesno(
+                    "Delete meeting", notes_ui.delete_prompt(note), parent=win
+                )
+
+            def selected() -> int:
+                return tree.index(f) if (f := tree.focus()) else -1
+
+            for action in notes_ui.ACTIONS:
+                tk.Button(
+                    bar, text=action, command=lambda a=action: self.act(selected(), a, ask)
+                ).pack(side="left", padx=2)
+            tk.Button(bar, text="Refresh", command=self.ctrl.notes_async).pack(side="right")
+            tree.bind(  # the row under the pointer, not a stale focus (header, empty space)
+                "<Double-1>",
+                lambda e: (
+                    (row := tree.identify_row(e.y)) and self.act(tree.index(row), "Open transcript")
+                ),
+            )
+            tree.bind(
+                "<<TreeviewSelect>>",
+                lambda _e: excerpt.configure(
+                    text=self.notes[i].excerpt if 0 <= (i := selected()) < len(self.notes) else ""
+                ),
+            )
+        except Exception as e:
+            self.failed = True
+            log.warning("no meeting notes window (tkinter unavailable): %s", type(e).__name__)
+            return
+
+        def poll() -> None:
+            try:
+                while True:
+                    cmd = self._q.get_nowait()
+                    if cmd[0] == "notes":
+                        self.notes = list(cmd[1])
+                        tree.delete(*tree.get_children())
+                        for note in self.notes:
+                            tree.insert("", "end", values=notes_ui.note_columns(note))
+                        excerpt.configure(text="" if self.notes else "No meetings yet")
+                        win.deiconify()
+                        win.lift()
+            except queue.Empty:
+                pass
+            except Exception as e:  # titles and excerpts are meeting text: log the type only
+                log.error("meeting notes update failed: %s", type(e).__name__)
+            root.after(self.POLL_MS, poll)
+
+        root.after(self.POLL_MS, poll)
+        root.mainloop()
+
+
 class TrayApp:
     def __init__(self, ctrl: Controller):
         self.ctrl = ctrl
@@ -320,6 +451,7 @@ class TrayApp:
         self._prompt_windows: dict[int | None, object] = {}
         self.captions = TkCaptions()
         self.search = TkSearch(ctrl.search_async)
+        self.notes = TkNotes(ctrl)
         self._live_id: str | None = None
         self._live_dir: str | None = None
         self.icon = pystray.Icon(
@@ -402,6 +534,11 @@ class TrayApp:
                 checked=lambda _i: bool(self.cfg.live_captions),
             ),
             Item(
+                ROOM_ITEM,
+                lambda: self.ctrl.set_room_listening(not self.cfg.detection.room_listening),
+                checked=lambda _i: bool(self.cfg.detection.room_listening),
+            ),
+            Item(
                 "Open live transcript",
                 self._open_live,
                 enabled=lambda _i: bool(self._live_dir),
@@ -410,6 +547,7 @@ class TrayApp:
             Item("Open transcripts folder", self._open_folder),
             Item("Recent transcripts", pystray.Menu(recent)),
             Item("Search transcripts…", lambda: self.search.post("ask")),
+            Item("Meeting notes…", lambda: self.ctrl.notes_async()),
             Item("Permissions", pystray.Menu(perms)),
             Item("Languages", pystray.Menu(languages)),
             Item("Launch at login", self._toggle_login, checked=lambda _i: autostart.is_enabled()),
@@ -504,6 +642,8 @@ class TrayApp:
                     self.captions.post("end")
             elif ev[0] == "search":
                 self.search.post("results", ev[1], ev[2])  # failures and no matches too
+            elif ev[0] == "notes":
+                self.notes.post("notes", ev[1])
             elif ev[0] == "transcribed":
                 _, s, res = ev
                 self._notify(

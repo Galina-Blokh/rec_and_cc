@@ -117,6 +117,14 @@ Menu items:
   manual recording, and a small toast confirms it. Change or disable it with `hotkey` in the
   settings.
 - **Show live captions**: on/off switch for the floating captions window (saved to settings).
+- **Listen for conversations in the room** (off by default): while nothing records, the mic
+  stays on (macOS shows the orange dot the whole time; it costs some battery, and Bluetooth
+  headsets switch to their call profile) and about 6 s of speech within 15 s near the laptop
+  starts a recording, as in Auto/Ask mode, including the 15 s before it (system audio is
+  recorded too, as for calls). It stops after 90 s without speech. Apps take precedence:
+  nothing starts while another app plays or uses the mic (music too), and a room recording
+  stops if an app you switched off, stopped or ignore starts. Tell the people in the room: recording them may need
+  their consent.
 - **Open live transcript**: opens the current (or last) live session's `transcript.md`.
 - **Recent transcripts**: the last 10, click to open.
 - **Search transcripts…**: full-text search across all your transcripts (English, Russian,
@@ -128,6 +136,13 @@ Menu items:
   `recandcc name-speaker`.
 - **Forget all voices…**: after a confirmation, deletes every voice profile and all saved
   session voices (`recandcc voices delete --all`). macOS menu only for now.
+- **Meeting notes…**: your past sessions, newest first, with title (the app that triggered
+  it, or one you gave it), date and time, duration, speakers, languages and whether it is
+  transcribed. Pick one to open its transcript or `summary.md` (if there is one; its first
+  lines show as an excerpt), reveal its folder, rename it (the title is kept in
+  `session.json`) or delete it. Delete moves the folder to the Trash / Recycle Bin and drops
+  it from the search index; a session still recording or waiting to be transcribed can't be
+  changed. On macOS it is a pair of dialogs; on Windows a small window with buttons.
 - **Open transcripts folder**
 - **Permissions**: status and "Grant…" actions.
 - **Launch at login**: starts RecAndCC every time you log in. Turn it on once.
@@ -164,7 +179,7 @@ shows captions only once the model has loaded (a few seconds).
 ### In-person meetings: press ⌃⌥R
 
 A meeting in a room doesn't make any app play or capture audio, so nothing triggers a
-recording. Press **⌃⌥R** (Control+Option+R) when it starts and again when it ends. It works in every app, needs
+recording unless **Listen for conversations in the room** is on. Otherwise press **⌃⌥R** (Control+Option+R) when it starts and again when it ends. It works in every app, needs
 no extra permission (no Accessibility / Input Monitoring), and uses the physical R key, so it
 works with a Russian keyboard layout too. While RecAndCC runs, the shortcut belongs to it, so
 the default avoids ⌘⇧R (hard reload in Chrome, Reader in Safari). If another app already
@@ -330,13 +345,17 @@ local folder (for example `~/Transcribes`) if recordings must stay on this devic
   by a quit are deleted at the next startup).
 - `audio_retention_days = N` (menu → **Delete audio after**: Never / 1 / 7 / 30 / 90 days)
   deletes the audio N days after transcription; `0` keeps it forever.
-- Transcripts are never deleted automatically. Delete a session by deleting its folder.
-  Its text leaves the search index at the next search, the next app start, or the app's
-  hourly check, whichever comes first. Removed or replaced text is overwritten in
+- Transcripts are never deleted automatically. Delete a session from **Meeting notes…**
+  (it goes to the Trash, where audio and transcript stay recoverable until you empty it;
+  its stored speaker voices are deleted at once and don't come back with "Put Back"; in a
+  cloud-synced folder the provider's own recycle bin keeps a copy too; where Windows can't
+  recycle it, it asks before deleting for good) or by deleting its folder. Deleted from Meeting notes, its text leaves the search index at
+  once; deleted by hand, at the next search, the next app start, or the app's hourly check,
+  whichever comes first. Removed or replaced text is overwritten in
   `search.sqlite3`, so it can't be recovered from the file. To remove the whole index at
   once, delete `search.sqlite3`; it is rebuilt from the transcripts on the next search.
-  With `speaker_names` on, its stored speaker voices are deleted the next time a transcript
-  is written or a `recandcc voices` command runs.
+  With `speaker_names` on, its stored speaker voices are deleted at once (from Meeting
+  notes) or the next time a transcript is written or a `recandcc voices` command runs.
 - `recandcc voices delete <name>` deletes that profile and removes the named voice from every
   session's stored voices too; renaming a speaker (`Anna` → `Bob`) takes that session's voice
   out of Anna's profile.

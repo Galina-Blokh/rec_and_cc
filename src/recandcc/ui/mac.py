@@ -27,9 +27,11 @@ from ..config import CONFIG_PATH
 from ..engine import RECORDING
 from ..models import Mode, TriggerKind
 from ..retention import RETENTION_CHOICES
+from . import notes as notes_ui
 from .common import (
     PERM_KINDS,
     PERM_TITLES,
+    ROOM_ITEM,
     Controller,
     as_str,
     chooser_script,
@@ -83,6 +85,7 @@ class MacApp(rumps.App):
         self.cfg = ctrl.cfg
         self._dialog: tuple[int | None, subprocess.Popen] | None = None  # (prompt_id, osascript)
         self._dialog_lock = threading.Lock()
+        self._notes_lock = threading.Lock()  # held while the meeting notes dialogs are up
         self._onboarded = False
         self._delegate = None
         self._recent_sig: tuple = ()
@@ -132,6 +135,8 @@ class MacApp(rumps.App):
         self._render_languages()
         self.captions_item = rumps.MenuItem("Show live captions", callback=self._toggle_captions)
         self.captions_item.state = check(self.cfg.live_captions)
+        self.room_item = rumps.MenuItem(ROOM_ITEM, callback=self._toggle_room)
+        self.room_item.state = check(self.cfg.detection.room_listening)
         self.live_open_item = rumps.MenuItem("Open live transcript")
 
         self.menu = [
@@ -140,12 +145,14 @@ class MacApp(rumps.App):
             self.mode_menu,
             self.rec_item,
             self.captions_item,
+            self.room_item,
             self.live_open_item,
             None,
             rumps.MenuItem("Open transcripts folder", callback=self._open_folder),
             self.recent_menu,
             rumps.MenuItem("Search transcripts…", callback=self._search),
             rumps.MenuItem("Forget all voices…", callback=self._forget_voices),
+            rumps.MenuItem("Meeting notes…", callback=lambda _: ctrl.notes_async()),
             None,
             self.perm_menu,
             self.login_item,
@@ -219,6 +226,8 @@ class MacApp(rumps.App):
                 self._notify(*named_notice(ev[3]))
             elif kind == "forgot":
                 self._notify(*forgot_notice(ev[1]))
+            elif kind == "notes":
+                self._show_notes(ev[1])
             elif kind == "refreshed":
                 self._render_recent()
                 self._render_permissions()
@@ -236,6 +245,7 @@ class MacApp(rumps.App):
         if self.rec_item.title != rec_title:
             self.rec_item.title = rec_title
         self.login_item.state = check(autostart.is_enabled())
+        self.room_item.state = check(self.cfg.detection.room_listening)  # hand edits too
         self._render_languages()
         self._render_live(st)
         # close a stale prompt dialog (answered elsewhere, expired, mode changed, ...)
@@ -379,6 +389,10 @@ class MacApp(rumps.App):
                 self.captions.reveal()
         else:
             self.captions.hide()
+
+    def _toggle_room(self, sender) -> None:
+        self.ctrl.set_room_listening(not self.cfg.detection.room_listening)
+        sender.state = check(self.cfg.detection.room_listening)
 
     def _open_live(self, _sender) -> None:
         if not self._live_dir:
@@ -534,6 +548,24 @@ class MacApp(rumps.App):
                 self.ctrl.forget_voices_async()
 
         threading.Thread(target=run, daemon=True, name="forget-voices-dialog").start()
+
+    def _show_notes(self, notes: list) -> None:
+        """Meeting notes as AppleScript dialogs on a worker thread (pick a meeting, then an
+        action); rename and delete run on the Controller, whose fresh list reopens the
+        dialog. One dialog at a time: a list arriving while one is open is dropped."""
+        if not notes:
+            self._notify("Meeting notes", "No meetings yet")
+            return
+        if not self._notes_lock.acquire(blocking=False):
+            return
+
+        def run():
+            try:
+                notes_ui.run_dialogs(notes, osascript, self.ctrl.note_action_async, open_path)
+            finally:
+                self._notes_lock.release()
+
+        threading.Thread(target=run, daemon=True, name="notes-dialog").start()
 
     def _maybe_onboard(self) -> None:
         if self._onboarded:
