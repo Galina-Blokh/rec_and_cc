@@ -414,15 +414,22 @@ class Controller:
             after_labels(directory, lambda: self._summarize(directory))
 
     def _resubmit_summaries(self) -> None:
-        """summary.enabled: re-queue summaries cut short by quitting (or stale after a
-        speaker rename), after the transcripts are re-queued."""
+        """summary.enabled: queue summaries still owed (cut short by quitting, or stale after
+        `name-speaker`): at startup and on idle refreshes. Skips sessions still in flight or
+        waiting for speaker labels; SummaryQueue drops repeats of queued ones."""
         if not self.cfg.summary.enabled:
             return
         try:
             from ..transcribe.summary import pending_summaries
 
+            labels_pending = getattr(getattr(self, "transcriber", None), "labels_pending", None)
+            with self._lock:
+                busy = set(getattr(self, "_in_flight", ()))
+            in_flight = {d.resolve() for d in busy}  # resolve() may touch the disk
             for d in pending_summaries(self.cfg.output_dir):
-                log.info("re-queueing the summary of %s", d.name)
+                if d.resolve() in in_flight or (labels_pending and labels_pending(d)):
+                    continue
+                log.info("queueing the pending summary of %s", d.name)
                 self._summarize(d)
         except Exception:
             log.exception("scanning for pending summaries failed")
@@ -684,6 +691,8 @@ class Controller:
             recent = recent_transcripts(self.cfg.output_dir)
             with self._lock:
                 self._perm, self._recent = perm, recent
+            if self.engine.state.status == IDLE:  # e.g. marked stale by `name-speaker`
+                self._resubmit_summaries()
         finally:
             with self._lock:
                 self._refreshing = False

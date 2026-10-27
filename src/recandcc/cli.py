@@ -355,32 +355,15 @@ def cmd_name_speaker(args) -> int:
 
 
 def _refresh_summary(directory: Path, cfg) -> None:
-    """After a speaker rename: regenerate an existing summary.md (summary.enabled), else
-    mark it stale so the app redoes it at its next start."""
-    from .transcribe.summary import (
-        SUMMARY_NAME,
-        SummaryUnavailable,
-        clear_pending,
-        mark_pending,
-        summarize_session,
-    )
+    """After a speaker rename: mark an existing summary.md stale. The app redoes it while
+    idle (never here: that could run the model on the GPU during a recording)."""
+    from .transcribe.summary import SUMMARY_NAME, mark_pending
 
     if not (directory / SUMMARY_NAME).exists():
         return
     mark_pending(directory)
-    if not cfg.summary.enabled:
-        print(f"{SUMMARY_NAME} still uses the old name: run `recandcc summarize` to update it.")
-        return
-    print(f"Updating {SUMMARY_NAME}…")
-    try:
-        summarize_session(directory, cfg)
-    except SummaryUnavailable as e:
-        print(f"{SUMMARY_NAME} is stale ({e}); the app redoes it at its next start.")
-        return
-    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as e:
-        print(f"Can't update {SUMMARY_NAME}: {type(e).__name__}", file=sys.stderr)
-        return
-    clear_pending(directory)
+    by_app = "the summary is redone by the app (or run" if cfg.summary.enabled else "(run"
+    print(f"{SUMMARY_NAME} still uses the old name: {by_app} `recandcc summarize {directory}`).")
 
 
 def cmd_voices(args) -> int:

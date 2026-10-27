@@ -55,6 +55,14 @@ MIN_LANGUAGE_CONFIDENCE = 0.75  # below this a chunk's language is re-checked wi
 # How long writing the final transcript waits for speaker diarization. If it takes longer, the
 # transcript is written with "Others" right away and rewritten with speaker labels when ready.
 DIARIZE_WAIT_S = 5.0
+# A summary waiting this long for a diarization that never ends is dropped from memory; its
+# .summary-pending marker gets it summarised (with "Others") by the app's idle re-scan.
+LABEL_WAIT_MAX_S = 3600.0
+
+
+def _dir_key(directory) -> str:
+    """A session folder as a dict key, the same for every spelling (no disk access)."""
+    return os.path.normcase(os.path.abspath(directory))
 
 
 def auto_parallelism(workers: int = 0, cores: int | None = None) -> tuple[int, int]:
@@ -107,9 +115,9 @@ class Transcriber:
         # model -> load seconds, not yet reported in a session's metrics (the session that
         # waited for the load gets them)
         self._load_times: dict[str, float] = {}
-        # session folder -> callbacks waiting for a slow diarization's relabelled transcript
-        # (see after_labels); under _init_lock
-        self._label_waiters: dict[str, list[Callable[[], None]]] = {}
+        # session folder -> (since, callbacks waiting for a slow diarization's relabelled
+        # transcript), see after_labels; under _init_lock
+        self._label_waiters: dict[str, tuple[float, list[Callable[[], None]]]] = {}
 
     # -- models ------------------------------------------------------------------------------
 
@@ -580,7 +588,7 @@ class Transcriber:
                 log.info("session %s: speaker labels follow when diarization ends", session.id)
                 self._write(session, segments, duration)
                 with self._init_lock:  # before the callback, which may run right away
-                    self._label_waiters.setdefault(str(session.directory), [])
+                    self._label_waiters[_dir_key(session.directory)] = (self.clock(), [])
                 diarization.add_done_callback(
                     lambda f: self._relabel_later(session, segments, duration, f)
                 )
@@ -597,15 +605,26 @@ class Transcriber:
         """Run ``fn`` once the session's transcript has its final speaker labels: now, or
         (on the diarizer thread) after a slow diarization has rewritten it."""
         with self._init_lock:
-            waiters = self._label_waiters.get(str(directory))
-            if waiters is not None:
-                waiters.append(fn)
+            if self._waiting_for_labels(directory):
+                self._label_waiters[_dir_key(directory)][1].append(fn)
                 return
         fn()
 
+    def labels_pending(self, directory: Path) -> bool:
+        """True while a slow diarization will still rewrite this session's transcript."""
+        with self._init_lock:
+            return self._waiting_for_labels(directory)
+
+    def _waiting_for_labels(self, directory: Path) -> bool:  # under _init_lock
+        now = self.clock()
+        for key, (since, _fns) in list(self._label_waiters.items()):
+            if now - since > LABEL_WAIT_MAX_S:  # never finished (hung): stop waiting
+                del self._label_waiters[key]
+        return _dir_key(directory) in self._label_waiters
+
     def _labels_final(self, session: SessionInfo) -> None:
         with self._init_lock:
-            waiters = self._label_waiters.pop(str(session.directory), [])
+            waiters = self._label_waiters.pop(_dir_key(session.directory), (0.0, []))[1]
         for fn in waiters:
             try:
                 fn()

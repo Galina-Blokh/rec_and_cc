@@ -344,11 +344,19 @@ class SummaryQueue:
         self.poll_s = poll_s
         self._q: queue.Queue[Path] = queue.Queue()
         self._skipped: set[str] = set()
+        self._queued: set[Path] = set()  # queued or running (resolved): never twice at once
+        self._queued_lock = threading.Lock()
         threading.Thread(target=self._loop, name="summary", daemon=True).start()
 
     def submit(self, directory: Path) -> None:
+        directory = Path(directory)
         mark_pending(directory)  # removed when done; startup re-queues it if we quit first
-        self._q.put(Path(directory))
+        key = directory.resolve()
+        with self._queued_lock:
+            if key in self._queued:
+                return
+            self._queued.add(key)
+        self._q.put(directory)
 
     def join(self) -> None:
         self._q.join()
@@ -384,6 +392,9 @@ class SummaryQueue:
                 self._wait_idle()
                 if not directory.exists():
                     continue  # deleted meanwhile
+                if (directory / SessionInfo.DISCARD_MARKER).exists():
+                    clear_pending(directory)
+                    continue  # discarded: purge_discarded_sessions deletes it
                 self._job(directory)
                 clear_pending(directory)
             except SummaryUnavailable as e:
@@ -397,4 +408,6 @@ class SummaryQueue:
                 log.error("summary of %s failed: %s", directory.name, type(e).__name__)
                 clear_pending(directory)  # e.g. a broken transcript: don't retry every start
             finally:
+                with self._queued_lock:
+                    self._queued.discard(directory.resolve())
                 self._q.task_done()

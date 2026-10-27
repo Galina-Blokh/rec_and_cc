@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import queue
 import sys
+import threading
 import types
 from datetime import datetime
 from pathlib import Path
@@ -161,7 +162,7 @@ def _controller(cfg):
     from recandcc.ui.common import Controller
 
     ctrl = Controller.__new__(Controller)  # only the post-transcription wiring
-    ctrl.events, ctrl.cfg = queue.Queue(), cfg
+    ctrl.events, ctrl.cfg, ctrl._lock = queue.Queue(), cfg, threading.Lock()
     ctrl.refresh_async = lambda force=False: None
     ctrl._index_session = lambda directory: None
     ctrl.engine = types.SimpleNamespace(state=types.SimpleNamespace(status="idle"))
@@ -238,22 +239,70 @@ def test_startup_requeues_pending_summaries(tmp_path, monkeypatch):
     assert (d / "summary.md").exists() and not (d / summary.PENDING_MARKER).exists()
 
 
-def test_cli_name_speaker_regenerates_or_marks_the_summary_stale(tmp_path, monkeypatch, capsys):
+def test_cli_name_speaker_only_marks_the_summary_stale(tmp_path, monkeypatch, capsys):
+    def no_model(*a, **k):
+        raise AssertionError("the CLI must not run the model (the app may be recording)")
+
+    monkeypatch.setattr(summary, "summarize_session", no_model)
     d = make_session(tmp_path, [seg("hello")])
     cfg = Config()
     cli._refresh_summary(d, cfg)  # no summary.md: nothing to do
     assert not (d / summary.PENDING_MARKER).exists()
     (d / "summary.md").write_text("old", encoding="utf-8")
-    cli._refresh_summary(d, cfg)  # summaries off: stale until `summarize`
-    assert (d / summary.PENDING_MARKER).exists() and "recandcc summarize" in capsys.readouterr().out
-    cfg.summary.enabled = True
-    monkeypatch.setattr(summary, "mlx_lm_available", lambda: False)
-    cli._refresh_summary(d, cfg)  # no model: the app redoes it at its next start
-    assert (d / summary.PENDING_MARKER).exists() and "stale" in capsys.readouterr().out
-    monkeypatch.setattr(summary, "MlxGenerator", lambda *a, **k: FakeGen())
     cli._refresh_summary(d, cfg)
-    assert (d / "summary.md").read_text(encoding="utf-8") != "old"
-    assert not (d / summary.PENDING_MARKER).exists()
+    assert (d / summary.PENDING_MARKER).exists()
+    assert f"recandcc summarize {d}" in capsys.readouterr().out
+    cfg.summary.enabled = True
+    cli._refresh_summary(d, cfg)
+    assert "redone by the app" in capsys.readouterr().out
+
+
+def test_idle_refresh_queues_pending_summaries_but_not_in_flight_ones(tmp_path, monkeypatch):
+    monkeypatch.setattr(summary, "MlxGenerator", lambda *a, **k: FakeGen())
+    d = _transcribed(make_session(tmp_path, [seg("hello")]))
+    summary.mark_pending(d)  # e.g. `name-speaker` marked it stale
+    ctrl = _controller(Config(output_dir=tmp_path))
+    ctrl.cfg.summary.enabled = True
+    ctrl._in_flight = set()
+    ctrl.transcriber = types.SimpleNamespace(labels_pending=lambda _d: True)
+    ctrl._resubmit_summaries()  # still waiting for its speaker labels: not yet
+    ctrl._in_flight = {d}
+    ctrl.transcriber = types.SimpleNamespace(labels_pending=lambda _d: False)
+    ctrl._resubmit_summaries()  # still being transcribed: not yet
+    assert getattr(ctrl, "_summaries", None) is None
+    ctrl._in_flight = set()
+    ctrl._resubmit_summaries()
+    ctrl._summaries.join()
+    assert (d / "summary.md").exists() and not (d / summary.PENDING_MARKER).exists()
+
+
+def test_a_queued_session_is_not_summarised_twice(tmp_path):
+    d = make_session(tmp_path, [seg("hello")])
+    gate, gen = threading.Event(), FakeGen()
+
+    class Slow(FakeGen):
+        def __call__(self, messages, max_tokens):
+            gate.wait(5)
+            return gen(messages, max_tokens)
+
+    q = summary.SummaryQueue(Config(), generate=Slow())
+    q.submit(d)
+    q.submit(Path(str(d) + "/."))  # e.g. startup's re-queue of the same session
+    gate.set()
+    q.join()
+    assert gen.calls == ["summary", "actions"]  # one summary
+    q.submit(d)  # done: a later stale marker runs again
+    q.join()
+    assert len(gen.calls) == 4
+
+
+def test_discarded_session_is_skipped_and_its_marker_cleared(tmp_path):
+    d = make_session(tmp_path, [seg("hello")])
+    (d / SessionInfo.DISCARD_MARKER).touch()
+    q = summary.SummaryQueue(Config(), generate=FakeGen())
+    q.submit(d)
+    q.join()
+    assert not (d / "summary.md").exists() and not (d / summary.PENDING_MARKER).exists()
 
 
 def test_missing_model_offline_is_skipped_with_one_notice(tmp_path, monkeypatch, caplog):

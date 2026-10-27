@@ -244,8 +244,8 @@ the transcript is final, and waits while you are recording, so captions are neve
 sent anywhere. It is a draft: check names and dates against the transcript. On Windows, or
 offline before the model is downloaded, the summary is skipped with a notice. It waits for
 the speaker labels (a slow diarization delays it), a summary cut short by quitting is redone
-at the next start (a `.summary-pending` marker in the session folder), and
-`recandcc name-speaker` regenerates an existing `summary.md` with the new name.
+at the next start (a `.summary-pending` marker in the session folder), and after
+`recandcc name-speaker` the app redoes an existing `summary.md` with the new name once idle.
 
 ## Command line
 

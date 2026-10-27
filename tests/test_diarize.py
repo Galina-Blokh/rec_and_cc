@@ -362,6 +362,21 @@ def test_after_labels_waits_for_a_slow_diarization(tmp_path):
     assert seen[1:] == ["now"]
 
 
+def test_a_diarization_that_never_ends_stops_holding_its_waiters(tmp_path):
+    from recandcc.transcribe import engine
+
+    s = _session_with_audio(tmp_path)
+    t = Transcriber(TranscriptionConfig(model="fake"))
+    t.diarize_wait_s, now = 0.01, [0.0]
+    t.clock = lambda: now[0]
+    t.write_final(s, SEGS, 15.0, Future())  # never completes
+    seen = []
+    t.after_labels(s.directory, lambda: seen.append(1))
+    assert t.labels_pending(s.directory) and seen == []
+    now[0] = engine.LABEL_WAIT_MAX_S + 1  # dropped: the summary marker re-queues it
+    assert not t.labels_pending(s.directory) and t._label_waiters == {}
+
+
 def test_after_labels_runs_now_without_a_pending_diarization(tmp_path, monkeypatch):
     s = _session_with_audio(tmp_path)
     t = Transcriber(TranscriptionConfig(model="fake"))
