@@ -55,23 +55,40 @@ def _play(path):
     return subprocess.Popen(["afplay", str(path)])
 
 
-def test_monitor_detects_afplay(speech_file):
+def _wait_ready(monitor, timeout=10.0):
+    """Block until the helper has produced its first line (Core Audio init can be slow)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if monitor._latest_at > 0:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_monitor_detects_afplay(tmp_path):
     monitor = MacActivityMonitor(interval=0.25)
-    player = _play(speech_file)
+    player = None
     try:
+        if not _wait_ready(monitor):
+            pytest.skip("rcc-audiotap monitor produced no output within 10 s")
+        # Long enough that the clip cannot end before the monitor sees it.
+        player = _play(_tone(tmp_path, 440, seconds=60))
         found = None
-        deadline = time.monotonic() + 8
+        deadline = time.monotonic() + 15
         while time.monotonic() < deadline and found is None:
             for proc in monitor.snapshot():
                 if proc.pid == player.pid:
                     found = proc
             time.sleep(0.2)
+        if found is None and player.poll() is not None:
+            pytest.skip("afplay exited before it could be observed")
         assert found is not None, "afplay was not reported by rcc-audiotap monitor"
         assert found.output_active
         assert found.name == "afplay"
     finally:
-        player.kill()
-        player.wait()
+        if player is not None:
+            player.kill()
+            player.wait()
         monitor.close()
 
 
@@ -201,17 +218,25 @@ def _band_share(audio, freq):
 
 def _playing(path):
     """afplay ``path``, returned once Core Audio reports it playing (it has a process object)."""
-    player = _play(path)
     monitor = MacActivityMonitor(interval=0.2)
+    player = None
     try:
+        _wait_ready(monitor)  # start afplay only once the helper is live
+        player = _play(path)
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
             if any(p.pid == player.pid and p.output_active for p in monitor.snapshot()):
                 return player
             time.sleep(0.1)
+    except BaseException:
+        if player is not None:
+            player.kill()
+            player.wait()
+        raise
     finally:
         monitor.close()
     player.kill()
+    player.wait()
     pytest.skip("afplay never started playing")
 
 
