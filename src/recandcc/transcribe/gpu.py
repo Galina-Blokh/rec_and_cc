@@ -17,6 +17,7 @@ import platform
 import sys
 import threading
 import time
+import types
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -106,6 +107,34 @@ def use_gpu(cfg: TranscriptionConfig) -> bool:
     return gpu_available()
 
 
+def _stub_word_timestamps(*_args: object, **_kwargs: object) -> None:
+    raise RuntimeError(
+        "word timestamps need numba and scipy, which RecAndCC does not install "
+        "(ADR 0011, follow-up 4)"
+    )
+
+
+def import_mlx_whisper() -> Any:
+    """Import mlx_whisper without numba and scipy, which pyproject.toml excludes.
+
+    ``mlx_whisper/transcribe.py`` imports ``timing.add_word_timestamps``, and ``timing.py``
+    imports numba and scipy, but only ``word_timestamps=True`` calls it. RecAndCC never asks
+    for word timestamps, so when numba or scipy is missing a stub ``mlx_whisper.timing`` is
+    registered first; it raises a clear error if word timestamps are ever requested. With
+    both installed the real module is used. Every mlx_whisper import in RecAndCC must go
+    through here first, since a direct one fails on the missing numba
+    (tests/test_mlx_imports.py enforces that, tests/test_no_torch.py checks that neither
+    library is imported).
+    """
+    if "mlx_whisper.timing" not in sys.modules and (
+        importlib.util.find_spec("numba") is None or importlib.util.find_spec("scipy") is None
+    ):
+        stub = types.ModuleType("mlx_whisper.timing")
+        stub.__dict__["add_word_timestamps"] = _stub_word_timestamps
+        sys.modules["mlx_whisper.timing"] = stub
+    return importlib.import_module("mlx_whisper")
+
+
 class MlxWhisper:
     """One MLX Whisper model, driven from a single dedicated thread."""
 
@@ -119,6 +148,7 @@ class MlxWhisper:
         # mlx / mlx_whisper are installed only on Apple Silicon (see pyproject.toml).
         import mlx.core as mx  # pyright: ignore[reportMissingImports]
 
+        import_mlx_whisper()
         holder = importlib.import_module("mlx_whisper.transcribe").ModelHolder
         # Same cache mlx_whisper.transcribe() uses, so the weights are loaded once.
         return holder.get_model(self.repo, mx.float16)
@@ -137,10 +167,8 @@ class MlxWhisper:
         """(start, end, text) per segment, relative to the start of ``audio``."""
 
         def run():
-            import mlx_whisper  # pyright: ignore[reportMissingImports]
-
             with MLX_LOCK:
-                result = mlx_whisper.transcribe(
+                result = import_mlx_whisper().transcribe(
                     np.ascontiguousarray(audio, dtype=np.float32),
                     path_or_hf_repo=self.repo,
                     language=language,
@@ -157,6 +185,8 @@ class MlxWhisper:
 
         def run():
             import mlx.core as mx  # pyright: ignore[reportMissingImports]
+
+            import_mlx_whisper()
             from mlx_whisper.audio import (  # pyright: ignore[reportMissingImports]
                 N_FRAMES,
                 N_SAMPLES,
