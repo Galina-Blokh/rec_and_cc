@@ -24,7 +24,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
-from ..config import Config
+from ..config import DEFAULT_SUMMARY_MODEL, QWEN_RESEARCH_SUMMARY_MODEL, Config
 from ..models import Segment, SessionInfo, is_rtl
 from .output import JSON_NAME, PDI, RLI, atomic_write, paragraphs
 
@@ -41,7 +41,8 @@ SOURCE_NAME = ".summary-source"
 # (which holds gpu.MLX_LOCK) stays within ~1-2 s.
 CHUNK_CHARS = 8_000
 PREFILL_STEP = 512  # prompt tokens per prefill step (lower peak memory than mlx-lm's 2048)
-DOWNLOAD_NOTICE = "Downloading the summary model (~1.7 GB, once)"
+# One-time download size of each pinned summary model, for the download notice.
+DOWNLOAD_SIZES = {DEFAULT_SUMMARY_MODEL: "~0.9 GB", QWEN_RESEARCH_SUMMARY_MODEL: "~1.7 GB"}
 MAX_ROUNDS = 3  # reduce rounds before the notes are cut to fit
 LANGUAGE_NAMES = {"en": "English", "ru": "Russian", "he": "Hebrew"}
 # (summary heading, action items heading, "none") per language; English otherwise.
@@ -57,6 +58,12 @@ Messages = list[dict[str, str]]
 
 class Generator(Protocol):
     def __call__(self, messages: Messages, max_tokens: int) -> str: ...
+
+
+def download_notice(model: str) -> str:
+    """The one-time download notice, with the size when ``model`` is a pinned one."""
+    size = DOWNLOAD_SIZES.get(model)
+    return f"Downloading the summary model ({size + ', ' if size else ''}once)"
 
 
 class SummaryUnavailable(RuntimeError):
@@ -101,11 +108,15 @@ def chunk_lines(lines: list[str], max_chars: int = 0) -> list[str]:
     return chunks
 
 
-def build_messages(task: str, text: str, language: str, part: str = "") -> Messages:
-    """Chat messages for ``task`` ("notes", "summary" or "actions") in ``language``."""
+def build_messages(
+    task: str, text: str, language: str, part: str = "", room: bool = False
+) -> Messages:
+    """Chat messages for ``task`` ("notes", "summary" or "actions") in ``language``.
+    ``room``: a room session whose mic speakers are numbered, so no line is 'Me'."""
     lang = LANGUAGE_NAMES.get(language, f"the language with code '{language}'")
+    owner = "the owner is one of the numbered speakers in the room" if room else "'Me' is the owner"
     system = (
-        "You summarise meeting transcripts. Lines are 'Speaker: text'; 'Me' is the owner. "
+        f"You summarise meeting transcripts. Lines are 'Speaker: text'; {owner}. "
         f"Always answer in {lang}, even if parts of the input are in another language. "
         "Use only facts from the input; do not invent names, dates or tasks."
     )
@@ -130,7 +141,9 @@ def build_messages(task: str, text: str, language: str, part: str = "") -> Messa
     ]
 
 
-def _reduce(lines: list[str], generate: Generator, language: str, max_tokens: int) -> str:
+def _reduce(
+    lines: list[str], generate: Generator, language: str, max_tokens: int, room: bool = False
+) -> str:
     """Map step: replace the text by chunk notes until it fits in one chunk."""
     chunks = chunk_lines(lines)
     for _ in range(MAX_ROUNDS):
@@ -138,7 +151,7 @@ def _reduce(lines: list[str], generate: Generator, language: str, max_tokens: in
             break
         n = len(chunks)
         notes = [
-            generate(build_messages("notes", c, language, f"{i} of {n}"), max_tokens)
+            generate(build_messages("notes", c, language, f"{i} of {n}", room), max_tokens)
             for i, c in enumerate(chunks, 1)
         ]
         chunks = chunk_lines(notes)
@@ -159,15 +172,17 @@ def action_items(answer: str) -> list[str]:
 
 
 def summarize(
-    segments: list[Segment], generate: Generator, max_tokens: int = 400
+    segments: list[Segment], generate: Generator, max_tokens: int = 400, room: bool = False
 ) -> tuple[str, str, list[str]]:
-    """(language, summary, action items) of a transcript."""
+    """(language, summary, action items) of a transcript. ``room``: the session started as a
+    room session; if its mic speakers were numbered (no 'Me' line), the prompts say so."""
     language = main_language(segments)
-    text = _reduce(transcript_lines(segments), generate, language, max_tokens)
+    room = room and not any(s.speaker == "Me" for s in segments)
+    text = _reduce(transcript_lines(segments), generate, language, max_tokens, room)
     if not text:
         return language, "", []
-    summary = generate(build_messages("summary", text, language), max_tokens).strip()
-    items = action_items(generate(build_messages("actions", text, language), max_tokens))
+    summary = generate(build_messages("summary", text, language, room=room), max_tokens).strip()
+    items = action_items(generate(build_messages("actions", text, language, room=room), max_tokens))
     return language, summary, items
 
 
@@ -197,12 +212,17 @@ def summarize_session(directory: Path, cfg: Config, generate: Generator | None =
     directory = Path(directory)
     data = json.loads((directory / JSON_NAME).read_text(encoding="utf-8"))
     segments = [Segment(**s) for s in data.get("segments", [])]
+    try:
+        room = SessionInfo.load(directory).started_as_room
+    except Exception as e:  # noqa: BLE001 - only a hint for the prompt
+        log.debug("no session.json for the summary prompt (%s)", type(e).__name__)
+        room = False
     t0 = time.monotonic()
     owned = None
     if generate is None:  # the real model, freed again after this session
         generate = owned = MlxGenerator(cfg.summary.model, cfg.transcription.allow_unpinned_models)
     try:
-        language, summary, items = summarize(segments, generate, cfg.summary.max_tokens)
+        language, summary, items = summarize(segments, generate, cfg.summary.max_tokens, room)
     finally:
         if owned is not None:
             owned.close()
@@ -323,7 +343,7 @@ class MlxGenerator:
             out.append(step.text)
 
     def close(self) -> None:
-        """Free the model, so its ~2 GB don't stay resident between sessions."""
+        """Free the model, so its 1-2 GB don't stay resident between sessions."""
         if self._model is None:
             return
         self._model = self._tokenizer = None
@@ -385,10 +405,11 @@ class SummaryQueue:
         owned = None
         gen = self.generate
         if gen is None:
+            model = self.cfg.summary.model  # a config reload may change it while we wait
             gen = owned = MlxGenerator(
-                self.cfg.summary.model,
+                model,
                 self.cfg.transcription.allow_unpinned_models,
-                on_download=lambda: self.notify("Summary model", DOWNLOAD_NOTICE),
+                on_download=lambda: self.notify("Summary model", download_notice(model)),
             )
 
         def gated(messages: Messages, max_tokens: int) -> str:

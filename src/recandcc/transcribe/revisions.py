@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import logging
 
+from ..config import SUMMARY_MODEL_REVISIONS
+
 log = logging.getLogger("recandcc.transcribe")
 
 # Model names offered in README.md / docs/CONFIGURATION.md (tests check each is pinned).
@@ -46,8 +48,9 @@ HF_REVISIONS: dict[str, str] = {
     # ... and their MLX conversions
     "mlx-community/ivrit-ai-whisper-large-v3-turbo-mlx": "53ad8c6cd8b32eb0303f093a404ae13c1b1d567f",
     "mlx-community/ivrit-ai-whisper-large-v3-mlx": "097c0cb2bb4288a3c82f6d524a39c4ce09afa187",
-    # Local summary LLM (mlx-lm, Apple silicon), see summary.py
-    "mlx-community/Qwen2.5-3B-Instruct-4bit": "4f83f8f146fdf28b512a06562b671d7af4fab457",
+    # Local summary LLMs (mlx-lm, Apple silicon), see summary.py: pinned next to their names
+    # in config.py (with their sha256), which the load-time summary-model migration needs.
+    **SUMMARY_MODEL_REVISIONS,
 }
 
 # The same ivrit.ai model in both formats: CTranslate2 (faster-whisper) repo -> MLX repo. Either
