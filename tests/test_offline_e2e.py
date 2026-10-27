@@ -7,7 +7,7 @@ traffic; only AF_UNIX is allowed) and DNS lookup raises; the only attempt allowe
 one-time speaker-model download in ``diarize._download``, which must fail fast and leave
 "Others" in the transcript. The slow test does the same with the real cached models.
 
-Stories: US-14
+Stories: US-14.
 """
 
 from __future__ import annotations
