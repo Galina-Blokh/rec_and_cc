@@ -297,7 +297,19 @@ def mac_network_volume(path: str | os.PathLike, statfs=None) -> str | None:
 
 
 def windows_network_volume(path: str | os.PathLike, drive_type=None) -> str | None:
-    text = ntpath.normpath(os.path.realpath(str(path)))  # junctions / links to shares
+    """Judge the path as written first (string checks and GetDriveTypeW only: nothing here
+    contacts a share, so a hostile UNC path never starts an SMB session); only a local-looking
+    path is resolved, to catch junctions and links that lead to a share."""
+    raw = str(path)
+    found = _win_network(ntpath.normpath(raw), drive_type)
+    if found is None:
+        real = os.path.realpath(raw)
+        if real != raw:
+            found = _win_network(ntpath.normpath(real), drive_type)
+    return found
+
+
+def _win_network(text: str, drive_type) -> str | None:
     if text.lower().startswith("\\\\?\\unc\\"):
         return "a network share"
     if text.startswith(("\\\\?\\", "\\\\.\\")):  # \\?\Z:\... -> Z:\...
@@ -318,16 +330,27 @@ def linux_network_volume(path: str | os.PathLike, mounts: str | None = None) -> 
     """Longest matching mount point in /proc/mounts decides."""
     if mounts is None:
         mounts = Path("/proc/mounts").read_text(encoding="utf-8", errors="replace")
-    target = posixpath.normpath(os.path.realpath(str(path)).replace("\\", "/"))
-    best, best_type = "", ""
+    table = []
     for line in mounts.splitlines():
         parts = line.split()
-        if len(parts) < 3:
-            continue
-        mnt = parts[1].replace("\\040", " ")
-        if (target == mnt or target.startswith(mnt.rstrip("/") + "/")) and len(mnt) > len(best):
-            best, best_type = mnt, parts[2]
-    return _NETWORK_FS.get(best_type)
+        if len(parts) >= 3:
+            table.append((parts[1].replace("\\040", " "), parts[2]))
+
+    def classify(text: str) -> str | None:
+        target = posixpath.normpath(text.replace("\\", "/"))
+        best, best_type = "", ""
+        for mnt, fstype in table:
+            if (target == mnt or target.startswith(mnt.rstrip("/") + "/")) and len(mnt) > len(best):
+                best, best_type = mnt, fstype
+        return _NETWORK_FS.get(best_type)
+
+    raw = str(path)  # as written first; resolve links only when it looks local
+    found = classify(raw)
+    if found is None:
+        real = os.path.realpath(raw)
+        if real != raw:
+            found = classify(real)
+    return found
 
 
 def network_volume(path: str | os.PathLike, platform: str | None = None) -> str | None:

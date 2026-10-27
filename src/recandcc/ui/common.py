@@ -64,6 +64,7 @@ RECENT_COUNT = 10
 SEARCH_LIMIT = 20
 HOTKEY_DEBOUNCE_S = 0.5
 NET_PROBE_WAIT_S = 2.0  # how long a refresh waits for the network-volume probe
+NET_PROBES_MAX = 4  # stuck probes (dead mounts) tolerated at once
 NET_PROBE_RETRY_S = 300.0  # after a hung or failed probe
 REFRESH_EVERY_S = 10.0
 PERM_KINDS = ("microphone", "system_audio")
@@ -313,7 +314,7 @@ class Controller:
         self._lang_lock = threading.Lock()  # transcription.languages + its raw spelling
         self._summaries = None  # SummaryQueue, created on the first summary
         self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
-        self._net_probe: threading.Thread | None = None
+        self._net_probes: dict[Path, threading.Thread] = {}  # one probe per folder
         self._net_retry: dict[Path, float] = {}  # folder -> earliest next probe (monotonic)
         self._net_warned: set[Path] = set()  # network-volume output dirs already warned about
         # global shortcut
@@ -836,11 +837,12 @@ class Controller:
         with self._lock:
             if out in self._net_warned:
                 return
-            if self._net_probe is not None and self._net_probe.is_alive():
-                return  # a previous probe is still stuck: don't pile up threads
+            self._net_probes = {p: th for p, th in self._net_probes.items() if th.is_alive()}
+            if out in self._net_probes or len(self._net_probes) >= NET_PROBES_MAX:
+                return  # this folder's probe is still stuck: don't pile up threads
             if time.monotonic() < self._net_retry.get(out, 0.0):
                 return  # a recent probe of this folder hung or failed
-            self._net_probe = t = threading.Thread(
+            self._net_probes[out] = t = threading.Thread(
                 target=self._probe_network_volume, args=(out,), daemon=True, name="ui-netprobe"
             )
         t.start()

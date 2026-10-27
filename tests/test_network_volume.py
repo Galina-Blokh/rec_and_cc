@@ -189,7 +189,7 @@ def test_a_hung_probe_never_stalls_the_refresh(tmp_path, monkeypatch):
     ctrl._check_network_volume()  # does not start a second stuck probe
     assert _notices(ctrl) == [] and ctrl._net_warned == set()
     release.set()
-    ctrl._net_probe.join(5)
+    ctrl._net_probes[tmp_path].join(5)
     assert len(_notices(ctrl)) == 1  # a late answer still warns, once
 
 
@@ -223,9 +223,39 @@ def test_a_failed_or_hung_probe_is_not_retried_every_refresh(tmp_path, monkeypat
         start_threads=False,
     )
     ctrl._check_network_volume()
-    ctrl._net_probe.join(5)
+    ctrl._net_probes[tmp_path].join(5)
     ctrl._check_network_volume()
     assert len(calls) == 1
     ctrl._net_retry[tmp_path] = 0.0  # the retry interval has passed
     ctrl._check_network_volume()
     assert len(calls) == 2
+
+
+def test_unc_paths_are_never_resolved(monkeypatch):
+    def forbidden(_p):
+        raise AssertionError("realpath would contact the share")
+
+    monkeypatch.setattr(cs.os.path, "realpath", forbidden)
+    assert cs.windows_network_volume(r"\\evil\share\Rec") == "a network share"
+    assert cs.linux_network_volume("/mnt/nas/rec", "srv:/x /mnt/nas nfs rw 0 0\n") == "NFS"
+
+
+def test_a_stuck_probe_does_not_block_other_folders(tmp_path, monkeypatch):
+    release = threading.Event()
+    stuck = tmp_path / "dead"
+
+    def probe(p):
+        if p == stuck:
+            release.wait(10)
+            return None
+        return "SMB"
+
+    monkeypatch.setattr(common, "NET_PROBE_WAIT_S", 0.05)
+    monkeypatch.setattr(common, "network_volume", probe)
+    cfg = Config(output_dir=stuck)
+    ctrl = Controller(cfg, monitor=_Monitor(), recorder=object(), tq=_Q(), start_threads=False)
+    ctrl._check_network_volume()
+    cfg.output_dir = tmp_path / "live"
+    ctrl._check_network_volume()
+    assert len(_notices(ctrl)) == 1
+    release.set()
