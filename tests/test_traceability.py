@@ -1,9 +1,14 @@
-"""docs/requirements: every story has a traceability row, and every listed test exists."""
+"""docs/requirements: every story has a traceability row, every listed test exists, and every
+test file declares its stories ("Stories: none." for tooling tests).
+
+Stories: none.
+"""
 
 from __future__ import annotations
 
 import ast
 import re
+from functools import cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -24,9 +29,24 @@ def trace_rows() -> dict[str, list[str]]:
     return rows
 
 
-def defined_functions(path: Path) -> set[str]:
-    tree = ast.parse(path.read_text("utf-8"))
-    return {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+@cache
+def parsed(file: str) -> ast.Module:
+    return ast.parse((TESTS / file).read_text("utf-8"))
+
+
+def functions_named_test(file: str) -> set[str]:
+    return {
+        n.name
+        for n in parsed(file).body
+        if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")
+    }
+
+
+def declared_stories(file: str) -> set[str] | None:
+    m = re.search(r"^Stories: (.+)\.$", ast.get_docstring(parsed(file)) or "", re.M)
+    if not m:
+        return None
+    return set() if m[1] == "none" else set(m[1].split(", "))
 
 
 def test_every_story_is_traced_and_ids_are_unique():
@@ -43,19 +63,24 @@ def test_traced_tests_exist():
     for refs in trace_rows().values():
         for ref in refs:
             file, func = ref.split("::")
-            path = TESTS / file
-            if not path.exists() or (func != "*" and func not in defined_functions(path)):
+            names = functions_named_test(file) if (TESTS / file).exists() else set()
+            if not names if func == "*" else func not in names:
                 missing.append(ref)
     assert not missing, missing
 
 
-def test_test_docstrings_name_their_stories():
-    want: dict[str, set[str]] = {}
+def test_every_test_file_declares_the_stories_it_is_traced_to():
+    traced: dict[str, set[str]] = {}
     for story, refs in trace_rows().items():
         for ref in refs:
-            want.setdefault(ref.split("::")[0], set()).add(story)
-    for file, stories in want.items():
-        doc = ast.get_docstring(ast.parse((TESTS / file).read_text("utf-8"))) or ""
-        m = re.search(r"^Stories: (.+)\.$", doc, re.M)
-        assert m, f"{file}: docstring has no 'Stories:' line"
-        assert set(m[1].split(", ")) == stories, file
+            traced.setdefault(ref.split("::")[0], set()).add(story)
+    wrong = {}
+    for path in sorted(TESTS.glob("test_*.py")):
+        declared = declared_stories(path.name)
+        if declared is None:
+            wrong[path.name] = "no 'Stories:' docstring line (use 'Stories: none.' for tooling)"
+        elif declared != traced.get(path.name, set()):
+            wrong[path.name] = (
+                f"docstring {sorted(declared)} != table {sorted(traced.get(path.name, set()))}"
+            )
+    assert not wrong, wrong

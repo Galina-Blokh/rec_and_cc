@@ -110,7 +110,8 @@ uv run ruff check . && uv run ruff format --check src tests
   audio with `afplay`/`say` and checks that it is detected and captured.
 - **Traceability:** each test file's docstring names the user stories it covers
   (`Stories: US-03, US-06.`), matching [requirements/traceability.md](requirements/traceability.md).
-  `test_traceability.py` fails when a story has no tests, a listed test was renamed, or a
+  Every test file needs that line; tooling tests say `Stories: none.`.
+  `test_traceability.py` fails when a story has no tests, a listed test doesn't exist, or a
   docstring disagrees with the table. A new behaviour gets a story in
   [requirements/stories.md](requirements/stories.md) (or a criterion in an existing one).
 
