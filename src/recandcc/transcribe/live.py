@@ -46,7 +46,7 @@ import numpy as np
 
 from ..metrics import latency_stats, log_session_metrics, rounded
 from ..models import SAMPLE_RATE, Segment, SessionInfo, Track
-from .engine import MIN_LANGUAGE_CONFIDENCE, SPEAKERS, Transcriber
+from .engine import MIN_LANGUAGE_CONFIDENCE, SPEAKERS, Transcriber, diarized_tracks
 from .live_speakers import LOAD_GRACE_S, SpeakerLabeler
 from .merge import ECHO_TOLERANCE_S, dedupe_echo, merge_tracks
 from .output import write_live_markdown
@@ -222,7 +222,15 @@ class LiveTranscriber:
         self.beam_size = beam_size
         self.clock = clock
         # "Speaker N" labels for Others captions (display only, see live_speakers.py)
-        if labeler is None and getattr(self.cfg, "live_speaker_labels", False):
+        # Not when the final transcript also numbers Me's speakers (room / started-as-room
+        # sessions): it numbers Me first, so live numbers would not match it. Decided here, at
+        # the start, so a call upgraded to a room mid-way keeps its labels (documented limit).
+        numbers_me = Track.ME in diarized_tracks(session)
+        if numbers_me:
+            if labeler is not None:
+                labeler.close()
+            labeler = None
+        elif labeler is None and getattr(self.cfg, "live_speaker_labels", False):
             labeler = SpeakerLabeler(clock=clock)
         self._labeler = labeler
 

@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 from test_live import FakeTranscriber, Feeder, burst, make_session, manual, phrase, silence
 
-from recandcc.models import SAMPLE_RATE, Segment, Track
+from recandcc.models import SAMPLE_RATE, Segment, Track, TriggerKind
 from recandcc.transcribe import diarize, live_speakers
 from recandcc.transcribe.live import EMBED_WAIT_S
 from recandcc.transcribe.live_speakers import SpeakerClusterer, SpeakerLabeler
@@ -277,6 +277,24 @@ def test_live_captions_get_speaker_labels_but_stored_segments_keep_others(tmp_pa
     assert [s.speaker for s in emitted] == ["Speaker 1", "Speaker 2"]
     assert {s.speaker for s in live.segments()} == {"Others"}  # final transcript untouched
     lab.close()
+
+
+@pytest.mark.parametrize("kind, started_as_room", [("room", False), ("call", True)])
+def test_no_live_speaker_numbers_when_the_final_transcript_numbers_me(
+    tmp_path, emitted, kind, started_as_room
+):
+    """Stories: US-33. Room sessions number Me first offline, so live N would not match."""
+    session = make_session(tmp_path)
+    session.trigger_kind = TriggerKind(kind)
+    session.started_as_room = started_as_room
+    lab = SpeakerLabeler(embedder=lambda a: vec(0))
+    live = manual(FakeTranscriber(), session, emitted, labeler=lab)
+    assert live._labeler is None
+    feed = Feeder(live, Track.OTHERS)
+    feed(np.concatenate([silence(1), burst(2.5, amp=0.3), silence(1.5)]))
+    live._step(False)
+    live._step(True)
+    assert emitted and {s.speaker for s in emitted} == {"Others"}
 
 
 def test_live_without_labeler_is_unchanged(tmp_path, emitted):

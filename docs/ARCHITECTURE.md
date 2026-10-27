@@ -39,7 +39,7 @@ across platforms.
 | `recorder.py` | One session: sources → queues → WAV writer threads, live levels, silence tracking, frame tap for live transcription |
 | `engine.py` | Detection state machine: classify apps, debounce, ask/auto/off, stop conditions |
 | `transcribe/` | VAD chunking, language ID, parallel Whisper, merge + echo removal, md/srt/json output, background queue, live transcription (`live.py`) |
-| `transcribe/diarize.py` | Offline speaker diarization of the `Others` track (speaker embeddings + clustering) and `Others` → `Speaker N` relabelling of the final transcript; one-time, checksum-verified model download |
+| `transcribe/diarize.py` | Offline speaker diarization of the `Others` track (the `Me` track too in room sessions: `engine.diarized_tracks`) (speaker embeddings + clustering) and `Others` → `Speaker N` relabelling of the final transcript; owns the CAM++ extractor shared with the live labels (`shared_extractor`); one-time, checksum-verified model download |
 | `hotkey.py` | Global start/stop shortcut: parses `hotkey`, runs `rcc-audiotap hotkey` (macOS) or `RegisterHotKey` (Windows) |
 | `cloudsync.py` | Is `output_dir` synced to iCloud / OneDrive / File Provider? Local path checks only; the controller warns once per folder |
 | `permissions.py` | Query, request and open settings for mic and system-audio permissions |
@@ -243,10 +243,13 @@ the previous segment ended within 1.5 s, else `Others`). One CAM++ extractor
 is shared with the offline Diarizer (`diarize.shared_extractor`, loaded once per process;
 live failures are remembered, no lock is held across `compute`, so a compute orphaned by a
 closed session blocks nobody); requests past their 0.5 s deadline are skipped, where the
-cold model load is not counted (at most 3 s), and a finished embedding wakes the live worker. Live numbers are
+cold model load is not counted (at most 1.5 s, `LOAD_GRACE_S`), and a finished embedding wakes the live worker. Live numbers are
 provisional: they come from incremental clustering and can differ from the final transcript's
 labels (the offline diarization), e.g. one other voice is `Speaker 1` live but `Others` in
-the final transcript. The captions colour each `Speaker N` from a fixed palette. The shared
+the final transcript. The captions colour each `Speaker N` from a fixed palette. Room sessions (and calls that started as a room) show no live
+`Speaker N`, only `Me` / `Others`: the final transcript numbers `Me`'s speakers first, so live
+numbers would not match; this is decided at session start, so a call upgraded to a room
+mid-way keeps its live labels. The shared
 speaker model (~28 MB) stays loaded for the app's life, by design (it was already kept until
 quit before); there is no idle unloading.
 

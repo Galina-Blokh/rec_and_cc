@@ -372,6 +372,9 @@ that I can follow who says what during the call.*
   finished `Others` caption is shown, **then** it says `Speaker N`, the same N for the same
   voice for the whole session; a clearly different voice gets a new number (at most 8
   speakers). `Me` stays `Me`.
+- **Given** a room session, or a call that started as a room, **then** captions keep `Me` /
+  `Others` (the final transcript numbers `Me`'s speakers first, so live numbers would clash);
+  decided at session start, so a call upgraded to a room mid-way keeps its live labels.
 - **Then** the labels are display only: the final transcript keeps the offline diarization.
 - **Given** the model is not on disk, **then** captions keep `Others`, nothing is downloaded
   and nothing is logged above DEBUG.
