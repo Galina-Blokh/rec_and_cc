@@ -103,9 +103,10 @@ def suggestions(directory: Path) -> list[str]:
     names = voices.read_session_names(session.id)
     if not names:
         return []
-    side = call_side(directory) if session.started_as_room else None
-    labels = side if side is not None else [lbl for lbl, _ in voices.session_speakers(directory)]
-    return free_names(labels, names)
+    if session.started_as_room:  # only the call's side; unknown tracks: suggest nothing
+        side = call_side(directory)
+        return free_names(side, names) if side is not None else []
+    return free_names([lbl for lbl, _ in voices.session_speakers(directory)], names)
 
 
 class _Forgotten(Exception):
@@ -114,7 +115,9 @@ class _Forgotten(Exception):
 
 def _rename(directory: Path, session: SessionInfo, label: str, name: str, since: int) -> None:
     """Relabel the transcript files; keep the session's voice (if any) under the new label,
-    with no profile. Under NAMING_LOCK (``apply``), like ``voices.name_speaker``."""
+    with no profile. Under NAMING_LOCK (``apply``), like ``voices.name_speaker``. The transcript
+    is written first and the voice store only after that; if the store write fails, the
+    transcript gets its old label back (no name shown whose voice was not moved with it)."""
     name = voices.check_name(name)
     data = json.loads((directory / JSON_NAME).read_text(encoding="utf-8"))
     segments = [Segment(**s) for s in data["segments"]]
@@ -128,18 +131,22 @@ def _rename(directory: Path, session: SessionInfo, label: str, name: str, since:
         raise ValueError("that name is already a speaker of this session")
     if since != voices.forget_generation():  # by another process (this one's waits for us)
         raise _Forgotten
-    segments = [replace(s, speaker=name) if s.speaker == label else s for s in segments]
-    write_outputs(session, segments, data["duration"], data["model"])
-    with voices.store_lock():  # read and write together; a forget since `since` drops it
-        stored = voices.read_session_voices(session.id)
-        if label in stored:
-            new = {(name if k == label else k): v for k, v in stored.items()}
-            voices.write_session_voices(
-                session,
-                {k: v["centroid"] for k, v in new.items()},
-                {k: v["profile"] for k, v in new.items() if v["profile"]},
-                since=since,
-            )
+    renamed = [replace(s, speaker=name) if s.speaker == label else s for s in segments]
+    write_outputs(session, renamed, data["duration"], data["model"])
+    try:
+        with voices.store_lock():  # read and write together; a forget since `since` drops it
+            stored = voices.read_session_voices(session.id)
+            if label in stored:
+                new = {(name if k == label else k): v for k, v in stored.items()}
+                voices.write_session_voices(
+                    session,
+                    {k: v["centroid"] for k, v in new.items()},
+                    {k: v["profile"] for k, v in new.items() if v["profile"]},
+                    since=since,
+                )
+    except BaseException:
+        write_outputs(session, segments, data["duration"], data["model"])  # the old label back
+        raise
 
 
 def apply(directory: Path, since: int | None = None) -> bool:

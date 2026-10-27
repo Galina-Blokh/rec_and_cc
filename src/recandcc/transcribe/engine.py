@@ -948,6 +948,8 @@ class Transcriber:
                     labelled = segments
                 else:
                     labelled = self._labelled_now(session, segments, turns, gen)
+                # `track` is compare=False: a track-only change (a lone "Me") is not rewritten,
+                # so those labels stay untracked and call-app names fail closed for them
                 if labelled != segments and Path(session.directory).exists():
                     write_outputs(session, labelled, duration, self.cfg.model)
                     log.info("session %s: transcript rewritten with speaker labels", session.id)

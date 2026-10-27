@@ -176,3 +176,25 @@ def test_a_plain_call_records_the_track_and_names_as_before(tmp_path):
     turns = {"others.wav": Turns([Turn(0, 5, 0), Turn(10, 15, 1)], centroids={0: bob, 1: anna})}
     out = _final(tmp_path, turns, ["Bob", "Anna"], started_as_room=False)
     assert out == [("Me", ""), ("Me", ""), ("Bob", "others"), ("Anna", "others")]
+
+
+def test_suggestions_fail_closed_when_the_tracks_are_unknown(tmp_path):
+    _transcript(tmp_path, [("Speaker 1", ""), ("Speaker 2", "")], ["Anna"])
+    assert callnames.suggestions(tmp_path) == []  # never the room's (or the owner's) labels
+    _transcript(tmp_path, [("Speaker 1", "me"), ("Speaker 2", "others")], ["Anna", "Bob"])
+    assert callnames.suggestions(tmp_path) == ["Anna", "Bob"]
+
+
+def test_a_failed_voice_store_write_puts_the_old_label_back(tmp_path, monkeypatch):
+    s = _transcript(tmp_path, [("Speaker 1", "me"), ("Speaker 2", "others")], ["Anna"])
+    voices.write_session_voices(s, {"Speaker 2": np.eye(192)[0]})
+
+    def broken(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(voices, "write_session_voices", broken)
+    assert callnames.apply(tmp_path) is False
+    assert _speakers(tmp_path) == ["Speaker 1", "Speaker 2"]  # transcript and store agree
+    assert list(voices.read_session_voices(s.id)) == ["Speaker 2"]
+    data = json.loads((tmp_path / "transcript.json").read_text(encoding="utf-8"))
+    assert [x["track"] for x in data["segments"]] == ["me", "others"]  # tracks kept too
