@@ -60,6 +60,7 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "S"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The coverage floor is enforced in CI only: `--cov-fail-under` in .github/workflows/ci.yml.
 addopts = "-m 'not slow' --cov --cov-report=term-missing:skip-covered"
 markers = ["slow: downloads Whisper models / runs real inference (run with -m slow)"]
 
@@ -76,7 +77,4 @@ omit = [
     "*/recandcc/ui/toast_mac.py",
 ]
 
-[tool.coverage.report]
-# Floor for the fast suite (issue #16). Raise it as tests are added; never lower it to merge.
-fail_under = 70
 
