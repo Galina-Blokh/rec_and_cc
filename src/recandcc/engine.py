@@ -828,6 +828,9 @@ class Engine:
             return
         try:
             upgrade(app, target=target)
+            take = getattr(self.recorder, "scope_notice", None)
+            if (notice := take() if take is not None else None) is not None:
+                self._notice(*notice)
         except Exception:
             log.exception("could not add the microphone to the running session")
 

@@ -601,7 +601,7 @@ class TappedSource(ManualSource):
     def __init__(self, target=None, scope=None, early=None, confirmed=None, fail_start=False):
         super().__init__(fail=fail_start)
         self.target, self.scope = target, scope or ("app" if target else "all")
-        self.early, self.confirmed, self.fail_stop = early, confirmed, False
+        self.early, self.confirmed, self.fail_stop, self.on_stop = early, confirmed, False, None
 
     def start(self, on_frames):
         super().start(on_frames)
@@ -612,13 +612,15 @@ class TappedSource(ManualSource):
         return self.confirmed or self.scope
 
     def stop(self):
+        if self.on_stop is not None:
+            self.on_stop()
         if self.fail_stop:
             self.fail_stop = False  # once: the recorder's own stop() succeeds later
             raise subprocess.TimeoutExpired("rcc-audiotap", 3)
         super().stop()
 
 
-def _app_scope_recorder(tmp_path, **per_app):
+def _app_scope_recorder(tmp_path, clock=time.monotonic, **per_app):
     cfg = Config(output_dir=tmp_path)
     cfg.detection.system_audio_scope = "app"
     made: list[TappedSource] = []
@@ -627,7 +629,9 @@ def _app_scope_recorder(tmp_path, **per_app):
         made.append(TappedSource(*target, **(per_app if target else {})))
         return made[-1]
 
-    rec = Recorder(cfg, mic_factory=ManualSource, system_factory=system, min_session_s=0)
+    rec = Recorder(
+        cfg, mic_factory=ManualSource, system_factory=system, min_session_s=0, clock=clock
+    )
     return rec, made
 
 
@@ -666,15 +670,15 @@ def test_upgraded_room_session_in_app_scope_reopens_others_for_the_call_app(tmp_
         {"confirmed": "all"},  # no audio process of the call app yet: the helper taps all
         {"confirmed": "pending"},  # no report within SCOPE_WAIT_S
         {"fail_start": True},
-        "old stop fails",
     ],
 )
 def test_room_upgrade_keeps_the_system_wide_tap_unless_per_app_is_confirmed(tmp_path, case):
-    rec, made = _app_scope_recorder(tmp_path, **(case if isinstance(case, dict) else {}))
+    rec, made = _app_scope_recorder(tmp_path, **case)
     session = rec.start(TriggerKind.ROOM, "Room", mic_source=ManualSource)
-    made[0].fail_stop = case == "old stop fails"
     assert rec.upgrade_to_call("zoom.us", target=ZOOM) is True
     assert made[1].stopped  # the per-app source is never left running or orphaned
+    notice = rec.scope_notice()  # once, naming the app only
+    assert notice is not None and "us.zoom" in notice[1] and rec.scope_notice() is None
     others = next(w for w in rec._writers if w.track == Track.OTHERS)
     assert others.source is made[0] and others.scope is None and not made[0].stopped
     made[0].push(np.full(SR, 0.25, np.float32))
@@ -684,14 +688,29 @@ def test_room_upgrade_keeps_the_system_wide_tap_unless_per_app_is_confirmed(tmp_
     assert len(audio) == SR  # one tap on the track, no frames from the per-app one
 
 
-def test_room_upgrade_without_a_mic_track_switches_with_no_padding(tmp_path):
+def test_room_upgrade_with_a_failing_old_stop_still_switches_to_the_live_tap(tmp_path):
     rec, made = _app_scope_recorder(tmp_path)
+    rec.start(TriggerKind.ROOM, "Room", mic_source=ManualSource)
+    made[0].fail_stop = True  # e.g. TimeoutExpired after the helper was already SIGTERMed
+    assert rec.upgrade_to_call("zoom.us", target=ZOOM) is True
+    others = next(w for w in rec._writers if w.track == Track.OTHERS)
+    assert others.source is made[1] and others.scope == "all→app"
+    assert made[0].stopped and not made[1].stopped  # stopped quietly once more
+    assert rec.scope_notice() is None
+    rec.stop()
+
+
+def test_room_upgrade_without_a_mic_track_pads_the_switch_time(tmp_path):
+    now = [100.0]
+    rec, made = _app_scope_recorder(tmp_path, clock=lambda: now[0])
     session = rec.start(TriggerKind.ROOM, "Room", mic_source=lambda: ManualSource(fail=True))
     assert list(session.tracks) == [Track.OTHERS]  # the room mic could not open
     made[0].push(np.full(SR, 0.25, np.float32))
+    made[0].on_stop = lambda: now.__setitem__(0, now[0] + 0.5)  # the switch takes 0.5 s
     assert rec.upgrade_to_call("zoom.us", target=ZOOM) is True
     made[1].push(np.full(SR, 0.5, np.float32))
     rec.stop()
     others, _ = sf.read(session.directory / "others.wav", dtype="float32")
-    assert len(others) == 2 * SR  # lead 0: nothing padded
-    np.testing.assert_allclose(others[SR:], 0.5, atol=1e-4)
+    assert len(others) == 5 * SR // 2  # lead 0, so the measured switch time is padded
+    assert not others[SR : 3 * SR // 2].any()
+    np.testing.assert_allclose(others[3 * SR // 2 :], 0.5, atol=1e-4)

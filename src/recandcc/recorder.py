@@ -481,6 +481,7 @@ class Recorder:
         self._op_lock = threading.Lock()  # serialises start/stop
         self._lvl_lock = threading.Lock()  # guards _last_sound
         self._session: SessionInfo | None = None
+        self._scope_issue: str | None = None  # app a room upgrade couldn't tap alone
         self._privacy_issue: str | None = None  # last start's not-private key (privacy_notice)
         self._writers: list[_TrackWriter] = []
         self._started_mono = 0.0
@@ -610,7 +611,7 @@ class Recorder:
             if self._session is not None:
                 raise RuntimeError("already recording")
             now = datetime.now().astimezone()
-            self._privacy_issue = None
+            self._privacy_issue = self._scope_issue = None
             sid, directory, privacy_issue = self._make_dir(now, app, kind)
             session = SessionInfo(
                 id=sid,
@@ -791,23 +792,40 @@ class Recorder:
             confirmed = False
         if not confirmed:  # e.g. no audio process of the call app yet: the helper taps all
             _stop_quietly(new)
+            name = ", ".join(target.match) or str(target.pids)
+            log.warning("per-app tap of %s not confirmed; recording all system audio", name)
+            self._scope_issue = name  # one notice (scope_notice), no retry
             return False
         assert new is not None  # noqa: S101 - type narrowing: confirmed implies a source
+        old, t0 = w.source, self.clock()
         try:
-            w.source.stop()
-        except Exception:  # it may still deliver: keep it, never two taps on one track
-            log.exception("could not stop the system-wide tap; still recording all of it")
-            _stop_quietly(new)
-            return False
+            old.stop()
+        except Exception:  # new is live; old may be half-stopped (helper already SIGTERMed)
+            log.warning("could not stop the system-wide tap cleanly", exc_info=True)
+            _stop_quietly(old)
         w.source, w.scope = new, "all→app"
-        # Audio between the old tap's stop and gate.set() is dropped and this pad is computed
-        # before the gate opens, so Others may drift a few tens of ms against Me.
+        # Audio between the old tap's stop and gate.set() is dropped: pad the longer of the
+        # lag behind the other tracks and the measured switch time (no mic track: lead 0),
+        # so Others keeps to the wall clock (a few tens of ms of drift against Me remain).
         lead = max(x.frames_received for x in self._writers) - w.frames_received
-        if lead > 0:
-            w.pad_silence(lead)
+        gap = int((self.clock() - t0) * SAMPLE_RATE)
+        if max(lead, gap) > 0:
+            w.pad_silence(max(lead, gap))
         gate.set()
         log.info("Others track: now recording only %s", ", ".join(target.match) or target.pids)
         return True
+
+    def scope_notice(self) -> tuple[str, str] | None:
+        """``(title, message)`` once after a room upgrade could not switch Others to the
+        call app (app scope): all system audio is still recorded. Names the app only."""
+        name, self._scope_issue = self._scope_issue, None
+        if name is None:
+            return None
+        return (
+            "Recording all system audio",
+            f"Could not record only {name} in this session; everything the Mac plays is "
+            "recorded until it ends.",
+        )
 
     def stop(self) -> SessionInfo | None:
         """Stop, flush and close. Returns the session, or None if nothing was recording
