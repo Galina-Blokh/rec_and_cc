@@ -31,6 +31,7 @@ log = logging.getLogger("recandcc.transcribe")
 MLX_REPOS = {
     "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
     "turbo": "mlx-community/whisper-large-v3-turbo",
+    "large": "mlx-community/whisper-large-v3-mlx",  # faster-whisper alias of large-v3
 }
 
 

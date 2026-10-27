@@ -66,7 +66,9 @@ def _transcriber(**kw) -> Transcriber:
     return Transcriber(TranscriptionConfig(model="base", backend="faster-whisper", **kw))
 
 
-@pytest.mark.parametrize("name", revisions.OFFERED_MODELS)
+@pytest.mark.parametrize(
+    "name", sorted(set(revisions.OFFERED_MODELS) | set(revisions.FASTER_WHISPER_REPOS))
+)
 def test_every_offered_model_is_pinned_on_both_backends(name):
     assert revisions.faster_whisper_revision(name) is not None
     assert revisions.revision(gpu.mlx_repo(name)) is not None
@@ -184,3 +186,15 @@ def test_refused_mlx_model_frees_its_thread(monkeypatch):
     with pytest.raises(UnpinnedModelError):
         t.ensure_loaded()
     assert closed == ["someone/custom-mlx"]
+
+
+def test_refused_main_model_keeps_the_language_id_model(monkeypatch):
+    _fake_hub(monkeypatch, cached=False)
+    t = Transcriber(TranscriptionConfig(model="someone/custom-mlx", languages=["en", "ru"]))
+    t.gpu = True
+    loaded = []
+    monkeypatch.setattr(t, "_load", lambda name: loaded.append(name) or object())
+    for _ in range(2):
+        with pytest.raises(UnpinnedModelError):
+            t.ensure_loaded()
+    assert loaded == [t.language_model]  # loaded once, not on every retry
