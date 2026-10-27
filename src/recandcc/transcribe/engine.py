@@ -509,9 +509,10 @@ class Transcriber:
         try:  # opt-in only, in the private voices folder: lets `name-speaker` name them later
             if centroids and labels and Path(session.directory).exists():
                 speakers = {lbl: centroids[k] for k, lbl in labels.items() if k in centroids}
-                voices.write_session_voices(session.id, speakers)
+                voices.write_session_voices(session, speakers)
             else:  # never leave voices of an older transcript of this session behind
                 voices.delete_session_voices(session.id)
+            voices.prune_session_voices()  # of sessions whose folder was deleted
         except OSError:
             log.exception("session %s: could not update speaker voices", session.id)
         if not turns:

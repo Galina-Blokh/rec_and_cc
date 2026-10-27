@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import threading
 import unicodedata
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -17,9 +20,9 @@ from test_transcribe import make_session
 
 from recandcc import cli
 from recandcc.config import Config, TranscriptionConfig
-from recandcc.models import Segment
+from recandcc.models import SAMPLE_RATE, Segment
 from recandcc.transcribe import voices
-from recandcc.transcribe.diarize import Turn, Turns, label_speakers
+from recandcc.transcribe.diarize import Diarizer, Turn, Turns, label_speakers
 from recandcc.transcribe.engine import Transcriber
 
 RNG = np.random.default_rng(7)
@@ -105,7 +108,8 @@ def test_profiles_are_a_running_mean_in_a_private_folder(tmp_path):
     if os.name != "nt":
         (d / "old.json").unlink()
         [f] = d.glob("*.json")
-        stale = f.with_name(f".{f.name}.tmp")  # left over from a crash, world-readable
+        # left over from a crash, world-readable
+        stale = f.with_name(f".{f.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         stale.write_text("{}")
         stale.chmod(0o644)
         voices.save_profile("Анна", ANNA, d)
@@ -116,13 +120,14 @@ def test_profiles_are_a_running_mean_in_a_private_folder(tmp_path):
 def test_delete_one_and_all(tmp_path):
     for name, c in (("Anna", ANNA), ("Bob", BOB), ("Carl", CARL)):
         voices.save_profile(name, c, tmp_path)
-    voices.write_session_voices("s9", {"Speaker 1": BOB}, voices_dir=tmp_path)
+    (tmp_path / "rec").mkdir()
+    voices.write_session_voices(make_session(tmp_path / "rec"), {"Speaker 1": BOB}, None, tmp_path)
     if os.name != "nt":
         assert (tmp_path / "sessions").stat().st_mode & 0o777 == 0o700
     assert voices.delete_profile("anna", tmp_path) and not voices.delete_profile("Zed", tmp_path)
     assert [p.name for p in voices.load_profiles(tmp_path)] == ["Bob", "Carl"]
     assert voices.delete_all_profiles(tmp_path) == 2 and voices.load_profiles(tmp_path) == []
-    assert voices.read_session_voices("s9", tmp_path) == {}
+    assert voices.read_session_voices("s1", tmp_path) == {}
 
 
 # --------------------------------------------------------------------------- sessions
@@ -175,7 +180,8 @@ def test_name_speaker_saves_profile_and_rewrites_all_outputs(tmp_path, monkeypat
     for label, name in (("Me", "Bob"), ("Speaker 1", "carl"), ("Speaker 9", "Bob")):
         with pytest.raises(ValueError):
             voices.name_speaker(tmp_path, label, name)
-    voices.write_session_voices("s1", {"Speaker 7": BOB})  # stale: not in the transcript
+    stale = make_session(tmp_path)  # voices not in the transcript
+    voices.write_session_voices(stale, {"Speaker 7": BOB})
     with pytest.raises(ValueError):
         voices.name_speaker(tmp_path, "Speaker 7", "Bob")
     assert [p.name for p in voices.load_profiles()] == ["Carl"]
@@ -195,3 +201,112 @@ def test_cli_naming_needs_the_opt_in_and_voices_can_be_deleted(tmp_path, monkeyp
     assert cli.main(["voices", "delete", "Zed"]) == 1
     assert cli.main(["voices", "delete", "--all"]) == 0 and voices.load_profiles() == []
     assert voices.read_session_voices("s1") == {}
+
+
+def test_a_failure_partway_never_counts_a_session_twice(tmp_path, monkeypatch):
+    _final(tmp_path, monkeypatch, speaker_names=True)
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    for step in ("write_outputs", "save_profile"):
+        with monkeypatch.context() as m:
+            m.setattr(voices, step, boom)
+            with pytest.raises(OSError):
+                voices.name_speaker(tmp_path, "Speaker 2", "Carl")
+        assert voices.name_speaker(tmp_path, "Speaker 2", "Carl").count == 1  # the retry
+        assert voices.name_speaker(tmp_path, "Carl", "Carl").count == 1
+        voices.delete_profile("Carl")
+        _final(tmp_path, monkeypatch, speaker_names=True)
+    assert "Carl" not in (tmp_path / "transcript.md").read_text(encoding="utf-8")
+
+
+def test_windows_replace_retries_when_the_file_is_held_open(tmp_path, monkeypatch):
+    real, calls = os.replace, []
+
+    def held(src, dst):
+        calls.append(dst)
+        if len(calls) < 3:
+            raise PermissionError("in use")
+        real(src, dst)
+
+    monkeypatch.setattr(voices.os, "replace", held)
+    monkeypatch.setattr(voices.time, "sleep", lambda _s: None)
+    assert voices.save_profile("Anna", ANNA, tmp_path).count == 1 and len(calls) == 3
+    calls.clear()
+    monkeypatch.setattr(voices, "REPLACE_TRIES", 2)
+    with pytest.raises(PermissionError):
+        voices.save_profile("Anna", ANNA, tmp_path)
+    assert [f.name for f in tmp_path.iterdir()] == [calls[0].name]  # no temp file left
+    assert voices.load_profiles(tmp_path)[0].count == 1
+
+
+def test_correcting_a_name_moves_the_voice_to_the_new_profile(tmp_path, monkeypatch):
+    voices.save_profile("Anna", BOB)  # an earlier session's voice
+    _final(tmp_path, monkeypatch, speaker_names=True)
+    assert voices.name_speaker(tmp_path, "Speaker 2", "Anna").count == 2
+    assert voices.name_speaker(tmp_path, "anna", "Bob").count == 1
+    [anna, bob] = voices.load_profiles()
+    assert anna.count == 1 and float(anna.centroid @ BOB) > 0.999
+    assert bob.name == "Bob" and float(bob.centroid @ CARL) > 0.9
+    voices.name_speaker(tmp_path, "Bob", "Carl")  # Bob had only this session: deleted
+    assert [p.name for p in voices.load_profiles()] == ["Anna", "Carl"]
+    old = {"name": "Old", "model": voices.MODEL, "count": 2, "updated": "", "centroid": list(BOB)}
+    (voices.VOICES_DIR / "old.json").write_text(json.dumps(old))  # stored before sums
+    p = voices.save_profile("Old", BOB)
+    assert p.count == 3 and float(p.centroid @ BOB) > 0.999
+
+
+def test_deleting_a_name_strips_it_from_session_voices(tmp_path, monkeypatch, capsys):
+    _final(tmp_path, monkeypatch, speaker_names=True)
+    voices.name_speaker(tmp_path, "Speaker 2", "Carl")
+    assert cli.main(["voices", "delete", "carl"]) == 0
+    assert set(voices.read_session_voices("s1")) == {"Speaker 1"}
+    assert voices.load_profiles() == []
+    with pytest.raises(ValueError):  # the voice can't come back from this session
+        voices.name_speaker(tmp_path, "Carl", "Carl")
+    assert cli.main(["voices", "delete", "carl"]) == 1
+
+
+def test_voices_of_deleted_sessions_are_pruned(tmp_path, monkeypatch, capsys):
+    gone, kept = tmp_path / "gone", tmp_path / "kept"
+    gone.mkdir()
+    kept.mkdir()
+    s = make_session(gone)
+    voices.write_session_voices(replace(s, id="s2"), {"Speaker 1": BOB})
+    sessions = voices.VOICES_DIR / "sessions"
+    (sessions / "legacy.json").write_text(json.dumps({"session_id": "s0", "speakers": {}}))
+    shutil.rmtree(gone)
+    _final(kept, monkeypatch, speaker_names=True)  # a transcript write prunes
+    assert [f.name for f in sessions.iterdir()] == [voices._session_path("s1", None).name]
+    assert cli.main(["voices", "list"]) == 0 and voices.read_session_voices("s1")
+    shutil.rmtree(kept)
+    assert cli.main(["voices", "list"]) == 0  # every voices command prunes too
+    assert not list(sessions.iterdir())
+
+
+def test_real_diarization_attaches_speaker_centroids():
+    class Stream:
+        def accept_waveform(self, _rate, samples):
+            self.voice = ANNA if samples.mean() > 0 else CARL
+
+        def input_finished(self):
+            pass
+
+    class Extractor:
+        def create_stream(self):
+            return Stream()
+
+        def compute(self, stream):
+            return list(near(stream.voice, 0.1) * 3)  # not unit length, like the model
+
+    d = Diarizer(threads=2, vad=lambda _audio: [(0.0, 8.0), (8.0, 16.0)])
+    d._extractor, d._pool = Extractor(), ThreadPoolExecutor(2)  # as if the model loaded
+    audio = np.concatenate([np.ones(8 * SAMPLE_RATE), -np.ones(8 * SAMPLE_RATE)])
+    turns = d.diarize(audio.astype(np.float32))
+    d.close()
+    assert isinstance(turns, Turns) and len(turns.centroids) == 2
+    first, last = turns.centroids[turns[0].speaker], turns.centroids[turns[-1].speaker]
+    assert abs(float(np.linalg.norm(first)) - 1) < 1e-5
+    assert float(first @ ANNA) > 0.95 and float(last @ CARL) > 0.95
+    assert voices.match_profiles(turns.centroids, profiles(Anna=ANNA)) == {turns[0].speaker: "Anna"}

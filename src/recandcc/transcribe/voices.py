@@ -4,10 +4,11 @@ Voice data is biometric, so nothing here is stored unless
 ``transcription.speaker_names = true``, and all of it lives in the owner-only ``VOICES_DIR``
 (app data, never inside ``output_dir``, which may be synced to a cloud drive):
 
-- ``<VOICES_DIR>/<hash>.json``: one profile per name, the running mean of the voice centroids
-  it was named from, their count and the embedding model.
+- ``<VOICES_DIR>/<hash>.json``: one profile per name: the sum of the voice centroids it was
+  named from (so a wrong one can be taken out again), their count and the embedding model.
 - ``<VOICES_DIR>/sessions/<hash>.json``: each diarized session's speaker centroids (label ->
-  unit vector), so a speaker can be named after the fact without re-running diarization.
+  unit vector) and its folder, so a speaker can be named after the fact without re-running
+  diarization. ``prune_session_voices`` deletes them once that folder is gone.
 
 ``match_profiles`` names a new session's speakers: a cluster centroid takes a profile's name
 if their cosine similarity is >= ``MATCH_SIMILARITY`` and beats the second-best profile by
@@ -21,6 +22,8 @@ import json
 import logging
 import os
 import re
+import threading
+import time
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -45,6 +48,7 @@ MODEL = EMBEDDING_MODEL.name  # centroids of another embedding model are not com
 # match also needs a clear margin over the next profile. To be tuned on real speech (#13).
 MATCH_SIMILARITY = 0.6
 MATCH_MARGIN = 0.1
+REPLACE_TRIES = 5
 NUMBERED = re.compile(r"speaker\s*\d+")  # labels the diarizer hands out itself
 
 
@@ -54,6 +58,7 @@ class Profile:
     centroid: np.ndarray  # unit vector
     count: int  # how many sessions' speakers it is the mean of
     updated_at: str = ""
+    total: np.ndarray | None = None  # sum of those centroids, so one can be taken out again
 
 
 def _unit(v) -> np.ndarray:
@@ -94,12 +99,23 @@ def _write_private(path: Path, data: dict) -> None:
         d.mkdir(parents=True, exist_ok=True, mode=0o700)
         if os.name != "nt":
             d.chmod(0o700)  # mkdir's mode is filtered by the umask
-    tmp = path.with_name(f".{path.name}.tmp")
+    # unique per process and thread (the app and the CLI may both write), like SessionInfo
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.unlink(missing_ok=True)  # a stale one from a crash may have other permissions
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
-    tmp.replace(path)
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        for attempt in range(REPLACE_TRIES):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:  # Windows: antivirus or a reader has the file open
+                if attempt + 1 == REPLACE_TRIES:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _vector(c) -> list[float]:
@@ -116,30 +132,64 @@ def load_profiles(voices_dir: Path | None = None) -> list[Profile]:
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
             if data.get("model") == MODEL:
-                c = _unit(data["centroid"])
-                out.append(Profile(data["name"], c, int(data["count"]), data["updated"]))
+                count = int(data["count"])
+                if "sum" in data:
+                    total = np.asarray(data["sum"], dtype=np.float64)
+                else:  # written before sums were stored: its mean stands for every session
+                    total = _unit(data["centroid"]) * count
+                out.append(Profile(data["name"], _unit(total), count, data["updated"], total))
         except (OSError, ValueError, KeyError, TypeError):
             log.warning("skipping unreadable voice profile %s", f.name)
     return sorted(out, key=lambda p: _key(p.name))
 
 
 def save_profile(name: str, centroid, voices_dir: Path | None = None) -> Profile:
-    """Create the profile of `name`, or fold `centroid` into it (running mean)."""
-    name = check_name(name)
-    old = next((p for p in load_profiles(voices_dir) if _key(p.name) == _key(name)), None)
-    c, count = _unit(centroid), 1
-    if old is not None and old.centroid.shape == c.shape:
-        c, count = _unit(old.centroid * old.count + c), old.count + 1
-    profile = Profile(name, c, count, datetime.now().isoformat(timespec="seconds"))
-    data = {"name": name, "model": MODEL, "count": count, "updated": profile.updated_at}
-    _write_private(_hashed(_dir(voices_dir), _key(name)), {**data, "centroid": _vector(c)})
+    """Fold `centroid` into the profile of `name` (created if new): the mean of all of them."""
+    profile = _fold(name, centroid, +1, voices_dir)
+    if profile is None:  # unreachable: adding never empties a profile
+        raise RuntimeError("voice profile vanished")
     return profile
 
 
+def _fold(name: str, centroid, sign: int, voices_dir: Path | None) -> Profile | None:
+    """Add (+1) or take out (-1) one centroid; deletes the profile when nothing is left."""
+    name = check_name(name)
+    path = _hashed(_dir(voices_dir), _key(name))
+    old = next((p for p in load_profiles(voices_dir) if _key(p.name) == _key(name)), None)
+    c = _unit(centroid)
+    total, count = np.zeros_like(c), 0
+    if old is not None and old.total is not None and old.total.shape == c.shape:
+        total, count = old.total, old.count
+    total, count = total + sign * c, count + sign
+    if count <= 0:
+        path.unlink(missing_ok=True)
+        return None
+    now = datetime.now().isoformat(timespec="seconds")
+    data = {"name": name, "model": MODEL, "count": count, "updated": now}
+    _write_private(path, {**data, "sum": [round(float(x), 6) for x in total]})
+    return Profile(name, _unit(total), count, now, total)
+
+
 def delete_profile(name: str, voices_dir: Path | None = None) -> bool:
+    """Delete the profile of `name` and every session's centroid labelled `name` or folded
+    into it, so the voice can't come back from a session."""
     path = _hashed(_dir(voices_dir), _key(name))
     existed = path.exists()
     path.unlink(missing_ok=True)
+    for f in _session_files(voices_dir):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            speakers = data.get("speakers", {})
+            keep = {
+                lbl: v
+                for lbl, v in speakers.items()
+                if _key(name) not in (_key(lbl), _key(v.get("profile") or ""))
+            }
+            if len(keep) != len(speakers):
+                existed = True
+                _write_private(f, {**data, "speakers": keep})
+        except (OSError, ValueError, AttributeError):
+            log.warning("could not clean session voices %s", f.name)
     return existed
 
 
@@ -147,7 +197,7 @@ def delete_all_profiles(voices_dir: Path | None = None) -> int:
     """Every profile and every session's speaker voices; returns the number of profiles."""
     d = _dir(voices_dir)
     profiles = list(d.glob("*.json")) if d.is_dir() else []
-    for f in [*profiles, *(d / "sessions").glob("*.json")]:
+    for f in [*profiles, *_session_files(voices_dir)]:
         f.unlink(missing_ok=True)
     return len(profiles)
 
@@ -184,8 +234,30 @@ def _session_path(session_id: str, voices_dir: Path | None) -> Path:
     return _hashed(_dir(voices_dir) / "sessions", session_id)
 
 
+def _session_files(voices_dir: Path | None) -> list[Path]:
+    d = _dir(voices_dir) / "sessions"
+    return sorted(d.glob("*.json")) if d.is_dir() else []
+
+
+def prune_session_voices(voices_dir: Path | None = None) -> int:
+    """Delete the voices of sessions whose folder was deleted; returns how many."""
+    n = 0
+    for f in _session_files(voices_dir):
+        try:
+            directory = json.loads(f.read_text(encoding="utf-8")).get("directory")
+            gone = not directory or not (Path(directory) / SessionInfo.FILENAME).exists()
+        except (OSError, ValueError, AttributeError):
+            gone = True  # unreadable or without a folder: nothing can use it
+        if gone:
+            f.unlink(missing_ok=True)
+            n += 1
+    if n:
+        log.info("deleted the voices of %d deleted session(s)", n)
+    return n
+
+
 def write_session_voices(
-    session_id: str,
+    session: SessionInfo,
     speakers: Mapping[str, np.ndarray],
     folded: Mapping[str, str] | None = None,
     voices_dir: Path | None = None,
@@ -197,8 +269,14 @@ def write_session_voices(
         label: {"centroid": _vector(c), "profile": folded.get(label)}
         for label, c in speakers.items()
     }
-    data = {"version": 1, "session_id": session_id, "model": MODEL, "speakers": entries}
-    _write_private(_session_path(session_id, voices_dir), data)
+    data = {
+        "version": 1,
+        "session_id": session.id,
+        "directory": str(Path(session.directory).resolve()),  # to prune deleted sessions
+        "model": MODEL,
+        "speakers": entries,
+    }
+    _write_private(_session_path(session.id, voices_dir), data)
 
 
 def read_session_voices(session_id: str, voices_dir: Path | None = None) -> dict[str, dict]:
@@ -246,27 +324,35 @@ def name_speaker(directory: Path, label: str, name: str, voices_dir: Path | None
     if any(_key(s.speaker) == _key(name) and s.speaker != label for s in segments):
         raise ValueError(f"{name!r} is already another speaker of this session")
     stored = read_session_voices(session.id, voices_dir)
-    entry = next((v for lbl, v in stored.items() if _key(lbl) == _key(label)), None)
-    if entry is None:
+    folded_as = {k: _key(v["profile"] or "") for k, v in stored.items()}
+    # `name`: its voice was renamed already, but rewriting the transcript failed last time
+    found = [k for k in stored if _key(k) == _key(label)] or [
+        k for k in stored if _key(k) == _key(name) == folded_as[k]
+    ]
+    if not found:
         raise ValueError(
             f"no voice data for {label!r} (speaker_names was off when this session was "
             "transcribed, or its voices were deleted)"
         )
+    entry, previous = stored[found[0]], folded_as[found[0]]
     known = {_key(p.name): p for p in load_profiles(voices_dir)}
-    if entry["profile"] and _key(entry["profile"]) == _key(name) and _key(name) in known:
-        profile = known[_key(name)]  # this session is already part of that profile
-    else:
-        profile = save_profile(name, entry["centroid"], voices_dir)
-    if label != name:
-        segments = [replace(s, speaker=name) if s.speaker == label else s for s in segments]
-        write_outputs(session, segments, data["duration"], data["model"])
-    voices = {name if _key(lbl) == _key(label) else lbl: v for lbl, v in stored.items()}
+    voices = {name if k == found[0] else k: v for k, v in stored.items()}
+    # Mark this session as folded into `name` first: a failure below can then leave the
+    # profile one session short, but never count this session twice.
     write_session_voices(
-        session.id,
+        session,
         {lbl: v["centroid"] for lbl, v in voices.items()},
         {lbl: v["profile"] for lbl, v in voices.items() if v["profile"]} | {name: name},
         voices_dir,
     )
+    profile = known.get(_key(name))
+    if previous != _key(name) or profile is None:
+        if previous and previous != _key(name) and previous in known:
+            _fold(known[previous].name, entry["centroid"], -1, voices_dir)  # Anna -> Bob
+        profile = save_profile(name, entry["centroid"], voices_dir)
+    if label != name:
+        segments = [replace(s, speaker=name) if s.speaker == label else s for s in segments]
+        write_outputs(session, segments, data["duration"], data["model"])
     log.info("named a speaker of session %s (profile of %d sessions)", session.id, profile.count)
     return profile
 
@@ -283,6 +369,7 @@ __all__ = [
     "load_profiles",
     "match_profiles",
     "name_speaker",
+    "prune_session_voices",
     "read_session_voices",
     "save_profile",
     "session_speakers",
