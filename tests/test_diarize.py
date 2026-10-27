@@ -22,7 +22,7 @@ from test_live import FakeTranscriber, Feeder, burst, make_session, silence
 from test_transcribe import make_session as make_batch_session
 
 from recandcc.config import TranscriptionConfig
-from recandcc.models import SAMPLE_RATE, Segment, Track
+from recandcc.models import SAMPLE_RATE, Segment, SessionInfo, Track
 from recandcc.transcribe import diarize
 from recandcc.transcribe.diarize import (
     Diarizer,
@@ -536,6 +536,46 @@ def test_slow_diarization_rewrites_the_transcript_later(tmp_path, monkeypatch):
     assert "Speaker 2:** hi" in md.read_text(encoding="utf-8")
     assert "Speaker 1" in (tmp_path / "transcript.srt").read_text(encoding="utf-8")
     assert not (tmp_path / "others.wav").exists()
+
+
+def test_retention_waits_for_a_slow_diarization(tmp_path):
+    from recandcc.retention import purge_old_audio
+
+    d = tmp_path / "2026-10-01" / "s"
+    d.mkdir(parents=True)
+    s = _session_with_audio(d)
+    t = Transcriber(TranscriptionConfig(model="fake"))  # keep_audio: retention deletes it
+    t.diarize_wait_s = 0.01
+    pending: Future = Future()
+    t.write_final(s, SEGS, 15.0, pending)
+    assert s.transcribed and s.ended_at is not None
+    later = s.ended_at.astimezone() + timedelta(days=2)
+    assert purge_old_audio(tmp_path, 1, now=later) == []  # the diarizer still needs the WAVs
+    assert (d / "others.wav").exists()
+    pending.set_result(TURNS)  # labels written: the audio may go now
+    assert not (d / SessionInfo.LABELS_PENDING_MARKER).exists()
+    assert len(purge_old_audio(tmp_path, 1, now=later)) == 2
+    assert not (d / "others.wav").exists()
+
+
+def test_labels_final_even_if_the_audio_cannot_be_deleted(tmp_path, monkeypatch):
+    """A WAV still open elsewhere (Windows: PermissionError) must not leave the marker
+    behind or keep after-labels callbacks waiting."""
+    s = _session_with_audio(tmp_path)
+    t = Transcriber(TranscriptionConfig(model="fake", keep_audio=False))
+    t.diarize_wait_s = 0.01
+    pending: Future = Future()
+    t.write_final(s, SEGS, 15.0, pending)
+    done = []
+    t.after_labels(s.directory, lambda: done.append(1))
+
+    def locked(session):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(t, "_drop_audio", locked)
+    pending.set_result(TURNS)
+    assert not (tmp_path / SessionInfo.LABELS_PENDING_MARKER).exists()
+    assert done == [1]
 
 
 def test_after_labels_waits_for_a_slow_diarization(tmp_path):

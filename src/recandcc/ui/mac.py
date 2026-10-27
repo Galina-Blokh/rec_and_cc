@@ -48,6 +48,7 @@ from .common import (
     transcript_label,
 )
 from .present import (
+    FORGET_VOICES_TEXT,
     MODE_LABELS,
     check,
     dialog_timeout,
@@ -611,8 +612,7 @@ class MacApp(rumps.App):
 
     def _forget_voices(self, _sender) -> None:
         script = (
-            'display dialog "Delete all saved voice profiles and the voice data of every '
-            'session? Names already written into transcripts stay." with title "RecAndCC" '
+            f'display dialog {as_str(FORGET_VOICES_TEXT)} with title "RecAndCC" '
             'buttons {"Cancel", "Forget all voices"} default button "Cancel" with icon caution'
         )
 

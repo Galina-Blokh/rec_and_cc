@@ -160,6 +160,19 @@ def _gave_up(d: Path) -> bool:
     return str(d) in getattr(_held, "gave_up", set())
 
 
+def _open_lock(path: Path):
+    """The lock file, owner-only (an existing one is tightened where fchmod exists)."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if hasattr(os, "fchmod"):
+            with contextlib.suppress(OSError):
+                os.fchmod(fd, 0o600)
+        return os.fdopen(fd, "a+b")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 @contextlib.contextmanager
 def _file_lock(voices_dir: Path | None = None):
     """Exclusive lock on the voices folder across processes and threads, taken by every
@@ -178,7 +191,7 @@ def _file_lock(voices_dir: Path | None = None):
     if _gave_up(d):  # inside store_lock_best_effort that already waited: never wait twice
         raise OSError("the voice data is in use by another process; try again")
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with open(d / LOCK_FILE, "a+b") as f:
+    with _open_lock(d / LOCK_FILE) as f:
         if os.name == "nt":
             _lock_windows(f)
         else:

@@ -25,9 +25,9 @@ import sys
 import threading
 import time
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import fields
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -51,7 +51,7 @@ from ..config import (
     validate_settings,
 )
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
-from ..models import Mode, SessionInfo, TriggerKind, discard_session
+from ..models import Mode, SessionInfo, TriggerKind, discard_session, recording_lock_held
 from ..recorder import make_private_dir
 from ..retention import purge_old_audio, purge_transcribed_audio
 from ..sensitivity import PRESETS as SENSITIVITY_PRESETS
@@ -233,6 +233,78 @@ def untranscribed_sessions(output_dir: Path) -> list[SessionInfo]:
             continue
         if s.ended_at is not None and not s.transcribed and s.tracks:
             out.append(s)
+    return out
+
+
+# A track written this recently may belong to another writer (``recandcc record``, a
+# folder synced from another Mac): recovery waits until it has been quiet this long.
+RECOVER_QUIET_S = 120.0
+
+
+def recover_interrupted_sessions(
+    output_dir: Path,
+    *,
+    started_before: datetime,
+    busy: Callable[[], Iterable[Path | str]] = tuple,
+) -> list[SessionInfo]:
+    """Finish sessions a crash, force-quit or power loss cut off (session.json still has no
+    ``ended_at``), so ``untranscribed_sessions`` re-queues them; returns those finished.
+
+    ``ended_at`` becomes ``started_at`` plus the longest track's length (``sf.info`` reads
+    WAVs whose header was never finalised). Tracks with no frames leave ``tracks`` but stay
+    on disk; a session with no frames at all, or with a track that can't be read now (held
+    open, evicted by a sync client), is left as it is and retried at the next start.
+
+    Never touched: sessions that began at or after ``started_before`` (this app's start),
+    whose WAVs were written less than ``RECOVER_QUIET_S`` before it, that a live process
+    records into (``RECORDING_LOCK``), or that ``busy()`` lists (the live session and those
+    in flight; asked again just before each write). Blocking I/O: call it on a worker
+    thread."""
+    import soundfile as sf
+
+    def is_busy(d: Path) -> bool:
+        return d.resolve() in {Path(p).resolve() for p in busy()}
+
+    cutoff = started_before.timestamp()
+    out = []
+    for f in sorted(Path(output_dir).glob(f"*/*/{SessionInfo.FILENAME}")):
+        d = f.parent
+        try:
+            if (d / SessionInfo.DISCARD_MARKER).exists():
+                continue
+            s = SessionInfo.load(d)
+            if s.ended_at is not None or s.transcribed or s.started_at.timestamp() >= cutoff:
+                continue
+            if is_busy(d) or recording_lock_held(d):
+                continue
+        except Exception:  # noqa: BLE001 - unreadable: left alone
+            continue
+        longest, newest, kept = 0.0, float("-inf"), {}
+        try:
+            for track, name in s.tracks.items():
+                p = d / name
+                newest = max(newest, p.stat().st_mtime)
+                info = sf.info(str(p))
+                if info.frames > 0:
+                    kept[track] = name
+                    longest = max(longest, info.frames / info.samplerate)
+        except Exception:  # noqa: BLE001 - unreadable now (or deleted): retried next start
+            log.debug("interrupted session %s: a track can't be read; left alone", d.name)
+            continue
+        if not kept or newest >= cutoff - RECOVER_QUIET_S:  # no audio, or written lately
+            continue
+        try:
+            if is_busy(d):  # it may have become the live session meanwhile
+                continue
+            s.tracks = kept
+            s.ended_at = s.started_at + timedelta(seconds=longest)
+            s.update_metrics("recording", {"audio_s": round(longest, 1), "recovered": True})
+            s.save()
+        except Exception:
+            log.exception("could not save recovered session %s", d)
+            continue
+        log.info("recovered interrupted session %s (%.1fs)", d, longest)
+        out.append(s)
     return out
 
 
@@ -966,12 +1038,31 @@ class Controller:
         except Exception:
             log.exception("deleting leftover audio failed")
 
+    def _recover_interrupted(self) -> None:
+        """Give sessions an earlier run never stopped (crash, force-quit, power loss) an end
+        time, so they are re-queued. Never the live one: it started after this controller
+        (and is skipped by folder too, in case a room pre-roll moved its start earlier)."""
+
+        def busy() -> set[Path]:
+            live = self.engine.state.session_dir  # engine lock taken and released here
+            with self._lock:
+                out = set(self._in_flight)
+            return out | {Path(live)} if live else out
+
+        try:
+            recover_interrupted_sessions(
+                self.cfg.output_dir, started_before=self._started_at, busy=busy
+            )
+        except Exception:
+            log.exception("recovering interrupted sessions failed")
+
     def _resubmit_unfinished(self) -> None:
         # Purge first, on this same thread: once a re-queued session is transcribed, its
         # diarization may still need the WAVs, and the purge must not see it as leftover.
         self._resubmitting = True  # note_busy: untranscribed sessions may be about to queue
         try:
             self._purge_leftover_audio()
+            self._recover_interrupted()
             for s in untranscribed_sessions(self.cfg.output_dir):
                 log.info("re-queueing untranscribed session %s", s.directory)
                 self.tq.submit(s)
