@@ -8,7 +8,7 @@ Unset (None) leaves the configured thresholds exactly as they are, with no noise
 
 from __future__ import annotations
 
-from .config import CONFIG_LOCK, DetectionConfig
+from .config import DetectionConfig
 
 # Menu presets: label -> (outside, inside). "Off" = both unset (the plain thresholds).
 PRESETS: dict[str, tuple[int | None, int | None]] = {
@@ -62,14 +62,5 @@ def current_preset(det: DetectionConfig) -> str | None:
     return next((name for name, vals in PRESETS.items() if vals == now), None)
 
 
-SENSITIVITY_KEYS = ("outside_sensitivity", "inside_sensitivity")
-
-
-def apply_preset(det: DetectionConfig, name: str, *, lock: bool = True) -> None:
-    """Set both sensitivities. lock=False for the UI thread, which must never wait on a save
-    (each attribute write is atomic; the save worker re-reads them under CONFIG_LOCK)."""
-    if not lock:
-        det.outside_sensitivity, det.inside_sensitivity = PRESETS[name]
-        return
-    with CONFIG_LOCK:  # never between a reload's or a save's reads
-        det.outside_sensitivity, det.inside_sensitivity = PRESETS[name]
+def apply_preset(det: DetectionConfig, name: str) -> None:
+    det.outside_sensitivity, det.inside_sensitivity = PRESETS[name]

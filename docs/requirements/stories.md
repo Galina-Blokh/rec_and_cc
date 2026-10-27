@@ -141,6 +141,11 @@ while I decide.*
   with noisy audio, **then** the number of speakers is estimated per session instead of fixed
   by a threshold, within `min_speakers` / `max_speakers` if set, and an hour still
   diarizes in seconds.
+- **Given** `diarize_overlap = true` and a speaker change without a pause, or two speakers
+  at once, **then** the turn
+  boundary follows the change (segmentation model), overlapped speech gets the dominant
+  speaker, and that segment has `"overlap": true` in `transcript.json` (only there); without
+  the segmentation model (off, offline or broken), fixed ~2 s windows as before.
 
 ### US-13 Readable transcripts in private folders
 - **Then** each session is saved under `<output_dir>/<date>/<time>_<app>/` with
@@ -153,7 +158,7 @@ while I decide.*
 - **Given** the models are on disk, **when** all network access is blocked, **then** a
   session records and transcribes end to end.
 - **Then** models download once: every offered Whisper model (`tiny` to `large-v3-turbo`,
-  both backends) pinned to an exact revision, the speaker model verified by SHA-256 (a bad
+  both backends) pinned to an exact revision, the speaker and segmentation models verified by SHA-256 (a bad
   checksum is rejected). A custom repo without a pin is refused unless
   `allow_unpinned_models = true`.
 - **Then** RecAndCC uploads nothing itself. The default output folder may still be synced
@@ -347,8 +352,8 @@ noisy café.* (#7)
 - **Then** a room session's live transcript starts with the whole pre-roll, even when a low
   outside sensitivity widened it beyond `room_preroll_s`.
 - **Given** the menu "Sensitivity" (Off / Quiet room / Normal / Noisy place), **then** the
-  preset is saved to `config.toml` (saves are serialized and atomic) and applies at once; a
-  hand edit not yet reloaded is applied first, so the click doesn't overwrite it.
+  preset applies at once and only its two keys are written to `config.toml`, so hand edits
+  to other keys are kept; "Off" removes them.
 - **Not yet:** a settings window with live level meters, a per-source speech score, caption
   priority between the tracks.
 

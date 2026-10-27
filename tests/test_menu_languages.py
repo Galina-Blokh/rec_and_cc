@@ -3,6 +3,7 @@
 Stories: US-19.
 """
 
+import os
 import threading
 import tomllib
 
@@ -34,7 +35,7 @@ def _ctrl(tmp_path, monkeypatch, languages: str):
     path.write_text(f'[detection]\nmode = "off"\n[transcription]\nlanguages = {languages}\n')
     cfg = load_config(path)
     monkeypatch.setattr(common, "CONFIG_PATH", path)
-    monkeypatch.setattr(common, "load_config", lambda *_a: load_config(path))
+    monkeypatch.setattr(common, "load_config", lambda: load_config(path))
     ctrl = Controller(cfg, monitor=Monitor(), recorder=object(), tq=Q(), start_threads=False)
     assert cfg.detection.mode == Mode.OFF
     return ctrl, path
@@ -81,7 +82,7 @@ def test_menu_language_change_reaches_the_transcriber_at_once(tmp_path, monkeypa
 def test_hand_edited_languages_are_picked_up_live(tmp_path, monkeypatch):
     ctrl, path = _ctrl(tmp_path, monkeypatch, '["en", "ru"]')
     path.write_text('[transcription]\nlanguages = ["iw"]\n')
-    ctrl._config_sig = None
+    ctrl._config_mtime = -1.0
     ctrl._maybe_reload_config()
     assert ctrl.cfg.transcription.languages == ["he"]
     _toggle(ctrl, "en")  # the reloaded spelling is kept on the next save
@@ -90,17 +91,18 @@ def test_hand_edited_languages_are_picked_up_live(tmp_path, monkeypatch):
 
 def test_menu_save_keeps_other_keys_edited_by_hand(tmp_path, monkeypatch):
     ctrl, path = _ctrl(tmp_path, monkeypatch, '["en", "ru"]')
-    ctrl._config_sig = common.file_signature(path)
+    ctrl._config_mtime = ctrl._mtime()
     text = "live_captions = false\n" + path.read_text() + "audio_retention_days = 7\n"
     path.write_text(text)  # edited, not reloaded yet
+    os.utime(path, (ctrl._config_mtime + 5, ctrl._config_mtime + 5))  # coarse clocks
     _toggle(ctrl, "he")
     saved = load_config(path)
     assert saved.live_captions is False  # the hand edits survive the menu save
     assert saved.transcription.audio_retention_days == 7
     assert saved.transcription.languages == ["en", "ru", "he"]
-    ctrl._maybe_reload_config()  # and are still picked up: the edit wasn't swallowed
+    ctrl._maybe_reload_config()  # and are still picked up: the edit's mtime wasn't swallowed
     assert ctrl.cfg.transcription.languages == ["en", "ru", "he"]
-    assert ctrl._config_sig == common.file_signature(path)
+    assert ctrl._config_mtime == ctrl._mtime()
 
 
 def test_menu_save_leaves_an_unparseable_config_alone(tmp_path, monkeypatch):

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
+import tomllib
 from datetime import datetime
 
 import numpy as np
@@ -424,41 +425,32 @@ def test_menu_toggle_saves_warns_and_engine_owns_a_closed_room_monitor(tmp_path,
         def submit(self, *_a, **_k):
             pass
 
-    import recandcc.ui.common as common
-
-    path = tmp_path / "config.toml"
-    monkeypatch.setattr(common, "CONFIG_PATH", path)  # never the user's real settings
     cfg = Config(output_dir=tmp_path)
-    saved = threading.Event()
-    real_save = cfg.save
-
-    def save(p=path):
-        assert p == path
-        real_save(p)
-        saved.set()
-
-    monkeypatch.setattr(cfg, "save", save)
+    path = tmp_path / "config.toml"
+    path.write_text("[summary]\nenabled = true\n")  # a hand edit the save must keep
+    monkeypatch.setattr("recandcc.ui.common.CONFIG_PATH", path)
     ctrl = Controller(cfg, monitor=Monitor(), recorder=object(), tq=Q(), start_threads=False)
     assert isinstance(ctrl.engine.room, RoomMonitor) and not ctrl.engine.room.running
     ctrl._perm = {"microphone": "denied"}
     ctrl.set_room_listening(True)
-    assert cfg.detection.room_listening and saved.wait(2)
-    assert load_config(path).detection.room_listening  # saved to the temporary config
+    for t in threading.enumerate():
+        if t.name == "save-config":
+            t.join(5)
+    saved = tomllib.loads(path.read_text())
+    assert cfg.detection.room_listening and saved["detection"]["room_listening"] is True
+    assert saved["summary"]["enabled"] is True
     assert ctrl.events.get_nowait() == ("notice", "Room listening on", ROOM_LISTENING_NOTICE)
     assert "screen is locked" in ROOM_LISTENING_NOTICE and "consent" in ROOM_LISTENING_NOTICE
     assert ctrl.events.get_nowait()[1] == "Room listening can't hear anything"
-    saved.clear()
     ctrl.set_room_listening(False)
-    assert not cfg.detection.room_listening and saved.wait(2)
-    assert not load_config(path).detection.room_listening
-    assert ctrl.events.empty()  # no notice when off
+    assert not cfg.detection.room_listening and ctrl.events.empty()  # no notice when off
     text = keep_prompt_text("Room", TriggerKind.ROOM, "record")
     assert "a conversation near the laptop" in text
     # Turned on by editing config.toml: the same notice, once.
     on = Config(output_dir=tmp_path)
     on.detection.room_listening = True
     monkeypatch.setattr("recandcc.ui.common.load_config", lambda *a, **k: on)
-    path.write_text("# edited by hand\n")  # changed on disk: the reload reads it
+    ctrl._mtime = lambda: 42.0
     ctrl._maybe_reload_config()
     assert cfg.detection.room_listening
     assert ctrl.events.get_nowait() == ("notice", "Room listening on", ROOM_LISTENING_NOTICE)

@@ -24,36 +24,33 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import fields, is_dataclass
+from dataclasses import fields
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from .. import hotkey as hotkey_mod
 from ..cloudsync import cloud_sync_provider, warning_text
 from ..config import (
-    CONFIG_LOCK,
     CONFIG_PATH,
-    LANG_LOCK,
     LOG_DIR,
     Config,
-    file_signature,
     load_config,
     normalize_languages,
-    save_languages,
-    written_by_us,
+    save_keys,
 )
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind, discard_session
 from ..recorder import make_private_dir
 from ..retention import purge_old_audio, purge_transcribed_audio
 from ..sensitivity import PRESETS as SENSITIVITY_PRESETS
-from ..sensitivity import SENSITIVITY_KEYS, current_preset, room_trigger
+from ..sensitivity import apply_preset, current_preset, room_trigger
 
 if TYPE_CHECKING:
     from ..transcribe.live import LiveTranscriber
 
 log = logging.getLogger(__name__)
+CFG_HOTKEY = object()  # apply_hotkey(): use cfg.hotkey
 
 RECENT_COUNT = 10
 SEARCH_LIMIT = 20
@@ -261,16 +258,17 @@ class Controller:
         self._recent: list[Path] = []
         self._refreshing = False
         self._last_refresh = 0.0
-        self._config_sig = file_signature(CONFIG_PATH)
-        self._lang_lock = LANG_LOCK  # transcription.languages + its raw spelling
-        # Menu values set in memory but not saved yet: field -> (value, click number).
-        self._pending: dict[str, tuple[object, int]] = {}
-        self._pending_lock = threading.Lock()
-        self._pending_seq = 0
+        self._config_mtime = self._mtime()
+        self._save_lock = threading.Lock()  # menu writes to config.toml
+        self._lang_lock = threading.Lock()  # transcription.languages + its raw spelling
         self._summaries = None  # SummaryQueue, created on the first summary
         self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
         # global shortcut
         self._hotkey_lock = threading.Lock()
+        # Serializes whole apply_hotkey calls (startup and a config reload can overlap), and
+        # what is registered, so the same shortcut is never registered twice.
+        self._apply_hotkey_lock = threading.Lock()
+        self._hotkey_text: str | None = None
         self._hotkey = None  # HotkeyListener / WinHotkeyListener
         self._hotkey_label = ""  # "⌘⇧R" while the shortcut is (being) registered
         self._last_hotkey = float("-inf")
@@ -323,15 +321,27 @@ class Controller:
             threading.Thread(target=self._resubmit_unfinished, daemon=True, name="resubmit").start()
             threading.Thread(target=self._retention_loop, daemon=True, name="retention").start()
             self.refresh_async(force=True)
-            self.apply_hotkey(cfg.hotkey)
+            self.apply_hotkey()
 
     # --- global shortcut
-    def apply_hotkey(self, text: str | None, factory=None) -> None:
-        """(Re)register the global shortcut; ``""`` disables it. Blocks briefly while the old
-        listener shuts down, so call it off the main thread. ``factory`` is for tests."""
+    def apply_hotkey(self, text: str | None | object = CFG_HOTKEY, factory=None) -> None:
+        """(Re)register the global shortcut; ``""`` disables it. By default the configured
+        ``cfg.hotkey``, read under the lock, so of two overlapping calls the later one wins and
+        the same shortcut is never registered twice. Blocks briefly while the old listener
+        shuts down, so call it off the main thread. ``factory`` is for tests."""
+        with self._apply_hotkey_lock:
+            spec = cast("str | None", self.cfg.hotkey if text is CFG_HOTKEY else text)
+            with self._hotkey_lock:
+                current = self._hotkey_text if (self._hotkey is not None or not spec) else None
+            if current is not None and spec == current and not getattr(self, "_shut", False):
+                return  # already registered (or already disabled)
+            self._apply_hotkey_locked(spec, factory)
+
+    def _apply_hotkey_locked(self, text: str | None, factory=None) -> None:
         factory = factory or hotkey_mod.create_listener
         with self._hotkey_lock:
             old, self._hotkey, self._hotkey_label = self._hotkey, None, ""
+            self._hotkey_text = None
         if old is not None:
             with contextlib.suppress(Exception):
                 old.close()
@@ -345,6 +355,8 @@ class Controller:
             return
         if parsed is None:
             log.info("global shortcut disabled")
+            with self._hotkey_lock:
+                self._hotkey_text = text or ""
             return
         with self._hotkey_lock:  # before the listener exists: its on_error may fire at once
             self._hotkey_label = parsed.label()
@@ -355,6 +367,7 @@ class Controller:
             listener = None
         with self._hotkey_lock:
             self._hotkey = listener
+            self._hotkey_text = text if listener is not None else None
             if listener is None:
                 self._hotkey_label = ""
 
@@ -695,58 +708,40 @@ class Controller:
             ("notice", "Transcripts folder is cloud-synced", warning_text(out, provider))
         )
 
-    def _maybe_reload_config(self) -> None:
-        """Apply edits made to config.toml by hand. Our own saves are recognised and skipped;
-        the read and apply hold the config lock, so a menu click saving at the same time is
-        neither lost nor read half-written, and menu values not saved yet are re-applied on
-        top. A changed shortcut is applied after the lock is released."""
-        with CONFIG_LOCK:
-            hotkey = self._reload_locked()
-        if hotkey is not None:
-            self.apply_hotkey(hotkey)
-
-    def _reload_locked(self) -> str | None:
-        """Under CONFIG_LOCK: if config.toml changed on disk (not by us), copy every setting of
-        every section into the live config objects, in place (the engine and the room monitor
-        keep references to them), then re-apply pending menu values. Returns the new hotkey if
-        it changed, for the caller to apply outside the lock."""
-        sig = file_signature(CONFIG_PATH)
-        if sig == self._config_sig:
-            return None
-        if written_by_us(CONFIG_PATH):
-            self._config_sig = sig
-            return None
-        if sig is not None and sig[1] == 0:  # empty: being rewritten in place, retry
-            log.debug("config.toml is empty; keeping current settings")
-            return None
-        self._config_sig = sig
+    def _mtime(self) -> float:
         try:
-            new = load_config(CONFIG_PATH)
-        except Exception:
-            log.warning("config.toml is invalid; keeping current settings", exc_info=True)
-            self.post_notice("Settings not applied", "config.toml could not be parsed")
-            return None
-        cfg = self.cfg
-        was_listening = cfg.detection.room_listening
-        old_hotkey = cfg.hotkey
-        sections = {f.name for f in fields(cfg) if is_dataclass(getattr(cfg, f.name))}
-        for f in fields(cfg):
-            if f.name not in sections:
-                setattr(cfg, f.name, getattr(new, f.name))
-        for name in sections - {"transcription"}:
-            live, loaded = getattr(cfg, name), getattr(new, name)
-            for f in fields(loaded):
-                setattr(live, f.name, getattr(loaded, f.name))
-        tr, new_tr = cfg.transcription, new.transcription
-        with self._lang_lock:  # languages + raw spelling together: save() pairs them
-            for f in fields(new_tr):
-                setattr(tr, f.name, getattr(new_tr, f.name))
-            tr._raw_languages = getattr(new_tr, "_raw_languages", None)  # type: ignore[attr-defined]
-        self._reapply_pending()
-        if cfg.detection.room_listening and not was_listening:  # turned on by hand
+            return CONFIG_PATH.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def _maybe_reload_config(self) -> None:
+        """Apply edits made to config.toml by hand (detection settings, output dir, hotkey,
+        languages). Under ``_save_lock`` so a menu write never interleaves with the read."""
+        with self._save_lock:
+            m = self._mtime()
+            if m == self._config_mtime:
+                return
+            self._config_mtime = m
+            try:
+                new = load_config()
+            except Exception:
+                log.exception("config.toml is invalid; keeping current settings")
+                self.post_notice("Settings not applied", "config.toml could not be parsed")
+                return
+        was_listening = self.cfg.detection.room_listening
+        for f in fields(new.detection):
+            setattr(self.cfg.detection, f.name, getattr(new.detection, f.name))
+        if self.cfg.detection.room_listening and not was_listening:  # turned on by hand
             self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
+        self.cfg.output_dir = new.output_dir
+        tr, new_tr = self.cfg.transcription, new.transcription
+        with self._lang_lock:  # both together: save() pairs them
+            tr._raw_languages = getattr(new_tr, "_raw_languages", None)  # type: ignore[attr-defined]
+            tr.languages = new_tr.languages
+        if new.hotkey != self.cfg.hotkey:
+            self.cfg.hotkey = new.hotkey
+            self.apply_hotkey()  # reads cfg.hotkey under the hotkey lock
         log.info("config reloaded from %s", CONFIG_PATH)
-        return cfg.hotkey if cfg.hotkey != old_hotkey else None
 
     # --- settings changed from the menu (main thread; saved on a worker thread)
     def toggle_language(self, code: str) -> None:
@@ -764,31 +759,50 @@ class Controller:
         if new is None:
             self.post_notice("Languages", LANGUAGES_KEEP_ONE)
             return
-        threading.Thread(target=self._save_languages, daemon=True, name="save-config").start()
+        self.save_settings("transcription.languages", title="Languages")
 
-    def _save_languages(self) -> None:
-        """Write the menu's languages into config.toml, changing nothing else in the file: a
-        hand edit made since the last reload is kept, and picked up by the next refresh."""
-        tr = self.cfg.transcription
-        with CONFIG_LOCK:
-            with self._lang_lock:
-                raw = getattr(tr, "_raw_languages", None)
-                value = list(raw) if raw is not None else list(tr.languages)
-            sig = file_signature(CONFIG_PATH)  # changed on disk, not reloaded yet?
-            edited = sig != self._config_sig and not written_by_us(CONFIG_PATH)
+    def save_settings(self, *keys: str, title: str = "Settings") -> None:
+        """Save the in-memory value of each dotted key ("live_captions",
+        "transcription.audio_retention_days") to config.toml on a worker thread. Menu
+        callbacks use this instead of ``cfg.save()``, which would overwrite hand edits."""
+        kw = {"title": title}
+        t = threading.Thread(target=self.write_settings, args=keys, kwargs=kw, name="save-config")
+        t.daemon = True
+        t.start()
+
+    def write_settings(self, *keys: str, title: str = "Settings") -> None:
+        """Blocking part of ``save_settings``: a read-modify-write of only ``keys``, so a hand
+        edit made since the last reload is kept (and picked up by the next refresh). The values
+        are read under ``_save_lock``: of two quick menu saves, the last one wins."""
+        with self._save_lock:
+            values = {key: self._setting(key) for key in keys}
+            edited = self._mtime() != self._config_mtime  # changed on disk, not reloaded yet
             try:
                 try:
-                    save_languages(value, CONFIG_PATH)
+                    mtime = save_keys(CONFIG_PATH, values)
                 except FileNotFoundError:
-                    self.cfg.save(CONFIG_PATH)
+                    self.cfg.save(CONFIG_PATH)  # no file yet: write a fresh one
+                    mtime = self._mtime()
                 if not edited:
-                    self._config_sig = file_signature(CONFIG_PATH)  # ours: nothing to reload
+                    self._config_mtime = mtime  # our own write: nothing to reload
             except ValueError:  # invalid TOML (mid-edit?): don't overwrite the user's file
-                log.warning("config.toml could not be parsed; languages not saved")
-                self.post_notice("Languages not saved", "config.toml could not be parsed")
+                log.warning("config.toml could not be parsed; %s not saved", ", ".join(keys))
+                self.post_notice(f"{title} not saved", "config.toml could not be parsed")
             except Exception:
                 log.exception("saving settings failed")
                 self.post_notice("Settings not saved", "config.toml could not be written")
+
+    def _setting(self, key: str):
+        """The TOML value of a dotted config key, as the menu last set it."""
+        if key == "transcription.languages":  # keep the user's own spelling ("iw")
+            tr = self.cfg.transcription
+            with self._lang_lock:
+                raw = getattr(tr, "_raw_languages", None)
+                return list(raw) if raw is not None else list(tr.languages)
+        value = self.cfg
+        for name in key.split("."):
+            value = getattr(value, name)
+        return value
 
     @property
     def permissions(self) -> dict[str, str]:
@@ -847,63 +861,12 @@ class Controller:
             return f"Waiting for answer: record {st.app}?"
         return f"Idle — {str(st.mode).capitalize()} mode"
 
-    def _menu_set(self, **values) -> None:
-        """A menu click (UI thread): set detection fields in memory at once, remember them as
-        pending until saved, and save on a worker (the UI thread never waits on CONFIG_LOCK).
-        """
-        with self._pending_lock:
-            for k, v in values.items():
-                self._pending_seq += 1
-                self._pending[k] = (v, self._pending_seq)
-                setattr(self.cfg.detection, k, v)
-        self._save_settings()
-
-    def _reapply_pending(self) -> None:
-        """After a reload: menu values not saved yet win over the file."""
-        with self._pending_lock:
-            for k, (v, _seq) in self._pending.items():
-                setattr(self.cfg.detection, k, v)
-
-    def _save_settings(self) -> None:
-        threading.Thread(target=self._save_settings_now, daemon=True, name="settings-save").start()
-
-    def _save_settings_now(self) -> None:
-        """Under CONFIG_LOCK: a hand edit not yet reloaded is applied first (with every pending
-        menu value on top), a config.toml that doesn't parse is left alone, then the settings
-        are saved and the pending values this save wrote are cleared."""
-        hotkey = None
-        try:
-            with CONFIG_LOCK:
-                with self._pending_lock:
-                    snapshot = dict(self._pending)
-                sig = file_signature(CONFIG_PATH)
-                if sig is not None and sig != self._config_sig and not written_by_us(CONFIG_PATH):
-                    try:
-                        load_config(CONFIG_PATH)
-                    except Exception:  # being edited by hand: don't overwrite it
-                        log.warning("config.toml could not be parsed; settings not saved")
-                        self.post_notice("Settings not saved", "config.toml could not be parsed")
-                        return
-                    hotkey = self._reload_locked()  # re-applies the pending values
-                self._reapply_pending()
-                self.cfg.save(CONFIG_PATH)
-                self._config_sig = file_signature(CONFIG_PATH)
-                with self._pending_lock:  # a newer click keeps its entry for its own save
-                    for k, entry in snapshot.items():
-                        if self._pending.get(k) == entry:
-                            del self._pending[k]
-        except Exception:
-            log.exception("saving settings failed")
-            self.post_notice("Settings not saved", "config.toml could not be written")
-        if hotkey is not None:  # outside CONFIG_LOCK: closing the old listener may block
-            self.apply_hotkey(hotkey)
-
     def set_room_listening(self, on: bool) -> None:
         """Menu toggle: the engine opens or closes the room mic (and stops a room session) on
         its next tick. Turning it on explains the always-on mic indicator and the consent
-        question. Saved by the settings worker (the UI thread never waits on CONFIG_LOCK);
-        it saves the latest in-memory value, so quick toggles can't race."""
-        self._menu_set(room_listening=bool(on))
+        question. Saves only this key, like the other toggles (the last toggle wins)."""
+        self.cfg.detection.room_listening = bool(on)
+        self.save_settings("detection.room_listening")
         if on:
             self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
             if self.permissions.get("microphone") == "denied":
@@ -913,10 +876,12 @@ class Controller:
                 )
 
     def set_sensitivity(self, preset: str) -> None:
-        """Sensitivity menu (any thread): apply a preset from ``sensitivity.PRESETS``. The
-        engine picks the new thresholds up on its next tick. The save worker applies a hand
-        edit not yet reloaded first, so saving the preset doesn't overwrite it."""
-        self._menu_set(**dict(zip(SENSITIVITY_KEYS, SENSITIVITY_PRESETS[preset], strict=True)))
+        """Sensitivity menu: apply a preset from ``sensitivity.PRESETS`` in memory (the engine
+        and the room monitor read it on their next tick) and save only these two keys."""
+        apply_preset(self.cfg.detection, preset)
+        self.save_settings(
+            "detection.outside_sensitivity", "detection.inside_sensitivity", title="Sensitivity"
+        )
 
     def sensitivity_preset(self) -> str | None:
         return current_preset(self.cfg.detection)

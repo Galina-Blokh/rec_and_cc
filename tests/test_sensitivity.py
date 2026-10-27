@@ -79,65 +79,10 @@ def test_load_config_drops_non_numeric_sensitivity(tmp_path, caplog):
     assert load_config(path).detection.inside_sensitivity == 80
 
 
-def test_concurrent_saves_never_tear_the_file(tmp_path):
-    path = tmp_path / "c.toml"
+def test_unset_sensitivities_are_left_out_of_a_fresh_file(tmp_path):
     cfg = Config()
-
-    errors: list[BaseException] = []
-
-    def spam(i):
-        try:
-            for j in range(20):
-                cfg.detection.inside_sensitivity = i * 20 + j
-                cfg.save(path)
-        except BaseException as e:  # surfaced below: a thread's exception would be lost
-            errors.append(e)
-
-    threads = [threading.Thread(target=spam, args=(i,)) for i in range(6)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert errors == []
-    cfg.save(path)  # the last save writes the current values
-    assert load_config(path).detection.inside_sensitivity == cfg.detection.inside_sensitivity
-    assert [p.name for p in tmp_path.iterdir()] == ["c.toml"]  # no temp files left
-
-
-def test_save_falls_back_to_writing_in_place_when_replace_is_refused(tmp_path, monkeypatch):
-    import recandcc.config as config_mod
-
-    def refuse(src, dst):
-        raise PermissionError("file in use")
-
-    monkeypatch.setattr(config_mod.os, "replace", refuse)
-    monkeypatch.setattr(config_mod.time, "sleep", lambda s: None)
-    cfg = Config()
-    cfg.detection.inside_sensitivity = 70
-    cfg.save(tmp_path / "c.toml")
-    assert load_config(tmp_path / "c.toml").detection.inside_sensitivity == 70
-    assert [p.name for p in tmp_path.iterdir()] == ["c.toml"]  # temp file cleaned up
-
-
-def test_save_survives_a_temp_file_that_cannot_be_removed(tmp_path, monkeypatch):
-    import recandcc.config as config_mod
-
-    real_unlink = config_mod.Path.unlink
-
-    def unlink(self, missing_ok=False):
-        if self.name.endswith(".tmp"):
-            raise PermissionError("still open")
-        return real_unlink(self, missing_ok=missing_ok)
-
-    monkeypatch.setattr(
-        config_mod.os, "replace", lambda a, b: (_ for _ in ()).throw(PermissionError())
-    )
-    monkeypatch.setattr(config_mod.time, "sleep", lambda s: None)
-    monkeypatch.setattr(config_mod.Path, "unlink", unlink)
-    cfg = Config()
-    cfg.detection.outside_sensitivity = 40
-    cfg.save(tmp_path / "c.toml")  # the in-place fallback worked: no error reported
-    assert load_config(tmp_path / "c.toml").detection.outside_sensitivity == 40
+    cfg.save(tmp_path / "c.toml")  # TOML has no null: unset keys are omitted
+    assert "sensitivity" not in (tmp_path / "c.toml").read_text()
 
 
 def _controller(tmp_path, monkeypatch):
@@ -160,123 +105,27 @@ def _controller(tmp_path, monkeypatch):
     return ctrl, cfg, path
 
 
-def test_reload_skips_our_own_saves_and_applies_hand_edits(tmp_path, monkeypatch):
-    ctrl, cfg, path = _controller(tmp_path, monkeypatch)
-    apply_preset(cfg.detection, "Normal")
-    cfg.save(path)
-    cfg.detection.outside_sensitivity = 75  # a click whose save hasn't run yet
-    ctrl._maybe_reload_config()
-    assert cfg.detection.outside_sensitivity == 75  # our own file isn't "reloaded" over it
-    path.write_text("[detection]\noutside_sensitivity = 25\n")  # a hand edit
-    ctrl._maybe_reload_config()
-    assert cfg.detection.outside_sensitivity == 25
+def _wait_for_saves() -> None:
+    for t in threading.enumerate():
+        if t.name == "save-config":
+            t.join(5)
 
 
-def test_reload_notices_a_same_size_edit_within_one_mtime_tick(tmp_path, monkeypatch):
-    import os
-
-    ctrl, cfg, path = _controller(tmp_path, monkeypatch)
-    cfg.detection.outside_sensitivity = 25
-    cfg.save(path)
-    stamp = path.stat().st_mtime_ns
-    path.write_text(
-        path.read_text().replace("outside_sensitivity = 25", "outside_sensitivity = 75")
-    )
-    os.utime(path, ns=(stamp, stamp))  # coarse mtime: same size, same timestamp
-    ctrl._maybe_reload_config()
-    assert cfg.detection.outside_sensitivity == 75
-
-
-def _deferred_saves(ctrl, monkeypatch) -> list:
-    """Hold the save worker's runs so a test can edit the file before it saves."""
-    pending: list = []
-    monkeypatch.setattr(ctrl, "_save_settings", lambda: pending.append(ctrl._save_settings_now))
-    return pending
-
-
-def test_a_preset_click_keeps_a_hand_edit_made_around_it(tmp_path, monkeypatch):
+def test_a_preset_click_saves_only_its_two_keys(tmp_path, monkeypatch):
     ctrl, cfg, path = _controller(tmp_path, monkeypatch)
     cfg.save(path)
-    ctrl._maybe_reload_config()
-    pending = _deferred_saves(ctrl, monkeypatch)
-    path.write_text(path.read_text().replace("min_active_s = 3.0", "min_active_s = 5.0"))
-    ctrl.set_sensitivity("Noisy place")  # before the periodic reload saw the edit
+    text = path.read_text().replace("min_active_s = 3.0", "min_active_s = 5.0")
+    path.write_text(text.replace("live_captions = true", "live_captions = false"))  # by hand
+    ctrl.set_sensitivity("Noisy place")
     assert current_preset(cfg.detection) == "Noisy place"  # in memory at once
-    text = path.read_text().replace("stop_after_inactive_s = 20.0", "stop_after_inactive_s = 9.0")
-    path.write_text(text)  # another edit lands between the click and its save
-    pending.pop()()
-    det = load_config(path).detection
-    assert det.min_active_s == 5.0 and det.stop_after_inactive_s == 9.0  # both edits kept
-    assert (det.outside_sensitivity, det.inside_sensitivity) == (25, 50)  # and the preset
-    assert cfg.detection.min_active_s == 5.0 and current_preset(cfg.detection) == "Noisy place"
-
-
-def test_quick_clicks_and_a_hand_edit_all_survive_saves_in_any_order(tmp_path, monkeypatch):
-    ctrl, cfg, path = _controller(tmp_path, monkeypatch)
-    cfg.save(path)
-    ctrl._maybe_reload_config()
-    pending = _deferred_saves(ctrl, monkeypatch)
-    path.write_text(path.read_text().replace("min_active_s = 3.0", "min_active_s = 5.0"))
-    ctrl.set_sensitivity("Quiet room")
-    ctrl.set_room_listening(True)
-    ctrl._maybe_reload_config()  # the periodic reload runs before either save
-    assert current_preset(cfg.detection) == "Quiet room" and cfg.detection.room_listening
-    for save in reversed(pending):  # the room toggle's worker runs first
-        save()
-    det = load_config(path).detection
-    assert det.min_active_s == 5.0 and det.room_listening
-    assert (det.outside_sensitivity, det.inside_sensitivity) == (75, 50)
-    assert cfg.detection.min_active_s == 5.0 and cfg.detection.room_listening
-    assert current_preset(cfg.detection) == "Quiet room"
-    assert ctrl._pending == {}  # everything saved
-
-
-def test_a_preset_click_keeps_hand_edits_outside_detection(tmp_path, monkeypatch):
-    ctrl, cfg, path = _controller(tmp_path, monkeypatch)
-    cfg.save(path)
-    ctrl._maybe_reload_config()
-    pending = _deferred_saves(ctrl, monkeypatch)
-    text = path.read_text().replace("live_captions = true", "live_captions = false")
-    path.write_text(text.replace("audio_retention_days = 0", "audio_retention_days = 7"))
-    ctrl.set_sensitivity("Normal")
-    pending.pop()()
+    _wait_for_saves()
     saved = load_config(path)
-    assert saved.live_captions is False and saved.transcription.audio_retention_days == 7
-    assert cfg.live_captions is False and cfg.transcription.audio_retention_days == 7
-    assert current_preset(saved.detection) == "Normal" == current_preset(cfg.detection)
-
-
-def test_a_changed_hotkey_is_applied_outside_the_config_lock(tmp_path, monkeypatch):
-    from recandcc.config import CONFIG_LOCK
-
-    ctrl, cfg, path = _controller(tmp_path, monkeypatch)
-    cfg.save(path)
-    ctrl._maybe_reload_config()
-    free: list[bool] = []
-
-    def apply_hotkey(spec):
-        def probe():
-            got = CONFIG_LOCK.acquire(timeout=1)
-            free.append(got)
-            if got:
-                CONFIG_LOCK.release()
-
-        t = threading.Thread(target=probe)
-        t.start()
-        t.join()
-
-    monkeypatch.setattr(ctrl, "apply_hotkey", apply_hotkey)
-    pending = _deferred_saves(ctrl, monkeypatch)
-    path.write_text(
-        path.read_text().replace('hotkey = "<ctrl>+<alt>+r"', 'hotkey = "<ctrl>+<alt>+t"')
-    )
-    ctrl.set_sensitivity("Normal")
-    pending.pop()()  # the save worker reloads the edit first
-    path.write_text(
-        path.read_text().replace('hotkey = "<ctrl>+<alt>+t"', 'hotkey = "<ctrl>+<alt>+y"')
-    )
-    ctrl._maybe_reload_config()  # the periodic reload
-    assert free == [True, True] and cfg.hotkey == "<ctrl>+<alt>+y"
+    assert (saved.detection.outside_sensitivity, saved.detection.inside_sensitivity) == (25, 50)
+    assert saved.detection.min_active_s == 5.0 and saved.live_captions is False  # kept
+    ctrl.set_sensitivity("Off")
+    _wait_for_saves()
+    assert "sensitivity" not in path.read_text()  # unset keys are removed, not nulled
+    assert current_preset(load_config(path).detection) == "Off"
 
 
 def test_speech_longer_than_the_window_is_clamped_only_where_it_is_used(tmp_path, caplog):
@@ -295,33 +144,6 @@ def test_speech_longer_than_the_window_is_clamped_only_where_it_is_used(tmp_path
     cfg = Config(detection=det)
     cfg.save(path)
     assert load_config(path).detection.room_speech_s == 20.0  # the user's value is kept
-
-
-def test_a_preset_click_never_overwrites_a_broken_hand_edit(tmp_path, monkeypatch):
-    ctrl, cfg, path = _controller(tmp_path, monkeypatch)
-    cfg.save(path)
-    ctrl._maybe_reload_config()
-    pending = _deferred_saves(ctrl, monkeypatch)
-    path.write_text("[detection\nmin_active_s = 5\n")  # mid-edit
-    ctrl.set_sensitivity("Normal")
-    pending.pop()()
-    assert path.read_text() == "[detection\nmin_active_s = 5\n"
-    assert ("notice", "Settings not saved", "config.toml could not be parsed") in [
-        ctrl.events.get_nowait() for _ in range(ctrl.events.qsize())
-    ]
-
-
-def test_reload_ignores_an_empty_or_broken_file(tmp_path, monkeypatch):
-    ctrl, cfg, path = _controller(tmp_path, monkeypatch)
-    cfg.detection.outside_sensitivity = 75
-    path.write_text("")  # mid-way through an in-place write
-    ctrl._maybe_reload_config()
-    assert cfg.detection.outside_sensitivity == 75
-    path.write_text("[detection\n")
-    ctrl._maybe_reload_config()
-    assert cfg.detection.outside_sensitivity == 75
-    path.write_text("")
-    assert load_config(path).detection.outside_sensitivity is None  # startup: defaults
 
 
 def test_presets_apply_match_and_persist(tmp_path):

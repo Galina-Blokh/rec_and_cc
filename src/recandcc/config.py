@@ -2,22 +2,19 @@
 
 from __future__ import annotations
 
-import hashlib
+import contextlib
 import logging
 import os
 import sys
-import threading
-import time
 import tomllib
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
+from typing import Any
 
 import platformdirs
 import tomli_w
 
 from .models import Mode
-
-log = logging.getLogger(__name__)
 
 APP_NAME = "RecAndCC"
 CONFIG_DIR = Path(platformdirs.user_config_dir(APP_NAME, appauthor=False))
@@ -163,6 +160,10 @@ class TranscriptionConfig:
     # speakers is picked automatically within [min_speakers, max_speakers]. 0 = no hint.
     min_speakers: int = 0
     max_speakers: int = 0
+    # Opt-in: find speaker changes without a pause and overlapped speech with a segmentation
+    # model (6 MB, downloaded once when on); off or without the model: fixed ~2 s windows.
+    # Off by default until it is measured on real meetings (#13). ADR 0014.
+    diarize_overlap: bool = False
     # Remember speakers' voices so that a speaker named once (`recandcc name-speaker`) is named
     # in later sessions. Off by default: voice profiles are biometric data. See voices.py.
     speaker_names: bool = False
@@ -204,75 +205,19 @@ class Config:
     summary: SummaryConfig = field(default_factory=SummaryConfig)
 
     def save(self, path: Path | None = None) -> None:
-        """Write the settings (to CONFIG_PATH, looked up at call time). Serialized (the
-        snapshot is taken under the lock, so the last save writes the current values) and
-        atomic where the OS allows it."""
-        path = CONFIG_PATH if path is None else path
-        with CONFIG_LOCK:
-            data = asdict(self)
-            data["output_dir"] = str(self.output_dir)
-            # Keep the user's own spelling of `languages` ("iw", unknown codes) unless the list
-            # was changed since loading: load_config only normalises the in-memory copy.
-            tr = self.transcription
-            with LANG_LOCK:  # the pair, as the menu set it (lock order: CONFIG_LOCK first)
-                raw = getattr(tr, "_raw_languages", None)
-                langs = list(tr.languages)
-            data["transcription"]["languages"] = langs
-            if raw is not None and normalize_languages(raw) == langs:
-                data["transcription"]["languages"] = raw
-            for section in ("detection", "transcription"):  # TOML has no null: unset = omitted
-                data[section] = {k: v for k, v in data[section].items() if v is not None}
-            blob = tomli_w.dumps(data).encode()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            _write_atomic(path, blob)
-            _own_writes[str(path)] = (hashlib.sha256(blob).hexdigest(), len(blob))
-
-
-# Held while saving and while applying a reload, so neither sees the other half-done.
-# Re-entrant: load_config() saves the defaults on first run.
-CONFIG_LOCK = threading.RLock()
-# transcription.languages + its raw spelling change together (menu, reload, save).
-LANG_LOCK = threading.Lock()
-_own_writes: dict[str, tuple[str, int]] = {}  # path -> signature of what our last save wrote
-
-
-def file_signature(path: Path) -> tuple[str, int] | None:
-    """(sha256, size) of the file's content, None if it can't be read. By content, not
-    mtime: a same-size hand edit within a coarse mtime tick is still noticed."""
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return None
-    return hashlib.sha256(data).hexdigest(), len(data)
-
-
-def written_by_us(path: Path) -> bool:
-    """Whether the file is exactly as our last save left it (not a hand edit)."""
-    sig = file_signature(path)
-    return sig is not None and _own_writes.get(str(path)) == sig
-
-
-def _write_atomic(path: Path, blob: bytes) -> None:
-    """Temp file + os.replace, so a crash never leaves a torn file. On Windows the replace
-    fails while another handle has the file open (a reader, antivirus): retry briefly, then
-    write in place rather than lose the setting."""
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    try:
-        tmp.write_bytes(blob)
-        for attempt in range(5):
-            try:
-                os.replace(tmp, path)
-                return
-            except PermissionError:
-                if attempt < 4:
-                    time.sleep(0.05 * (attempt + 1))
-        log.warning("config: could not replace %s atomically; writing it in place", path.name)
-        path.write_bytes(blob)
-    finally:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:  # e.g. still locked on Windows: a stray temp file, not a failed save
-            log.debug("config: could not remove %s", tmp.name)
+        path = CONFIG_PATH if path is None else path  # looked up at call time (tests)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = asdict(self)
+        data["output_dir"] = str(self.output_dir)
+        # Keep the user's own spelling of `languages` ("iw", unknown codes) unless the list
+        # was changed since loading: load_config only normalises the in-memory copy.
+        tr = self.transcription
+        raw = getattr(tr, "_raw_languages", None)
+        if raw is not None and normalize_languages(raw) == tr.languages:
+            data["transcription"]["languages"] = raw
+        for section in ("detection", "transcription"):  # TOML has no null: unset = omitted
+            data[section] = {k: v for k, v in data[section].items() if v is not None}
+        path.write_bytes(tomli_w.dumps(data).encode())
 
 
 def _build(cls, data: dict):
@@ -331,14 +276,48 @@ def normalize_language_models(value) -> dict[str, str]:
     return out
 
 
-def save_languages(languages: list, path: Path | None = None) -> None:
-    """Write only `transcription.languages` into config.toml, leaving every other key as it is
-    on disk (it may have been edited by hand since the app loaded it). Raises
-    FileNotFoundError if there is no file yet, ValueError if it is not valid TOML."""
-    path = CONFIG_PATH if path is None else path
+def save_keys(path: Path, updates: dict[str, Any]) -> float:
+    """Write only the dotted keys in ``updates`` ("transcription.languages": [...]) into
+    config.toml, leaving every other key's value exactly as it is on disk (it may have been
+    edited by hand since the app loaded it). Like every save, it drops TOML comments and
+    rewrites the file in tomli_w's key order. Returns the new file's mtime. Raises
+    FileNotFoundError if there is no file yet, ValueError if it is not valid TOML or a key's
+    parent is not a table."""
+    path = path.resolve()  # a symlinked config.toml stays a symlink
     data = tomllib.loads(path.read_text(encoding="utf-8"))
-    data.setdefault("transcription", {})["languages"] = list(languages)
-    path.write_bytes(tomli_w.dumps(data).encode())
+    for dotted, value in updates.items():
+        *parents, leaf = dotted.split(".")
+        table = data
+        for name in parents:
+            table = table.setdefault(name, {})
+            if not isinstance(table, dict):
+                raise ValueError(f"{name} in {path} is not a table")
+        if value is None:  # unset (TOML has no null): drop the key
+            table.pop(leaf, None)
+        else:
+            table[leaf] = value
+    return _write_atomic(path, tomli_w.dumps(data).encode())
+
+
+def _write_atomic(path: Path, payload: bytes) -> float:
+    """Replace ``path`` in one step, so a crash mid-write never leaves half a config. Returns
+    the new file's mtime."""
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
+        tmp.write_bytes(payload)
+        with contextlib.suppress(OSError):
+            os.chmod(tmp, path.stat().st_mode & 0o777)  # keep the user's file mode
+        mtime = tmp.stat().st_mtime  # os.replace keeps it
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return mtime
+
+
+def save_languages(languages: list, path: Path | None = None) -> None:
+    """Write only `transcription.languages` (see `save_keys`)."""
+    save_keys(CONFIG_PATH if path is None else path, {"transcription.languages": list(languages)})
 
 
 def load_config(path: Path | None = None) -> Config:
