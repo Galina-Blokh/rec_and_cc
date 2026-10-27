@@ -493,7 +493,9 @@ def test_a_session_folder_swapped_for_a_link_is_not_written_through(tmp_path):
 def test_pdf_safe_text_placeholder_bidi_and_scripts():
     font = export.find_font()
     cmap = export._font_cmap(font)
-    out = export.pdf_safe_text("a\U0001f600b‫c⁦d؜", font)
+    if 0xE000 in cmap:
+        pytest.skip("font covers the private-use probe")
+    out = export.pdf_safe_text("ab‫c⁦d؜", font)
     assert out[0] == "a" and out[1] in "?�" and out[2:] == "bcd"
     kept = "Привет שלום\n"
     assert export.pdf_safe_text(kept, font) == kept
@@ -519,7 +521,7 @@ def test_pdf_safe_text_collapses_emoji_sequences():
 def test_pdf_with_emoji_and_bidi_marks_reads_back(tmp_path):
     from pypdf import PdfReader
 
-    text = "hi \U0001f600‏ Привет שלום there"
+    text = "hi ‏ Привет שלום there"
     seg = {"start": 0, "end": 1, "text": text, "speaker": "Me"}
     (tmp_path / "transcript.json").write_text(json.dumps({"segments": [seg]}), "utf-8")
     pdf = export.export_pdf(tmp_path)
@@ -527,4 +529,16 @@ def test_pdf_with_emoji_and_bidi_marks_reads_back(tmp_path):
     he = "שלום"
     assert "Привет" in got and (he in got or he[::-1] in got)
     assert "?" in got or "�" in got
-    assert "\U0001f600" not in got
+    assert "\ue000" not in got
+
+
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_pdf_safe_text_keeps_a_placeholder_after_zwj_and_normalises_controls():
+    font = export.find_font()
+    cmap = export._font_cmap(font)
+    if 0x1F468 in cmap or 0x4E2D in cmap or 0xE000 in cmap:
+        pytest.skip("font covers the probes")
+    # a lone ZWJ after an uncovered emoji must not swallow the next, non-emoji character
+    out = export.pdf_safe_text("\U0001f468‍中", font)
+    assert [c in "?�" for c in out] == [True, True]
+    assert export.pdf_safe_text("a\r\nb\rc\x00d\x07e", font) == "a\nb\ncde"

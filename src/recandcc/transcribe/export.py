@@ -247,29 +247,32 @@ _EMOJI_MODIFIERS = range(0x1F3FB, 0x1F400)
 
 
 @functools.lru_cache(maxsize=4)
-def _cmap_of(path: Path) -> frozenset[int]:
+def _font_cmap(path: Path) -> frozenset[int]:
     from fontTools.ttLib import TTFont
 
     with TTFont(str(path), lazy=True, fontNumber=0) as f:
         return frozenset(f.getBestCmap() or {})
 
 
-def _font_cmap(path: Path) -> frozenset[int]:
-    return _cmap_of(Path(path).resolve())  # same key however the caller spells the path
+def _is_emoji(o: int) -> bool:
+    return o >= 0x1F000 or 0x2190 <= o <= 0x2BFF or o in _EMOJI_MODIFIERS
 
 
 def pdf_safe_text(text: str, path: Path) -> str:
     """Strip bidi controls and swap characters the font lacks (emoji, ...) for a visible
     placeholder, so the PDF never silently loses text the DOCX has. A ZWJ emoji sequence or
-    skin-tone run becomes one placeholder."""
+    skin-tone run becomes one placeholder. ``path`` should be the same Path object every call
+    (the font cmap is cached by it)."""
     cmap = _font_cmap(path)
     mark = "\ufffd" if 0xFFFD in cmap else "?"
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     out: list[str] = []
     after_mark = False  # the last thing emitted is a placeholder that a ZWJ/modifier extends
     joined = False  # a dropped ZWJ follows that placeholder
+    swapped = 0
     for c in text:
         o = ord(c)
-        if o in _BIDI_CONTROLS:
+        if o in _BIDI_CONTROLS or (o < 0x20 and c not in "\n\t") or 0x7F <= o < 0xA0:
             continue
         if after_mark and o == _ZWJ:
             joined = True  # inside an emoji sequence: glue, not text
@@ -278,11 +281,14 @@ def pdf_safe_text(text: str, path: Path) -> str:
             after_mark = joined = False
         elif o in _FORMAT:
             joined = after_mark and (joined or o == _ZWJ)
-        elif after_mark and (joined or o in _EMOJI_MODIFIERS):
+        elif after_mark and (o in _EMOJI_MODIFIERS or (joined and _is_emoji(o))):
             joined = False
         else:
             out.append(mark)
+            swapped += 1
             after_mark, joined = True, False
+    if swapped:
+        log.debug("PDF: %d character(s) shown as a placeholder (not in the font)", swapped)
     return "".join(out)
 
 
