@@ -313,6 +313,8 @@ Windows needs no system-audio permission. The microphone is controlled in
   data flow, design decisions
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md): every setting explained
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): building, testing, project layout, contributing
+- [docs/requirements/](docs/requirements/intent.md): intent, goals and non-goals, and
+  user stories with acceptance criteria
 - [docs/ROADMAP.md](docs/ROADMAP.md): what's next
 - [CHANGELOG.md](CHANGELOG.md): what changed in each version
 - [SECURITY.md](SECURITY.md): reporting security issues, threat model
