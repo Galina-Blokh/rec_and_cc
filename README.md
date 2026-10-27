@@ -252,8 +252,9 @@ models load from disk without contacting anything (tested with all network acces
 The folders RecAndCC creates for recordings (the transcripts folder, each day and each
 session) are readable only by you (`0700` on macOS). A transcripts folder that already
 existed keeps its permissions; tighten it with `chmod 700 ~/Documents/Transcribes`.
-`~/Documents` may be synced by iCloud Drive ("Desktop & Documents Folders"); set
-`output_dir` to a folder outside it if recordings must stay on this Mac only.
+`~/Documents` may be synced by iCloud Drive ("Desktop & Documents Folders") on macOS, and
+`Documents` by OneDrive folder backup on Windows; set `output_dir` to a folder outside it if
+recordings must stay on this computer only.
 
 ### Retention
 
