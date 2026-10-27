@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import sys
 import threading
 import types
@@ -77,10 +78,245 @@ def test_prompts_ask_for_the_meetings_language(lang, name):
         assert "(part 2 of 3)" in user["content"]
 
 
-def test_main_language_is_the_one_with_the_most_text():
-    segs = [seg("hello", "en"), seg("это длинная фраза по-русски", "ru"), seg("ok", "en")]
-    assert summary.main_language(segs) == "ru"
+def test_main_language_is_the_one_with_the_most_speech_time():
+    segs = [seg("hello", "en"), Segment(2, 9, "это фраза", "Me", "ru"), seg("ok", "en", t=9)]
+    assert summary.main_language(segs) == "ru"  # 7 s of Russian, 4 s of English
     assert summary.main_language([seg("x", "")]) == "en"
+
+
+def test_overlapping_speech_counts_once_per_language():
+    """Me and Others talking over each other in Russian for 6 s must not beat 8 s of English."""
+    segs = [Segment(0, 6, "да", "Me", "ru"), Segment(0, 6, "да", "Speaker 1", "ru")]
+    segs += [Segment(1, 5, "ну", "Speaker 2", "ru"), Segment(10, 18, "yes", "Me", "en")]
+    segs.append(Segment(4, 8, "так", "Me", "ru"))  # the Russian span is now 0-8 s
+    assert summary.main_language(segs[:4]) == "en"  # 6 s of ru (not 16) vs 8 s of en
+    segs.append(Segment(20, 21, "и", "Me", "ru"))
+    assert summary.main_language(segs) == "ru"  # 9 s vs 8 s
+
+
+QWEN35 = "mlx-community/Qwen3.5-4B-MLX-4bit"
+
+
+def test_unpinned_language_model_is_ignored_unless_allowed(tmp_path, caplog):
+    cfg = Config()
+    segs = [Segment(0, 9, "שלום", "Me", "he")]
+    cfg.summary.language_models = {"he": "someone/unpinned-llm"}
+    with caplog.at_level(logging.WARNING, logger="recandcc"):
+        assert summary.summary_model(cfg, segs) == DEFAULT_SUMMARY_MODEL
+    assert "ignoring unpinned summary.language_models model someone/unpinned-llm" in caplog.text
+    cfg.summary.language_models = {"he": str(tmp_path)}  # a local model folder is fine
+    assert summary.summary_model(cfg, segs) == str(tmp_path)
+    cfg.summary.language_models = {"he": "someone/unpinned-llm"}
+    cfg.transcription.allow_unpinned_models = True
+    assert summary.summary_model(cfg, segs) == "someone/unpinned-llm"
+
+
+def test_mixed_meeting_uses_one_language_for_model_prompt_and_headings(tmp_path, monkeypatch):
+    """Long Hebrew speech with few characters, plus a wordy English line: Hebrew wins for
+    the model and for the summary's language."""
+    seen = []
+
+    class Gen(FakeGen):
+        def __init__(self, model, allow_unpinned=False, on_download=None):
+            super().__init__()
+            seen.append(model)
+
+        def __call__(self, messages, max_tokens):
+            seen.append(messages[0]["content"])
+            return super().__call__(messages, max_tokens)
+
+    monkeypatch.setattr(summary, "MlxGenerator", Gen)
+    cfg = Config()
+    cfg.summary.language_models = {"he": QWEN35}
+    segs = [Segment(0, 30, "כן", "Me", "he"), seg("a much longer English sentence", t=40)]
+    text = summary.summarize_session(make_session(tmp_path, segs), cfg).read_text("utf-8")
+    assert seen[0] == QWEN35 and "Always answer in Hebrew" in seen[1]
+    assert text.startswith("# סיכום")
+
+
+def test_routed_model_unavailable_falls_back_to_the_default(tmp_path, monkeypatch, caplog):
+    made = []
+
+    class Gen(FakeGen):
+        def __init__(self, model, allow_unpinned=False, on_download=None):
+            super().__init__()
+            self.model = model
+            made.append(model)
+
+        def __call__(self, messages, max_tokens):
+            if self.model == QWEN35:  # offline, or an mlx-lm without Qwen3.5
+                raise summary.ModelUnavailable("the summary model is not on disk")
+            return super().__call__(messages, max_tokens)
+
+    monkeypatch.setattr(summary, "MlxGenerator", Gen)
+    cfg = Config()
+    cfg.summary.language_models = {"he": QWEN35}
+    d = make_session(tmp_path, [Segment(0, 20, SPOKEN, "Me", "he")])
+    with caplog.at_level(logging.DEBUG, logger="recandcc"):
+        text = summary.summarize_session(d, cfg).read_text("utf-8")
+    assert made == [QWEN35, DEFAULT_SUMMARY_MODEL]
+    assert f"by {Path(DEFAULT_SUMMARY_MODEL).name};" in text
+    assert f"summary model {QWEN35} unavailable; using {DEFAULT_SUMMARY_MODEL}" in caplog.text
+    assert SPOKEN not in caplog.text
+    cfg.summary.language_models = {}  # the default itself unavailable: skipped as before
+    monkeypatch.setattr(cfg.summary, "model", QWEN35)
+    with pytest.raises(summary.ModelUnavailable):
+        summary.summarize_session(d, cfg)
+
+
+@pytest.mark.parametrize(
+    ("models", "lang", "expected"),
+    [
+        ({}, "he", DEFAULT_SUMMARY_MODEL),  # no routing: the old behaviour
+        ({"he": QWEN35}, "he", QWEN35),
+        ({"he": QWEN35}, "en", DEFAULT_SUMMARY_MODEL),
+    ],
+)
+def test_summary_model_is_routed_by_the_main_language(models, lang, expected):
+    cfg = Config()
+    cfg.summary.language_models = models
+    segs = [seg("hello", "en", t=0), Segment(5, 6, "שלום", "Me", lang)]
+    segs.append(Segment(10, 40, "x", "Speaker 1", lang))
+    assert summary.summary_model(cfg, segs) == expected
+
+
+def test_session_loads_only_the_routed_model_and_frees_it(tmp_path, monkeypatch):
+    made = []
+
+    class Gen(FakeGen):
+        def __init__(self, model, allow_unpinned=False, on_download=None):
+            super().__init__()
+            self.model, self.closed = model, False
+            made.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(summary, "MlxGenerator", Gen)
+    cfg = Config()
+    cfg.summary.language_models = {"he": QWEN35}
+    he = make_session(tmp_path / "he", [Segment(0, 20, "שלום לכולם", "Me", "he")])
+    text = summary.summarize_session(he, cfg).read_text("utf-8")
+    en = make_session(tmp_path / "en", [seg("hello")])
+    summary.summarize_session(en, cfg)
+    assert [(g.model, g.closed) for g in made] == [(QWEN35, True), (DEFAULT_SUMMARY_MODEL, True)]
+    assert "by Qwen3.5-4B-MLX-4bit;" in text
+
+
+@pytest.mark.parametrize(
+    ("raw", "answer"),
+    [
+        (
+            "<think>\nThe user wants a summary...\n</think>\n\nAnna fixes signing.",
+            "Anna fixes signing.",
+        ),
+        ("<think>\n\n</think>\n\n- Me: book the room", "- Me: book the room"),  # thinking off
+        ("<|channel>thought\nplan<channel|>Final.", "Final."),  # Gemma 4's channel
+        ("  plain answer\n", "plain answer"),
+    ],
+)
+def test_thought_blocks_are_stripped(raw, answer):
+    assert summary.strip_thinking(raw) == answer
+
+
+@pytest.mark.parametrize("raw", ["<think>\nstill thinking", "<|channel>thought\nstill"])
+def test_an_unfinished_thought_gives_no_answer(raw):
+    with pytest.raises(summary.SummaryUnavailable, match="ran out of tokens"):
+        summary.strip_thinking(raw)
+
+
+def _fake_mlx_lm(monkeypatch, text: str, seen: list, thinking: bool | None):
+    """Fake mlx_lm that streams ``text``; returns a fake tokenizer (no real model loads)."""
+
+    def stream_generate(model, tokenizer, prompt, max_tokens, **kw):
+        seen.append(max_tokens)
+        return iter(types.SimpleNamespace(text=c) for c in [text[:5], text[5:]])
+
+    def apply_chat_template(messages, add_generation_prompt, **kw):
+        seen.append(kw)
+        return [1]
+
+    tok = types.SimpleNamespace(apply_chat_template=apply_chat_template)
+    if thinking is not None:  # None: an mlx-lm without has_thinking
+        tok.has_thinking = thinking
+    if thinking:  # what mlx-lm detects for Qwen3.5
+        tok.think_start, tok.think_end = "<think>", "</think>"
+    sample = types.SimpleNamespace(make_logits_processors=lambda **kw: [])
+    monkeypatch.setitem(
+        sys.modules, "mlx_lm", types.SimpleNamespace(stream_generate=stream_generate)
+    )
+    monkeypatch.setitem(sys.modules, "mlx_lm.sample_utils", sample)
+    return tok
+
+
+@pytest.mark.parametrize(
+    ("model", "thinking", "raw", "seen"),
+    [
+        # a thinking model (Qwen3.5) answers with thinking off, within max_tokens
+        (QWEN35, True, "<think>\n\n</think>\n\nAnswer.", [{"enable_thinking": False}, 400]),
+        (DEFAULT_SUMMARY_MODEL, False, "Answer.", [{}, 400]),  # Qwen2.5: prompt as before
+        # no has_thinking (another mlx-lm): template defaults, but no thought reaches summary.md
+        (QWEN35, None, "<think>\nplan\n</think>\nAnswer.", [{}, 400]),
+        (QWEN35, None, "<|channel>thought\nplan<channel|>Answer.", [{}, 400]),
+    ],
+)
+def test_generator_turns_thinking_off_and_strips_thoughts(monkeypatch, model, thinking, raw, seen):
+    calls: list = []
+    gen = summary.MlxGenerator(model)
+    gen._model, gen._tokenizer = object(), _fake_mlx_lm(monkeypatch, raw, calls, thinking)
+    assert gen([{"role": "user", "content": "x"}], 400) == "Answer."
+    assert calls == seen
+
+
+def test_thought_cut_off_writes_no_summary(tmp_path, caplog):
+    def cut_off(messages, max_tokens):
+        return summary.strip_thinking(f"<think>\n{SPOKEN} and more")
+
+    d = make_session(tmp_path, [seg(SPOKEN)])
+    notices = []
+    q = summary.SummaryQueue(Config(), notify=lambda *n: notices.append(n), generate=cut_off)
+    with caplog.at_level(logging.DEBUG, logger="recandcc"):
+        q.submit(d)
+        q.join()
+    assert not (d / "summary.md").exists() and not (d / summary.PENDING_MARKER).exists()
+    assert notices == [("Summary skipped", summary.CUT_OFF)]
+    assert SPOKEN not in caplog.text
+
+
+def test_a_model_this_mlx_lm_cannot_load_is_skipped(monkeypatch):
+    def load(path):
+        raise ValueError("Model type qwen3_5 not supported.")
+
+    monkeypatch.setattr(summary, "mlx_lm_available", lambda: True)
+    monkeypatch.setattr(gpu, "local_model_path", lambda *a: "/cache/m")
+    monkeypatch.setitem(sys.modules, "mlx_lm", types.SimpleNamespace(load=load))
+    with pytest.raises(summary.SummaryUnavailable, match="can't load"):
+        summary.MlxGenerator(QWEN35).load()
+
+
+def test_offered_summary_models_are_pinned_and_documented():
+    from recandcc.transcribe import revisions
+
+    assert DEFAULT_SUMMARY_MODEL in revisions.OFFERED_SUMMARY_MODELS
+    root = Path(__file__).resolve().parents[1]
+    config_doc = (root / "docs/CONFIGURATION.md").read_text("utf-8")  # documents every model
+    for model in revisions.OFFERED_SUMMARY_MODELS:
+        assert re.fullmatch(r"[0-9a-f]{40}", revisions.HF_REVISIONS[model]), model
+        assert model in summary.MODEL_SIZES
+        assert model in config_doc, model
+    assert QWEN35 in (root / "README.md").read_text("utf-8")  # the Hebrew routing example
+    assert summary.download_notice(QWEN35) == "Downloading the summary model (~3.0 GB, once)"
+    assert summary.download_notice("me/custom") == "Downloading the summary model (once)"
+
+
+def test_load_config_reads_summary_language_models(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(f'[summary]\nlanguage_models = {{ iw = "{QWEN35}", xx = "m" }}\n', "utf-8")
+    assert load_config(path).summary.language_models == {"he": QWEN35}
+    assert Config().summary.language_models == {}
+    cfg = load_config(path)
+    cfg.save(tmp_path / "saved.toml")  # round-trips
+    assert load_config(tmp_path / "saved.toml").summary.language_models == {"he": QWEN35}
 
 
 def test_chunks_stay_within_the_limit_and_keep_everything():
@@ -206,6 +442,50 @@ def test_old_default_switch_is_saved_with_only_that_key(tmp_path):
     assert DEFAULT_SUMMARY_MODEL in text and QWEN_RESEARCH_SUMMARY_MODEL not in text
     assert "hand = 1" in text  # key-level save, not a full overwrite
     assert load_config(path, migrate=True).summary.model == DEFAULT_SUMMARY_MODEL
+
+
+HAND_EDITED = f"""# my settings, edited by hand
+output_dir = "/tmp/x"  # where transcripts go
+
+[summary]
+# summaries on for work calls
+enabled = true
+model = "{QWEN_RESEARCH_SUMMARY_MODEL}"  # the old default
+max_tokens = 400
+
+[transcription]
+model = "base"  # must stay
+"""
+
+
+def test_switch_rewrites_only_the_model_line_and_keeps_comments(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(HAND_EDITED, "utf-8")
+    assert load_config(path, migrate=True).summary.model == DEFAULT_SUMMARY_MODEL
+    expected = HAND_EDITED.replace(QWEN_RESEARCH_SUMMARY_MODEL, DEFAULT_SUMMARY_MODEL)
+    assert path.read_text("utf-8") == expected  # every comment and other line unchanged
+    assert load_config(path).transcription.model == "base"
+
+
+def test_model_line_falls_back_to_a_key_save_when_not_a_plain_line(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(f'summary = {{ model = "{QWEN_RESEARCH_SUMMARY_MODEL}" }}\n', "utf-8")
+    config_mod.set_string_line(path, "summary", "model", DEFAULT_SUMMARY_MODEL)
+    assert load_config(path).summary.model == DEFAULT_SUMMARY_MODEL
+
+
+def test_following_the_switch_notice_keeps_the_3b(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(HAND_EDITED, "utf-8")
+    assert load_config(path, migrate=True).summary.notice == SUMMARY_MODEL_SWITCHED
+    # do what the notice says: set summary.model back to the 3B and accept its licence
+    assert f'summary.model = "{QWEN_RESEARCH_SUMMARY_MODEL}"' in SUMMARY_MODEL_SWITCHED
+    assert "summary.accept_qwen_research_licence = true" in SUMMARY_MODEL_SWITCHED
+    text = path.read_text("utf-8").replace(DEFAULT_SUMMARY_MODEL, QWEN_RESEARCH_SUMMARY_MODEL)
+    path.write_text(text.replace("max_tokens", "accept_qwen_research_licence = true\nmax_tokens"))
+    cfg = load_config(path, migrate=True)
+    assert cfg.summary.model == QWEN_RESEARCH_SUMMARY_MODEL and cfg.summary.notice is None
+    assert QWEN_RESEARCH_SUMMARY_MODEL in path.read_text("utf-8")
 
 
 def test_cli_loads_switch_in_memory_only(tmp_path):

@@ -276,21 +276,36 @@ enabled = false              # true = summary.md with action items after each me
 
 With `[summary] enabled = true` (Apple silicon), each finished transcript also gets a
 `summary.md` in its folder: a few sentences about the meeting and an **Action items** list
-(who does what, by when), written in the meeting's main language (English or Russian).
-Summaries support English and Russian only: the Qwen models tried write unusable Hebrew
-summaries, and a Hebrew-capable model is being researched in #6. A small local model (Qwen2.5 1.5B Instruct, 4-bit, ~0.9 GB, Apache-2.0) does it
+(who does what, by when), written in the meeting's main language. The default model
+summarises English and Russian; for Hebrew meetings, route them to a Hebrew-capable model
+with `summary.language_models` (below). A small local model (Qwen2.5 1.5B Instruct, 4-bit, ~0.9 GB, Apache-2.0) does it
 in the background after the transcript is final, and waits while you are recording, so
 captions are never slowed; it is downloaded once, pinned to an exact version, and nothing is
 sent anywhere. It is a draft: check names and dates against the transcript. The larger
 `model = "mlx-community/Qwen2.5-3B-Instruct-4bit"` (~1.7 GB, also pinned) is under the Qwen
 Research licence: non-commercial use only. It was the default before, and older settings
 files hold it without anyone choosing it, so it is replaced by the default (saved to `config.toml`, with a one-time notice) unless
-you also set `accept_qwen_research_licence = true` under `[summary]`. If the 3B is already
+you also set `accept_qwen_research_licence = true` under `[summary]` (after a switch, set
+`model` back to the 3B as well; only that line is rewritten, so comments stay). If the 3B is already
 downloaded and the new default isn't, it is kept for now, so offline summaries keep working. On Windows, or
 offline before the model is downloaded, the summary is skipped with a notice. It waits for
 the speaker labels (a slow diarization delays it), a summary cut short by quitting is redone
 at the next start (a `.summary-pending` marker in the session folder; a `.summary-source` file records a fingerprint of the transcript text the summary was made from), and after
 `recandcc name-speaker` the app redoes an existing `summary.md` with the new name once idle. Renaming a speaker in the menu, or call-app names, keeps the existing summary, whose text may still mention the old label. Old summaries are not given a fingerprint afterwards: one computed now could describe a transcript that already differs from what the summary was made from.
+
+Qwen2.5 summarises Hebrew badly. Route Hebrew meetings to Qwen3.5 4B (Apache-2.0) instead.
+On our self-written test meetings it wrote fluent Hebrew summaries and got most owners and
+deadlines right, but not all: check them against the transcript. Meetings in other
+languages keep the default:
+
+```toml
+[summary.language_models]
+he = "mlx-community/Qwen3.5-4B-MLX-4bit"   # ~3.0 GB once, ~3 GB RAM while it runs
+```
+
+The language with the most speech time picks the model (and the summary's language). The
+model is downloaded once (pinned) on the first meeting that needs it, and freed after each
+summary; if it can't be downloaded or loaded, the default model writes that summary.
 
 ## Command line
 
@@ -375,7 +390,7 @@ models load from disk without contacting anything (tested with all network acces
 | Each session's speaker voices (only with `speaker_names = true`) | `…/RecAndCC/voices/sessions/` | `%LOCALAPPDATA%\RecAndCC\voices\sessions\` |
 | Speaker-diarization model | `~/Library/Caches/RecAndCC/models/` | `%LOCALAPPDATA%\RecAndCC\Cache\models\` |
 | Whisper models (shared Hugging Face cache) | `~/.cache/huggingface/hub/models--*whisper*` | `%USERPROFILE%\.cache\huggingface\hub\` |
-| Summary model (only with summaries on) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-*-Instruct-4bit` | not used |
+| Summary model (only with summaries on) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-*-Instruct-4bit` (and `…--Qwen3.5-4B-MLX-4bit` with `summary.language_models`) | not used |
 | Old summary model, unused after the switch to the 1.5B default (~1.7 GB, safe to delete unless you kept the 3B with `accept_qwen_research_licence = true`) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-3B-Instruct-4bit` | not used |
 | Launch at login | `~/Library/LaunchAgents/com.gblokh.recandcc.plist` | registry `HKCU\…\CurrentVersion\Run\RecAndCC` |
 
