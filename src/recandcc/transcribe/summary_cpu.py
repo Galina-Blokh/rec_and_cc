@@ -18,12 +18,14 @@ never contain prompt or answer text.
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import hashlib
 import importlib.util
 import json
 import logging
 import os
+import sys
 import threading
 import time
 import urllib.error
@@ -45,6 +47,12 @@ DOWNLOAD_TIMEOUT_S = 30.0
 REPETITION_PENALTY = 1.1  # as in MlxGenerator
 CONFIG_NAME = "genai_config.json"
 NOT_ON_DISK = "the summary model is not on disk or can't be loaded"  # as in MlxGenerator
+TOO_LONG = "the transcript part is too long for the CPU summary model"
+CONTEXT_LENGTH = 32768  # Qwen2.5's; genai_config.json declares it too (see _context_length)
+STALE_PART_S = 3600.0  # a .part.<pid> file untouched this long is dead, whatever its pid
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_ERROR_ACCESS_DENIED = 5
+_STILL_ACTIVE = 259
 
 
 @dataclass(frozen=True)
@@ -145,6 +153,7 @@ DOWNLOAD_SIZES = {name: "~1.8 GB" for name in CPU_MODELS}
 
 _lock = threading.Lock()  # one download/check at a time (app summary thread vs. CLI calls)
 _verified: set[Path] = set()  # files whose sha256 was checked in this process
+_mapped_logged: set[str] = set()  # summary models whose CPU mapping was logged (once a process)
 
 
 def cpu_available() -> bool:
@@ -203,6 +212,61 @@ def _download(url: str, path: Path, f: ModelFile) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def _pid_alive(pid: int) -> bool:
+    """Whether process ``pid`` exists, without signalling it: on Windows os.kill(pid, 0) would
+    terminate the process, so that platform asks the kernel instead."""
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:  # ERROR_ACCESS_DENIED means it exists, another user's
+            return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == _STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # it exists, another user's
+        return True
+    return True
+
+
+def _remove_stale_parts(folder: Path) -> None:
+    """At a download's start, delete the ``.part.<pid>`` files of downloads that died: untouched
+    for an hour, or from a process that is gone, or from this one (it holds the lock, so none of
+    its own downloads is running)."""
+    now = time.time()
+    for part in folder.rglob(".*.part.*"):
+        try:
+            pid: int | None = int(part.name.rsplit(".part.", 1)[1])
+        except ValueError:  # not a name we write: judged by its age alone
+            pid = None
+        dead = pid is not None and (pid == os.getpid() or not _pid_alive(pid))
+        try:
+            if dead or now - part.stat().st_mtime > STALE_PART_S:
+                part.unlink(missing_ok=True)
+        except OSError:
+            log.debug("a stale download part could not be removed")
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Write ``path`` whole or not at all: a temp file beside it, then os.replace."""
+    tmp = path.with_name(f".{path.name}.part.{os.getpid()}")
+    try:
+        tmp.write_text(text, "utf-8")
+        os.replace(tmp, path)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+
+
 def model_dir(model: CpuModel, on_download: Callable[[], None] | None = None) -> Path:
     """Folder with ``model``'s verified files and genai_config.json, downloading missing files
     once (``on_download`` runs before the first one). Raises if they can't be had."""
@@ -211,6 +275,8 @@ def model_dir(model: CpuModel, on_download: Callable[[], None] | None = None) ->
         missing = [f for f in model.files if not _is_valid(folder / f.path, f)]
         if missing and on_download is not None:
             on_download()
+        if missing:
+            _remove_stale_parts(folder)
         for f in missing:
             log.info("downloading summary model file %s (%.0f MB, once)", f.path, f.size / 1e6)
             t0 = time.monotonic()
@@ -219,7 +285,7 @@ def model_dir(model: CpuModel, on_download: Callable[[], None] | None = None) ->
         config = folder / CONFIG_NAME
         text = json.dumps(model.config, indent=2)
         if not config.is_file() or config.read_text("utf-8") != text:
-            config.write_text(text, "utf-8")
+            _write_atomic(config, text)
     return folder
 
 
@@ -231,7 +297,14 @@ def resolve(model: str, on_download: Callable[[], None] | None = None) -> Path:
     if cpu is None:
         log.info("summary model %s has no CPU build", model)
         raise ModelUnavailable("the summary model has no CPU build")
-    log.info("summary model %s runs on the CPU as %s", model, cpu.repo)
+    if model not in _mapped_logged:  # once a process; model names only, never transcript text
+        _mapped_logged.add(model)
+        log.info(
+            "summary model %s runs on the CPU as %s (a smaller model: weaker for Hebrew, Russian "
+            "and action items)",
+            model,
+            cpu.repo,
+        )
     try:
         return model_dir(cpu, on_download)
     except Exception as e:  # noqa: BLE001 - offline, proxy, disk full, bad checksum ...
@@ -239,34 +312,68 @@ def resolve(model: str, on_download: Callable[[], None] | None = None) -> Path:
         raise ModelUnavailable(NOT_ON_DISK) from e
 
 
+def _disable_telemetry(og: Any, ort: Any) -> None:
+    """Switch off each runtime's telemetry, best effort: a failing switch never blocks a summary.
+    ONNX Runtime's events are ETW on Windows, local. The GenAI 0.18 DLL also has a OneCollector
+    uploader (HTTPS). Its documented switch (``disable_telemetry_events``) stops the non-essential
+    events; whether anything else still leaves the machine is not verified."""
+    for module in (og, ort):
+        switch = getattr(module, "disable_telemetry_events", None)
+        if switch is None:
+            continue
+        try:
+            switch()
+        except Exception as e:  # noqa: BLE001 - telemetry must never block a summary
+            log.debug("a telemetry switch failed: %s", type(e).__name__)
+
+
+def _context_length(folder: Path) -> int:
+    """The context window that genai_config.json declares (CONTEXT_LENGTH when it doesn't)."""
+    try:
+        config = json.loads((folder / CONFIG_NAME).read_text("utf-8"))
+        return int(config["model"]["context_length"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return CONTEXT_LENGTH
+
+
 class CpuGenerator:
     """The summary LLM through onnxruntime-genai on the CPU. Loaded on first use, used from one
-    thread (the summary thread), freed by close()."""
+    thread (the summary thread), freed by close(). ``pause`` runs before each generated token,
+    so an answer yields to a recording that starts mid-way (as ``before_call`` does between
+    model calls)."""
 
     def __init__(
         self,
         model: str,
         allow_unpinned: bool = False,  # unused: only pinned CPU builds are downloaded
         on_download: Callable[[], None] | None = None,
+        pause: Callable[[], None] | None = None,
     ) -> None:
         self.model_name = model
         self.on_download = on_download
+        self.pause = pause
         self._model: Any = None
         self._tokenizer: Any = None
+        self._context = CONTEXT_LENGTH
 
     def load(self) -> None:
         if not cpu_available():
             raise SummaryUnavailable("local summaries need Apple silicon or onnxruntime-genai")
+        try:  # before the download: a runtime that won't import fetches nothing
+            # The GenAI DLL reads this when it starts, so it is set before the import (seen in
+            # the 0.18 binary; not in the package docs).
+            os.environ["ORT_DISABLE_TELEMETRY"] = "1"
+            og: Any = importlib.import_module("onnxruntime_genai")
+            ort: Any = importlib.import_module("onnxruntime")
+        except ImportError as e:
+            log.info("onnxruntime-genai can't be imported: %s", type(e).__name__)
+            raise ModelUnavailable("onnxruntime-genai can't be imported here") from e
+        _disable_telemetry(og, ort)
         path = resolve(self.model_name, self.on_download)
-        import onnxruntime_genai as og  # pyright: ignore[reportMissingImports]
-
-        for mod in (og, importlib.import_module("onnxruntime")):  # ETW events on Windows
-            off = getattr(mod, "disable_telemetry_events", None)
-            if off is not None:
-                off()
         try:
             self._model = og.Model(str(path))
             self._tokenizer = og.Tokenizer(self._model)
+            self._context = _context_length(path)
         except Exception as e:  # noqa: BLE001 - a broken or unsupported model folder
             self._model = self._tokenizer = None
             log.info("summary model %s failed to load: %s", self.model_name, type(e).__name__)
@@ -280,6 +387,8 @@ class CpuGenerator:
         tokenizer: Any = self._tokenizer
         prompt = tokenizer.apply_chat_template(json.dumps(messages), add_generation_prompt=True)
         ids = tokenizer.encode(prompt)
+        if len(ids) + max_tokens > self._context:  # refused, never cut: a cut prompt misleads
+            raise SummaryUnavailable(TOO_LONG)
         params = og.GeneratorParams(self._model)
         params.set_search_options(
             max_length=len(ids) + max_tokens,
@@ -291,6 +400,8 @@ class CpuGenerator:
         stream = tokenizer.create_stream()
         out = []
         while not gen.is_done():
+            if self.pause is not None:  # e.g. waits while a recording runs, as between calls
+                self.pause()
             gen.generate_next_token()
             out.append(stream.decode(gen.get_next_tokens()[0]))
         return "".join(out).strip()
