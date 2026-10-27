@@ -94,3 +94,38 @@ def test_labels_and_tips_are_escaped():
     assert "<b>" not in out
     assert '"x"' not in out
     assert "&lt;b&gt;" in out
+
+
+def test_hbars_widths_are_proportional_to_values():
+    svg = charts.hbars(["a", "b"], [10, 5])
+    widths = [float(w) for _, _, w, _ in _rects(svg)]
+    assert widths[0] == pytest.approx(charts.W - 210 - 70) and widths[1] == pytest.approx(
+        widths[0] / 2
+    )
+
+
+def test_steps_place_points_on_the_axis_scale():
+    svg = charts.steps([{"name": "n", "color": "--s1", "points": [(0, 0), (10, 4)]}], [])
+    circles = [
+        (float(x), float(y)) for x, y in re.findall(r'<circle cx="([\d.]+)" cy="([\d.]+)"', svg)
+    ]
+    assert circles[0] == pytest.approx((charts.PAD_L, charts.PAD_T + PLOT_H))
+    assert circles[-1] == pytest.approx((charts.W - charts.PAD_R, charts.PAD_T))
+    path = re.search(r'<path d="([^"]+)" fill="none"', svg).group(1)
+    assert (
+        f"L{charts.W - charts.PAD_R:.1f},{charts.PAD_T:.1f}" in path
+    )  # rises at x=10, holds to the end
+
+
+def test_swimlane_bars_sit_in_their_lane():
+    svg = charts.swimlanes(
+        ["a", "b"], [{"lane": "b", "start": 0, "end": 10, "color": "--s1", "tip": "t"}], 0, 10, []
+    )
+    _, y, _, _ = _rects(svg)[0]
+    assert float(y) == 8 + 1 * 30 + 4  # lane index 1, first bar in that lane
+
+
+def test_heatstrips_shade_by_count():
+    svg = charts.heatstrips([("dev", [0, 5] + [0] * 22)])
+    fills = re.findall(r'fill="(var\(--[a-z0-9]+\))"', svg)
+    assert fills[0] == "var(--grid)" and fills[1] == "var(--seq7)"
