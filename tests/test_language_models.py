@@ -155,6 +155,7 @@ def test_mlx_models_share_one_gpu_thread_and_keep_their_weights(monkeypatch, tmp
     monkeypatch.setitem(sys.modules, "mlx", mlx)
     monkeypatch.setitem(sys.modules, "mlx.core", types.SimpleNamespace(float16="f16"))
     monkeypatch.setitem(sys.modules, "mlx_whisper", types.SimpleNamespace(transcribe=transcribe))
+    monkeypatch.setitem(sys.modules, "mlx_whisper.timing", types.ModuleType("mlx_whisper.timing"))
     monkeypatch.setitem(
         sys.modules, "mlx_whisper.transcribe", types.SimpleNamespace(ModelHolder=Holder)
     )

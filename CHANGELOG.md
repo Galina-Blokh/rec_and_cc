@@ -48,6 +48,9 @@ All notable changes to RecAndCC are documented here. The format is based on
 - ADR 0011: stack and packaging after v0.1 (Proposed) (#57).
 
 ### Changed
+- The macOS environment no longer installs torch (#69) or numba, llvmlite and scipy (#77),
+  which mlx-whisper declares but RecAndCC never uses: `.venv` shrinks from 1.3 GB to
+  559 MB (part of #3).
 - Menu-bar presentation logic moved out of the AppKit/pystray shells into `ui/present.py`,
   so it is unit-tested on every platform (#67).
 - CI type-checks `src/` with pyright and enforces a 70 % coverage floor on non-UI code
