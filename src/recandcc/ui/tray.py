@@ -22,6 +22,7 @@ calls; their dialogs (``tk_dialog``, own Tk root, time out as Cancel) run on wor
 from __future__ import annotations
 
 import contextlib
+import gc
 import logging
 import os
 import queue
@@ -502,7 +503,8 @@ def tk_dialog(
                 result = field.get().strip() or None
             elif accept:
                 result = True
-            root.destroy()
+            if root is not None:
+                root.destroy()
 
         row = tk.Frame(root, pady=10)
         row.pack()
@@ -526,6 +528,12 @@ def tk_dialog(
             with contextlib.suppress(Exception):
                 root.destroy()
         return None
+    finally:
+        # The callbacks form a cycle with the root; free the Tk app here, on its own thread,
+        # not later from the cyclic GC on another thread (Tcl aborts with
+        # "Tcl_AsyncDelete: async handler deleted by the wrong thread").
+        root = None
+        gc.collect()
     return result
 
 
