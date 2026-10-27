@@ -116,6 +116,9 @@ def test_fuse_mounts_are_judged_by_their_source():
     assert nv("/V/x", fuse("macfuse", "/Users/me/Cryptomator/vaultX")) is None
     assert nv("/V/x", fuse("macfuse", "/Users/me/rclone-vault/gocryptfs")) is None
     assert nv("/V/x", fuse("macfuse", "/Volumes/rclone-cache/x.gocryptfs")) is None
+    # a vault word buried inside another word is not a vault
+    assert nv("/V/x", fuse("macfuse", "/Users/me/notgocryptfsx/y")) == "a network volume"
+    assert nv("/V/x", fuse("macfuse", "/Users/me/my-cryfs-stuff/y")) == "a network volume"
     # network names are case-insensitive and anchored to the fstype or source head
     assert nv("/V/x", fuse("macfuse", "Rclone")) == "a network volume"
     assert nv("/V/x", fuse("macfuse", "SSHFS#me@h")) == "a network volume"

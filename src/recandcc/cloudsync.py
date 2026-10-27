@@ -310,8 +310,10 @@ def _fuse_volume(fstype: str, source: str) -> tuple[bool, str | None]:
     if any(ft == n or head.startswith(n) for n in _LOCAL_FUSE):
         return True, None
     if low.startswith("/") and any(
-        n in comp for comp in low.split("/") for n in _LOCAL_FUSE
-    ):  # local path: safe, the network patterns were checked first
+        comp.startswith((n, "." + n)) or comp.endswith("." + n)
+        for comp in low.split("/")
+        for n in _LOCAL_FUSE
+    ):  # local path component "cryfs", ".encfs", "vault.gocryptfs"; network was checked first
         return True, None
     return False, None
 
