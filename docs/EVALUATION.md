@@ -83,6 +83,7 @@ without everyone's consent.
 uv run python scripts/eval.py ~/RecAndCC-eval                       # config's model
 uv run python scripts/eval.py ~/RecAndCC-eval --model small --json small.json
 uv run python scripts/eval.py ~/RecAndCC-eval --no-diarize          # skip DER
+uv run python scripts/eval.py ~/RecAndCC-eval --diarize-overlap     # DER with the segmentation model
 uv run python scripts/eval.py ~/RecAndCC-eval --live                # + live caption latency
 uv run python scripts/eval.py ~/RecAndCC-eval --backend mlx         # force MLX on the GPU
 uv run python scripts/eval.py ~/RecAndCC-eval --backend cpu         # force faster-whisper, CPU
@@ -195,3 +196,62 @@ into one speaker (DER 0.64 there; 0.13 on the other three `others` clips). Diari
 To regenerate: `uv run python scripts/make_synthetic_evalset.py "$TMPDIR/rcc-synth"`, then
 `uv run python scripts/eval.py "$TMPDIR/rcc-synth" --languages en,ru,he --backend mlx --json
 "$TMPDIR/mlx.json"` (and `--backend cpu`, and `--backend mlx --live`).
+
+## Interim synthetic speaker baseline
+
+For issue #1 ("6-speaker test meeting: DER better than v0.1; no regression at 2-3 speakers").
+**Synthetic TTS (macOS `say`), not the consented set: interim, overstates real-world accuracy.**
+Real calls have room noise, codecs, crosstalk and voices that differ far less than six distinct
+TTS voices do, so treat the numbers as a regression check, not as the acceptance result.
+
+DER here is scored with 10 ms frames and no collar. Set: `scripts/make_synthetic_evalset.py --meetings` (en only; voices Samantha, Reed, Daniel,
+Karen, Moira, Rishi). Three `others` clips of turn-taking meetings with turns of 1 to ~15
+words, varied pauses (0.15-1.0 s) and quick replies: 2 speakers (71 s, 24 turns), 3 speakers
+(83 s, 26 turns), 6 speakers (224 s, 77 turns). No overlapping speech. 2026-10-27, Apple M5 Max,
+macOS 26.7.1, offline (`HF_HUB_OFFLINE=1`), diarizer models `3dspeaker_speech_campplus_sv_zh_en_16k`
+(embedding) and, where noted, `pyannote-segmentation-3.0` (ONNX), both from the local cache.
+Transcription (large-v3-turbo, MLX, `--languages en`) gives WER 0.003 on the 997 words.
+
+| Diarizer | Clip | Speakers (found / true) | DER | Missed s | False alarm s | Confusion s |
+|---|---|---|---|---|---|---|
+| v0.1.0 | 2 speakers | 3 / 2 | 0.257 | 0.0 | 7.6 | 7.4 |
+| v0.1.0 | 3 speakers | 3 / 3 | 0.210 | 0.0 | 8.6 | 5.9 |
+| v0.1.0 | 6 speakers | 6 / 6 | 0.357 | 0.0 | 25.3 | 41.4 |
+| main, `diarize_overlap` off | 2 speakers | 2 / 2 | 0.231 | 0.0 | 7.6 | 5.9 |
+| main, `diarize_overlap` off | 3 speakers | 3 / 3 | 0.210 | 0.0 | 8.6 | 5.9 |
+| main, `diarize_overlap` off | 6 speakers | 6 / 6 | 0.357 | 0.0 | 25.3 | 41.4 |
+| main, `diarize_overlap` on | 2 speakers | 2 / 2 | 0.130 | 0.0 | 7.6 | 0.0 |
+| main, `diarize_overlap` on | 3 speakers | 3 / 3 | 0.169 | 0.0 | 8.6 | 3.1 |
+| main, `diarize_overlap` on | 6 speakers | 5 / 6 | 0.309 | 0.0 | 25.3 | 32.3 |
+
+These numbers are not comparable with the 7-clip baseline above (DER 0.240): the clip set
+differs (long meetings with 2, 3 and 6 distinct voices, shorter pauses).
+
+Reading it:
+
+- Missed speech is 0 everywhere. False alarm is the same in every row because every
+  diarizer fills the pauses between turns (about 72-75% of the pause time in the three clips).
+  Confusion is the part that differs.
+- Main with `diarize_overlap` off matches v0.1.0 at 3 and 6 speakers (consistent with
+  the same windows and clustering) and is slightly better at 2 (v0.1.0 found a third speaker;
+  the cause was not investigated).
+  So: no regression at 2-3 speakers, but **no gain at 6 speakers either**.
+- With `diarize_overlap` on, DER improves on all three clips (6 speakers: 0.357 to 0.309), but it
+  merged two of the six voices (5 found). The "better than v0.1" criterion is met only in that
+  mode and only by 5 points on TTS; it stays open until measured on a real, consented
+  6-speaker meeting.
+
+How the rows were made: current `scripts/eval.py` on main at 281bd90, with and without the new
+`--diarize-overlap` flag (which builds `Diarizer(segmentation=True)`, like config
+`diarize_overlap`); `eval.py` now also stores `speakers` and `ref_speakers` per clip. v0.1.0
+has no `eval.py` and no segmentation, so its rows come from a throwaway driver that put a
+`git worktree` of the `v0.1.0` tag (commit 5126a7c) first on `sys.path`, ran its `Diarizer().diarize_file` on
+each clip and scored the turns with the current `eval.py`'s `der` (same references, same
+10 ms frames, no collar), with the same cached embedding model
+(`3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx`) as main. Each clip was run once,
+so there is no variance estimate. `--diarize-overlap` exits with an error if the segmentation
+model is not on disk (it never downloads or silently falls back). The audio was generated into a temp folder and is not committed.
+
+To regenerate: `uv run python scripts/make_synthetic_evalset.py --meetings "$TMPDIR/rcc-meetings"`,
+then `uv run python scripts/eval.py "$TMPDIR/rcc-meetings" --languages en [--diarize-overlap]
+--json "$TMPDIR/out.json"`.
