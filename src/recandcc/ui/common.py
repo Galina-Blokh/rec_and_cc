@@ -126,9 +126,9 @@ def untranscribed_sessions(output_dir: Path) -> list[SessionInfo]:
     """Finished sessions never transcribed (e.g. app quit mid-queue), oldest first."""
     out = []
     for f in sorted(Path(output_dir).glob(f"*/*/{SessionInfo.FILENAME}")):
-        if (f.parent / SessionInfo.DISCARD_MARKER).exists():
-            continue  # discarded; purge_discarded_sessions deletes it
         try:
+            if (f.parent / SessionInfo.DISCARD_MARKER).exists():
+                continue  # discarded; purge_discarded_sessions deletes it
             s = SessionInfo.load(f.parent)
         except Exception:
             continue

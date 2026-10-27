@@ -13,6 +13,8 @@ Threading model
   transcription) run on the engine thread right after the recorder started / stopped, also
   outside the lock. ``on_session_end`` runs before the session is submitted to the queue (kept)
   or deleted (discarded); ``session`` is None if the recorder dropped it (too short) or failed.
+* A discarded session is marked before ``recorder.stop()`` and deleted afterwards via
+  ``run_in_background`` (a daemon thread), so big WAVs don't delay detection or the hotkey.
 * Time comes from an injectable ``clock`` so tests can drive the state machine with a fake
   clock by calling ``tick()`` directly without starting the thread.
 """
@@ -28,11 +30,17 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from .config import Config, DetectionConfig
-from .models import AudioProcess, Mode, SessionInfo, TriggerKind, discard_session
+from .models import AudioProcess, Mode, SessionInfo, TriggerKind, discard_session, mark_discarded
 
 log = logging.getLogger(__name__)
 
 IDLE, PROMPTING, RECORDING = "idle", "prompting", "recording"
+
+
+def _run_daemon(fn: Callable[[], None]) -> None:
+    threading.Thread(target=fn, name="discard", daemon=True).start()
+
+
 CHOICES = ("record", "ignore", "always")
 
 
@@ -172,6 +180,7 @@ class Engine:
         permission_status: Callable[[], dict[str, str]] | None = None,
         on_session_start: Callable[[SessionInfo], None] | None = None,
         on_session_end: Callable[[SessionInfo | None, bool], None] | None = None,
+        run_in_background: Callable[[Callable[[], None]], None] | None = None,
     ):
         self.cfg = cfg
         self.monitor = monitor
@@ -186,6 +195,8 @@ class Engine:
         self.permission_status = permission_status
         self.on_session_start = on_session_start
         self.on_session_end = on_session_end
+        # run_in_background(fn): slow side work (deleting a discarded session); tests: inline.
+        self.run_in_background = run_in_background or _run_daemon
         self._save_config = save_config if save_config is not None else cfg.save
         self.own_pids = set(own_pids) if own_pids is not None else {os.getpid()}
 
@@ -620,23 +631,30 @@ class Engine:
         with self._lock:
             started = self._rec.session if self._rec is not None else None
             self._rec = None
+        if started is not None:  # marked first: a crash from here on can't keep it
+            mark_discarded(started.directory)
         try:
             session = self.recorder.stop()
         except Exception:
             log.exception("could not stop recording cleanly")
-            self._session_end(None, False)
-            session = started  # whatever it wrote must still go
-        else:
-            self._session_end(session, False)
+            session = None
+        self._session_end(session, False)
+        # Also when stop() failed or dropped it as too short: whatever it wrote must go.
+        session = session or started
         if session is None:
             return
-        if discard_session(session.directory):
-            log.info("discarded recording %s", session.directory)
+        mark_discarded(session.directory)
+        directory = session.directory
+        self.run_in_background(lambda: self._delete_discarded(directory))
+
+    def _delete_discarded(self, directory) -> None:
+        """Runs off the engine thread: deleting big WAVs mustn't delay detection."""
+        if discard_session(directory):
+            log.info("discarded recording %s", directory)
         else:
             self._notice(
                 "Recording not fully deleted",
-                f"Some files in {session.directory} are in use; "
-                "they will be deleted at the next start",
+                f"Some files in {directory} are in use; they will be deleted at the next start",
             )
 
     def _do_stop(self) -> None:

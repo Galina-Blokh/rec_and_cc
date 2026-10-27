@@ -131,6 +131,7 @@ class Harness:
             own_pids=[999],
             on_notice=lambda t, m: self.notices.append(t),
             permission_status=lambda: self.perm,
+            run_in_background=lambda fn: fn(),
         )
 
     def run(self, seconds, step=1.0):
@@ -705,23 +706,68 @@ def test_startup_retry_deletes_leftover_discarded_session(tmp_path, monkeypatch)
     assert [s.id for s in untranscribed_sessions(tmp_path)] == ["s6"]
 
 
-def test_discard_when_recorder_stop_fails(tmp_path):
-    class StopFails(FakeRecorder):
-        def start(self, kind, app=None):
-            s = super().start(kind, app)
-            s.directory = tmp_path / DAY / "s"
-            return _fill(s)
+class RealDirRecorder(FakeRecorder):
+    """Session on disk from start(); stop() behaves as `outcome` says."""
 
-        def stop(self):
+    def __init__(self, root, outcome):
+        super().__init__()
+        self.dir, self.outcome, self.marked_at_stop = root / DAY / "s", outcome, None
+
+    def start(self, kind, app=None):
+        self.session = super().start(kind, app)
+        self.session.directory = self.dir
+        return _fill(self.session)
+
+    def stop(self):
+        self.marked_at_stop = (self.dir / SessionInfo.DISCARD_MARKER).exists()
+        if self.outcome == "raise":
             raise RuntimeError("boom")
+        if self.outcome == "too_short":  # recorder's own rmtree(ignore_errors) left files
+            (self.dir / "me.wav").unlink()
+            return None
+        self.session.save()  # what Recorder.stop() does last
+        return self.session
 
+
+@pytest.mark.parametrize("outcome", ["ok", "raise", "too_short"])
+def test_discard_marks_before_stop_and_always_deletes(tmp_path, outcome):
     h = Harness(Mode.ASK)
-    h.rec = h.eng.recorder = StopFails()
+    h.rec = h.eng.recorder = RealDirRecorder(tmp_path, outcome)
     h.mon.procs = [CHROME]
     h.run(4)
     h.eng.respond("ignore")
     h.eng.tick()
-    assert h.status == IDLE and not (tmp_path / DAY / "s").exists()
+    assert h.rec.marked_at_stop  # a crash during stop() can't leave it recoverable
+    assert h.status == IDLE and not h.rec.dir.exists() and h.q.submitted == []
+
+
+def test_discard_deletes_off_the_engine_thread(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from recandcc.engine import _run_daemon
+
+    release, real_unlink = threading.Event(), Path.unlink
+
+    def slow_unlink(self, *a, **kw):
+        if self.suffix == ".wav":
+            release.wait(5)
+        return real_unlink(self, *a, **kw)
+
+    h = Harness(Mode.ASK)
+    h.eng.run_in_background = _run_daemon
+    h.rec = h.eng.recorder = RealDirRecorder(tmp_path, "ok")
+    h.mon.procs = [CHROME]
+    h.run(4)
+    monkeypatch.setattr(Path, "unlink", slow_unlink)
+    h.eng.respond("ignore")
+    h.eng.tick()  # returns although the WAV delete is still blocked
+    assert h.status == IDLE and h.rec.dir.exists()
+    release.set()
+    deadline = time.monotonic() + 5
+    while h.rec.dir.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not h.rec.dir.exists() and h.notices == []
 
 
 def test_discard_tolerates_vanished_files_and_save_is_atomic(tmp_path):
@@ -734,3 +780,52 @@ def test_discard_tolerates_vanished_files_and_save_is_atomic(tmp_path):
     names = sorted(p.name for p in s.directory.iterdir())
     assert names == ["me.wav", "others.wav", SessionInfo.FILENAME, "transcript.md"]  # no temp
     assert discard_session(s.directory) and not s.directory.exists()
+
+
+def _saved(tmp_path):
+    from datetime import datetime
+
+    s = SessionInfo("s", tmp_path, datetime.now(), TriggerKind.CALL)
+    s.save()
+    s.trigger_app = "zoom.us"
+    return s
+
+
+def _no_temp(tmp_path):
+    return [p.name for p in tmp_path.iterdir()] == [SessionInfo.FILENAME]
+
+
+@pytest.mark.parametrize("failures", [2, 99])  # retried until it works / falls back in place
+def test_save_survives_a_session_json_held_open(tmp_path, monkeypatch, failures):
+    import recandcc.models as models
+
+    real_replace, calls = models.os.replace, []
+
+    def replace(src, dst):
+        calls.append(dst)
+        if len(calls) <= failures:
+            raise PermissionError(13, "in use", str(dst))
+        return real_replace(src, dst)
+
+    s = _saved(tmp_path)
+    monkeypatch.setattr(models.os, "replace", replace)
+    monkeypatch.setattr(models.time, "sleep", lambda s: None)
+    s.save()
+    assert len(calls) == min(failures + 1, models._REPLACE_TRIES)
+    assert SessionInfo.load(tmp_path).trigger_app == "zoom.us" and _no_temp(tmp_path)
+
+
+def test_save_cut_short_keeps_the_previous_session_json(tmp_path, monkeypatch):
+    real_write = Path.write_text
+
+    def write_text(self, data, *a, **kw):
+        if self.name.endswith(".tmp"):
+            real_write(self, data[:10], *a, **kw)  # crash / disk full mid-write
+            raise OSError(28, "no space left")
+        return real_write(self, data, *a, **kw)
+
+    s = _saved(tmp_path)
+    monkeypatch.setattr(Path, "write_text", write_text)
+    with pytest.raises(OSError):
+        s.save()
+    assert SessionInfo.load(tmp_path).trigger_app is None and _no_temp(tmp_path)
