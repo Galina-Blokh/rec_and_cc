@@ -75,7 +75,31 @@ def test_main_language_is_the_one_with_the_most_speech_time():
     assert summary.main_language([seg("x", "")]) == "en"
 
 
+def test_overlapping_speech_counts_once_per_language():
+    """Me and Others talking over each other in Russian for 6 s must not beat 8 s of English."""
+    segs = [Segment(0, 6, "да", "Me", "ru"), Segment(0, 6, "да", "Speaker 1", "ru")]
+    segs += [Segment(1, 5, "ну", "Speaker 2", "ru"), Segment(10, 18, "yes", "Me", "en")]
+    segs.append(Segment(4, 8, "так", "Me", "ru"))  # the Russian span is now 0-8 s
+    assert summary.main_language(segs[:4]) == "en"  # 6 s of ru (not 16) vs 8 s of en
+    segs.append(Segment(20, 21, "и", "Me", "ru"))
+    assert summary.main_language(segs) == "ru"  # 9 s vs 8 s
+
+
 GEMMA = "mlx-community/gemma-4-e4b-it-4bit"
+
+
+def test_unpinned_language_model_is_ignored_unless_allowed(tmp_path, caplog):
+    cfg = Config()
+    segs = [Segment(0, 9, "שלום", "Me", "he")]
+    cfg.summary.language_models = {"he": "someone/unpinned-llm"}
+    with caplog.at_level(logging.WARNING, logger="recandcc"):
+        assert summary.summary_model(cfg, segs) == DEFAULT_SUMMARY_MODEL
+    assert "ignoring unpinned summary.language_models model someone/unpinned-llm" in caplog.text
+    cfg.summary.language_models = {"he": str(tmp_path)}  # a local model folder is fine
+    assert summary.summary_model(cfg, segs) == str(tmp_path)
+    cfg.summary.language_models = {"he": "someone/unpinned-llm"}
+    cfg.transcription.allow_unpinned_models = True
+    assert summary.summary_model(cfg, segs) == "someone/unpinned-llm"
 
 
 def test_mixed_meeting_uses_one_language_for_model_prompt_and_headings(tmp_path, monkeypatch):

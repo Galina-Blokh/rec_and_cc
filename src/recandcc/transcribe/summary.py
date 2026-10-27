@@ -78,17 +78,36 @@ class ModelUnavailable(SummaryUnavailable):
 
 def main_language(segments: list[Segment]) -> str:
     """The language with the most speech time ("en" if none is known). It picks both the
-    summary's language (prompt, headings) and its model (summary_model)."""
-    secs: dict[str, float] = {}
+    summary's language (prompt, headings) and its model (summary_model). Overlapping
+    segments (Me and Others at once) count their shared time once."""
+    spans: dict[str, list[tuple[float, float]]] = {}
     for s in segments:
-        if s.language:
-            secs[s.language] = secs.get(s.language, 0.0) + max(0.0, s.end - s.start)
+        if s.language and s.end > s.start:
+            spans.setdefault(s.language, []).append((s.start, s.end))
+    secs: dict[str, float] = {}
+    for lang, intervals in spans.items():
+        total, reach = 0.0, float("-inf")
+        for start, end in sorted(intervals):
+            if end > reach:
+                total += end - max(start, reach)
+                reach = end
+        secs[lang] = total
     return max(secs, key=lambda k: secs[k]) if secs else "en"
 
 
 def summary_model(cfg: Config, segments: list[Segment]) -> str:
-    """``summary.language_models`` entry of the main language, else ``summary.model``."""
-    return cfg.summary.language_models.get(main_language(segments), cfg.summary.model)
+    """``summary.language_models`` entry of the main language, else ``summary.model``. An
+    entry that is neither pinned (revisions.py) nor a local path is ignored with a warning,
+    unless ``transcription.allow_unpinned_models`` is on."""
+    from .revisions import revision
+
+    model = cfg.summary.language_models.get(main_language(segments))
+    if model is None:
+        return cfg.summary.model
+    if revision(model) or Path(model).exists() or cfg.transcription.allow_unpinned_models:
+        return model
+    log.warning("ignoring unpinned summary.language_models model %s; using summary.model", model)
+    return cfg.summary.model
 
 
 def download_notice(model: str) -> str:
