@@ -393,11 +393,38 @@ def chooser_script(labels: list[str], prompt: str, button: str) -> str:
     )
 
 
-def name_dialog_script(label: str) -> str:
+PLAY_SAMPLE = "Play sample"
+
+
+def name_dialog_script(label: str, sample: bool = False, answer: str = "") -> str:
+    """The name prompt; with `sample` a "Play sample" button too, after which the dialog is
+    shown again with the text typed so far (`answer`)."""
+    buttons = f'{{"Cancel", {as_str(PLAY_SAMPLE)}, "Save"}}' if sample else '{"Cancel", "Save"}'
     return (
-        f'display dialog {as_str(f"Name for {label}:")} default answer "" '
-        'with title "RecAndCC" buttons {"Cancel", "Save"} default button "Save"'
+        f"display dialog {as_str(f'Name for {label}:')} default answer {as_str(answer)} "
+        f'with title "RecAndCC" buttons {buttons} default button "Save"'
     )
+
+
+def name_dialog_answer(output: str) -> tuple[bool, str]:
+    """(play the sample?, typed text) from a ``name_dialog_script`` result; "" = cancelled."""
+    button, _, text = output.partition(", text returned:")
+    return button.strip() == f"button returned:{PLAY_SAMPLE}", text.strip()
+
+
+def ask_speaker_name(label: str, clip, ask: Callable[[str], str], play) -> str:
+    """Ask for `label`'s name on a dialog worker thread (``ask`` runs the AppleScript). With a
+    `clip` the dialog can play it (``play(clip)`` returns at once) and comes back with the
+    text typed so far, as often as the user likes; without one it is the plain prompt.
+    Returns the name, "" if cancelled or timed out."""
+    answer = ""
+    while True:
+        replay, answer = name_dialog_answer(
+            ask(name_dialog_script(label, clip is not None, answer))
+        )
+        if not (replay and clip is not None):
+            return answer
+        play(clip)
 
 
 # ----------------------------------------------------------------------- controller
@@ -810,6 +837,21 @@ class Controller:
     @property
     def speaker_names_enabled(self) -> bool:
         return self.cfg.transcription.speaker_names
+
+    @property
+    def sample_allowed(self) -> bool:
+        """A speaker sample plays only while nothing records: system capture leaves out only
+        our own process, so ``afplay`` would end up in the recording."""
+        return self.engine.state.status == IDLE
+
+    def speaker_clip(self, directory: Path, label: str):
+        """The label's audio sample (``ui.sample.Clip``) for the name dialog, or None while
+        recording or when the audio is gone. Call it on a worker thread (reads the WAV)."""
+        if not self.sample_allowed:
+            return None
+        from . import sample
+
+        return sample.find_clip(directory, label)
 
     def speakers_async(self, directory: Path) -> None:
         """List the session's speakers that have voice data, with their first lines; posts

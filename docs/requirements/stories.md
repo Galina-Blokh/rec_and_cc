@@ -30,7 +30,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 language ID checked on a synthetic he/en/ru set; no real Hebrew recordings, ivrit.ai routing not evaluated (#6) |
 | US-20 | Search my transcripts | ✅ search (summaries and export: see US-27, US-25) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI (#62), macOS menu and Windows tray (US-26, #76); self-intro hints (#81) and overlap segmentation (#96) shipped (#1) |
-| US-26 | Name speakers and forget voices from the menu | 🟡 macOS menu and Windows tray (tray untested on Windows hardware), first lines instead of an audio sample (#1) |
+| US-26 | Name speakers and forget voices from the menu | 🟡 macOS menu (first lines and an audio sample) and Windows tray (tray untested on Windows hardware) (#1) |
 | US-31 | Speaker names from the call app's participant list | 🟡 shipped (#80, #1 A.3): opt-in, macOS, one-to-one only |
 | US-35 | Call-app names in a room recording a call joined | 🟡 claimed (#1): fake-tested; older transcripts stay unnamed |
 | US-25 | Export a transcript to DOCX and PDF | 🟡 CLI, macOS menu and Windows tray; templates planned (#4) |
@@ -297,7 +297,8 @@ I don't have to work out who `Speaker 2` was every time.*
 don't need the command line for it.*
 
 - **Given** `speaker_names = true`, **when** I choose "Recent transcripts → Name speakers…",
-  pick a session and a `Speaker N` (shown with their first lines), and type a name, **then**
+  pick a session and a `Speaker N` (shown with their first lines; on macOS the name dialog
+  can play a short sample of their voice), and type a name, **then**
   the result is exactly that of `recandcc name-speaker` (same function): transcript files and
   the voice profile are updated.
 - **Given** `speaker_names = false` (default), **then** "Name speakers…" is greyed out and
@@ -308,10 +309,16 @@ don't need the command line for it.*
   the forget keeps no voices or call-app names either, even if it is transcribed after it.
 - **Then** dialogs run off the menu thread, disk work on worker threads, and neither names
   nor transcript text are logged at INFO or above.
+- **Given** the session's audio is still kept, **when** I press "Play sample" (macOS),
+  **then** a few seconds of that speaker (their first segment of at least 2 s, else the
+  longest, at most 6 s) play from the session's own WAV, cut into a private temp file that
+  is deleted after playback (its folder on quit), off the menu thread. **Given** the audio
+  was purged or is missing, or a session is recording (it would record the sample), **then**
+  there is no "Play sample" button, only the first lines. A label from a call is never
+  played from the user's own mic track.
 - **Given** Windows, **then** the tray has the same two items; its dialogs are small tkinter
   windows on worker threads and time out as Cancel (unit-tested with fake dialogs, not yet
   checked on Windows hardware).
-- **Not yet:** a short audio sample (the first lines are shown instead) (#1).
 
 ### US-31 Speaker names from the call app's participant list
 *As the owner, I want `Speaker 2` named after the person shown in Zoom/Teams/Meet, so that I
