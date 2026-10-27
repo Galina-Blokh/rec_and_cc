@@ -104,7 +104,7 @@ def test_faster_whisper_names_map_to_pinned_revisions():
     assert (
         revisions.faster_whisper_revision("mobiuslabsgmbh/faster-whisper-large-v3-turbo") == turbo
     )
-    assert revisions.faster_whisper_revision("medium") is None
+    assert revisions.faster_whisper_revision("someone/custom-ct2") is None
     assert revisions.faster_whisper_revision("/some/local/dir") is None
 
 
