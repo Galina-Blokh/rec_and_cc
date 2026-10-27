@@ -35,7 +35,7 @@ from ..models import Mode, SessionInfo, TriggerKind, discard_session
 from ..recorder import make_private_dir
 from ..retention import purge_old_audio
 from ..sensitivity import PRESETS as SENSITIVITY_PRESETS
-from ..sensitivity import apply_preset, current_preset
+from ..sensitivity import apply_preset, current_preset, room_trigger
 
 if TYPE_CHECKING:
     from ..transcribe.live import LiveTranscriber
@@ -272,7 +272,8 @@ class Controller:
             permission_status=permission_status,
             on_session_start=self._on_session_start,
             on_session_end=self._on_session_end,
-            room_monitor=RoomMonitor(),  # opens the mic only if detection.room_listening
+            # mic only if room_listening; thresholds follow the outside sensitivity
+            room_monitor=RoomMonitor(cfg.detection, thresholds=room_trigger),
         )
         if start_threads:
             self.engine.start()
@@ -541,9 +542,10 @@ class Controller:
         return f"Idle — {str(st.mode).capitalize()} mode"
 
     def _save_settings(self) -> None:
-        def save():
+        def save():  # serialized: the last save writes the latest settings
             try:
-                self.cfg.save()
+                with _SAVE_LOCK:
+                    self.cfg.save()
             except Exception:
                 log.exception("saving settings failed")
 
@@ -556,6 +558,11 @@ class Controller:
         self._save_settings()
         if on:
             self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
+            if self.permissions.get("microphone") == "denied":
+                self.post_notice(
+                    "Room listening can't hear anything",
+                    "RecAndCC has no microphone access — grant it in the Permissions menu.",
+                )
 
     def set_sensitivity(self, preset: str) -> None:
         """Sensitivity menu (any thread): apply a preset from ``sensitivity.PRESETS``. The
@@ -614,11 +621,13 @@ class _LiveAwareQueue:
         self._ctrl._submit(session)
 
 
+_SAVE_LOCK = threading.Lock()
 ROOM_ITEM = "Listen for conversations in the room"
 SENSITIVITY_ITEM = "Sensitivity"
 ROOM_LISTENING_NOTICE = (
     "While idle, the microphone stays on (orange dot) to notice conversations near the "
-    "laptop; nothing leaves the device. Recording people may need their consent."
+    "laptop, which costs some battery; nothing leaves the device. Recording people may "
+    "need their consent: tell them."
 )
 
 

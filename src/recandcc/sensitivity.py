@@ -18,15 +18,22 @@ PRESETS: dict[str, tuple[int | None, int | None]] = {
     "Noisy place": (25, 50),
 }
 MIN_MARGIN_DB, MAX_MARGIN_DB = 3.0, 15.0  # room level above its noise floor, at 100 / 0
+# Speech needed is at most this share of the window (the window widens instead): even a busy
+# conversation leaves pauses, so every setting stays reachable.
+MAX_COVERAGE = 0.6
 
 
-def _clamp(s: float) -> float:
+def valid(s: object) -> float | None:
+    """A sensitivity as a float in 0-100, or None if unset or not a number."""
+    if s is None or isinstance(s, bool) or not isinstance(s, int | float) or s != s:
+        return None
     return min(100.0, max(0.0, float(s)))
 
 
 def scale(s: float | None) -> float:
     """Threshold multiplier: 4x at 0, 1x at 50 (= the configured value), 0.25x at 100."""
-    return 1.0 if s is None else 4.0 ** ((50.0 - _clamp(s)) / 50.0)
+    v = valid(s)
+    return 1.0 if v is None else 4.0 ** ((50.0 - v) / 50.0)
 
 
 def effective_min_active_s(det: DetectionConfig) -> float:
@@ -37,14 +44,14 @@ def effective_min_active_s(det: DetectionConfig) -> float:
 def room_trigger(det: DetectionConfig) -> tuple[float, float, float | None]:
     """(speech_s, window_s, margin_db) for the room monitor (outside sensitivity).
 
-    speech_s never exceeds the window; margin_db is how far above the room's adaptive noise
-    floor a block must be to count as speech (None = no level gate)."""
-    s = det.outside_sensitivity
-    window = float(det.room_window_s)
+    The window widens so speech_s is at most MAX_COVERAGE of it; margin_db is how far above
+    the room's noise floor a step must be to count (None = no level gate)."""
+    s = valid(det.outside_sensitivity)
     if s is None:
-        return float(det.room_speech_s), window, None
-    speech = min(det.room_speech_s * scale(s), window)
-    margin = MAX_MARGIN_DB - (MAX_MARGIN_DB - MIN_MARGIN_DB) * _clamp(s) / 100.0
+        return float(det.room_speech_s), float(det.room_window_s), None
+    speech = det.room_speech_s * scale(s)
+    window = max(float(det.room_window_s), speech / MAX_COVERAGE)
+    margin = MAX_MARGIN_DB - (MAX_MARGIN_DB - MIN_MARGIN_DB) * s / 100.0
     return speech, window, margin
 
 

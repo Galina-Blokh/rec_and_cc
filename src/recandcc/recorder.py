@@ -286,9 +286,15 @@ class Recorder:
         return f"{now.strftime('%Y-%m-%d')}_{d.name}", d
 
     def start(
-        self, kind: TriggerKind, app: str | None = None, record_mic: bool | None = None
+        self,
+        kind: TriggerKind,
+        app: str | None = None,
+        record_mic: bool | None = None,
+        mic_source: SourceFactory | None = None,
     ) -> SessionInfo:
-        """Start a session. ``record_mic`` overrides the config policy when not None."""
+        """Start a session. ``record_mic`` overrides the config policy when not None.
+        ``mic_source`` replaces the mic factory (room listening: a source that replays its
+        pre-roll first); it opens first and the other tracks start padded to its length."""
         with self._op_lock:
             if self._session is not None:
                 raise RuntimeError("already recording")
@@ -304,11 +310,14 @@ class Recorder:
             )
             plan = [(Track.OTHERS, self.system_factory)]
             if want_mic:
-                plan.append((Track.ME, self.mic_factory))
+                plan.append((Track.ME, mic_source or self.mic_factory))
+            if mic_source is not None:
+                plan.reverse()
 
             writers: list[_TrackWriter] = []
             for track, factory in plan:
-                w = self._open_track(session, track, factory)
+                pad = max((w.frames_received for w in writers), default=0) if mic_source else 0
+                w = self._open_track(session, track, factory, pad_frames=pad)
                 if w is not None:
                     writers.append(w)
 

@@ -216,6 +216,7 @@ class MacApp(rumps.App):
         if self.rec_item.title != rec_title:
             self.rec_item.title = rec_title
         self.login_item.state = 1 if autostart.is_enabled() else 0
+        self.room_item.state = 1 if self.cfg.detection.room_listening else 0  # hand edits too
         self._render_live(st)
         # close a stale prompt dialog (answered elsewhere, expired, mode changed, ...)
         with self._dialog_lock:

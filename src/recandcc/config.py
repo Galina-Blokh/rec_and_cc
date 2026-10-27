@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import sys
+import threading
 import tomllib
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -11,6 +14,8 @@ import platformdirs
 import tomli_w
 
 from .models import Mode
+
+log = logging.getLogger(__name__)
 
 APP_NAME = "RecAndCC"
 CONFIG_DIR = Path(platformdirs.user_config_dir(APP_NAME, appauthor=False))
@@ -95,6 +100,9 @@ class DetectionConfig:
     room_listening: bool = False
     room_speech_s: float = 6.0
     room_window_s: float = 15.0
+    room_preroll_s: float = 15.0  # audio before the trigger kept at the session's start
+    room_stop_after_silence_s: float = 90.0  # no speech this long ends a room session
+    room_vad_threshold: float = 0.5  # Silero speech probability that counts as speech
     # Sensitivity 0-100 (higher = less needed to start), unset = the plain thresholds above.
     # Outside = room/mic (room_speech_s + a noise-floor margin), inside = app audio
     # (min_active_s). See recandcc.sensitivity and the "Sensitivity" menu presets.
@@ -152,7 +160,10 @@ class Config:
         data["output_dir"] = str(self.output_dir)
         for section in ("detection", "transcription"):  # TOML has no null: unset = omitted
             data[section] = {k: v for k, v in data[section].items() if v is not None}
-        path.write_bytes(tomli_w.dumps(data).encode())
+        # Atomic: concurrent saves (two quick menu clicks) never leave a torn file.
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_bytes(tomli_w.dumps(data).encode())
+        os.replace(tmp, path)
 
 
 def _build(cls, data: dict):
@@ -170,6 +181,11 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     det = _build(DetectionConfig, data.pop("detection", {}))
     det.mode = Mode(det.mode)
     det.app_modes = {k: Mode(v) for k, v in det.app_modes.items()}
+    for key in ("outside_sensitivity", "inside_sensitivity"):
+        v = getattr(det, key)
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int | float)):
+            log.warning("config: [detection] %s must be a number 0-100; ignoring it", key)
+            setattr(det, key, None)
     tr = _build(TranscriptionConfig, data.pop("transcription", {}))
     cfg = _build(Config, data)
     cfg.output_dir = Path(cfg.output_dir).expanduser()

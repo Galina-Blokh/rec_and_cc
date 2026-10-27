@@ -108,9 +108,11 @@ Menu items:
   settings.
 - **Show live captions**: on/off switch for the floating captions window (saved to settings).
 - **Listen for conversations in the room** (off by default): while nothing records, the mic
-  stays on (macOS shows the orange dot the whole time) and about 6 s of speech within 15 s
-  near the laptop starts a recording, as in Auto/Ask mode. Calls take precedence. Tell the
-  people in the room: recording them may need their consent.
+  stays on (macOS shows the orange dot the whole time; it costs some battery, and Bluetooth
+  headsets switch to their call profile) and about 6 s of speech within 15 s near the laptop
+  starts a recording, as in Auto/Ask mode, including the 15 s before it. It stops after 90 s
+  without speech. Apps take precedence. Tell the people in the room: recording them may need
+  their consent.
 - **Sensitivity** (Off by default): presets *Quiet room / Normal / Noisy place* for how
   readily the room (microphone) and app audio start a recording; a noisy place needs more
   and louder-than-background speech. Fine-tune with `outside_sensitivity` /
@@ -148,7 +150,7 @@ shows captions only once the model has loaded (a few seconds).
 ### In-person meetings: press ⌃⌥R
 
 A meeting in a room doesn't make any app play or capture audio, so nothing triggers a
-recording. Press **⌃⌥R** (Control+Option+R) when it starts and again when it ends. It works in every app, needs
+recording unless **Listen for conversations in the room** is on. Otherwise press **⌃⌥R** (Control+Option+R) when it starts and again when it ends. It works in every app, needs
 no extra permission (no Accessibility / Input Monitoring), and uses the physical R key, so it
 works with a Russian keyboard layout too. While RecAndCC runs, the shortcut belongs to it, so
 the default avoids ⌘⇧R (hard reload in Chrome, Reader in Safari). If another app already

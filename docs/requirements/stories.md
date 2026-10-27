@@ -22,12 +22,12 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-11 | Live captions and live transcript | ✅ |
 | US-12 | Speaker labels for the other side | ✅ |
 | US-13 | Readable transcripts in private folders | 🟡 owner-only not enforced on Windows (#37) |
-| US-14 | Works offline, nothing leaves the device | 🟡 no end-to-end offline test (#40) |
+| US-14 | Works offline, nothing leaves the device | 🟡 no warning for synced folders yet (#41) |
 | US-15 | Delete old audio automatically | 🟡 `keep_audio = false` can miss a crash (#38) |
 | US-16 | Permissions set up from the app | ✅ |
 | US-17 | Always on, visible state | ✅ |
 | US-18 | Runs on Windows | 🟡 untested on hardware (#5) |
-| US-22 | Room listening (opt-in) | 🟡 no pre-roll, locked screen unverified (#2) |
+| US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
 | US-23 | Sensitivity: room vs system audio | 🟡 presets only, no live meters (#7) |
 
 ---
@@ -144,8 +144,9 @@ while I decide.*
   `allow_unpinned_models = true`.
 - **Then** RecAndCC uploads nothing itself. The default output folder may still be synced
   by iCloud or OneDrive; the README warns, the app doesn't yet (#41).
-- **Not yet:** no automated test runs a whole session with the network blocked
-  (`test_offline.py` and `test_model_pinning.py` cover model loading; #40).
+- **Then** this is enforced end to end: `test_offline_e2e.py` records and transcribes a
+  session (live and batch) with sockets and DNS blocked; only the speaker-model download
+  is attempted, and it fails fast, leaving "Others".
 - **Then** logs contain events, app names and paths, never transcript text or audio.
 
 ### US-15 Delete old audio automatically
@@ -175,27 +176,34 @@ while I decide.*
 - **Not yet:** a real-hardware test pass, per-app capture, installer (#5).
 
 ### US-22 Room listening (opt-in)
-*As the owner, I want a conversation next to the laptop recorded without pressing anything,
-so that in-person meetings are captured like calls.* (#2)
+*As the owner, I want a conversation next to the laptop (an in-person meeting) recorded
+without pressing anything, like a call, and only when I have turned that on.* (#2, with #58)
 
-- **Given** `room_listening = false` (the default), **then** the microphone is never opened
-  while nothing records.
-- **Given** room listening is on and nothing records, **when** speech totals `room_speech_s`
-  (6 s) within `room_window_s` (15 s), **then** a `room` session starts (mode `auto`), or
-  starts and asks whether to keep it (mode `ask`); short remarks don't trigger it.
-- **Then** the room monitor's mic is closed before the recorder opens its own and reopened
-  after the session; voice detection never runs on the audio callback thread.
-- **Given** an app session is recording or pending, **then** room speech starts nothing; a
-  call that starts during a room session turns it into that call's session.
-- **Given** a room session, **then** it stops after `stop_after_silence_s` of silence; after
-  a manual stop or a discard it doesn't restart until the room was quiet for
-  `stop_after_inactive_s`.
+- **Given** a fresh install (`room_listening = false`), **then** the microphone is never
+  opened while nothing records.
+- **Given** room listening is on and nothing records, **when** nobody speaks or I make a
+  short remark (less than `room_speech_s` of speech within `room_window_s`), **then**
+  nothing is recorded; **when** people talk for `room_speech_s` (6 s) within
+  `room_window_s` (15 s), **then** a `room` session starts (Auto), or starts and asks whether
+  to keep it (Ask).
+- **Then** the session's audio begins up to `room_preroll_s` (15 s) before the trigger, so
+  the first sentence is kept, with no gap or overlap, and the other track stays aligned.
+- **Then** the mic is never opened twice: a room session records the monitor's own stream,
+  and the monitor's mic is closed before any other session opens one.
+- **Given** an app is doing audio or another app uses the mic (even one I switched off,
+  stopped or that is ignored), **then** room speech starts nothing; a call that starts
+  during a room session turns it into that call's session, without a second session.
+- **Given** a room session, **then** it stops after `room_stop_after_silence_s` (90 s)
+  without speech; after a manual stop or a discard it doesn't restart until the room was
+  quiet for `stop_after_inactive_s`.
+- **Given** a room session, **then** the final transcript numbers the speakers on the mic
+  track (`Speaker 1`, `Speaker 2`, …).
 - **Given** the menu item "Listen for conversations in the room", **then** it switches the
-  setting (saved) and turning it on explains the always-on mic indicator and consent.
-- **Then** nothing about the room audio is logged beyond on/off states, and nothing leaves
-  the device.
-- **Not yet:** pre-roll of the first sentence, a VAD-based stop, `Speaker N` labels on the
-  mic track, locked-screen and battery measurements.
+  setting (saved) and closes or reopens the mic; turning it on explains the always-on mic
+  indicator, the battery cost and consent, and warns if mic access is denied.
+- **Then** speech detection runs on its own thread (the audio thread only copies frames);
+  nothing about the room audio is logged beyond on/off states, and nothing leaves the device.
+- **Not yet:** verified with the screen locked; idle CPU and battery impact measured.
 
 ### US-23 Sensitivity: room vs system audio
 *As the owner, I want to tell the app how readily the room (outside, microphone) and the
@@ -205,15 +213,17 @@ noisy café.* (#7)
 - **Given** `outside_sensitivity` and `inside_sensitivity` are unset (the default), **then**
   detection behaves exactly as before: `min_active_s`, `room_speech_s`, no level gate.
 - **Given** a sensitivity 0–100, **then** the threshold is scaled 4× at 0, 1× at 50 and
-  0.25× at 100: inside scales `min_active_s`; outside scales `room_speech_s` (capped at
-  `room_window_s`) and sets a 15–3 dB margin above the room's adaptive noise floor.
-- **Given** outside favoured (high) and inside low, **when** people talk in the room while an
-  app plays briefly, **then** the room starts the recording and the short app audio doesn't
-  yet; **given** inside favoured, **then** the reverse.
+  0.25× at 100: inside scales `min_active_s`; outside scales `room_speech_s` (the window widens
+  so speech is at most 60% of it, so even 0 triggers on a real conversation) and sets a
+  15–3 dB margin above the room's noise floor. A non-numeric value counts as unset.
+- **Given** outside favoured (high) and inside low, **when** an app plays briefly and then
+  people talk in the room, **then** the short app audio starts nothing and the room starts the
+  recording; **given** inside favoured, **then** app audio starts it within a second.
 - **Given** steady background noise (a fan, a café), **then** blocks near the noise floor
-  don't count as speech and don't even run the voice detector.
+  don't count as speech and don't even run the voice detector; the floor learns only from
+  moments without speech, so a long conversation or a mic opened mid-conversation keeps
+  counting.
 - **Given** the menu "Sensitivity" (Off / Quiet room / Normal / Noisy place), **then** the
-  preset is saved to `config.toml` and applied on the next engine tick (the room mic reopens
-  with the new thresholds).
+  preset is saved to `config.toml` (saves are serialized and atomic) and applies at once.
 - **Not yet:** a settings window with live level meters, a per-source speech score, caption
   priority between the tracks.
