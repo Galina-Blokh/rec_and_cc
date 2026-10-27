@@ -59,6 +59,12 @@ if TYPE_CHECKING:
     from ..transcribe.live import LiveTranscriber
 
 log = logging.getLogger(__name__)
+
+
+class _ConfigWriteError(Exception):
+    """Writing config.toml failed (args: exception name, errno); no path in the message."""
+
+
 CFG_HOTKEY = object()  # apply_hotkey(): use cfg.hotkey
 
 RECENT_COUNT = 10
@@ -1179,10 +1185,13 @@ class Controller:
                                 raise
                             self.cfg.save(CONFIG_PATH)  # no file yet: write a fresh one
                             mtime = save_settings(updates, CONFIG_PATH)
-                    except Exception:
+                    except Exception as e:
                         self.apply_settings(old)
                         with self._lang_lock:
                             tr._raw_languages = old_raw  # type: ignore[attr-defined]
+                        if isinstance(e, OSError) and not isinstance(e, ConfigLockTimeout):
+                            # not the folder: the outer handler would say so
+                            raise _ConfigWriteError(type(e).__name__, e.errno) from e
                         raise
                     if not edited:
                         self._config_mtime = mtime  # our own write: nothing to reload
@@ -1200,6 +1209,9 @@ class Controller:
             except ConfigLockTimeout:
                 log.warning("settings not saved: config lock timed out")
                 self.post_notice("Settings not saved", "config.toml is locked by another process")
+            except _ConfigWriteError as e:
+                log.warning("settings not saved: config write %s (errno %s)", *e.args)
+                self.post_notice("Settings not saved", "config.toml could not be written")
             except OSError as e:
                 log.warning("settings not saved: %s (errno %s)", type(e).__name__, e.errno)
                 self.post_notice("Settings not saved", "the transcripts folder can't be created")
