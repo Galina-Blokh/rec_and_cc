@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
+import tempfile
+import threading
+import time
 import tomllib
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -188,23 +192,43 @@ class Config:
         raw = getattr(tr, "_raw_languages", None)
         if raw is not None and normalize_languages(raw) == tr.languages:
             data["transcription"]["languages"] = raw
-        try:
-            existing = tomllib.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            existing = {}
-        for key, value in data.items():
-            if isinstance(value, dict) and isinstance(existing.get(key), dict):
-                existing[key].update(value)
-            else:
-                existing[key] = value
-        _write_atomic(path, existing)
+        with _WRITE_LOCK:
+            try:
+                existing = tomllib.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                existing = {}
+            for key, value in data.items():
+                if isinstance(value, dict) and isinstance(existing.get(key), dict):
+                    existing[key].update(value)
+                else:
+                    existing[key] = value
+            _write_atomic(path, existing)
+
+
+# Every read-modify-write of config.toml in this process holds this lock.
+_WRITE_LOCK = threading.RLock()
 
 
 def _write_atomic(path: Path, data: dict) -> None:
-    """Write ``data`` as TOML to a temp file next to ``path``, then replace it."""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(tomli_w.dumps(data).encode())
-    tmp.replace(path)
+    """Write ``data`` as TOML to a unique temp file next to ``path``, then replace it. On
+    Windows a scanner or editor can briefly lock the target: retry, then write in place."""
+    payload = tomli_w.dumps(data).encode()
+    fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+        for attempt in range(5):
+            try:
+                tmp.replace(path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    path.write_bytes(payload)
+                    return
+                time.sleep(0.05 * (attempt + 1))
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _build(cls, data: dict):
@@ -249,9 +273,10 @@ def save_languages(languages: list, path: Path = CONFIG_PATH) -> None:
     """Write only `transcription.languages` into config.toml, leaving every other key as it is
     on disk (it may have been edited by hand since the app loaded it). Raises
     FileNotFoundError if there is no file yet, ValueError if it is not valid TOML."""
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
-    data.setdefault("transcription", {})["languages"] = list(languages)
-    _write_atomic(path, data)
+    with _WRITE_LOCK:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        data.setdefault("transcription", {})["languages"] = list(languages)
+        _write_atomic(path, data)
 
 
 # Keys the native settings window may change: flat name -> (section or "", key).
@@ -302,16 +327,17 @@ def validate_settings(values) -> dict:
 def save_settings(updates: dict, path: Path = CONFIG_PATH) -> None:
     """Write validated settings (see validate_settings) into config.toml, keeping every other
     key as it is on disk. Raises FileNotFoundError / ValueError like save_languages."""
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
-    for name, value in updates.items():
-        section, key = SETTINGS_KEYS[name]
-        target = data.setdefault(section, {}) if section else data
-        target[key] = (
-            value.value
-            if isinstance(value, Mode)
-            else (str(value) if isinstance(value, Path) else value)
-        )
-    _write_atomic(path, data)
+    with _WRITE_LOCK:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        for name, value in updates.items():
+            section, key = SETTINGS_KEYS[name]
+            target = data.setdefault(section, {}) if section else data
+            target[key] = (
+                value.value
+                if isinstance(value, Mode)
+                else (str(value) if isinstance(value, Path) else value)
+            )
+        _write_atomic(path, data)
 
 
 def load_config(path: Path = CONFIG_PATH) -> Config:

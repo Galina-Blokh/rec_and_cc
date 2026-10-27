@@ -31,6 +31,7 @@ SETTINGS_TIMEOUT_S = 15 * 60.0
 
 _proc_lock = threading.Lock()
 _proc: subprocess.Popen | None = None  # the open window's helper, so quitting can close it
+_closing = threading.Event()  # set when the app quits: a window starting now is killed
 
 
 class SettingsUnavailable(RuntimeError):
@@ -61,10 +62,15 @@ def raise_settings() -> None:
 
 def close_settings() -> None:
     """Close the settings window if one is open (the app is quitting)."""
+    _closing.set()
     with _proc_lock:
         proc = _proc
     if proc is not None and proc.poll() is None:
         proc.terminate()
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 def run_settings(cfg: Config, timeout: float = SETTINGS_TIMEOUT_S) -> dict | None:
@@ -80,9 +86,12 @@ def run_settings(cfg: Config, timeout: float = SETTINGS_TIMEOUT_S) -> dict | Non
         helper = find_helper()
     except HelperNotFoundError as e:
         raise SettingsUnavailable(str(e)) from e
+    if _closing.is_set():
+        return None
+    shown = snapshot(cfg)  # what the window starts with: the baseline for "changed"
     with tempfile.TemporaryDirectory(prefix="rcc-settings-") as tmp:
         snap = Path(tmp) / "settings.json"
-        snap.write_text(json.dumps(snapshot(cfg)), encoding="utf-8")
+        snap.write_text(json.dumps(shown), encoding="utf-8")
         global _proc
         try:
             proc = subprocess.Popen(  # noqa: S603 - fixed argv: our own helper, no shell
@@ -96,11 +105,16 @@ def run_settings(cfg: Config, timeout: float = SETTINGS_TIMEOUT_S) -> dict | Non
             raise SettingsUnavailable(f"settings window failed: {e}") from e
         with _proc_lock:
             _proc = proc
+            if _closing.is_set():
+                proc.kill()  # quit raced with the start: don't leave a Dock icon behind
         try:
             stdout, _err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.communicate()
+            try:
+                proc.communicate(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                log.warning("settings helper did not exit after kill")
             log.warning("settings window timed out; treated as cancelled")
             return None
         finally:
@@ -117,6 +131,5 @@ def run_settings(cfg: Config, timeout: float = SETTINGS_TIMEOUT_S) -> dict | Non
         raise SettingsUnavailable("the helper has no settings window (rebuild it)") from e
     if state == "saved" and isinstance(reply.get("values"), dict):
         # only what the user changed: edits made to config.toml meanwhile are not reverted
-        shown = snapshot(cfg)
         return {k: v for k, v in reply["values"].items() if shown.get(k) != v}
     return None

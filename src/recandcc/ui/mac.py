@@ -203,7 +203,6 @@ class MacApp(rumps.App):
                     if self.captions is not None:
                         self.captions.end()
             elif kind == "settings_saved":
-                self.ctrl.apply_settings(ev[1])
                 self.captions_item.state = check(self.cfg.live_captions)
                 if "live_captions" in ev[1]:
                     self._apply_captions()

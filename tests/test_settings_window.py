@@ -69,7 +69,9 @@ def _real_config_untouched():
             return None
 
     before = stamp()
+    settings_window._closing.clear()
     yield
+    settings_window._closing.clear()
     assert stamp() == before, "a test wrote the real config.toml"
 
 
@@ -219,7 +221,8 @@ def test_window_never_blocks_the_caller(tmp_path, monkeypatch):
     fake_helper(
         tmp_path,
         monkeypatch,
-        'import time\ntime.sleep(1.0)\nprint(\'{"settings": "cancelled"}\')\n',
+        "import signal,time\nsignal.signal(signal.SIGUSR1, signal.SIG_IGN)\ntime.sleep(1.0)\n"
+        'print(\'{"settings": "cancelled"}\')\n',
     )
     start = time.monotonic()
     ctrl.open_settings_async()
@@ -293,7 +296,83 @@ def test_only_changed_values_are_applied(tmp_path, monkeypatch):
 @mac_only
 def test_mode_change_keeps_unknown_keys(tmp_path, monkeypatch):
     ctrl, path = make_ctrl(tmp_path, monkeypatch)
-    ctrl.apply_settings({"mode": Mode.OFF})
+    ctrl.engine.set_mode(Mode.OFF)  # the engine's own save
     join_threads("set-mode")
     text = path.read_text()
     assert "unknown = 1" in text and 'mode = "off"' in text
+
+
+@mac_only
+def test_baseline_is_the_snapshot_the_window_opened_with(tmp_path, monkeypatch):
+    ctrl, _ = make_ctrl(tmp_path, monkeypatch)
+    fake_helper(
+        tmp_path,
+        monkeypatch,
+        "import json,sys,time\n"
+        "snap=json.load(open(sys.argv[sys.argv.index('--config')+1]))\n"
+        "time.sleep(0.5)\n"
+        "snap['keep_audio']=False\n"
+        "print(json.dumps({'settings':'saved','values':snap}))\n",
+    )
+    threading.Timer(0.2, lambda: setattr(ctrl.cfg.detection, "mode", Mode.AUTO)).start()
+    # the mode was changed from the menu while the window was open: not part of the result
+    assert settings_window.run_settings(ctrl.cfg) == {"keep_audio": False}
+
+
+@mac_only
+def test_timeout_is_cancelled_and_releases_the_lock(tmp_path, monkeypatch):
+    ctrl, _ = make_ctrl(tmp_path, monkeypatch)
+    fake_helper(tmp_path, monkeypatch, "import time\ntime.sleep(60)\n")
+    assert settings_window.run_settings(ctrl.cfg, timeout=0.3) is None
+
+
+@mac_only
+def test_extra_languages_pass_through(tmp_path, monkeypatch):
+    ctrl, path = make_ctrl(tmp_path, monkeypatch)
+    ctrl.cfg.transcription.languages = ["en", "fr"]
+    fake_helper(
+        tmp_path,
+        monkeypatch,
+        "import json,sys\n"
+        "snap=json.load(open(sys.argv[sys.argv.index('--config')+1]))\n"
+        "assert snap['languages']==['en','fr']\n"
+        "snap['languages']=['ru','fr']\n"
+        "print(json.dumps({'settings':'saved','values':snap}))\n",
+    )
+    ctrl.open_settings_async()
+    assert next_event(ctrl, {"settings_saved", "notice", "settings_fallback"})[0] == (
+        "settings_saved"
+    )
+    assert load_config(path).transcription.languages == ["ru", "fr"]
+
+
+@mac_only
+def test_closing_before_the_window_starts_kills_it(tmp_path, monkeypatch):
+    ctrl, _ = make_ctrl(tmp_path, monkeypatch)
+    settings_window.close_settings()
+    assert settings_window.run_settings(ctrl.cfg) is None
+
+
+def test_concurrent_saves_leave_valid_toml(tmp_path):
+    path = tmp_path / "c.toml"
+    path.write_text("unknown = 1\n")
+    cfg = Config()
+    errors = []
+
+    def work(i):
+        try:
+            for _ in range(20):
+                cfg.save(path)
+                save_settings({"keep_audio": bool(i % 2)}, path)
+        except Exception as e:  # pragma: no cover
+            errors.append(e)
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(4)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert not errors
+    assert load_config(path).output_dir  # parses
+    assert "unknown = 1" in path.read_text()
+    assert [p.name for p in tmp_path.iterdir()] == ["c.toml"]  # no temp files left

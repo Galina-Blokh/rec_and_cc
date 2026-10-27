@@ -664,8 +664,8 @@ class Controller:
 
     def open_settings_async(self) -> None:
         """Menu "Settings…": the native window runs on a worker thread (it blocks until it is
-        closed); the outcome comes back as a ``settings_saved`` or ``settings_fallback`` event
-        and ``apply_settings`` runs on the UI thread."""
+        closed); saved values are applied and written there, and the UI thread gets a
+        ``settings_saved`` event (captions panel) or ``settings_fallback``."""
         if not self._settings_lock.acquire(blocking=False):
             raise_settings()  # already open: bring it to the front
             return
@@ -679,6 +679,8 @@ class Controller:
                 if "output_dir" in updates:
                     make_private_dir(updates["output_dir"])
                 with self._save_lock:
+                    # memory first: a menu save in between can't write the old values back
+                    self.apply_settings(updates)
                     edited = self._mtime() != self._config_mtime  # hand edit not reloaded yet
                     try:
                         save_settings(updates, CONFIG_PATH)
@@ -687,6 +689,8 @@ class Controller:
                         save_settings(updates, CONFIG_PATH)
                     if not edited:
                         self._config_mtime = self._mtime()  # our own write: nothing to reload
+                if "output_dir" in updates:
+                    self.refresh_async(force=True)  # cloud-sync warning for the new folder
                 self.events.put(("settings_saved", updates))
             except SettingsUnavailable as e:
                 log.info("native settings unavailable: %s", e)
@@ -706,7 +710,7 @@ class Controller:
         threading.Thread(target=run, daemon=True, name="settings-window").start()
 
     def apply_settings(self, updates: dict) -> None:
-        """Make saved settings live (UI thread). They are already on disk."""
+        """Make settings live in memory (any thread; no file I/O, the caller saves them)."""
         cfg, tr = self.cfg, self.cfg.transcription
         if "output_dir" in updates:
             cfg.output_dir = updates["output_dir"]
@@ -721,10 +725,7 @@ class Controller:
                 tr._raw_languages = None  # type: ignore[attr-defined]
                 tr.languages = list(updates["languages"])
         if "mode" in updates and updates["mode"] != cfg.detection.mode:
-            # set_mode saves the config: keep that file I/O off the UI thread
-            threading.Thread(
-                target=self.engine.set_mode, args=(updates["mode"],), daemon=True, name="set-mode"
-            ).start()
+            self.engine.set_mode(updates["mode"], save=False)
 
     @property
     def permissions(self) -> dict[str, str]:

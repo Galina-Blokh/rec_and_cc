@@ -140,6 +140,9 @@ func emitAndExit(_ values: [String: Any]?) {
 private var settingsDelegate: SettingsDelegate?
 
 func runSettings(configPath: String) -> Never {
+    // Before any slow setup: a signal that arrives early must not kill us (default action).
+    signal(SIGTERM, SIG_IGN)
+    signal(SIGUSR1, SIG_IGN)
     guard let data = FileManager.default.contents(atPath: configPath),
           let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     else {
@@ -160,11 +163,12 @@ func runSettings(configPath: String) -> Never {
     window.center()
     window.makeKeyAndOrderFront(nil)
     app.activate(ignoringOtherApps: true)
-    // SIGTERM (the app is quitting): leave at once, no answer = cancelled. _exit, not exit:
-    // exit() runs atexit handlers, which is not safe inside a signal handler.
-    signal(SIGTERM) { _ in _exit(0) }
-    // SIGUSR1 (Settings… clicked again): bring the open window to the front.
-    signal(SIGUSR1, SIG_IGN)
+    // SIGTERM (the app is quitting): answer "cancelled" and leave, from the main queue
+    // (exit() is not safe inside a signal handler).
+    let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+    term.setEventHandler { emitAndExit(nil) }
+    term.resume()
+    // SIGUSR1 (Settings... clicked again): bring the open window to the front.
     let raise = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
     raise.setEventHandler {
         app.activate(ignoringOtherApps: true)
