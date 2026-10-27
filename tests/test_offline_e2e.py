@@ -2,7 +2,8 @@
 
 The fast tests run the real Controller, Engine, Recorder, transcription queue, live
 transcriber, VAD, merge, outputs and diarization fallback with fake audio sources and a fake
-Whisper model. Every socket connect and DNS lookup raises; the only attempt allowed is the
+Whisper model. Every socket connect (loopback included, so a local proxy can't relay
+traffic; only AF_UNIX is allowed) and DNS lookup raises; the only attempt allowed is the
 one-time speaker-model download in ``diarize._download``, which must fail fast and leave
 "Others" in the transcript. The slow test does the same with the real cached models.
 
@@ -11,7 +12,6 @@ Stories: US-14
 
 from __future__ import annotations
 
-import ipaddress
 import queue
 import socket
 import time
@@ -31,6 +31,7 @@ from recandcc.ui.common import Controller
 
 REAL_MODEL_PATH = diarize.model_path  # before conftest stubs it out for fast tests
 AF_UNIX = getattr(socket, "AF_UNIX", None)
+PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
 
 
 # --------------------------------------------------------------------------- network guard
@@ -40,14 +41,6 @@ def _caller() -> str:
     app = [f for f in frames if "recandcc" in f.filename.replace("\\", "/")]
     f = (app or frames or traceback.extract_stack()[:1])[-1]
     return f"{f.filename}:{f.lineno} in {f.name}()"
-
-
-def _is_local(address) -> bool:
-    host = address[0] if isinstance(address, tuple) else address
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
 
 
 @dataclass
@@ -81,15 +74,18 @@ def net(monkeypatch):
     """Block the network; fail the test if anything but the speaker-model download tried it
     (attempts on worker threads are often caught and logged, so they are checked here too)."""
     guard = NetworkGuard()
+    for var in PROXY_VARS:
+        monkeypatch.delenv(var, raising=False)
+        monkeypatch.delenv(var.lower(), raising=False)
     real_connect, real_connect_ex = socket.socket.connect, socket.socket.connect_ex
 
     def connect(self, address):
-        if self.family == AF_UNIX or _is_local(address):
+        if AF_UNIX is not None and self.family == AF_UNIX:
             return real_connect(self, address)
         raise guard.deny("socket.connect", address)
 
     def connect_ex(self, address):
-        if self.family == AF_UNIX or _is_local(address):
+        if AF_UNIX is not None and self.family == AF_UNIX:
             return real_connect_ex(self, address)
         raise guard.deny("socket.connect_ex", address)
 
@@ -126,10 +122,13 @@ def test_guard_blocks_and_names_the_caller(net):
         socket.getaddrinfo("example.com", 443)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s, pytest.raises(OSError):
         s.connect(("192.0.2.1", 443))  # TEST-NET-1: never routable
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s, pytest.raises(OSError):
+        s.connect_ex(("127.0.0.1", 8080))  # a local proxy could relay traffic out
     assert [a.api for a in net.attempts] == [
         "socket.create_connection",
         "socket.getaddrinfo",
         "socket.connect",
+        "socket.connect_ex",
     ]
     assert "test_guard_blocks_and_names_the_caller" in net.attempts[0].stack
     net.attempts.clear()  # the deliberate attempts above are not a failure
@@ -181,19 +180,21 @@ def events_until(ctrl, kind, timeout=30.0):
     raise AssertionError(f"no {kind!r} event; got {[e[0] for e in out]}")
 
 
-def run_session(ctrl, sources, live_wait=0.6):
-    """Record the fake audio, stop, and wait until the transcript is written."""
-    ctrl.engine.start_manual()
-    ctrl.engine.tick()
-    session_dir = ctrl.engine.recorder.session.directory
-    sources["sys"].done.wait(5)
-    sources["mic"].done.wait(5)
-    time.sleep(live_wait)
-    ctrl.engine.stop()
-    ctrl.engine.tick()
-    evs = events_until(ctrl, "transcribed")
-    ctrl.shutdown()
-    return session_dir, evs
+def run_session(ctrl, sources, live_wait=0.6, timeout=20.0):
+    """Record the fake audio, stop, and wait until the transcript is written. With the fake
+    model the default `timeout` also proves a blocked speaker-model download doesn't hang."""
+    try:
+        ctrl.engine.start_manual()
+        ctrl.engine.tick()
+        session_dir = ctrl.engine.recorder.session.directory
+        sources["sys"].done.wait(5)
+        sources["mic"].done.wait(5)
+        time.sleep(live_wait)
+        ctrl.engine.stop()
+        ctrl.engine.tick()
+        return session_dir, events_until(ctrl, "transcribed", timeout)
+    finally:
+        ctrl.shutdown()
 
 
 def assert_transcript(session_dir, texts):
@@ -210,9 +211,7 @@ def test_live_session_offline(tmp_path, net, no_speaker_model):
 
     get_vad_model()  # Silero VAD ships with the package: loads with the network blocked
     ctrl, sources = make_ctrl(tmp_path, TranscriptionConfig(model="fake", workers=2, live=True))
-    t0 = time.monotonic()
-    session_dir, evs = run_session(ctrl, sources)
-    assert time.monotonic() - t0 < 20  # a blocked download fails fast, no hang
+    session_dir, evs = run_session(ctrl, sources)  # within 20 s: the blocked download fails fast
     assert any(e[0] == "live" for e in evs)
     assert evs[-1][1].transcribed
     assert_transcript(session_dir, [phrase(1), phrase(4)])
@@ -260,12 +259,13 @@ def _cached(repo: str, revision: str | None, faster_whisper: bool) -> bool:
 
 
 @pytest.mark.slow
-def test_real_models_session_offline(tmp_path, net):
+@pytest.mark.parametrize("live", [False, True], ids=["batch", "live"])
+def test_real_models_session_offline(tmp_path, net, live):
     from recandcc.transcribe import Transcriber
     from recandcc.transcribe.gpu import mlx_repo
     from recandcc.transcribe.revisions import FASTER_WHISPER_REPOS, revision
 
-    tcfg = TranscriptionConfig(workers=2, live=False)
+    tcfg = TranscriptionConfig(workers=2, live=live)
     tr = Transcriber(tcfg)
     repos = [(mlx_repo(tcfg.model), False) if tr.gpu else (FASTER_WHISPER_REPOS[tcfg.model], True)]
     if tr.language_model:
@@ -274,7 +274,8 @@ def test_real_models_session_offline(tmp_path, net):
     if missing:
         pytest.skip(f"models not cached: {missing}")
     ctrl, sources = make_ctrl(tmp_path, tcfg, transcriber=tr)
-    session_dir, evs = run_session(ctrl, sources, live_wait=0.0)
+    session_dir, evs = run_session(ctrl, sources, live_wait=2.0 if live else 0.0, timeout=120)
+    assert any(e[0] == "live_start" for e in evs) == live
     assert evs[-1][1].transcribed
     assert (session_dir / "transcript.md").is_file()
     if REAL_MODEL_PATH(download=False) is not None:
