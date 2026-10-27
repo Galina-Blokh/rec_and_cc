@@ -463,6 +463,7 @@ class Transcriber:
         background as soon as they are ready (WAVs are deleted only after that). Returns the
         segments written now.
         """
+        gen = voices.forget_generation()  # a "forget all" after this drops our voice writes
         if diarization is None:
             diarization = self.start_diarization(session)
         with self._init_lock:
@@ -476,13 +477,13 @@ class Transcriber:
                 log.info("session %s: speaker labels follow when diarization ends", session.id)
                 self._write(session, segments, duration)
                 diarization.add_done_callback(
-                    lambda f: self._relabel_later(session, segments, duration, f)
+                    lambda f: self._relabel_later(session, segments, duration, f, gen)
                 )
                 return segments
             except Exception:  # noqa: BLE001 - cancelled; diarization is optional
                 turns = None
             self._diarization_metrics(session, diarization)
-            segments = self._labelled(session, segments, turns)
+            segments = self._labelled(session, segments, turns, gen)
         self._write(session, segments, duration)
         self._drop_audio(session)
         return segments
@@ -504,7 +505,11 @@ class Transcriber:
                 (Path(session.directory) / name).unlink(missing_ok=True)
 
     def _labelled(
-        self, session: SessionInfo, segments: list[Segment], turns: list[Turn] | None
+        self,
+        session: SessionInfo,
+        segments: list[Segment],
+        turns: list[Turn] | None,
+        gen: int | None = None,
     ) -> list[Segment]:
         centroids = getattr(turns, "centroids", {}) if turns and self.cfg.speaker_names else {}
         names: dict[int, str] = {}
@@ -517,7 +522,7 @@ class Transcriber:
         try:  # opt-in only, in the private voices folder: lets `name-speaker` name them later
             if centroids and labels and Path(session.directory).exists():
                 speakers = {lbl: centroids[k] for k, lbl in labels.items() if k in centroids}
-                voices.write_session_voices(session, speakers)
+                voices.write_session_voices(session, speakers, since=gen)
             else:  # never leave voices of an older transcript of this session behind
                 voices.delete_session_voices(session.id)
             voices.prune_session_voices()  # of sessions whose folder was deleted
@@ -534,12 +539,17 @@ class Transcriber:
         return out
 
     def _relabel_later(
-        self, session: SessionInfo, segments: list[Segment], duration: float, future: Future
+        self,
+        session: SessionInfo,
+        segments: list[Segment],
+        duration: float,
+        future: Future,
+        gen: int | None = None,
     ) -> None:
         """Done-callback of a slow diarization: rewrite the transcript with speaker labels."""
         try:
             turns = None if future.cancelled() else future.result()
-            labelled = self._labelled(session, segments, turns)
+            labelled = self._labelled(session, segments, turns, gen)
             if labelled != segments and Path(session.directory).exists():
                 write_outputs(session, labelled, duration, self.cfg.model)
                 log.info("session %s: transcript rewritten with speaker labels", session.id)

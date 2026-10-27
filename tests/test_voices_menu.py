@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import time
 
 from test_voices import ANNA, BOB, CARL, _final
 
@@ -105,23 +106,23 @@ def test_unexpected_error_still_posts_a_name_free_outcome(tmp_path, monkeypatch)
 def test_forget_waits_for_a_running_naming(tmp_path, monkeypatch):
     import threading
 
-    from recandcc.ui import common
-
     _final(tmp_path, monkeypatch, speaker_names=True)
     ctrl = controller()
     started, release = threading.Event(), threading.Event()
     real = voices.name_speaker
 
     def slow(*args):
-        started.set()
-        release.wait(5)
-        return real(*args)
+        with voices.LOCK:  # as the real one does
+            started.set()
+            release.wait(5)
+            return real(*args)
 
     monkeypatch.setattr(voices, "name_speaker", slow)
     ctrl.name_speaker_async(tmp_path, "Speaker 2", "Carl")
     assert started.wait(5)
     ctrl.forget_voices_async()
-    assert common.VOICE_LOCK.locked() and ctrl.events.empty()  # forget is waiting
+    time.sleep(0.2)
+    assert ctrl.events.empty()  # forget is waiting for the naming
     release.set()
     assert ctrl.events.get(timeout=5)[0] == "named"
     assert ctrl.events.get(timeout=5) == ("forgot", 1)
@@ -141,3 +142,53 @@ def test_two_namings_of_one_session_both_survive(tmp_path, monkeypatch):
     assert [ctrl.events.get(timeout=5)[3] for _ in range(2)] == [None, None]
     data = json.loads((tmp_path / "transcript.json").read_text(encoding="utf-8"))
     assert {"Anna", "Carl"} <= {s["speaker"] for s in data["segments"]}
+
+
+def test_diarization_started_before_a_forget_cannot_bring_voices_back(tmp_path, monkeypatch):
+    from test_transcribe import make_session
+
+    session = make_session(tmp_path)
+    started = voices.forget_generation()
+    voices.write_session_voices(session, {"Speaker 1": ANNA}, since=started)
+    assert voices.read_session_voices(session.id)
+    voices.delete_all_profiles()
+    assert voices.read_session_voices(session.id) == {}
+    voices.write_session_voices(session, {"Speaker 1": ANNA}, since=started)  # began before
+    assert voices.read_session_voices(session.id) == {}
+    voices.write_session_voices(session, {"Speaker 1": ANNA}, since=voices.forget_generation())
+    assert voices.read_session_voices(session.id)
+
+
+def test_atomic_write_survives_concurrent_writers_and_a_busy_file(tmp_path, monkeypatch):
+    import threading
+    from pathlib import Path
+
+    from recandcc.transcribe.output import atomic_write
+
+    target = tmp_path / "t.md"
+    errors = []
+
+    def write(i):
+        try:
+            for _ in range(20):
+                atomic_write(target, f"text {i}")
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=write, args=(i,)) for i in range(4)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert not errors and target.read_text(encoding="utf-8").startswith("text ")
+    assert [p.name for p in tmp_path.iterdir()] == ["t.md"]  # no temp left behind
+
+    real, calls = Path.replace, []
+
+    def busy(self, dst):
+        calls.append(1)
+        if len(calls) < 3:
+            raise PermissionError("held")
+        return real(self, dst)
+
+    monkeypatch.setattr(Path, "replace", busy)
+    atomic_write(target, "after retries")
+    assert target.read_text(encoding="utf-8") == "after retries" and len(calls) == 3

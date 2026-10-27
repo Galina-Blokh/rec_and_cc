@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -142,6 +143,16 @@ def write_live_markdown(session: SessionInfo, segments: list[Segment], duration:
 def atomic_write(path: Path, text: str) -> Path:
     """Write via a temp file + rename, so readers never see a half-written file."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        for attempt in range(5):
+            try:
+                tmp.replace(path)
+                break
+            except PermissionError:  # Windows: a reader or antivirus holds the file
+                if attempt == 4:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+    finally:
+        tmp.unlink(missing_ok=True)
     return path

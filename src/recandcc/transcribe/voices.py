@@ -17,6 +17,7 @@ if their cosine similarity is >= ``MATCH_SIMILARITY`` and beats the second-best 
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -82,6 +83,27 @@ def check_name(name: str) -> str:
     if "**" in name or _key(name) in {_key(ME), _key(OTHERS)} or NUMBERED.fullmatch(_key(name)):
         raise ValueError(f"{name!r} is reserved (Me, Others, Speaker N) or breaks the markdown")
     return name
+
+
+# Every change of the voice store holds LOCK (re-entrant: name_speaker calls the others), so
+# "Forget all voices" can't interleave with a naming or a diarization. `delete_all_profiles`
+# also bumps the generation: a write that began before it (`since=`) is dropped.
+LOCK = threading.RLock()
+_forgets = 0
+
+
+def forget_generation() -> int:
+    """Changes every time all voices are deleted; see ``write_session_voices(since=)``."""
+    return _forgets
+
+
+def _locked(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with LOCK:
+            return fn(*args, **kwargs)
+
+    return wrapper
 
 
 def _dir(voices_dir: Path | None) -> Path:
@@ -150,6 +172,7 @@ def load_profiles(voices_dir: Path | None = None) -> list[Profile]:
     return sorted(out, key=lambda p: _key(p.name))
 
 
+@_locked
 def save_profile(name: str, centroid, voices_dir: Path | None = None) -> Profile:
     """Fold `centroid` into the profile of `name` (created if new): the mean of all of them."""
     profile = _fold(name, centroid, +1, voices_dir)
@@ -181,6 +204,7 @@ def _fold(name: str, centroid, sign: int, voices_dir: Path | None) -> Profile | 
     return Profile(name, _unit(total), count, now, total)
 
 
+@_locked
 def delete_profile(name: str, voices_dir: Path | None = None) -> bool:
     """Delete the profile of `name` and every session's centroid labelled `name` or folded
     into it, so the voice can't come back from a session."""
@@ -204,12 +228,15 @@ def delete_profile(name: str, voices_dir: Path | None = None) -> bool:
     return existed
 
 
+@_locked
 def delete_all_profiles(voices_dir: Path | None = None) -> int:
     """Every profile, every session's speaker voices and any temp file left by a crash
     (they hold voice data too); returns the number of profiles."""
     d = _dir(voices_dir)
     profiles = list(d.glob("*.json")) if d.is_dir() else []
     stale = [*d.glob(".*.tmp"), *d.glob("sessions/.*.tmp")] if d.is_dir() else []
+    global _forgets
+    _forgets += 1
     for f in [*profiles, *_session_files(voices_dir), *stale]:
         f.unlink(missing_ok=True)
     return len(profiles)
@@ -265,6 +292,7 @@ def _deleted(directory: Path) -> bool:
     return False
 
 
+@_locked
 def prune_session_voices(voices_dir: Path | None = None) -> int:
     """Delete the voices of sessions whose folder was deleted; returns how many. Files that
     can't be read or name no folder (written before folders were stored) are kept."""
@@ -282,14 +310,20 @@ def prune_session_voices(voices_dir: Path | None = None) -> int:
     return n
 
 
+@_locked
 def write_session_voices(
     session: SessionInfo,
     speakers: Mapping[str, np.ndarray],
     folded: Mapping[str, str] | None = None,
     voices_dir: Path | None = None,
+    since: int | None = None,
 ) -> None:
     """Save a session's label -> centroid. `folded`: label -> the profile it was already
-    added to (so naming it again doesn't count the same session twice)."""
+    added to (so naming it again doesn't count the same session twice). `since`: the
+    ``forget_generation()`` when the work began; if all voices were deleted since, nothing
+    is written."""
+    if since is not None and since != _forgets:
+        return
     folded = folded or {}
     entries = {
         label: {"centroid": _vector(c), "profile": folded.get(label)}
@@ -319,6 +353,7 @@ def read_session_voices(session_id: str, voices_dir: Path | None = None) -> dict
     }
 
 
+@_locked
 def delete_session_voices(session_id: str, voices_dir: Path | None = None) -> None:
     _session_path(session_id, voices_dir).unlink(missing_ok=True)
 
@@ -333,6 +368,7 @@ def session_speakers(directory: Path, lines: int = 2) -> list[tuple[str, list[st
     return list(out.items())
 
 
+@_locked
 def name_speaker(directory: Path, label: str, name: str, voices_dir: Path | None = None) -> Profile:
     """Save `label`'s voice of the session in `directory` as `name` and rewrite its transcript
     files with the name. Labels and names compare case-insensitively. Raises ValueError when

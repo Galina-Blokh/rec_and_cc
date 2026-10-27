@@ -212,6 +212,7 @@ class MacApp(rumps.App):
             elif kind == "speakers":
                 self._pick_speaker(ev[1], ev[2])
             elif kind == "named":
+                self._naming_open = False
                 self._notify(*named_notice(ev[3]))
             elif kind == "forgot":
                 self._notify(*forgot_notice(ev[1]))
@@ -460,6 +461,10 @@ class MacApp(rumps.App):
         recent = list(self.ctrl.recent)
         if not recent:
             return
+        if self._naming_open:  # one flow (and one osascript chooser) at a time
+            self._notify("Naming already in progress", "Finish or cancel the open dialog first.")
+            return
+        self._naming_open = True  # until the "named" event, or a cancel/notice below
         labels = [f"{i}. {transcript_label(p)}" for i, p in enumerate(recent, 1)]
         script = (
             f'choose from list {{{", ".join(map(as_str, labels))}}} with title "RecAndCC" '
@@ -470,13 +475,14 @@ class MacApp(rumps.App):
             number = osascript(script).partition(".")[0]
             if number.isdigit() and 0 < int(number) <= len(recent):
                 self.ctrl.speakers_async(recent[int(number) - 1].parent)
+            else:
+                self._naming_open = False
 
         threading.Thread(target=run, daemon=True, name="name-speakers-pick").start()
 
     def _pick_speaker(self, directory, speakers) -> None:
-        if self._naming_open:  # one naming flow at a time
-            return
         if notice := speakers_notice(speakers):
+            self._naming_open = False
             self._notify(*notice)
             return
         labels = [speaker_choice_label(i, lbl, ln) for i, (lbl, ln) in enumerate(speakers, 1)]
@@ -486,6 +492,7 @@ class MacApp(rumps.App):
         )
 
         def run():
+            dispatched = False
             try:
                 number = osascript(pick).partition(".")[0]
                 if not (number.isdigit() and 0 < int(number) <= len(speakers)):
@@ -496,11 +503,11 @@ class MacApp(rumps.App):
                     'with title "RecAndCC" buttons {"Cancel", "Save"} default button "Save"'
                 )
                 if name := osascript(ask).partition("text returned:")[2].strip():
+                    dispatched = True  # the "named" event clears the guard
                     self.ctrl.name_speaker_async(directory, label, name)
             finally:
-                self._naming_open = False
-
-        self._naming_open = True
+                if not dispatched:
+                    self._naming_open = False
 
         threading.Thread(target=run, daemon=True, name="name-speaker-dialog").start()
 

@@ -237,11 +237,6 @@ def as_str(text: str) -> str:
 
 
 # ----------------------------------------------------------------------- controller
-# Menu actions that change voice data run one at a time (a naming that outlives a
-# "Forget all voices" would bring the data back).
-VOICE_LOCK = threading.Lock()
-
-
 class Controller:
     def __init__(
         self,
@@ -432,10 +427,11 @@ class Controller:
                 from ..models import SessionInfo
                 from ..transcribe import voices
 
-                known = voices.read_session_voices(SessionInfo.load(directory).id)
-                result = [
-                    (lbl, ln) for lbl, ln in voices.session_speakers(directory) if lbl in known
-                ]
+                with voices.LOCK:  # not between a naming's voice and transcript rewrites
+                    known = voices.read_session_voices(SessionInfo.load(directory).id)
+                    result = [
+                        (lbl, ln) for lbl, ln in voices.session_speakers(directory) if lbl in known
+                    ]
             except Exception as e:  # noqa: BLE001
                 log.error("could not list the speakers: %s", type(e).__name__)
                 result = e
@@ -455,8 +451,7 @@ class Controller:
                 else:
                     from ..transcribe import voices
 
-                    with VOICE_LOCK:  # not while "Forget all voices" or another naming runs
-                        voices.name_speaker(Path(directory), label, name)
+                    voices.name_speaker(Path(directory), label, name)  # holds voices.LOCK
             except Exception as e:  # noqa: BLE001 - always post an outcome
                 log.error("could not name a speaker: %s", type(e).__name__)
                 # fixed text: the library's messages quote the name, and notices may be logged
@@ -476,8 +471,7 @@ class Controller:
             try:
                 from ..transcribe import voices
 
-                with VOICE_LOCK:
-                    result = voices.delete_all_profiles()
+                result = voices.delete_all_profiles()
             except Exception as e:  # noqa: BLE001
                 log.error("could not delete the voices: %s", type(e).__name__)
                 result = e
