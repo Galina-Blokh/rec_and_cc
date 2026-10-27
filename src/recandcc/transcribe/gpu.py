@@ -170,14 +170,18 @@ class MlxWhisper:
         return holder.get_model(self.repo, mx.float16)
 
     def load(self) -> None:
+        t0 = time.monotonic()
+        # Resolve (and, the first time, download) on the calling thread: only the weight load
+        # goes to the GPU thread, so a slow download of a model that shares it never stalls
+        # the other model's transcribe/detect_language calls (or its close()).
+        self.repo = local_model_path(self.repo, self.allow_unpinned)
+
         def _load():
-            t0 = time.monotonic()
-            self.repo = local_model_path(self.repo, self.allow_unpinned)
             with MLX_LOCK:
                 self._model = self._get_model()
-            log.info("loaded MLX whisper %s on the GPU in %.1fs", self.repo, time.monotonic() - t0)
 
         self._thread.submit(_load).result()
+        log.info("loaded MLX whisper %s on the GPU in %.1fs", self.repo, time.monotonic() - t0)
 
     def transcribe(self, audio: np.ndarray, language: str) -> list[tuple[float, float, str]]:
         """(start, end, text) per segment, relative to the start of ``audio``."""
