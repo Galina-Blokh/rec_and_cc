@@ -18,6 +18,7 @@ import argparse
 import json
 import logging
 import os
+import random
 import re
 import statistics
 import subprocess
@@ -40,6 +41,9 @@ except ZoneInfoNotFoundError:  # Windows without the tzdata package: report in U
 TIMEOUT = 120  # seconds for any one gh or git call
 RETRIES, BACKOFF = 3, 2.0  # retry rate-limited gh calls after 2, 4, 8 s
 RATE_LIMITED = re.compile(r"HTTP 429|HTTP 403|rate limit", re.I)
+NOT_FOUND = re.compile(r"HTTP 404|Not Found")
+FULL_WALK = timedelta(hours=24)  # walk every list end to end at least this often
+MAX_RUN_REFRESH = 20  # unfinished runs refetched by id per collect
 CACHE = Path.home() / ".cache" / "recandcc-report"
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 REVIEW_MARK = "## 🤖 Cursor review"
@@ -196,12 +200,19 @@ class GitHub:
         yields the fetched items only. An early stop yields the fetched items plus the cached
         tail after the last cached item on that page. Duplicates (head inserts shift pages)
         collapse to the first occurrence by `id`. Cached items that left the list are dropped
-        and recorded in `self.dropped[endpoint]`. `key` names the list inside a dict page.
+        and recorded in `self.dropped[endpoint]`. Early stops are allowed only within
+        FULL_WALK of the last complete walk, so deletions anywhere are seen at least daily.
+        `key` names the list inside a dict page.
         """
         path = self._path(endpoint)
-        cached = (self._load(path) or {}).get("data") or []
+        record = self._load(path) or {}
+        cached = record.get("data") or []
         if self.offline:
             return cached
+        # Deletions below the stop point are only seen on a complete walk, so force one when
+        # the last complete walk is older than FULL_WALK.
+        last_full = ts(record.get("full_at"))
+        allow_stop = bool(last_full) and datetime.now(UTC) - last_full < FULL_WALK
         known = {(i["id"], i.get("updated_at")) for i in cached}
         pos = {i["id"]: n for n, i in enumerate(cached)}
         m = re.search(r"per_page=(\d+)", endpoint)
@@ -216,7 +227,7 @@ class GitHub:
             fresh.extend(items)
             if len(items) < per_page:
                 break
-            if any((i["id"], i.get("updated_at")) in known for i in items):
+            if allow_stop and any((i["id"], i.get("updated_at")) in known for i in items):
                 tail_from = max(pos[i["id"]] for i in items if i["id"] in pos)
                 break
             page += 1
@@ -228,16 +239,29 @@ class GitHub:
             # Runs are listed by creation time, so a run still going when it was cached can
             # sit below the stop point; refetch each such run so its result is current.
             fetched = {i["id"] for i in fresh}
+            stale = [
+                i["id"] for i in merged if i["id"] not in fetched and i.get("status") != "completed"
+            ]
+            # At most MAX_RUN_REFRESH per collect; the rest wait for the next run or full walk.
+            todo = set(stale[:MAX_RUN_REFRESH])
             merged = [
-                self._api(f"actions/runs/{i['id']}")
-                if i["id"] not in fetched and i.get("status") != "completed"
-                else i
-                for i in merged
+                r
+                for r in (self._refetch_run(i) if i["id"] in todo else i for i in merged)
+                if r is not None
             ]
         kept = {i["id"] for i in merged}
         self.dropped[endpoint] = [i for i in cached if i["id"] not in kept]
-        self._write(path, {"stamp": None, "data": merged})
+        full_at = iso(datetime.now(UTC)) if tail_from is None else record.get("full_at")
+        self._write(path, {"stamp": None, "data": merged, "full_at": full_at})
         return merged
+
+    def _refetch_run(self, run: dict) -> dict | None:
+        """The current state of one unfinished run, or None if it can't be read (deleted)."""
+        try:
+            return self._api(f"actions/runs/{run['id']}")
+        except RuntimeError:
+            log.debug("run %s could not be refreshed; dropping it", run["id"])
+            return None
 
     def _api(self, endpoint: str, paginate: bool = False):
         """One `gh api` call (all pages slurped with `paginate`), parsed from JSON."""
@@ -258,7 +282,8 @@ class GitHub:
             limited = out.returncode != 0 and RATE_LIMITED.search(out.stderr or "")
             if not limited or attempt == RETRIES:
                 break
-            time.sleep(BACKOFF * 2**attempt)  # GitHub secondary rate limits (403/429)
+            # GitHub secondary rate limits (403/429); jitter so parallel workers spread out
+            time.sleep(BACKOFF * 2**attempt * random.uniform(0.5, 1.5))  # noqa: S311
         if out.returncode != 0:
             # gh's stderr never contains the token; keep only its first line.
             first = (out.stderr.strip().splitlines() or ["unknown error"])[0]
@@ -289,8 +314,10 @@ def _pr_detail(gh: GitHub, p: dict) -> tuple[int, dict] | None:
             "comments": gh.get(f"issues/{n}/comments?per_page=100", stamp),
         }
     except RuntimeError as exc:
-        if "404" in str(exc) or "Not Found" in str(exc):
+        if NOT_FOUND.search(str(exc).partition(" failed: ")[2]):  # gh's stderr, not the path
             log.debug("PR #%s is gone on GitHub; skipping", n)
+            for f in _pr_files(gh, n):  # deleted content must not linger on disk
+                f.unlink(missing_ok=True)
             return None
         raise
 

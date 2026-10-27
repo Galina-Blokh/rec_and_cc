@@ -357,6 +357,84 @@ def test_rate_limited_calls_are_retried(tmp_path, monkeypatch):
     assert gh._api("issues") == [1] and gh.calls == 2
 
 
+def test_a_stale_complete_walk_forces_a_full_walk_that_drops_deleted_tail_items(tmp_path):
+    ep = "issues?per_page=2"
+    gh = collect.GitHub("o/r", tmp_path)
+    head = [{"id": 4, "updated_at": "a"}, {"id": 3, "updated_at": "a"}]
+    tail = [{"id": 2, "updated_at": "a"}, {"id": 1, "updated_at": "a"}]
+    full = {f"{ep}&page=1": head, f"{ep}&page=2": tail, f"{ep}&page=3": []}
+    _fake_api(gh, full, [])
+    gh.get_list(ep)  # cold complete walk records full_at
+    _fake_api(gh, {f"{ep}&page=1": head}, log := [])
+    assert [i["id"] for i in gh.get_list(ep)] == [4, 3, 2, 1] and len(log) == 1  # early stop
+    rec = json.loads(gh._path(ep).read_text())
+    rec["full_at"] = "2020-01-01T00:00:00+00:00"  # last complete walk long ago
+    gh._path(ep).write_text(json.dumps(rec))
+    gone = {f"{ep}&page=1": head, f"{ep}&page=2": [tail[0]]}  # issue 1 was deleted
+    _fake_api(gh, gone, log := [])
+    assert [i["id"] for i in gh.get_list(ep)] == [4, 3, 2] and len(log) == 2
+    assert [i["id"] for i in gh.dropped[ep]] == [1]
+
+
+def test_a_run_that_cannot_be_refetched_is_dropped_not_fatal(tmp_path):
+    gh = collect.GitHub("o/r", tmp_path)
+
+    def api(endpoint, paginate=False):
+        raise RuntimeError(f"gh api {endpoint} failed: gh: Not Found (HTTP 404)")
+
+    gh._api = api
+    assert gh._refetch_run({"id": 5}) is None
+
+
+def test_only_a_real_http_404_skips_a_pr_and_clears_its_cache(tmp_path):
+    gh = collect.GitHub("o/r", tmp_path)
+    for f in collect._pr_files(gh, 404):
+        f.write_text("{}")
+
+    def failing(message):
+        def get(endpoint, stamp=None, paginate=True):
+            raise RuntimeError(f"gh api {endpoint} failed: {message}")
+
+        return get
+
+    gh.get = failing("HTTP 500: server error")  # "404" only in the path: not a deleted PR
+    try:
+        collect._pr_detail(gh, {"number": 404, "updated_at": "u"})
+        raise AssertionError("expected the 500 to propagate")
+    except RuntimeError:
+        pass
+    gh.get = failing("gh: Not Found (HTTP 404)")
+    assert collect._pr_detail(gh, {"number": 404, "updated_at": "u"}) is None
+    assert not any(f.exists() for f in collect._pr_files(gh, 404))
+
+
+def test_unfinished_run_refetches_are_capped(tmp_path, monkeypatch):
+    monkeypatch.setattr(collect, "MAX_RUN_REFRESH", 2)
+    ep = "actions/runs?per_page=2"
+    gh = collect.GitHub("o/r", tmp_path)
+    head = [
+        {"id": 99, "updated_at": "a", "status": "completed"},
+        {"id": 98, "updated_at": "a", "status": "completed"},
+    ]
+    old = [{"id": n, "updated_at": "a", "status": "queued"} for n in (5, 4, 3)]
+    _fake_api(
+        gh, {f"{ep}&page=1": {"workflow_runs": head}, f"{ep}&page=2": {"workflow_runs": old}}, []
+    )
+    gh.get_list(ep, key="workflow_runs")
+    log = []
+    _fake_api(
+        gh,
+        {
+            f"{ep}&page=1": {"workflow_runs": head},
+            **{f"actions/runs/{n}": {"id": n, "status": "completed"} for n in (5, 4)},
+        },
+        log,
+    )
+    runs = gh.get_list(ep, key="workflow_runs")
+    assert log == [f"{ep}&page=1", "actions/runs/5", "actions/runs/4"]
+    assert [r["status"] for r in runs[2:]] == ["completed", "completed", "queued"]
+
+
 def test_pooled_pr_details_match_sequential(tmp_path, monkeypatch):
     pulls = [{"id": n, "number": n, "updated_at": f"u{n}"} for n in range(1, 8)]
 
