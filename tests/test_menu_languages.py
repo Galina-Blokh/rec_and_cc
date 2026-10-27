@@ -9,7 +9,6 @@ import threading
 import tomllib
 
 import numpy as np
-import pytest
 
 from recandcc.config import load_config
 from recandcc.models import Mode
@@ -270,14 +269,14 @@ def test_menu_change_waiting_for_its_save_survives_a_reload(tmp_path, monkeypatc
 def _race(ctrl, path, monkeypatch, click, join_name):
     """Block the save (before its lock), click, edit the file and reload, then release."""
     in_save, go = threading.Event(), threading.Event()
-    real = ctrl.write_settings
+    real = ctrl._write_settings  # what save_settings' thread calls (one mark per save)
 
     def slow_save(*keys, **kw):  # blocked before the save lock: a reload can run meanwhile
         in_save.set()
         assert go.wait(5)
         return real(*keys, **kw)
 
-    monkeypatch.setattr(ctrl, "write_settings", slow_save)
+    monkeypatch.setattr(ctrl, "_write_settings", slow_save)
     click()
     assert in_save.wait(5)  # the save is queued/blocked, not written
     path.write_text(path.read_text() + "\n# touched\n")  # a different mtime/content on disk
@@ -323,14 +322,41 @@ def test_a_raising_toggle_leaves_no_dirty_mark(tmp_path, monkeypatch):
     assert not ctrl._dirty
 
 
-def test_failed_save_start_unmarks_exactly_once(tmp_path, monkeypatch):
-    ctrl, _ = _ctrl(tmp_path, monkeypatch, '["en"]')
-    ctrl._dirty["transcription.languages"] = 2  # earlier clicks, saves still pending
+def _locked(*_a):
+    from recandcc.config import ConfigLockTimeout
 
-    def boom(self):
-        raise RuntimeError("can't start new thread")
+    raise ConfigLockTimeout("locked")
 
-    monkeypatch.setattr(threading.Thread, "start", boom)
-    with pytest.raises(RuntimeError):
-        ctrl.toggle_language("he")
-    assert ctrl._dirty["transcription.languages"] == 2  # +1 for this click, -1 once
+
+def test_failed_language_save_restores_both_fields(tmp_path, monkeypatch):
+    """The raw spelling ("iw") is what the save tried; the rollback restores it and the
+    normalized list together."""
+    ctrl, path = _ctrl(tmp_path, monkeypatch, '["iw"]')
+    monkeypatch.setattr(common, "save_keys", _locked)
+    _toggle(ctrl, "ru")
+    tr = ctrl.cfg.transcription
+    assert tr.languages == ["he"]
+    assert tr._raw_languages == ["iw"]  # type: ignore[attr-defined]
+
+
+def test_failed_language_save_keeps_a_newer_queued_toggle(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch, '["en"]')
+    real = common.save_keys
+    calls = []
+
+    def first_fails(p, values):
+        calls.append(values["transcription.languages"])
+        if len(calls) == 1:
+            ctrl.toggle_language("de")  # toggle 2, queued behind save 1
+            raise __import__("recandcc.config").config.ConfigLockTimeout("locked")
+        return real(p, values)
+
+    monkeypatch.setattr(common, "save_keys", first_fails)
+    _toggle(ctrl, "ru")
+    for _ in range(3):
+        for t in threading.enumerate():
+            if t.name == "save-config":
+                t.join(5)
+    assert calls == [["en", "ru"], ["en", "ru", "de"]]
+    assert ctrl.cfg.transcription.languages == ["en", "ru", "de"]
+    assert load_config(path).transcription.languages == ["en", "ru", "de"]

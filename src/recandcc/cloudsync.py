@@ -289,23 +289,29 @@ def _mac_statfs(path: Path) -> tuple[str, int, str]:
 
 
 _LOCAL_FUSE = ("cryptomator", "veracrypt", "gocryptfs", "cryfs", "encfs")
-_NET_FUSE_SRC = re.compile(r"^(//|[^/\s]+@[^/\s]+:|[A-Za-z][\w.-]*:)|sshfs|rclone|smbnetfs|s3fs")
+_NET_FUSE_SRC = re.compile(r"^(//|[^/\s]+@[^/\s]+:|[A-Za-z][\w.-]*:)")
+_NET_FUSE_NAME = re.compile(r"^(rclone|sshfs|s3fs|smbnetfs|gcsfuse)\b")  # fstype or source head
 
 
 def _fuse_volume(fstype: str, source: str) -> tuple[bool, str | None]:
     """macFUSE / FUSE-T mounts all report a ``*fuse*`` type, so the mount source decides.
-    Known local encrypted vaults (Cryptomator, VeraCrypt, gocryptfs...) are local: None.
-    Network-looking sources (``user@host:``, ``remote:``, ``//host/``, sshfs, rclone,
-    smbnetfs) are a network volume. Anything else is undecided ``(False, None)``: the caller
-    falls back to MNT_LOCAL and, when unsure, warns (privacy first)."""
-    text = f"{fstype} {source}".lower()
-    # network first: `me@host:/backups/gocryptfs` is a network share that merely has a vault
-    # name in its path. Vault names count only in the fstype or the source's last component.
-    if _NET_FUSE_SRC.search(source) or "sshfs" in text:
+    Order matters: network first (``user@host:``, ``remote:``, ``//host/``, or a fstype /
+    source head such as sshfs, rclone, s3fs, gcsfuse, smbnetfs: a bucket named
+    ``cryptomator-backup`` is still a network volume). Then known local vaults (Cryptomator,
+    VeraCrypt, gocryptfs...): a vault name as the fstype, the source head, or, for a local
+    path source, in any path component. Anything else is undecided ``(False, None)``: the
+    caller falls back to MNT_LOCAL and, when unsure, warns (privacy first)."""
+    ft = fstype.strip().lower()
+    src = source.strip()
+    low = src.lower()
+    head = re.split(r"[@:/\\\s]", low)[0]  # "" for a path source
+    if _NET_FUSE_SRC.search(src) or _NET_FUSE_NAME.search(ft) or _NET_FUSE_NAME.search(head):
         return True, "a network volume"
-    base = re.split(r"[\\/]", source.rstrip("/\\"))[-1].lower()
-    head = re.split(r"[@:/\\]", source)[0].lower()  # "Cryptomator@/path"
-    if any(name in f"{fstype.lower()} {head} {base}" for name in _LOCAL_FUSE):
+    if any(ft == n or head.startswith(n) for n in _LOCAL_FUSE):
+        return True, None
+    if low.startswith("/") and any(
+        n in comp for comp in low.split("/") for n in _LOCAL_FUSE
+    ):  # local path: safe, the network patterns were checked first
         return True, None
     return False, None
 
