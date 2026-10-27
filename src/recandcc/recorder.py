@@ -35,6 +35,16 @@ from .models import SAMPLE_RATE, SessionInfo, Track, TriggerKind
 log = logging.getLogger(__name__)
 
 PRIVATE_DIR_MODE = 0o700  # owner-only on POSIX; Windows gets an owner-only DACL instead
+_IS_WINDOWS = sys.platform == "win32"  # module flag so tests can fake Windows safely
+_FILE_PERSISTENT_ACLS = 0x8  # GetVolumeInformationW file-system flag
+_warned: set[str] = set()  # privacy warnings already logged (once per process / volume)
+_acl_volumes: dict[str, bool] = {}  # volume root -> persists ACLs
+
+
+def _warn_once(key: str, msg: str, *args: object) -> None:
+    if key not in _warned:
+        _warned.add(key)
+        log.warning(msg, *args)
 
 
 @cache
@@ -92,6 +102,7 @@ def owner_only_sddl(user_sid: str) -> str:
 
 def _win_mkdir_owner_only(path: Path) -> None:
     """Create one folder with an owner-only DACL in a single call (no permissive window)."""
+    sddl = owner_only_sddl(_current_user_sid())
     if sys.platform != "win32":  # also narrows the Win32-only ctypes names for pyright
         raise OSError("Windows only")
     import ctypes
@@ -115,7 +126,6 @@ def _win_mkdir_owner_only(path: Path) -> None:
         ctypes.c_void_p,
     ]
     sd = ctypes.c_void_p()
-    sddl = owner_only_sddl(_current_user_sid())
     if not adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(
         sddl,
         1,
@@ -131,23 +141,79 @@ def _win_mkdir_owner_only(path: Path) -> None:
         k32.LocalFree(sd)
 
 
+def _volume_root_and_acl_support(path: Path) -> tuple[str, bool]:
+    """``(volume root, persists ACLs)`` for an existing ``path``, cached per volume.
+
+    FAT/exFAT and some shares accept ``CreateDirectoryW`` with a security descriptor but
+    silently drop it; their volumes lack ``FILE_PERSISTENT_ACLS``. Two in-process API calls.
+    """
+    if sys.platform != "win32":  # also narrows the Win32-only ctypes names for pyright
+        raise OSError("Windows only")
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetVolumePathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    k32.GetVolumeInformationW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+    ]
+    buf = ctypes.create_unicode_buffer(1024)
+    if not k32.GetVolumePathNameW(str(path), buf, len(buf)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    root = buf.value
+    if root not in _acl_volumes:
+        flags = wintypes.DWORD()
+        if not k32.GetVolumeInformationW(root, None, 0, None, None, ctypes.byref(flags), None, 0):
+            raise ctypes.WinError(ctypes.get_last_error())
+        _acl_volumes[root] = bool(flags.value & _FILE_PERSISTENT_ACLS)
+    return root, _acl_volumes[root]
+
+
 def _mkdir_private(path: Path) -> None:
     """Create one folder (parent must exist), private to the current user from the start.
 
     POSIX: ``0700`` (chmod-ed too: ``mkdir(mode=...)`` is filtered by the umask). Windows: an
     owner-only DACL set at creation. If Windows refuses the DACL (e.g. some network shares),
-    this warns and falls back to a plain ``mkdir(mode=0o700)``: recording must go on.
-    Raises ``FileExistsError`` if something is already at ``path``.
+    this falls back to a plain ``mkdir(mode=0o700)``; if the volume doesn't keep ACLs at all
+    (FAT/exFAT), the folder is not private. Either way recording goes on and a warning is
+    logged once (per process / per volume). Raises ``FileExistsError`` if something is
+    already at ``path``.
     """
-    if sys.platform == "win32":
+    if _IS_WINDOWS:
         try:
             _win_mkdir_owner_only(path)
-            return
         except FileExistsError:
             raise
         except Exception as e:  # keep recording, just warn
-            log.warning("could not create %s with an owner-only ACL: %s", path, e)
-        path.mkdir(mode=PRIVATE_DIR_MODE)
+            _warn_once(
+                "acl-fallback",
+                "could not create %s with an owner-only ACL (%s); recordings may be readable "
+                "by other users",
+                path,
+                e,
+            )
+            path.mkdir(mode=PRIVATE_DIR_MODE)
+            return
+        try:
+            root, persists = _volume_root_and_acl_support(path)
+        except Exception as e:
+            log.debug("could not check ACL support for %s: %s", path, e)
+            return
+        if not persists:
+            _warn_once(
+                f"no-acl:{root}",
+                "%s does not keep file permissions (e.g. FAT/exFAT): recordings in %s are "
+                "readable by other users",
+                root,
+                path,
+            )
         return
     path.mkdir(mode=PRIVATE_DIR_MODE)
     path.chmod(PRIVATE_DIR_MODE)

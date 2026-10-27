@@ -33,8 +33,13 @@ def fake_windows(monkeypatch):
             raise state["error"]
         path.mkdir()
 
-    monkeypatch.setattr(recmod.sys, "platform", "win32")
+    state["persists"] = True
+    monkeypatch.setattr(recmod, "_IS_WINDOWS", True)
     monkeypatch.setattr(recmod, "_win_mkdir_owner_only", secure_mkdir)
+    monkeypatch.setattr(
+        recmod, "_volume_root_and_acl_support", lambda path: ("E:\\", state["persists"])
+    )
+    monkeypatch.setattr(recmod, "_warned", set())
     return type("FakeWindows", (), {"calls": calls, "state": state})
 
 
@@ -56,6 +61,39 @@ def test_windows_acl_failure_is_logged_and_falls_back_to_mkdir(fake_windows, tmp
         make_private_dir(tmp_path / "out")
     assert (tmp_path / "out").is_dir()
     assert "owner-only ACL" in caplog.text and "not supported" in caplog.text
+    make_private_dir(tmp_path / "out2")  # the next session start doesn't warn again
+    assert len(caplog.records) == 1
+
+
+def test_windows_sid_failure_falls_back_to_plain_mkdir_and_warns_once(
+    monkeypatch, tmp_path, caplog
+):
+    def no_sid():
+        raise OSError("no process token")
+
+    monkeypatch.setattr(recmod, "_IS_WINDOWS", True)
+    monkeypatch.setattr(recmod, "_current_user_sid", no_sid)  # real _win_mkdir_owner_only
+    monkeypatch.setattr(recmod, "_warned", set())
+    with caplog.at_level(logging.WARNING, logger="recandcc.recorder"):
+        make_private_dir(tmp_path / "a" / "b")
+    assert (tmp_path / "a" / "b").is_dir()
+    assert len(caplog.records) == 1 and "no process token" in caplog.text
+
+
+def test_windows_volume_without_persistent_acls_warns_once(fake_windows, tmp_path, caplog):
+    fake_windows.state["persists"] = False
+    with caplog.at_level(logging.WARNING, logger="recandcc.recorder"):
+        make_private_dir(tmp_path / "out" / "day")
+        make_private_dir(tmp_path / "out" / "day2")
+    assert (tmp_path / "out" / "day2").is_dir()  # recording goes on
+    assert len(caplog.records) == 1
+    assert "E:\\" in caplog.text and "does not keep file permissions" in caplog.text
+
+
+def test_windows_ntfs_volume_does_not_warn(fake_windows, tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger="recandcc.recorder"):
+        make_private_dir(tmp_path / "out")
+    assert not caplog.records
 
 
 def test_windows_file_in_the_way_still_raises(fake_windows, tmp_path):
@@ -85,7 +123,7 @@ def test_posix_never_uses_the_windows_api(monkeypatch, tmp_path):
     def secure_mkdir(path):
         raise AssertionError("Windows API on POSIX")
 
-    monkeypatch.setattr(recmod.sys, "platform", "darwin")
+    monkeypatch.setattr(recmod, "_IS_WINDOWS", False)
     monkeypatch.setattr(recmod, "_win_mkdir_owner_only", secure_mkdir)
     make_private_dir(tmp_path / "a" / "b")
     assert (tmp_path / "a" / "b").is_dir()
@@ -100,13 +138,9 @@ def test_real_windows_sid_matches_whoami():
     assert recmod._current_user_sid() == out.strip().rsplit(",", 1)[-1].strip('"')
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="NTFS ACLs")
-def test_real_windows_folder_is_owner_and_system_only(tmp_path):
-    d = tmp_path / "private" / "day"
-    make_private_dir(d)
-    (d / "probe.txt").write_text("ok")  # the owner can still write inside
+def _assert_owner_and_system_only(paths):
     user = subprocess.run(["whoami"], capture_output=True, text=True).stdout.strip().lower()
-    for p in (d.parent, d, d / "probe.txt"):
+    for p in paths:
         out = subprocess.run(["icacls", str(p)], capture_output=True, text=True, check=True)
         lines = [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
         # First line is "<path> <ACE>", then one ACE per line, then a summary line.
@@ -116,3 +150,22 @@ def test_real_windows_folder_is_owner_and_system_only(tmp_path):
         assert any(a.lower().startswith(user + ":") for a in aces), out.stdout
         if p.is_dir():  # the folders themselves inherit nothing from their parent
             assert not any("(I)" in a for a in aces), out.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="NTFS ACLs")
+def test_real_windows_folder_is_owner_and_system_only(tmp_path):
+    d = tmp_path / "private" / "day"
+    make_private_dir(d)
+    (d / "probe.txt").write_text("ok")  # the owner can still write inside
+    _assert_owner_and_system_only([d.parent, d, d / "probe.txt"])
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="NTFS ACLs")
+def test_real_windows_session_folder_and_file_are_owner_and_system_only(tmp_path):
+    cfg = Config()
+    cfg.output_dir = tmp_path / "out"
+    rec = recmod.Recorder.__new__(recmod.Recorder)  # the path Recorder.start uses
+    rec.cfg = cfg
+    _, d = rec._make_dir(datetime(2026, 10, 27, 9, 30), "zoom", TriggerKind.MANUAL)
+    (d / "others.wav").write_bytes(b"RIFF")
+    _assert_owner_and_system_only([cfg.output_dir, d.parent, d, d / "others.wav"])
