@@ -227,9 +227,8 @@ while I decide.*
   one-time notice, and the load is retried after 5 minutes.
 - **Not yet:** a Hebrew evaluation set and WER (#6); `tests/test_hebrew_integration.py`
   covers he/en/ru switching, RTL outputs and a two-speaker dialogue on synthetic `say` audio.
-- **Not yet:** the Windows (Tk) captions only right-justify Hebrew lines; Tk does no bidi
-  reordering, so the label stays left of the Hebrew text and the glyph order is unverified
-  on real hardware (#6).
+- **Not yet:** the Windows (Tk) captions reorder Hebrew to visual order themselves
+  (`ui/bidi.py`, US-29), but the glyph order is unverified on real hardware (#6).
 
 ### US-20 Search my transcripts
 *As the owner, I want to find what was said in any past meeting, so that I don't have to

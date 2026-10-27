@@ -87,7 +87,19 @@ def test_dispatch_and_failures_are_quiet(tmp_path, monkeypatch):
         raise OSError("stalled")
 
     monkeypatch.setattr(cs, "mac_network_volume", boom)
-    assert cs.network_volume(tmp_path, platform="darwin") is None
+    res = cs.network_volume(tmp_path, platform="darwin")
+    assert res is cs.PROBE_FAILED and not res  # distinct from "not a network volume" (None)
+
+
+def test_fuse_mounts_are_not_network_unless_known():
+    local = cs._MNT_LOCAL
+    assert cs.mac_network_volume("/Volumes/v", lambda p: ("macfuse", 0)) is None
+    assert cs.mac_network_volume("/Volumes/v", lambda p: ("fuse-t", 0)) is None
+    assert cs.mac_network_volume("/Volumes/v", lambda p: ("smbfs", local)) == "SMB"
+    assert cs.mac_network_volume("/Volumes/v", lambda p: ("weirdfs", 0)) == "a network volume"
+    mounts = "x /mnt/vault fuse.cryptomator rw 0 0\ns:/ /mnt/s fuse.sshfs rw 0 0\n"
+    assert cs.linux_network_volume("/mnt/vault/a", mounts) is None
+    assert cs.linux_network_volume("/mnt/s/a", mounts) == "SSHFS"
 
 
 def test_real_local_folder_is_not_network(tmp_path):
@@ -229,3 +241,43 @@ def test_a_failed_or_hung_probe_is_not_retried_every_refresh(tmp_path, monkeypat
     ctrl._net_retry[tmp_path] = 0.0  # the retry interval has passed
     ctrl._check_network_volume()
     assert len(calls) == 2
+
+
+def test_probe_failed_result_backs_off_like_an_error(tmp_path, monkeypatch):
+    calls = []
+
+    def failed(p):
+        calls.append(p)
+        return cs.PROBE_FAILED
+
+    monkeypatch.setattr(common, "network_volume", failed)
+    ctrl = Controller(
+        Config(output_dir=tmp_path),
+        monitor=_Monitor(),
+        recorder=object(),
+        tq=_Q(),
+        start_threads=False,
+    )
+    ctrl._check_network_volume()
+    ctrl._net_probe.join(5)
+    ctrl._check_network_volume()
+    assert len(calls) == 1 and _notices(ctrl) == []  # backed off, no notice
+    ctrl._net_retry[tmp_path] = 0.0
+    ctrl._check_network_volume()
+    ctrl._net_probe.join(5)
+    assert len(calls) == 2
+
+
+def test_not_network_result_is_not_backed_off(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(common, "network_volume", lambda p: calls.append(p))  # returns None
+    ctrl = Controller(
+        Config(output_dir=tmp_path),
+        monitor=_Monitor(),
+        recorder=object(),
+        tq=_Q(),
+        start_threads=False,
+    )
+    ctrl._check_network_volume()
+    ctrl._net_probe.join(5)
+    assert tmp_path not in ctrl._net_retry

@@ -30,7 +30,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from .. import hotkey as hotkey_mod
-from ..cloudsync import cloud_sync_provider, network_volume, network_warning_text, warning_text
+from ..cloudsync import (
+    PROBE_FAILED,
+    cloud_sync_provider,
+    network_volume,
+    network_warning_text,
+    warning_text,
+)
 from ..config import (
     CONFIG_PATH,
     LOG_DIR,
@@ -864,7 +870,11 @@ class Controller:
             with self._lock:
                 self._net_retry[out] = time.monotonic() + NET_PROBE_RETRY_S
             return
-        if kind is None:
+        if kind is PROBE_FAILED:  # errored, not "local": back off like a hung probe
+            with self._lock:
+                self._net_retry[out] = time.monotonic() + NET_PROBE_RETRY_S
+            return
+        if not isinstance(kind, str):
             return
         with self._lock:
             if out in self._net_warned:
@@ -996,6 +1006,8 @@ class Controller:
         from .present import LANGUAGES_KEEP_ONE, toggle_languages
 
         tr = self.cfg.transcription
+        key = "transcription.languages"
+        self._mark_dirty((key,), 1)  # before memory changes: a reload in between keeps the click
         with self._lang_lock:
             new = toggle_languages(tr.languages, getattr(tr, "_raw_languages", None), code)
             if new is not None:
@@ -1003,9 +1015,26 @@ class Controller:
                 tr._raw_languages = new if new != langs else None  # type: ignore[attr-defined]
                 tr.languages = langs  # a new list: other threads never see it half-built
         if new is None:
+            self._mark_dirty((key,), -1)
             self.post_notice("Languages", LANGUAGES_KEEP_ONE)
             return
-        self.save_settings("transcription.languages", title="Languages")
+        self.save_settings(key, title="Languages", marked=True)
+
+    def set_retention_days(self, days: int) -> None:
+        """Menu "Delete audio after": marks the key dirty first (see ``toggle_language``),
+        then sets it, saves and purges on a worker thread."""
+        key = "transcription.audio_retention_days"
+        self._mark_dirty((key,), 1)
+        self.cfg.transcription.audio_retention_days = days
+
+        def run() -> None:
+            try:
+                self.write_settings(key)
+                self.purge_audio_now()
+            finally:
+                self._mark_dirty((key,), -1)
+
+        threading.Thread(target=run, daemon=True, name="retention-set").start()
 
     def toggle_call_app_names(self) -> None:
         """Menu "Use names from the call app" (macOS), from the main thread; never blocks.
@@ -1046,12 +1075,14 @@ class Controller:
         self.cfg.transcription.names_from_call_app = on
         self.save_settings("transcription.names_from_call_app", title="Names from the call app")
 
-    def save_settings(self, *keys: str, title: str = "Settings") -> None:
+    def save_settings(self, *keys: str, title: str = "Settings", marked: bool = False) -> None:
         """Save the in-memory value of each dotted key ("live_captions",
         "transcription.audio_retention_days") to config.toml on a worker thread. Menu
-        callbacks use this instead of ``cfg.save()``, which would overwrite hand edits."""
+        callbacks use this instead of ``cfg.save()``, which would overwrite hand edits.
+        ``marked``: the caller already marked ``keys`` dirty (before changing memory)."""
         kw = {"title": title}
-        self._mark_dirty(keys, 1)  # a config reload before the write must not undo the change
+        if not marked:
+            self._mark_dirty(keys, 1)  # a config reload before the write must not undo the change
 
         def run() -> None:
             try:

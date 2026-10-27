@@ -291,6 +291,8 @@ def mac_network_volume(path: str | os.PathLike, statfs=None) -> str | None:
     fstype = fstype.lower()
     if fstype in _NETWORK_FS:
         return _NETWORK_FS[fstype]
+    if "fuse" in fstype:  # macFUSE, FUSE-T, Cryptomator...: userspace, usually a local vault
+        return None
     if not flags & _MNT_LOCAL and fstype not in ("devfs", "autofs"):
         return "a network volume"  # not local and not a known pseudo fs
     return None
@@ -330,8 +332,24 @@ def linux_network_volume(path: str | os.PathLike, mounts: str | None = None) -> 
     return _NETWORK_FS.get(best_type)
 
 
-def network_volume(path: str | os.PathLike, platform: str | None = None) -> str | None:
-    """Kind of network share holding ``path`` ("SMB", "NFS", "a network drive", ...) or None."""
+class _ProbeFailed:
+    """Result of ``network_volume`` when the check itself errored: not "no network", unknown."""
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return "PROBE_FAILED"
+
+
+PROBE_FAILED = _ProbeFailed()
+
+
+def network_volume(
+    path: str | os.PathLike, platform: str | None = None
+) -> str | None | _ProbeFailed:
+    """Kind of network share holding ``path`` ("SMB", "NFS", "a network drive", ...), None if it
+    is not on one, or ``PROBE_FAILED`` (falsy) if the check errored, so callers can back off."""
     platform = platform or sys.platform
     try:
         if platform == "darwin":
@@ -342,6 +360,7 @@ def network_volume(path: str | os.PathLike, platform: str | None = None) -> str 
             return linux_network_volume(path)
     except Exception:  # best effort, like the cloud check
         log.debug("network-volume check failed", exc_info=True)
+        return PROBE_FAILED
     return None
 
 

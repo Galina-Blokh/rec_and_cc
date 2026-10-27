@@ -263,3 +263,44 @@ def test_menu_change_waiting_for_its_save_survives_a_reload(tmp_path, monkeypatc
     ctrl.write_settings("live_captions")
     assert load_config(path).live_captions is False
     assert ctrl._dirty == {}
+
+
+def test_click_racing_a_reload_keeps_the_click_for_language_and_retention(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch, '["en"]')
+    seen = {}
+    real_set = Controller._mark_dirty
+
+    def spy(self, keys, delta):
+        # the key must already be dirty when memory changes, so record the order
+        seen.setdefault("order", []).append((tuple(keys), delta, self.cfg.transcription.languages))
+        return real_set(self, keys, delta)
+
+    monkeypatch.setattr(Controller, "_mark_dirty", spy)
+    ctrl.toggle_language("he")
+    first = seen["order"][0]
+    assert first[1] == 1 and first[2] == ["en"]  # marked while memory still old
+    for t in threading.enumerate():
+        if t.name == "save-config":
+            t.join(5)
+    monkeypatch.setattr(Controller, "_mark_dirty", real_set)
+
+    # retention: dirty before the value changes, so a reload at any point keeps it
+    ctrl.purge_audio_now = lambda: None  # type: ignore[method-assign]
+    key = "transcription.audio_retention_days"
+    marks = []
+
+    def spy2(self, keys, delta):
+        marks.append((delta, self.cfg.transcription.audio_retention_days))
+        return real_set(self, keys, delta)
+
+    monkeypatch.setattr(Controller, "_mark_dirty", spy2)
+    old = ctrl.cfg.transcription.audio_retention_days
+    ctrl.set_retention_days(old + 7)
+    assert marks[0] == (1, old)
+    for t in threading.enumerate():
+        if t.name == "retention-set":
+            t.join(5)
+    monkeypatch.setattr(Controller, "_mark_dirty", real_set)
+    assert key not in ctrl._dirty  # balanced: no leaked mark
+    assert "transcription.languages" not in ctrl._dirty
+    assert load_config(path).transcription.audio_retention_days == old + 7
