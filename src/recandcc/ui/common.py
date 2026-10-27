@@ -1019,6 +1019,8 @@ class Controller:
                         try:
                             mtime = save_settings(updates, CONFIG_PATH)
                         except FileNotFoundError:
+                            if CONFIG_PATH.exists():  # a write error, not a missing file
+                                raise
                             self.cfg.save(CONFIG_PATH)  # no file yet: write a fresh one
                             mtime = save_settings(updates, CONFIG_PATH)
                     except Exception:
