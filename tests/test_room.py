@@ -224,6 +224,22 @@ def test_close_mic_closes_it_and_start_reopens_a_fresh_stream():
         mon.close()
 
 
+def test_reset_forgets_the_preroll_and_speech_and_close_is_final():
+    mon, sources = make()
+    mon.start()
+    feed(mon, sources[0], burst(6))
+    assert mon.triggered() and mon._ring_size
+    mon.reset()  # an app is doing audio: nothing it played may reach a room session
+    assert mon.wait_idle() and not mon.triggered() and mon._ring_size == 0
+    got: list[np.ndarray] = []
+    tap = mon.session_source()
+    tap.start(got.append)
+    assert got == []
+    tap.stop()
+    mon.close()
+    assert mon.start() is False and not mon.running  # a late engine tick can't reopen it
+
+
 def test_a_missing_microphone_is_reported_not_raised():
     mon, _ = make(fail=True)
     try:
@@ -306,6 +322,8 @@ def test_room_session_keeps_the_preroll_and_pads_the_other_track(tmp_path):
         ramp = np.arange(6 * SR, dtype=np.float32) / (8 * SR)  # unique, < 1 for the WAV
         mic.push(ramp[: 4 * SR])
         session = rec.start(TriggerKind.ROOM, "Room", mic_source=mon.session_source)
+        heard: list[tuple] = []  # live transcription attaches after start(): whole pre-roll
+        rec.add_listener(lambda track, start, block: heard.append((track, start, block.size)))
         mic.push(ramp[4 * SR :])
         system.push(np.full(SR, 0.25, np.float32))
         out = rec.stop()
@@ -320,6 +338,8 @@ def test_room_session_keeps_the_preroll_and_pads_the_other_track(tmp_path):
     # ... and the system track starts with that much silence, so both stay aligned.
     assert len(others) == 5 * SR and not others[: 4 * SR].any() and others[4 * SR :].all()
     assert SessionInfo.load(session.directory).trigger_kind == TriggerKind.ROOM
+    me_heard = [(start, n) for track, start, n in heard if track == Track.ME]
+    assert me_heard[0][0] == 0 and sum(n for _, n in me_heard) == 6 * SR
 
 
 def test_room_sessions_diarize_the_mic_track():

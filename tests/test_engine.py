@@ -892,7 +892,7 @@ class FakeRoom:
     def __init__(self):
         self.running = self.speech = self.fail = False
         self.quiet = 0.0  # seconds_since_speech()
-        self.opens = self.closes = 0
+        self.opens = self.closes = self.resets = 0
 
     def start(self):
         if self.fail:
@@ -906,6 +906,10 @@ class FakeRoom:
         self.running = self.speech = False
 
     close = close_mic
+
+    def reset(self):
+        self.speech = False
+        self.resets += 1
 
     def triggered(self):
         return self.running and self.speech
@@ -993,18 +997,41 @@ def test_apps_take_precedence_over_room_speech():
 
 
 def test_room_never_records_what_an_app_switched_off_or_stopped_is_doing():
-    h = _room_harness(app_modes={"us.zoom": Mode.OFF})
-    h.mon.procs = [ZOOM]  # a call the user excluded: the mic hears it
-    h.run(10)
+    h = _room_harness(app_modes={"us.zoom": Mode.OFF, "com.google.chrome": Mode.OFF})
+    h.run(1)
+    assert h.room.running
+    for procs in ([ZOOM], [VOICE_MEMOS]):  # an excluded call, an ignored app using the mic
+        h.mon.procs = procs
+        h.eng.tick()
+        assert not h.room.running  # the room mic doesn't hear (or keep) what they capture
+        h.room.speech = True
+        h.run(10)
+        assert h.rec.starts == [] and not h.room.running
+    h.mon.procs = []
+    h.eng.tick()  # reopened with nothing heard: the call's speech can't start a session
+    assert h.room.running and h.rec.starts == []
+    h.mon.procs = [CHROME]  # a video the user switched off, through the speakers
     h.room.speech = True
-    h.run(10)
-    assert h.rec.starts == []
-    h.mon.procs = [VOICE_MEMOS]  # an ignored app using the mic
-    h.run(10)
-    assert h.rec.starts == []
+    h.run(5)
+    assert h.rec.starts == [] and h.room.running and h.room.resets >= 5
     h.mon.procs = [AudioProcess(999, "python", "python3", True, False)]  # our own room mic
+    h.room.speech = True
     h.eng.tick()
     assert h.rec.starts == [(TriggerKind.ROOM, "Room")]
+
+
+def test_room_session_stops_when_an_excluded_app_starts():
+    for procs in ([ZOOM], [VOICE_MEMOS], [CHROME]):
+        h = _room_harness(app_modes={"us.zoom": Mode.OFF, "com.google.chrome": Mode.OFF})
+        _start_room_session(h)
+        h.mon.procs = procs
+        h.eng.tick()
+        assert h.status == IDLE and h.rec.stops == 1, procs
+    h = _room_harness()  # a call the user records: no stop during its debounce, then upgrade
+    _start_room_session(h)
+    h.mon.procs = [ZOOM]
+    h.run(4)
+    assert h.rec.stops == 0 and h.rec.upgrades == ["zoom.us"]
 
 
 def test_stopped_room_session_stays_stopped_while_the_talk_goes_on():

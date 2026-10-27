@@ -99,6 +99,7 @@ class _TrackWriter:
         self.path = path
         self.source = source
         self.recorder = recorder
+        self.replay_s = REPLAY_SECONDS  # longer for a room mic: listeners get its pre-roll
         self.q: queue.Queue[np.ndarray | None] = queue.Queue()
         self.frames_written = 0
         self.frames_received = 0  # updated on the capture thread; ahead of frames_written
@@ -130,7 +131,7 @@ class _TrackWriter:
             self.frames_received += block.size
             self._recent.append((start, block))
             self._recent_frames += block.size
-            while self._recent_frames - self._recent[0][1].size >= REPLAY_SECONDS * SAMPLE_RATE:
+            while self._recent_frames - self._recent[0][1].size >= self.replay_s * SAMPLE_RATE:
                 self._recent_frames -= self._recent.popleft()[1].size
             for cb in self._listeners:
                 self._call(cb, start, block)
@@ -317,7 +318,10 @@ class Recorder:
             writers: list[_TrackWriter] = []
             for track, factory in plan:
                 pad = max((w.frames_received for w in writers), default=0) if mic_source else 0
-                w = self._open_track(session, track, factory, pad_frames=pad)
+                # Live transcription attaches after start(): it must still get the whole pre-roll.
+                det = self.cfg.detection
+                replay = max(det.room_preroll_s, det.room_window_s) + 5 if mic_source else 0.0
+                w = self._open_track(session, track, factory, pad_frames=pad, replay_s=replay)
                 if w is not None:
                     writers.append(w)
 
@@ -338,13 +342,20 @@ class Recorder:
             return session
 
     def _open_track(
-        self, session: SessionInfo, track: Track, factory: SourceFactory, pad_frames: int = 0
+        self,
+        session: SessionInfo,
+        track: Track,
+        factory: SourceFactory,
+        pad_frames: int = 0,
+        replay_s: float = 0.0,
     ) -> _TrackWriter | None:
         """Create and start one track; None (logged) if its source can't be started."""
         path = session.directory / TRACK_FILES[track]
         try:
             src = factory()
             w = _TrackWriter(track, path, src, self)
+            if replay_s:
+                w.replay_s = max(w.replay_s, replay_s)
         except Exception:
             log.exception("could not create %s source", track)
             return None

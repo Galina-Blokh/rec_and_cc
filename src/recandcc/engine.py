@@ -228,6 +228,7 @@ class Engine:
         self._apps: dict[str, AppActivity] = {}
         self.room = room_monitor
         self._room_retry_at = float("-inf")
+        self._room_mic_busy = self._room_apps_busy = False  # engine thread only
 
         self._wake = threading.Event()
         self._stop_evt = threading.Event()
@@ -371,14 +372,17 @@ class Engine:
         now = self.clock()
         min_active = effective_min_active_s(self.det)  # inside sensitivity
         room = self.room
+        # Other processes using the mic (even ignored or switched-off ones): the room mic would
+        # hear exactly what the user excluded, so room listening holds off (see _sync_room).
+        mic_users = [
+            p
+            for p in procs
+            if p.input_active and p.pid not in self.own_pids and not match_pattern(OWN_AUDIO, p)
+        ]
+        self._room_mic_busy, self._room_apps_busy = bool(mic_users), bool(apps)
         room_active, room_quiet = False, 0.0
         if room is not None and room.running:
-            # Any other app using the mic (even an ignored or switched-off one): not "the room".
-            mic_busy = any(
-                p.input_active and p.pid not in self.own_pids and not match_pattern(OWN_AUDIO, p)
-                for p in procs
-            )
-            room_active = self._room_wanted() and not mic_busy and room.triggered()
+            room_active = self._room_wanted() and not (mic_users or apps) and room.triggered()
             room_quiet = room.seconds_since_speech()
 
         start_req: tuple[TriggerKind, str | None] | None = None
@@ -483,6 +487,9 @@ class Engine:
                 if not is_room and r.key not in apps and now - last >= inactive_s:
                     log.info("stopping: %s inactive for %.0fs", r.name, now - last)
                     stop_req = True
+                elif is_room and self._room_excluded_locked(mic_users, apps):
+                    log.info("stopping the room session: an excluded app is doing audio")
+                    stop_req = True
                 elif is_room and r.room_mic and room_quiet >= det.room_stop_after_silence_s:
                     log.info("stopping: no speech in the room for %.0fs", room_quiet)
                     stop_req = True
@@ -582,20 +589,44 @@ class Engine:
         det = self.det
         return bool(det.room_listening) and Mode(det.mode) != Mode.OFF and det.record_mic != "never"
 
+    def _room_excluded_locked(self, mic_users, apps: dict[str, AppActivity]) -> bool:
+        """A room session must stop: a process uses the mic or an app does audio that the user
+        excluded (ignored, switched off, stopped). A call that may upgrade the session is fine."""
+        det = self.det
+
+        def allowed(key: str) -> bool:
+            a = apps.get(key)
+            return (
+                a is not None
+                and key not in self._suppressed
+                and effective_mode(det, key, a.procs) != Mode.OFF
+            )
+
+        for p in mic_users:
+            c = classify(p, det, self.own_pids)
+            if c is None or c[1] != TriggerKind.CALL or not allowed(c[0]):
+                return True
+        return not all(allowed(k) for k in apps)
+
     def _sync_room(self, now: float) -> None:
-        """Engine thread, outside the lock: open the room mic while idle and wanted."""
+        """Engine thread, outside the lock: open the room mic while idle and wanted, and not
+        while another process uses the mic. While an app does audio, forget what was heard,
+        so neither the pre-roll nor the speech window carry it into a room session."""
         room = self.room
         if room is None:
             return
         with self._lock:
             r = self._rec
             # A room session's mic track is the monitor's stream: keep it open until it ends.
-            want = r.room_mic if r is not None else self._room_wanted()
+            idle = r is None
+            want = self._room_wanted() and not self._room_mic_busy if idle else r.room_mic
         if want and not room.running and now >= self._room_retry_at:
             if not room.start():
                 self._room_retry_at = now + ROOM_RETRY_S
         elif not want and room.running:
             room.close_mic()
+        elif want and idle and self._room_apps_busy:
+            room.reset()
 
     def _notice(self, title: str, message: str) -> None:
         log.warning("%s: %s", title, message)
