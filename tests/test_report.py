@@ -411,3 +411,121 @@ def test_offline_makes_no_network_call(tmp_path, monkeypatch):
     monkeypatch.setattr(collect, "git_ledger", lambda root, ref: [])
     collect.collect(tmp_path, "o/r", tmp_path / "cache", offline=True, logs=tmp_path / "logs")
     assert not [c for c in calls if "fetch" in c or c[:2] == ["gh", "api"]]
+
+
+def _item(i, updated=None):
+    return {"id": i, "updated_at": updated or f"t{i}"}
+
+
+def test_list_drops_deleted_items_and_keeps_cached_tail(tmp_path):
+    ep = "pulls?state=all&sort=updated&direction=desc&per_page=2"
+    gh = collect.GitHub("o/r", tmp_path)
+    _fake_api(
+        gh,
+        {
+            f"{ep}&page=1": [_item(5), _item(4)],
+            f"{ep}&page=2": [_item(3), _item(2)],
+            f"{ep}&page=3": [_item(1)],
+        },
+        [],
+    )
+    assert [i["id"] for i in gh.get_list(ep)] == [5, 4, 3, 2, 1]
+
+    # #5 and #4 were deleted; page 1 holds #3 unchanged, so the walk stops there and keeps
+    # the cached tail after it (#2, #1). Items before the overlap that vanished are dropped.
+    gh = collect.GitHub("o/r", tmp_path)
+    _fake_api(gh, {f"{ep}&page=1": [_item(6), _item(3)]}, [])
+    assert [i["id"] for i in gh.get_list(ep)] == [6, 3, 2, 1]
+    assert [i["id"] for i in gh.dropped[ep]] == [5, 4]
+
+    # A complete walk replaces the list: #2 and #1 are gone.
+    gh = collect.GitHub("o/r", tmp_path)
+    _fake_api(gh, {f"{ep}&page=1": [_item(7, "new")]}, [])
+    assert [i["id"] for i in gh.get_list(ep)] == [7]
+    assert {i["id"] for i in gh.dropped[ep]} == {6, 3, 2, 1}
+
+
+def test_list_dedupes_ids_across_pages(tmp_path):
+    ep = "pulls?state=all&sort=updated&direction=desc&per_page=2"
+    gh = collect.GitHub("o/r", tmp_path)
+    _fake_api(
+        gh,
+        {
+            f"{ep}&page=1": [_item(3), _item(2)],
+            f"{ep}&page=2": [_item(2, "other"), _item(1)],
+            f"{ep}&page=3": [],
+        },
+        [],
+    )
+    got = gh.get_list(ep)
+    assert [(i["id"], i["updated_at"]) for i in got] == [(3, "t3"), (2, "t2"), (1, "t1")]
+
+
+def test_missing_pr_is_skipped_and_its_cache_removed(tmp_path):
+    ep = "pulls?state=all&sort=updated&direction=desc&per_page=100"
+    issues = "issues?state=all&sort=updated&direction=desc&per_page=100&page=1"
+    runs = "actions/runs?per_page=100&page=1"
+
+    def pr(n):
+        return {"id": n, "number": n, "updated_at": f"u{n}"}
+
+    def detail(n):
+        return {
+            f"pulls/{n}": {"number": n},
+            f"pulls/{n}/commits?per_page=100": [[{"sha": "c"}]],
+            f"pulls/{n}/reviews?per_page=100": [[]],
+            f"issues/{n}/comments?per_page=100": [[]],
+        }
+
+    gh = collect.GitHub("o/r", tmp_path)
+    r = {f"{ep}&page=1": [pr(2), pr(1)], issues: [], runs: {"workflow_runs": []}}
+    r.update(detail(1) | detail(2))
+    _fake_api(gh, r, [])
+    assert set(collect.fetch_github(gh)["detail"]) == {1, 2}
+    assert gh._path("pulls/1").exists()
+
+    # #1 leaves the list: its detail files go. #2 is listed but 404s: skipped, run survives.
+    gh = collect.GitHub("o/r", tmp_path)
+    r = {
+        f"{ep}&page=1": [
+            pr(3),
+            pr(
+                2,
+            ),
+            pr(2),
+        ],
+        issues: [],
+        runs: {"workflow_runs": []},
+    }
+    r[f"{ep}&page=1"][1]["updated_at"] = "u2b"
+    r[f"{ep}&page=1"][2] = r[f"{ep}&page=1"][1]
+    r.update(detail(3))
+
+    def api(endpoint, paginate=False):
+        if endpoint.startswith("pulls/2"):
+            raise RuntimeError(f"gh api {endpoint} failed: HTTP 404: Not Found")
+        return r[endpoint]
+
+    gh._api = api
+    got = collect.fetch_github(gh)
+    assert list(got["detail"]) == [3]
+    assert not gh._path("pulls/1").exists()
+    assert not gh._path("pulls/1/commits?per_page=100").exists()
+
+
+def test_cache_writes_are_atomic(tmp_path, monkeypatch):
+    replaced = []
+    real = collect.os.replace
+
+    def spy(src, dst):
+        replaced.append(Path(dst).name)
+        real(src, dst)
+
+    monkeypatch.setattr(collect.os, "replace", spy)
+    ep = "pulls?state=all&sort=updated&direction=desc&per_page=2"
+    gh = collect.GitHub("o/r", tmp_path)
+    _fake_api(gh, {f"{ep}&page=1": [_item(1)], "pulls/1": {"n": 1}}, [])
+    gh.get_list(ep)
+    gh.get("pulls/1", "s", paginate=False)
+    assert len(replaced) == 2
+    assert not list(gh.cache.glob("*.tmp"))

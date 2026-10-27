@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import statistics
@@ -27,6 +28,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+log = logging.getLogger("report.collect")
 
 REPO = "Galina-Blokh/rec_and_cc"
 try:
@@ -116,6 +119,17 @@ def pearson(xs: list[float], ys: list[float]) -> float | None:
 # ---------- GitHub ----------
 
 
+def _dedupe(items: list, field: str = "id") -> list:
+    """Keep the first occurrence of each `field` value, in order."""
+    seen: set = set()
+    out = []
+    for i in items:
+        if i[field] not in seen:
+            seen.add(i[field])
+            out.append(i)
+    return out
+
+
 class GitHub:
     """`gh api` with an on-disk cache keyed by endpoint (and an `updated_at` stamp).
 
@@ -130,6 +144,7 @@ class GitHub:
         self.offline = offline
         self.calls = 0
         self._lock = threading.Lock()
+        self.dropped: dict[str, list] = {}  # endpoint -> cached items that left the list
 
     def _path(self, key: str) -> Path:
         return self.cache / (re.sub(r"[^A-Za-z0-9_.-]+", "_", key) + ".json")
@@ -149,36 +164,58 @@ class GitHub:
             data = []
             for page in pages:
                 data.extend(page.get("workflow_runs", []) if isinstance(page, dict) else page)
-        path.write_text(json.dumps({"stamp": stamp, "data": data}))
+        self._write(path, {"stamp": stamp, "data": data})
         return data
+
+    @staticmethod
+    def _write(path: Path, payload) -> None:
+        """Atomic cache write: temp file in the same directory, then `os.replace`."""
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            tmp.write_text(json.dumps(payload))
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def get_list(self, endpoint: str, key: str | None = None) -> list:
         """Incremental fetch of a newest-first list endpoint.
 
         Reads page by page and stops at the first page holding an item already cached
-        unchanged (same `id` and `updated_at`), then merges: fetched items replace cached
-        ones by id and come first. `key` names the list inside a dict page (`workflow_runs`).
+        unchanged (same `id` and `updated_at`). A complete walk (short or empty last page)
+        yields the fetched items only. An early stop yields the fetched items plus the cached
+        tail after the last cached item on that page. Duplicates (head inserts shift pages)
+        collapse to the first occurrence by `id`. Cached items that left the list are dropped
+        and recorded in `self.dropped[endpoint]`. `key` names the list inside a dict page.
         """
         path = self._path(endpoint)
         cached = json.loads(path.read_text())["data"] if path.exists() else []
         if self.offline:
             return cached
         known = {(i["id"], i.get("updated_at")) for i in cached}
+        pos = {i["id"]: n for n, i in enumerate(cached)}
         m = re.search(r"per_page=(\d+)", endpoint)
         per_page = int(m.group(1)) if m else 30
         sep = "&" if "?" in endpoint else "?"
         fresh: list = []
+        tail_from = None  # index in `cached` after which the cached tail is kept
         page = 1
         while True:
             data = self._api(f"{endpoint}{sep}page={page}")
             items = (data or {}).get(key, []) if key else (data or [])
             fresh.extend(items)
-            if len(items) < per_page or any((i["id"], i.get("updated_at")) in known for i in items):
+            if len(items) < per_page:
+                break
+            if any((i["id"], i.get("updated_at")) in known for i in items):
+                tail_from = max(pos[i["id"]] for i in items if i["id"] in pos)
                 break
             page += 1
-        ids = {i["id"] for i in fresh}
-        merged = fresh + [i for i in cached if i["id"] not in ids]
-        path.write_text(json.dumps({"stamp": None, "data": merged}))
+        merged = _dedupe(fresh)
+        if tail_from is not None:
+            seen = {i["id"] for i in merged}
+            merged += [i for i in cached[tail_from + 1 :] if i["id"] not in seen]
+        kept = {i["id"] for i in merged}
+        self.dropped[endpoint] = [i for i in cached if i["id"] not in kept]
+        self._write(path, {"stamp": None, "data": merged})
         return merged
 
     def _api(self, endpoint: str, paginate: bool = False):
@@ -203,21 +240,44 @@ class GitHub:
         return json.loads(out.stdout or "null")
 
 
-def _pr_detail(gh: GitHub, p: dict) -> tuple[int, dict]:
+def _pr_files(gh: GitHub, n: int) -> list[Path]:
+    return [
+        gh._path(e)
+        for e in (
+            f"pulls/{n}",
+            f"pulls/{n}/commits?per_page=100",
+            f"pulls/{n}/reviews?per_page=100",
+            f"issues/{n}/comments?per_page=100",
+        )
+    ]
+
+
+def _pr_detail(gh: GitHub, p: dict) -> tuple[int, dict] | None:
+    """One PR's detail, or None when GitHub no longer has it (404)."""
     n, stamp = p["number"], p["updated_at"]
-    return n, {
-        "pr": gh.get(f"pulls/{n}", stamp, paginate=False),
-        "commits": gh.get(f"pulls/{n}/commits?per_page=100", stamp),
-        "reviews": gh.get(f"pulls/{n}/reviews?per_page=100", stamp),
-        "comments": gh.get(f"issues/{n}/comments?per_page=100", stamp),
-    }
+    try:
+        return n, {
+            "pr": gh.get(f"pulls/{n}", stamp, paginate=False),
+            "commits": gh.get(f"pulls/{n}/commits?per_page=100", stamp),
+            "reviews": gh.get(f"pulls/{n}/reviews?per_page=100", stamp),
+            "comments": gh.get(f"issues/{n}/comments?per_page=100", stamp),
+        }
+    except RuntimeError as exc:
+        if "404" in str(exc) or "Not Found" in str(exc):
+            log.debug("PR #%s is gone on GitHub; skipping", n)
+            return None
+        raise
 
 
 def fetch_github(gh: GitHub, workers: int = 4) -> dict:
-    pulls = gh.get_list("pulls?state=all&sort=updated&direction=desc&per_page=100")
+    pulls_ep = "pulls?state=all&sort=updated&direction=desc&per_page=100"
+    pulls = _dedupe(gh.get_list(pulls_ep), "number")
+    for p in gh.dropped.get(pulls_ep, []):  # deleted content must not linger on disk
+        for f in _pr_files(gh, p["number"]):
+            f.unlink(missing_ok=True)
     # Up to 4 PRs' details in flight; each endpoint writes only its own cache file.
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        detail = dict(pool.map(lambda p: _pr_detail(gh, p), pulls))
+        detail = dict(r for r in pool.map(lambda p: _pr_detail(gh, p), pulls) if r)
     issues = gh.get_list("issues?state=all&sort=updated&direction=desc&per_page=100")
     runs = gh.get_list("actions/runs?per_page=100", key="workflow_runs")
     return {"detail": detail, "issues": issues, "runs": runs}
