@@ -329,7 +329,18 @@ def test_room_session_keeps_the_preroll_and_pads_the_other_track(tmp_path):
         assert 3.99 < (before - session.started_at).total_seconds() < 4.05  # the pre-roll
         heard: list[tuple] = []  # live transcription attaches after start(): whole pre-roll
         rec.add_listener(lambda track, start, block: heard.append((track, start, block.size)))
-        mic.push(ramp[4 * SR :])
+        me_writer = next(w for w in rec._writers if w.track == Track.ME)
+
+        def drained():  # the writer caught up: what's left in its queue is real backlog
+            end = time.monotonic() + 10
+            while me_writer.frames_written < me_writer.frames_received:
+                assert time.monotonic() < end
+                time.sleep(0.005)
+
+        drained()  # the replayed pre-roll arrived all at once; the writer works it off
+        for i in range(4 * SR, 6 * SR, 1600):  # live audio at its own pace, block by block
+            mic.push(ramp[i : i + 1600])
+            drained()
         system.push(np.full(SR, 0.25, np.float32))
         out = rec.stop()
     finally:
@@ -344,8 +355,9 @@ def test_room_session_keeps_the_preroll_and_pads_the_other_track(tmp_path):
     assert len(others) == 5 * SR and not others[: 4 * SR].any() and others[4 * SR :].all()
     loaded = SessionInfo.load(session.directory)
     assert loaded.trigger_kind == TriggerKind.ROOM and loaded.started_as_room
-    # The replayed pre-roll arrives all at once: it is not disk backlog.
-    assert out.metrics["recording"]["writer_backlog_max_s"]["me"] < 1.0
+    # The replayed 4 s pre-roll arrives all at once: it is not disk backlog. Live blocks were
+    # pushed one at a time after the writer caught up, so at most one 0.1 s block waits.
+    assert out.metrics["recording"]["writer_backlog_max_s"]["me"] <= 0.2
     started = SessionInfo.load(session.directory).started_at  # when the audio begins
     assert abs((out.started_at - started).total_seconds()) < 1e-3
     me_heard = [(start, n) for track, start, n in heard if track == Track.ME]
