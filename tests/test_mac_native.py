@@ -69,8 +69,9 @@ def test_monitor_detects_afplay(tmp_path):
     monitor = MacActivityMonitor(interval=0.25)
     player = None
     try:
-        if not _wait_ready(monitor):
-            pytest.skip("rcc-audiotap monitor produced no output within 10 s")
+        # a live helper prints within a few seconds even on a loaded runner; silence for 20 s
+        # means it hangs, which is a real failure, not a reason to skip
+        assert _wait_ready(monitor, timeout=20.0), "rcc-audiotap monitor printed nothing in 20 s"
         # Long enough that the clip cannot end before the monitor sees it.
         player = _play(_tone(tmp_path, 440, seconds=60))
         found = None
