@@ -366,3 +366,13 @@ def test_recovering_a_corrupt_index_drops_the_cache(tmp_path, out):
     hits = idx.search("payment")
     assert hits and "invoice" in hits[0].snippet
     assert idx._cache is not None
+
+
+def test_a_missing_vec_version_reported_by_a_trigger_counts_as_missing_schema():
+    import sqlite3
+
+    from recandcc.search import _is_missing_schema
+
+    assert _is_missing_schema(sqlite3.OperationalError("no such table: main.vec_version"))
+    assert _is_missing_schema(sqlite3.OperationalError("no such table: vec_version"))
+    assert not _is_missing_schema(sqlite3.OperationalError("no such table: main.unrelated"))

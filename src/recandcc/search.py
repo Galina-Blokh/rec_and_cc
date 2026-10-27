@@ -160,7 +160,7 @@ _TABLES = ("sessions", "seg_fts", "seg_plain", "seg_vec", "sem_sessions", "roots
 
 def _is_missing_schema(e: sqlite3.Error) -> bool:
     """A file without our tables: deleted and recreated empty behind this instance's back."""
-    msg = str(e)
+    msg = str(e).replace("no such table: main.", "no such table: ", 1)  # trigger errors
     return isinstance(e, sqlite3.OperationalError) and any(
         msg == f"no such table: {t}" or msg.startswith(f"no such table: {t} ") for t in _TABLES
     )
