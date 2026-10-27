@@ -31,5 +31,6 @@ Paths are relative to `src/recandcc/`.
 | US-20 | `search.py`, `ui/common.py`, `ui/present.py`, `ui/mac.py`, `ui/tray.py`, `cli.py` | `test_search.py::*`, `test_ui_present.py::test_search_hit_row_and_notices`, `test_ui_present.py::test_search_open_target_falls_back_to_the_folder`, `test_ui_tray.py::*` |
 | US-21 | `transcribe/voices.py`, `transcribe/intro_hints.py`, `transcribe/diarize.py`, `cli.py` | `test_voices.py::*`, `test_intro_hints.py::*` |
 | US-27 | `transcribe/summary.py`, `transcribe/revisions.py`, `transcribe/gpu.py`, `config.py`, `ui/common.py`, `cli.py` | `test_summary.py::*` |
+| US-28 | `ui/notes.py`, `ui/common.py`, `ui/mac.py`, `ui/tray.py`, `models.py` | `test_notes.py::*`, `test_ui_tray.py::test_notes_menu_item_and_events_reach_the_notes_window`, `test_ui_tray.py::test_notes_window_actions` |
 | US-32 | `semantic.py`, `search.py`, `config.py`, `ui/common.py`, `cli.py` | `test_semantic.py::*` |
 | US-29 | `ui/bidi.py`, `ui/captions.py`, `ui/tray.py` | `test_bidi.py::*` |

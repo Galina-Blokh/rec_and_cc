@@ -40,6 +40,9 @@ All notable changes to RecAndCC are documented here. The format is based on
 - This changelog.
 - Search across all transcripts with a local SQLite FTS5 index: `recandcc search` and a
   menu item (#59).
+- "Meeting notes…" in the menu and the Windows tray: past sessions newest first, with
+  open transcript / summary, reveal, rename (`title` in `session.json`) and delete to the
+  Trash (#4).
 - Opt-in local meeting summaries (`[summary] enabled = true`, Apple silicon): `summary.md`
   with a short summary and action items after each transcript, from a pinned Qwen2.5 3B
   model via mlx-lm; `recandcc summarize <session_dir>` (#4).

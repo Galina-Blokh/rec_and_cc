@@ -286,6 +286,10 @@ class Controller:
         self.tq = tq
         self._live = None  # LiveTranscriber of the session being recorded (engine thread)
         self._live_done: dict[str, LiveTranscriber] = {}  # session id -> flushed LiveTranscriber
+        # Session folders from start until their transcription is done (or they are dropped):
+        # Meeting notes won't rename or delete them meanwhile. Guarded by self._lock.
+        self._in_flight: set[Path] = set()
+        self._notes_scanning = threading.Lock()
         self.engine = Engine(
             cfg,
             monitor,
@@ -382,6 +386,9 @@ class Controller:
         self.events.put(("prompt", app, kind, st.prompt_id))
 
     def _on_transcribed(self, session: SessionInfo, result) -> None:
+        if (in_flight := getattr(self, "_in_flight", None)) is not None:  # None: test fakes
+            with self._lock:
+                in_flight.discard(Path(session.directory))
         self.events.put(("transcribed", session, result))
         self.refresh_async(force=True)
         if not isinstance(result, Exception):
@@ -413,6 +420,86 @@ class Controller:
         except Exception:  # noqa: BLE001 - search is optional; never break transcription
             log.exception("could not update the search index")
 
+    # --- meeting notes (worker threads; the list arrives as a ("notes", notes) event)
+    def notes_async(self) -> None:
+        """Scan for Meeting notes off the UI thread; a click while a scan runs is dropped."""
+        if not self._notes_scanning.acquire(blocking=False):
+            return
+
+        def run() -> None:
+            try:
+                from .notes import scan_notes
+
+                self.events.put(("notes", scan_notes(self.cfg.output_dir)))
+            finally:
+                self._notes_scanning.release()
+
+        threading.Thread(target=run, daemon=True, name="notes").start()
+
+    def note_busy(self, directory: Path) -> str | None:
+        """Why a session can't be renamed or deleted now, or None: it is being recorded or
+        is not through its transcription yet (from session start until the queue is done
+        with it, or while startup re-queues unfinished ones). A late diarization or summary
+        may still write afterwards: a rename only touches the title, and after a delete
+        their writes fail without recreating the folder."""
+        live = self.engine.state.session_dir
+        with self._lock:
+            in_flight = set(self._in_flight)
+        try:  # resolve() may touch the disk: outside the lock
+            if Path(directory).resolve() in {d.resolve() for d in in_flight}:
+                return "It is still being recorded or transcribed; try again when it is done."
+            if live and Path(live).resolve() == Path(directory).resolve():
+                return "It is still recording."
+            info = SessionInfo.load(directory)
+        except Exception:  # noqa: BLE001 - unreadable: let the action report it
+            return None
+        if info.ended_at is None and live:  # unfinished while a session runs: maybe this one
+            return "It is still recording."
+        if not info.transcribed and (self.tq.pending() > 0 or getattr(self, "_resubmitting", 0)):
+            return "It may still be transcribing; try again when the queue is done."
+        return None
+
+    def note_action_async(self, directory: Path, action: str, title: str = "") -> None:
+        """Rename (``action="rename"``) or delete a session off the UI thread, then post a
+        notice and a fresh ``notes`` list."""
+
+        def run() -> None:
+            from .notes import delete_notice, delete_session, rename_session, scan_notes
+
+            if action not in ("rename", "delete"):
+                log.error("unknown meeting action %r", action)
+                return
+            if why := self.note_busy(directory):
+                self.events.put(("notice", "Can't change this meeting", why))
+                return
+            try:
+                if action == "rename":
+                    rename_session(directory, title, self.cfg.output_dir)
+                elif action == "delete":
+                    result = delete_session(directory, self.cfg.output_dir)
+                    self._index_session(directory)  # gone: drops it from the search index
+                    self._prune_voices()
+                    self.refresh_async(force=True)
+                    if notice := delete_notice(result):
+                        self.events.put(("notice", *notice))
+            except Exception as e:  # noqa: BLE001
+                log.error("meeting %s failed for %s: %s", action, directory.name, type(e).__name__)
+                self.events.put(("notice", f"Could not {action} the meeting", directory.name))
+            with self._notes_scanning:  # one scan at a time, after a running one (fresh list)
+                self.events.put(("notes", scan_notes(self.cfg.output_dir)))
+
+        threading.Thread(target=run, daemon=True, name="notes-action").start()
+
+    @staticmethod
+    def _prune_voices() -> None:
+        """Drop the stored speaker voices of deleted sessions (speaker_names) right away."""
+        try:
+            from ..transcribe.voices import prune_session_voices
+
+            prune_session_voices()
+        except Exception as e:  # noqa: BLE001 - voices are optional
+            log.warning("could not prune session voices: %s", type(e).__name__)
+
     def search_async(self, query: str) -> None:
         """Search the transcripts off the UI thread; posts ``("search", query, hits)``, with
         hits the exception if the search failed."""
@@ -434,6 +521,8 @@ class Controller:
 
     # --- live transcription (engine thread)
     def _on_session_start(self, session: SessionInfo) -> None:
+        with self._lock:
+            self._in_flight.add(Path(session.directory))
         if not self.cfg.transcription.live or self.transcriber is None:
             return
         add_listener = getattr(self.engine.recorder, "add_listener", None)
@@ -460,6 +549,16 @@ class Controller:
         log.info("live transcription on for %s", sid)
 
     def _on_session_end(self, session: SessionInfo | None, kept: bool) -> None:
+        if not kept:
+            # Dropped: the engine deletes it. Without a session (the recorder failed to stop)
+            # forget every folder but a running one; queued sessions stay busy via note_busy's
+            # pending() check.
+            live_dir = self.engine.state.session_dir
+            with self._lock:
+                if session is not None:
+                    self._in_flight.discard(Path(session.directory))
+                else:
+                    self._in_flight = {d for d in self._in_flight if str(d) == live_dir}
         live, self._live = self._live, None
         if live is None:
             return
@@ -510,13 +609,16 @@ class Controller:
     def _resubmit_unfinished(self) -> None:
         # Purge first, on this same thread: once a re-queued session is transcribed, its
         # diarization may still need the WAVs, and the purge must not see it as leftover.
-        self._purge_leftover_audio()
+        self._resubmitting = True  # note_busy: untranscribed sessions may be about to queue
         try:
+            self._purge_leftover_audio()
             for s in untranscribed_sessions(self.cfg.output_dir):
                 log.info("re-queueing untranscribed session %s", s.directory)
                 self.tq.submit(s)
         except Exception:
             log.exception("scanning for untranscribed sessions failed")
+        finally:
+            self._resubmitting = False
         try:  # after re-queueing, so deleting big WAVs doesn't delay recovery
             purge_discarded_sessions(self.cfg.output_dir)
         except Exception:
