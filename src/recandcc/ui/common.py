@@ -34,6 +34,7 @@ from ..cloudsync import cloud_sync_provider, warning_text
 from ..config import (
     CONFIG_PATH,
     LOG_DIR,
+    SUMMARY_MODEL_SWITCHED,
     Config,
     load_config,
     normalize_languages,
@@ -299,6 +300,10 @@ class Controller:
     ):
         self.cfg = cfg
         self.events: queue.Queue[tuple] = queue.Queue()
+        if cfg.summary.enabled and getattr(cfg.summary, "_switched_from", None):
+            # load_config moved an old-default 3B to the Apache-2.0 model: say so once (the
+            # switch is saved, so the next start loads the new model without a notice)
+            self.post_notice("Summary model", SUMMARY_MODEL_SWITCHED)
         self._lock = threading.Lock()
         self._perm: dict[str, str] = {}
         self._recent: list[Path] = []

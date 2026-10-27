@@ -16,9 +16,11 @@ from pathlib import Path
 import pytest
 
 from recandcc import cli
+from recandcc import config as config_mod
 from recandcc.config import (
     DEFAULT_SUMMARY_MODEL,
     QWEN_RESEARCH_SUMMARY_MODEL,
+    SUMMARY_MODEL_SWITCHED,
     Config,
     SummaryConfig,
     load_config,
@@ -182,6 +184,77 @@ def test_accepted_qwen_research_licence_keeps_the_3b(tmp_path):
     assert load_config(path).summary.model == QWEN_RESEARCH_SUMMARY_MODEL
     Config(summary=SummaryConfig(model="me/custom-llm")).save(path)
     assert load_config(path).summary.model == "me/custom-llm"  # other models untouched
+
+
+def _cache_model(cache: Path, repo: str) -> None:
+    """A fake complete snapshot of ``repo`` in the (tmp) Hugging Face cache."""
+    root = cache / ("models--" + repo.replace("/", "--"))
+    blob = root / "blobs" / "abc"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"weights")
+    snap = root / "snapshots" / "commit"
+    snap.mkdir(parents=True)
+    (snap / "model.safetensors").symlink_to(blob)
+
+
+def test_old_default_switch_is_saved_with_only_that_key(tmp_path):
+    path = tmp_path / "config.toml"
+    Config(summary=SummaryConfig(model=QWEN_RESEARCH_SUMMARY_MODEL)).save(path)
+    path.write_text(path.read_text("utf-8") + "\n[extra]\nhand = 1\n", "utf-8")
+    cfg = load_config(path)
+    assert cfg.summary.model == DEFAULT_SUMMARY_MODEL
+    assert cfg.summary._switched_from == QWEN_RESEARCH_SUMMARY_MODEL
+    text = path.read_text("utf-8")
+    assert DEFAULT_SUMMARY_MODEL in text and QWEN_RESEARCH_SUMMARY_MODEL not in text
+    assert "hand = 1" in text  # key-level save, not a full overwrite
+    again = load_config(path)
+    assert not hasattr(again.summary, "_switched_from")  # once: the switch is on disk
+
+
+def test_cached_3b_is_kept_while_the_new_default_is_missing(tmp_path):
+    # offline users who already have the 3B must not lose summaries or face a surprise fetch
+    _cache_model(config_mod.HF_CACHE_DIR, QWEN_RESEARCH_SUMMARY_MODEL)
+    path = tmp_path / "config.toml"
+    Config(summary=SummaryConfig(model=QWEN_RESEARCH_SUMMARY_MODEL)).save(path)
+    before = path.read_text("utf-8")
+    cfg = load_config(path)
+    assert cfg.summary.model == QWEN_RESEARCH_SUMMARY_MODEL
+    assert not hasattr(cfg.summary, "_switched_from")
+    assert path.read_text("utf-8") == before
+    _cache_model(config_mod.HF_CACHE_DIR, DEFAULT_SUMMARY_MODEL)  # both on disk: switch
+    assert load_config(path).summary.model == DEFAULT_SUMMARY_MODEL
+
+
+def test_interrupted_download_does_not_count_as_on_disk(tmp_path):
+    snap = config_mod.HF_CACHE_DIR / "models--a--b" / "snapshots" / "c"
+    snap.mkdir(parents=True)
+    (snap / "model.safetensors").symlink_to(tmp_path / "missing-blob")
+    assert config_mod.summary_model_on_disk("a/b") is False
+    assert config_mod.summary_model_on_disk("no/such") is False
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_controller_notices_the_switch_once(tmp_path, monkeypatch, enabled):
+    from recandcc.ui import common
+    from recandcc.ui.common import Controller
+
+    class Monitor:
+        def snapshot(self):
+            return []
+
+    path = tmp_path / "config.toml"
+    old = SummaryConfig(enabled=enabled, model=QWEN_RESEARCH_SUMMARY_MODEL)
+    Config(output_dir=tmp_path, summary=old).save(path)
+    monkeypatch.setattr(common, "CONFIG_PATH", path)
+    cfg = load_config(path)
+    ctrl = Controller(cfg, monitor=Monitor(), recorder=object(), tq=object(), start_threads=False)
+    notices = []
+    while not ctrl.events.empty():
+        ev = ctrl.events.get()
+        if ev[0] == "notice":
+            notices.append(ev[1:])
+    expected = [("Summary model", SUMMARY_MODEL_SWITCHED)] if enabled else []
+    assert notices == expected  # summaries off: the model doesn't matter, no toast
 
 
 def _controller(cfg):

@@ -192,6 +192,31 @@ DEFAULT_SUMMARY_MODEL = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
 # The previous default, still pinned and selectable: a larger model (~1.7 GB), but under the
 # Qwen Research licence, which allows non-commercial use only.
 QWEN_RESEARCH_SUMMARY_MODEL = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+# Hugging Face hub cache that summary_model_on_disk() looks in; None = huggingface_hub's own
+# (HF_HUB_CACHE / HF_HOME). Tests point it at a tmp folder.
+HF_CACHE_DIR: Path | None = None
+SUMMARY_MODEL_SWITCHED = (
+    "Summary model switched to Qwen2.5 1.5B (Apache-2.0); set "
+    "summary.accept_qwen_research_licence = true to keep the 3B"
+)
+
+
+def summary_model_on_disk(repo: str) -> bool:
+    """Whether a snapshot of ``repo`` with its weights is in the local Hugging Face cache.
+    Only looks at the disk (never the network), and never raises."""
+    cache = HF_CACHE_DIR
+    if cache is None:
+        try:
+            from huggingface_hub.constants import HF_HUB_CACHE
+        except ImportError:
+            return False
+        cache = Path(HF_HUB_CACHE)
+    snapshots = Path(cache).expanduser() / ("models--" + repo.replace("/", "--")) / "snapshots"
+    try:
+        # .exists() follows the symlink to the blob, so an interrupted download doesn't count
+        return any((snap / "model.safetensors").exists() for snap in snapshots.iterdir())
+    except OSError:
+        return False
 
 
 @dataclass
@@ -464,15 +489,40 @@ def load_config(path: Path | None = None) -> Config:
                 code,
             )
     summary = _build(SummaryConfig, data.pop("summary", {}))
-    if summary.model == QWEN_RESEARCH_SUMMARY_MODEL and not summary.accept_qwen_research_licence:
-        log.info(
-            "summary.model %s (the old default, non-commercial licence) -> %s; set "
-            "summary.accept_qwen_research_licence = true to keep it",
-            summary.model,
-            DEFAULT_SUMMARY_MODEL,
-        )
-        summary.model = DEFAULT_SUMMARY_MODEL
+    _migrate_summary_model(summary, path)
     cfg = _build(Config, data)
     cfg.output_dir = Path(cfg.output_dir).expanduser()
     cfg.detection, cfg.transcription, cfg.summary = det, tr, summary
     return cfg
+
+
+def _migrate_summary_model(summary: SummaryConfig, path: Path) -> None:
+    """Replace the old default 3B (non-commercial; Config.save wrote it into every
+    config.toml) with the current default, unless its licence was accepted. Kept when the 3B
+    is on disk and the new default isn't, so an offline user's summaries keep working. The
+    switch is written to config.toml (that key only) and flagged with
+    ``summary._switched_from`` for a one-time notice (ui.common.Controller)."""
+    if summary.model != QWEN_RESEARCH_SUMMARY_MODEL or summary.accept_qwen_research_licence:
+        return
+    if summary_model_on_disk(QWEN_RESEARCH_SUMMARY_MODEL) and not summary_model_on_disk(
+        DEFAULT_SUMMARY_MODEL
+    ):
+        log.info(
+            "summary.model %s (non-commercial licence) kept for now: it is on disk and %s "
+            "is not; set summary.accept_qwen_research_licence = true to keep it for good",
+            summary.model,
+            DEFAULT_SUMMARY_MODEL,
+        )
+        return
+    log.info(
+        "summary.model %s (the old default, non-commercial licence) -> %s; set "
+        "summary.accept_qwen_research_licence = true to keep it",
+        summary.model,
+        DEFAULT_SUMMARY_MODEL,
+    )
+    summary.model = DEFAULT_SUMMARY_MODEL
+    summary._switched_from = QWEN_RESEARCH_SUMMARY_MODEL  # type: ignore[attr-defined]
+    try:
+        save_keys(path, {"summary.model": DEFAULT_SUMMARY_MODEL})
+    except (OSError, ValueError) as e:
+        log.warning("could not write summary.model to %s: %s", path, type(e).__name__)
