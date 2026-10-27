@@ -175,6 +175,24 @@ permission for the terminal. The line formatting, ordering and trimming logic li
 Permissions are tracked per app. When you run things from a terminal, the terminal app is the
 one asking. Test permission flows through `RecAndCC.app`.
 
+## Build report
+
+`scripts/report/` turns the repository's own record into one self-contained HTML page: pull
+requests, issues, CI and Cursor review runs from GitHub, Claude trailers from `git log`, and
+token usage from the local Claude Code session logs (counts only, never prompt text).
+
+```bash
+./scripts/report/refresh.sh        # writes .report/report-data.json, report.html, artifact.html
+```
+
+`collect.py` gathers everything into `report-data.json` (GitHub responses are cached under
+`~/.cache/recandcc-report/`, so a refresh only fetches what changed); `render.py` builds the
+page from that file alone, so every number and sentence comes from one place. `refresh.sh`
+reads `GH_TOKEN`, or `git_api_key_0307` from `~/.env`, and prints what moved since the last
+run. `artifact.html` is the same page without its `<html>` wrapper, for hosts that add
+their own. Refresh after each merge; `.report/` is git-ignored. Claude cost is an estimate at
+Anthropic list prices (the table is in `collect.py`).
+
 ## Conventions
 
 - Python 3.12, type hints, docstrings; `ruff` (line length 100) for lint and format.
