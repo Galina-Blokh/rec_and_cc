@@ -23,7 +23,7 @@ import numpy as np
 
 from ..config import TranscriptionConfig
 from .merge import language_confidence
-from .revisions import revision
+from .revisions import check_download_allowed, revision
 
 log = logging.getLogger("recandcc.transcribe")
 
@@ -31,6 +31,7 @@ log = logging.getLogger("recandcc.transcribe")
 MLX_REPOS = {
     "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
     "turbo": "mlx-community/whisper-large-v3-turbo",
+    "large": "mlx-community/whisper-large-v3-mlx",  # faster-whisper alias of large-v3
 }
 
 
@@ -41,25 +42,25 @@ def mlx_repo(model: str) -> str:
     return MLX_REPOS.get(model, f"mlx-community/whisper-{model}-mlx")
 
 
-def local_model_path(repo: str) -> str:
+def local_model_path(repo: str, allow_unpinned: bool = False) -> str:
     """Local snapshot path of ``repo``, downloading it only if it isn't on disk yet.
 
     Passing the local path to mlx_whisper (instead of the repo id) means loading never
     contacts Hugging Face once the model has been downloaded, so the app works offline. The
-    repo's pinned commit (revisions.py) is used, both on disk and for the download.
+    repo's pinned commit (revisions.py) is used, both on disk and for the download; an
+    unpinned repo is only downloaded with ``allow_unpinned`` (a cached copy loads either way).
     """
     if Path(repo).exists():
         return repo
     from huggingface_hub import snapshot_download
 
     rev = revision(repo)
-    if rev is None:
-        log.info("model %s has no pinned revision; using its latest version", repo)
     try:
         return snapshot_download(repo, revision=rev, local_files_only=True)
     except FileNotFoundError:
         # A missing or partial snapshot (LocalEntryNotFoundError, incl. IncompleteSnapshotError):
-        # download it, or finish the interrupted download.
+        # download it, or finish the interrupted download (a pinned one, or an opted-in one).
+        check_download_allowed(repo, rev, allow_unpinned)
         log.info("model %s not on disk yet; downloading it once", repo)
     except Exception:
         # A snapshot that is present but unreadable or corrupt must not go online: surface it.
@@ -102,8 +103,9 @@ def use_gpu(cfg: TranscriptionConfig) -> bool:
 class MlxWhisper:
     """One MLX Whisper model, driven from a single dedicated thread."""
 
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, allow_unpinned: bool = False) -> None:
         self.repo = mlx_repo(model)  # HF repo id; replaced by its local path in load()
+        self.allow_unpinned = allow_unpinned
         self._thread = ThreadPoolExecutor(1, thread_name_prefix="whisper-gpu")
         self._model = None
 
@@ -117,7 +119,7 @@ class MlxWhisper:
     def load(self) -> None:
         def _load():
             t0 = time.monotonic()
-            self.repo = local_model_path(self.repo)
+            self.repo = local_model_path(self.repo, self.allow_unpinned)
             self._model = self._get_model()
             log.info("loaded MLX whisper %s on the GPU in %.1fs", self.repo, time.monotonic() - t0)
 

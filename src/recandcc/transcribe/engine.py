@@ -32,7 +32,7 @@ from .diarize import Diarizer, Turn, assign_speakers
 from .gpu import MlxWhisper, hf_cache_folder, use_gpu
 from .merge import ME, OTHERS, language_confidence, merge_tracks, smooth_languages
 from .output import write_outputs
-from .revisions import faster_whisper_revision
+from .revisions import check_download_allowed, faster_whisper_revision
 
 log = logging.getLogger("recandcc.transcribe")
 
@@ -107,6 +107,7 @@ class Transcriber:
         try:
             path = utils.download_model(name, local_files_only=True, revision=rev)
         except FileNotFoundError:
+            check_download_allowed(name, rev, self.cfg.allow_unpinned_models)
             log.info("model %s not on disk yet; downloading it once", name)
             path = utils.download_model(name, revision=rev)
         except Exception:
@@ -153,12 +154,19 @@ class Transcriber:
         if self._model is None:
             with self._init_lock:
                 if self._model is None:
-                    if self.language_model and self._needs_detection():
+                    need_lid = self.language_model and self._needs_detection()
+                    if need_lid and self._lid_model is None:  # kept if the main load fails
                         self._lid_model = self._load(self.language_model)
                     if self.gpu:
                         t0 = time.monotonic()
-                        model = MlxWhisper(self.cfg.model)
-                        model.load()
+                        model = MlxWhisper(
+                            self.cfg.model, allow_unpinned=self.cfg.allow_unpinned_models
+                        )
+                        try:
+                            model.load()
+                        except BaseException:
+                            model.close()  # e.g. an unpinned model refused: free its thread
+                            raise
                         self._load_times[f"{self.cfg.model} (gpu)"] = rounded(
                             time.monotonic() - t0, 2
                         )
