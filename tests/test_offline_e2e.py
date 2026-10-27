@@ -2,21 +2,32 @@
 
 The fast tests run the real Controller, Engine, Recorder, transcription queue, live
 transcriber, VAD, merge, outputs and diarization fallback with fake audio sources and a fake
-Whisper model. Every socket connect (loopback included, so a local proxy can't relay
-traffic; only AF_UNIX is allowed) and DNS lookup raises; the only attempt allowed is the
-one-time speaker-model download in ``diarize._download``, which must fail fast and leave
-"Others" in the transcript. The slow test does the same with the real cached models.
+Whisper model. Blocked, and recorded as an attempt:
+- ``socket.connect`` / ``connect_ex`` (loopback included, so a local proxy can't relay
+  traffic; AF_UNIX and the loopback pair ``socket.socketpair`` builds on Windows are allowed),
+- ``sendto`` / ``sendmsg`` (UDP never calls connect), ``socket.create_connection``,
+- DNS: ``getaddrinfo``, ``gethostbyname``, ``gethostbyname_ex``,
+- launching programs (``subprocess.Popen``, ``os.system``), e.g. a curl.
+Not covered: C extensions that open sockets themselves, and names bound before the test
+(``from socket import getaddrinfo``). The only attempt allowed is the one-time speaker-model
+download in ``diarize._download``, and only its connection to the model host; it must fail
+fast and leave "Others" in the transcript. The slow tests load the real Whisper models from
+disk; with the speaker model on disk too they must make no attempt at all.
 
 Stories: US-14.
 """
 
 from __future__ import annotations
 
+import os
 import queue
 import socket
+import subprocess
+import threading
 import time
 import traceback
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 import numpy as np
 import pytest
@@ -32,6 +43,8 @@ from recandcc.ui.common import Controller
 REAL_MODEL_PATH = diarize.model_path  # before conftest stubs it out for fast tests
 AF_UNIX = getattr(socket, "AF_UNIX", None)
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
+MODEL_HOST = urlparse(diarize.EMBEDDING_MODEL.url).hostname
+LOOPBACK = ("127.0.0.1", "::1", "localhost")
 
 
 # --------------------------------------------------------------------------- network guard
@@ -47,6 +60,7 @@ def _caller() -> str:
 class Attempt:
     api: str
     target: str
+    host: str | None
     caller: str
     stack: list[str] = field(repr=False)
 
@@ -58,11 +72,20 @@ class NetworkGuard:
     def deny(self, api: str, target) -> OSError:
         stack = [f.name for f in traceback.extract_stack()]
         caller = _caller()
-        self.attempts.append(Attempt(api, repr(target), caller, stack))
+        host = target[0] if isinstance(target, tuple) and target else None
+        self.attempts.append(Attempt(api, repr(target), host, caller, stack))
         return OSError(f"network blocked by test: {api}({target!r}) from {caller}")
 
     def model_downloads(self) -> list[Attempt]:
-        return [a for a in self.attempts if "_download" in a.stack and "model_path" in a.stack]
+        """The speaker-model download's first step towards its own host (it fails there)."""
+        return [
+            a
+            for a in self.attempts
+            if "_download" in a.stack
+            and "model_path" in a.stack
+            and a.api in ("socket.create_connection", "socket.getaddrinfo")
+            and a.host == MODEL_HOST
+        ]
 
     def unexpected(self) -> list[Attempt]:
         downloads = self.model_downloads()
@@ -78,16 +101,42 @@ def net(monkeypatch):
         monkeypatch.delenv(var, raising=False)
         monkeypatch.delenv(var.lower(), raising=False)
     real_connect, real_connect_ex = socket.socket.connect, socket.socket.connect_ex
+    before = set(threading.enumerate())
+
+    def local(sock, address) -> bool:
+        if AF_UNIX is not None and sock.family == AF_UNIX:
+            return True
+        # Windows builds socket.socketpair() from a loopback connect (asyncio, multiprocessing)
+        in_pair = any(f.name == "socketpair" for f in traceback.extract_stack())
+        return in_pair and isinstance(address, tuple) and address[0] in LOOPBACK
 
     def connect(self, address):
-        if AF_UNIX is not None and self.family == AF_UNIX:
+        if local(self, address):
             return real_connect(self, address)
         raise guard.deny("socket.connect", address)
 
     def connect_ex(self, address):
-        if AF_UNIX is not None and self.family == AF_UNIX:
+        if local(self, address):
             return real_connect_ex(self, address)
         raise guard.deny("socket.connect_ex", address)
+
+    def sendto(self, data, *args):
+        raise guard.deny("socket.sendto", args[-1] if args else None)
+
+    def sendmsg(self, buffers, ancdata=(), flags=0, address=None):
+        raise guard.deny("socket.sendmsg", address)
+
+    def resolver(name):
+        def deny(host, *a, **k):
+            raise guard.deny(name, (host,))
+
+        return deny
+
+    def popen_init(self, args, *a, **k):
+        raise guard.deny("subprocess.Popen", (args if isinstance(args, str) else args[0],))
+
+    def system(command):
+        raise guard.deny("os.system", (command,))
 
     def create_connection(address, *a, **k):
         raise guard.deny("socket.create_connection", address)
@@ -99,7 +148,17 @@ def net(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
     monkeypatch.setattr(socket, "create_connection", create_connection)
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(socket.socket, "sendto", sendto)
+    if hasattr(socket.socket, "sendmsg"):  # not on Windows
+        monkeypatch.setattr(socket.socket, "sendmsg", sendmsg)
+    monkeypatch.setattr(socket, "gethostbyname", resolver("socket.gethostbyname"))
+    monkeypatch.setattr(socket, "gethostbyname_ex", resolver("socket.gethostbyname_ex"))
+    monkeypatch.setattr(subprocess.Popen, "__init__", popen_init)
+    monkeypatch.setattr(os, "system", system)
     yield guard
+    # let worker threads the test started finish, so a late attempt is still seen
+    for th in set(threading.enumerate()) - before:
+        th.join(timeout=5)
     if bad := guard.unexpected():
         pytest.fail(
             "network access while offline:\n"
@@ -130,8 +189,48 @@ def test_guard_blocks_and_names_the_caller(net):
         "socket.connect",
         "socket.connect_ex",
     ]
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s, pytest.raises(OSError):
+        s.sendto(b"x", ("192.0.2.1", 53))  # UDP: no connect
+    with pytest.raises(OSError, match="gethostbyname"):
+        socket.gethostbyname("example.com")
+    with pytest.raises(OSError, match="subprocess.Popen"):
+        subprocess.run(["curl", "https://example.com"], check=False)
+    with pytest.raises(OSError, match="os.system"):
+        os.system("curl https://example.com")  # noqa: S605 - blocked by the guard
+    assert [a.api for a in net.attempts][4:] == [
+        "socket.sendto",
+        "socket.gethostbyname",
+        "subprocess.Popen",
+        "os.system",
+    ]
     assert "test_guard_blocks_and_names_the_caller" in net.attempts[0].stack
     net.attempts.clear()  # the deliberate attempts above are not a failure
+
+
+def test_guard_allows_only_the_model_hosts_lookup_from_the_download(net):
+    def model_path():
+        def _download():
+            for host in (MODEL_HOST, "elsewhere.example"):
+                with pytest.raises(OSError):
+                    socket.getaddrinfo(host, 443)
+
+        _download()
+
+    model_path()
+    assert [a.host for a in net.model_downloads()] == [MODEL_HOST]
+    assert [a.host for a in net.unexpected()] == ["elsewhere.example"]
+    net.attempts.clear()
+
+
+def test_guard_allows_the_loopback_pair_socketpair_builds(net):
+    def socketpair():  # same name as the stdlib's Windows fallback
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1)
+            with pytest.raises(OSError):  # really attempted: nothing listens there
+                s.connect(("127.0.0.1", 9))
+
+    socketpair()
+    assert net.attempts == []
 
 
 # --------------------------------------------------------------------------- sessions
