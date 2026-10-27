@@ -33,6 +33,9 @@ acceptance criteria.
       in chunks of 2,048 rows (`SCAN_CHUNK`). Left: an approximate index only if archives grow
       far past what a linear scan handles quickly (memory use: see `[search]` in
       CONFIGURATION.md).
+- [x] **Semantic search cache**: every query re-read all stored vectors from SQLite (about 150 MB at 100k
+      segments); now repeated queries reuse an in-process, token-invalidated vector cache
+      (capped at 100k segments, ~190 MB; larger archives stream as before).
 - [x] **Room listening** ([#2](https://github.com/Galina-Blokh/rec_and_cc/issues/2)): auto-record conversations near the laptop, also with
       the screen locked: always-on mic VAD, pre-roll buffer, mic-track diarization; opt-in
       (the orange mic indicator stays on). Shipped in #64 (opt-in, off by default); locked-screen
