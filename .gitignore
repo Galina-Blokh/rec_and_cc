@@ -10,3 +10,7 @@ bin/
 .pytest_cache/
 dist/
 .coverage
+# eval sets (reference transcripts are sensitive too) and results, if kept in the clone
+/eval/
+/RecAndCC-eval/
+eval-results.json

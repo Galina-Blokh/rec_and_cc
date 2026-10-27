@@ -19,8 +19,11 @@ Live caption latency is not measured yet.
 
 ## The eval set
 
-The set never goes into git: `*.wav` is ignored, and the folder lives outside the repo (for
-example `~/RecAndCC-eval`). Back it up privately, for example on an encrypted disk.
+The set never goes into git. The reference text in `manifest.json` is as private as the audio.
+Keep the folder outside the repo (for example `~/RecAndCC-eval`). `*.wav`, `/eval/`,
+`/RecAndCC-eval/` and `eval-results.json` are ignored, in case a copy ends up in the clone.
+Audio paths in the manifest must stay inside the set's folder. Back the set up privately, for
+example on an encrypted disk.
 
 ```
 ~/RecAndCC-eval/

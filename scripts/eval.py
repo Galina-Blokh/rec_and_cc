@@ -61,11 +61,14 @@ class Clip:
 
 
 def load_manifest(root: Path) -> list[Clip]:
+    root = root.resolve()
     data = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     clips = []
     for c in data["clips"]:
         utts = [Utterance(**u) for u in c["utterances"]]
-        audio = root / c["audio"]
+        audio = (root / c["audio"]).resolve()
+        if not audio.is_relative_to(root):  # e.g. "../Documents/..." or an absolute path
+            raise ValueError(f"clip {c['id']}: audio path is outside the eval folder")
         duration = sf.info(str(audio)).duration
         for u in utts:
             if not (math.isfinite(u.start) and math.isfinite(u.end) and 0 <= u.start < u.end):

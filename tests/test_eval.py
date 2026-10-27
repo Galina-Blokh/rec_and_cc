@@ -1,4 +1,7 @@
-"""scripts/eval.py: metrics on hand-made references, and a run with a fake pipeline."""
+"""scripts/eval.py: metrics on hand-made references, and a run with a fake pipeline.
+
+Stories: none.
+"""
 
 from __future__ import annotations
 
@@ -85,6 +88,13 @@ def test_segment_spanning_utterances_is_split():
     assert s["en"] == {"words": 2, "edits": 0, "utts": 2, "lid_ok": 2}
 
 
+def test_segment_over_overlapping_utterances_splits_words_and_votes():
+    utts = [utt(0, 2, "one two", "en", "A"), utt(1, 3, "три четыре", "ru", "B")]
+    (w0, v0), (w1, v1) = ev.assign_words(utts, [seg(0, 3, "one two три четыре", "en")])
+    assert w0 == ["one", "two"] and w1 == ["три", "четыре"]  # equal overlap: half each
+    assert v0 == {"en": 2.0} and v1 == {"en": 2.0}
+
+
 def test_language_vote_weighs_overlap_not_segment_length():
     utts = [utt(0, 10, "a b c d e f g h i j", "en"), utt(10, 12, "к л", "ru")]
     segs = [seg(0, 10.5, "a b c d e f g h i j", "en"), seg(10.5, 12, "к л", "ru")]
@@ -123,6 +133,20 @@ def test_best_mapping_beats_greedy():
     # greedy takes 5 (row 0 -> col 0) and then 0; the optimum pairs 4 + 4
     assert ev._best_mapping([[5, 4], [4, 0]]) == 8
     assert ev._best_mapping([[1, 2, 3]]) == 3 and ev._best_mapping([]) == 0
+
+
+def test_der_overlapping_reference_speakers():
+    ref = [(0, 2, "A"), (1, 3, "B")]  # 1 s of crosstalk: 4 s of reference speech
+    perfect = ev.der(ref, [(0, 2, "x"), (1, 3, "y")])
+    assert perfect["speech_s"] == pytest.approx(4.0) and perfect["der"] == 0.0
+    one_voice = ev.der(ref, [(0, 3, "x")])  # crosstalk heard as one speaker: 1 s missed
+    assert one_voice["miss_s"] == pytest.approx(1.0) and one_voice["false_alarm_s"] == 0.0
+    assert one_voice["confusion_s"] == pytest.approx(1.0)  # x maps to A or B, not both
+
+
+def test_best_mapping_greedy_above_twelve_speakers():
+    m = [[10 if i == j else 1 for j in range(14)] for i in range(13)]
+    assert ev._best_mapping(m) == 130  # diagonal; greedy finds it, the DP would be 2^13 x 14
 
 
 def test_der_no_reference():
@@ -202,6 +226,18 @@ def test_rtf_weighs_clips_by_audio_length():
         {"text": {}, "audio_s": 99.0, "elapsed_s": 9.9},  # RTF 0.1 on a 99 s clip
     ]
     assert ev.summarize(results)["rtf"] == pytest.approx(0.109)
+
+
+@pytest.mark.parametrize("audio", ["../outside.wav", "/etc/hosts"])
+def test_manifest_rejects_audio_outside_the_set(tmp_path, audio):
+    root = tmp_path / "set"
+    root.mkdir()
+    sf.write(tmp_path / "outside.wav", np.zeros(SAMPLE_RATE, dtype=np.float32), SAMPLE_RATE)
+    u = {"start": 0, "end": 1, "speaker": "A", "language": "en", "text": "a"}
+    m = {"clips": [{"id": "x", "audio": audio, "utterances": [u]}]}
+    (root / "manifest.json").write_text(json.dumps(m), encoding="utf-8")
+    with pytest.raises(ValueError, match="outside the eval folder"):
+        ev.load_manifest(root)
 
 
 @pytest.mark.parametrize(
