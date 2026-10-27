@@ -2,6 +2,8 @@
 
 Run: uv run pytest -m slow tests/test_transcribe_integration.py -v
 Model: RECANDCC_TEST_MODEL (default "large-v3-turbo", the app default, so it is cached).
+
+Stories: US-10.
 """
 
 from __future__ import annotations

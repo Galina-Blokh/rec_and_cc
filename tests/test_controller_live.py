@@ -1,4 +1,7 @@
-"""Controller wiring of live transcription: real Engine + Recorder + queue, fake model/audio."""
+"""Controller wiring of live transcription: real Engine + Recorder + queue, fake model/audio.
+
+Stories: US-11.
+"""
 
 from __future__ import annotations
 
