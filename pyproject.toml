@@ -41,6 +41,12 @@ dev = [
     "ruff>=0.17.2",
 ]
 
+[tool.uv]
+# mlx-whisper declares torch, but only its unused mlx_whisper/torch_whisper.py imports it;
+# RecAndCC never loads it (tests/test_no_torch.py). Excluding it drops ~0.57 GB of torch,
+# sympy, networkx, mpmath, jinja2, markupsafe and setuptools. See ADR 0011, follow-up 4.
+exclude-dependencies = ["torch"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

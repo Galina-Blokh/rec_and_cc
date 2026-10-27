@@ -54,6 +54,8 @@ from .present import (
     prompt_notice,
     record_item_title,
     retention_label,
+    search_notice,
+    search_open_target,
     transcribed_notice,
 )
 
@@ -426,11 +428,8 @@ class MacApp(rumps.App):
         threading.Thread(target=run, daemon=True, name="search-dialog").start()
 
     def _show_hits(self, query: str, hits) -> None:
-        if isinstance(hits, Exception):
-            self._notify("Search failed", str(hits))
-            return
-        if not hits:
-            self._notify("Search", "No matches")  # not the query: _notify may log it
+        if notice := search_notice(hits):
+            self._notify(*notice)
             return
         labels = [f"{i}. {search_hit_label(h)}"[:200] for i, h in enumerate(hits, 1)]
         script = (
@@ -441,12 +440,7 @@ class MacApp(rumps.App):
         def run():
             number = osascript(script).partition(".")[0]
             if number.isdigit() and 0 < int(number) <= len(hits):
-                hit = hits[int(number) - 1]
-                try:
-                    found = hit.transcript.exists()
-                except OSError:  # e.g. an unreachable volume
-                    found = False
-                open_path(hit.transcript if found else hit.folder)
+                open_path(search_open_target(hits[int(number) - 1]))
 
         threading.Thread(target=run, daemon=True, name="search-results").start()
 
