@@ -68,6 +68,39 @@ def test_save_keys_writes_only_the_given_keys(tmp_path):
     assert not list(tmp_path.glob(".*.tmp"))
 
 
+def test_save_keys_none_removes_a_key_and_its_emptied_table(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[detection]\nmode = "off"\noutside_sensitivity = 25\n[x.y]\nz = 1\n')
+    save_keys(path, {"detection.outside_sensitivity": None, "live_captions": False})
+    data = tomllib.loads(path.read_text())
+    assert data["detection"] == {"mode": "off"}  # the other key in the section survives
+    assert data["live_captions"] is False
+    save_keys(path, {"x.y.z": None})  # the last key: its table and emptied parents go too
+    assert "x" not in tomllib.loads(path.read_text())
+
+
+def test_save_keys_removing_an_absent_key_changes_nothing(tmp_path):
+    path = tmp_path / "config.toml"
+    text = '# my notes\n[detection]\nmode = "off"\n'
+    path.write_text(text)
+    mtime = path.stat().st_mtime
+    assert save_keys(path, {"detection.outside_sensitivity": None, "nope.key": None}) == mtime
+    assert path.read_text() == text  # not even rewritten: comments and all
+    assert "nope" not in tomllib.loads(path.read_text())  # no table created
+
+
+def test_menu_save_of_an_unset_value_removes_the_key(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    path.write_text(
+        path.read_text().replace('mode = "off"', 'mode = "off"\ninside_sensitivity = 50')
+    )
+    ctrl.cfg.detection.inside_sensitivity = None  # in memory: unset
+    ctrl.save_settings("detection.inside_sensitivity")
+    _join()
+    data = _kept(path)
+    assert "inside_sensitivity" not in data["detection"]
+
+
 def test_save_keys_returns_the_mtime_and_keeps_a_symlink(tmp_path):
     real = tmp_path / "dotfiles" / "config.toml"
     real.parent.mkdir()
