@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import threading
 import time
 import unicodedata
@@ -82,6 +83,10 @@ class Segment:
     speaker: str  # "Me", "Others" (later: "Speaker 1", ...)
     language: str  # ISO 639-1 code, e.g. "en", "ru", "he"
     overlap: bool = False  # diarization: two other speakers at once (json only, when True)
+    # The diarized track the label came from ("me" or "others"; json only, when set): call-app
+    # names go to "others" speakers only, since a room session numbers the mic track too.
+    # "" = not diarized, or a transcript written before tracks were recorded.
+    track: str = field(default="", compare=False)
     # (start, end, text) per word, when the backend gave word timestamps (faster-whisper, only
     # for "Others" while diarizing). In memory only: used to split at a speaker change, never
     # written to transcript.json.
@@ -131,6 +136,10 @@ class SessionInfo:
     FILENAME = "session.json"
     # Present in a folder the user discarded: never transcribe or list it (discard_session).
     DISCARD_MARKER = ".discarded"
+    # Present while a slow diarization still reads the WAVs to relabel the transcript:
+    # retention keeps the audio. One older than LABELS_PENDING_MAX_S is stale (a crash).
+    LABELS_PENDING_MARKER = ".labels-pending"
+    LABELS_PENDING_MAX_S = 3600.0
 
     def update_metrics(self, stage: str, values: dict) -> None:
         """Merge `values` into ``metrics[stage]`` (thread-safe; not saved until ``save``)."""
@@ -196,7 +205,7 @@ def _replace_json(target: Path, text: str) -> None:
     name is unique per process and thread (the app and the CLI may both save)."""
     tmp = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
-        tmp.write_text(text, encoding="utf-8")
+        tmp.write_text(text, encoding="utf-8", errors="replace")
         for attempt in range(_REPLACE_TRIES):
             try:
                 os.replace(tmp, target)
@@ -205,10 +214,111 @@ def _replace_json(target: Path, text: str) -> None:
                 if attempt + 1 < _REPLACE_TRIES:
                     time.sleep(_REPLACE_WAIT_S)
         log.warning("%s stays in use; writing it in place", target)
-        target.write_text(text, encoding="utf-8")
+        target.write_text(text, encoding="utf-8", errors="replace")
     finally:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
+
+
+RECORDING_LOCK = ".recording.lock"  # in a session folder another process records into
+
+
+def pid_alive(pid: int) -> bool:
+    """Whether process ``pid`` exists (never signals it: ``os.kill`` would end it on
+    Windows)."""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: it exists
+        try:
+            code = wintypes.DWORD()
+            if not k32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # someone else's process
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def hold_recording_lock(directory: Path) -> Path:
+    """Mark ``directory`` as being recorded by this process (``recandcc record``): startup
+    recovery leaves it alone while this pid is alive. Remove the returned file when done."""
+    lock = Path(directory) / RECORDING_LOCK
+    lock.write_text(str(os.getpid()), encoding="utf-8")
+    return lock
+
+
+def boot_time() -> float | None:
+    """When the system last booted (epoch seconds), or None if unknown. Counts time asleep,
+    unlike ``time.monotonic`` on macOS."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            k32 = ctypes.WinDLL("kernel32")
+            k32.GetTickCount64.restype = ctypes.c_uint64  # ms since boot, sleep included
+            return time.time() - k32.GetTickCount64() / 1000
+        if sys.platform == "darwin":
+            import ctypes
+
+            class Timeval(ctypes.Structure):
+                _fields_ = [("tv_sec", ctypes.c_long), ("tv_usec", ctypes.c_int32)]
+
+            tv, size = Timeval(), ctypes.c_size_t(ctypes.sizeof(Timeval))
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.sysctlbyname(b"kern.boottime", ctypes.byref(tv), ctypes.byref(size), None, 0):
+                return None
+            return tv.tv_sec + tv.tv_usec / 1e6
+        with open("/proc/stat", encoding="ascii") as f:  # Linux
+            for line in f:
+                if line.startswith("btime "):
+                    return float(line.split()[1])
+    except Exception:  # noqa: BLE001 - unknown: locks are judged by their pid alone
+        return None
+    return None
+
+
+def recording_lock_held(directory: Path) -> bool:
+    """True if a live process holds ``directory``'s recording lock (an unreadable lock counts
+    as held). A lock whose process is gone, or written before the system last booted (its pid
+    may now be another process), is deleted."""
+    lock = Path(directory) / RECORDING_LOCK
+    try:
+        text = lock.read_text(encoding="utf-8").strip()
+        written = lock.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        pid = int(text)
+    except ValueError:
+        pid = 0  # cut short while being written: its writer died with it
+    booted = boot_time()
+    if (booted is None or written >= booted) and pid_alive(pid):
+        return True
+    with contextlib.suppress(OSError):
+        lock.unlink(missing_ok=True)
+    log.info("removed stale recording lock in %s", directory)
+    return False
 
 
 def mark_discarded(directory: Path) -> None:

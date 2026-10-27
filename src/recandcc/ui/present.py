@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ..config import language_code, normalize_languages
 from ..models import Mode, SessionInfo, TriggerKind
+from ..retention import RETENTION_CHOICES
 from .common import (
     ONBOARDING_TEXT,
     PERM_LABELS,
@@ -53,6 +54,18 @@ def retention_label(days: int) -> str:
     if days == 0:
         return "Never (keep audio)"
     return f"{days} day" + ("s" if days > 1 else "")
+
+
+def retention_menu(current: int) -> list[tuple[int | None, str, bool]]:
+    """Rows of the "Delete audio after" submenu as (days, title, checked). A value set in
+    config.toml that the menu doesn't offer gets one checked, disabled row (days None), as in
+    the Languages submenu, so the current setting is never invisible."""
+    rows: list[tuple[int | None, str, bool]] = [
+        (days, retention_label(days), days == current) for days in RETENTION_CHOICES
+    ]
+    if current not in RETENTION_CHOICES:
+        rows.append((None, f"{retention_label(current)} (from settings)", True))
+    return rows
 
 
 def language_menu(languages: list[str]) -> list[tuple[str | None, str, bool]]:
@@ -211,7 +224,8 @@ def speakers_notice(speakers) -> tuple[str, str] | None:
 
 
 def speaker_choice_label(index: int, label: str, lines: list[str]) -> str:
-    """'1. Speaker 2: “hi there” / “ok”' (first lines as a hint: no audio sample)."""
+    """'1. Speaker 2: “hi there” / “ok”' (first lines as a hint; the name dialog
+    can play an audio sample, see ``ui/sample.py``)."""
     hint = " / ".join(f"“{' '.join(ln.split())[:40]}”" for ln in lines[:2])
     return f"{index}. {label}: {hint}"[:200]
 
@@ -221,6 +235,12 @@ def named_notice(error: str | None) -> tuple[str, str]:
     if error:
         return ("Can't name the speaker", error)
     return ("Speaker named", "The speaker was renamed in that transcript.")
+
+
+FORGET_VOICES_TEXT = (
+    "Delete all saved voice profiles and the voice data of every session? "
+    "Names already written into transcripts stay."
+)
 
 
 def forgot_notice(result) -> tuple[str, str]:

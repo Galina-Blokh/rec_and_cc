@@ -1931,3 +1931,14 @@ def test_blocked_write_skips_that_session_and_retries_it_later(tmp_path, out, mo
     assert vector_rows(idx) == 2  # both sessions embedded after the retry
     assert holder is not None
     holder.close()
+
+
+def test_corrupt_index_is_rebuilt_with_its_vectors(tmp_path, out):
+    """#151: a garbled index file is recreated with the semantic tables, and re-embedded."""
+    make_session(out, 1, [seg(1, "Please send the invoice"), seg(9, "Lunch at noon")])
+    idx = make(tmp_path, FakeEmbedder())
+    sync(idx, out)
+    idx.path.write_bytes(b"not a database" * 100)
+    assert sync(idx, out) == 1
+    assert vector_rows(idx) == 2
+    assert [h.start for h in idx.search("payment")] == [1.0]

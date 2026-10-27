@@ -1,6 +1,6 @@
 """Menu toggles save only their own key: hand edits to config.toml survive a menu save.
 
-Stories: US-17.
+Stories: US-15, US-17.
 """
 
 import errno
@@ -336,6 +336,132 @@ def test_missing_config_is_created(tmp_path, monkeypatch):
     ctrl.save_settings("live_captions")
     _join()
     assert load_config(path).live_captions is False
+
+
+def test_retention_choice_saves_its_key_and_purges(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    purged: list[int] = []
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda days=None: purged.append(days))
+    ctrl.set_retention(7)
+    assert ctrl.cfg.transcription.audio_retention_days == 7  # in memory at once: the check
+    _join("retention-set")
+    assert _kept(path)["transcription"]["audio_retention_days"] == 7
+    assert purged == [7]  # after the save, with the new value
+
+
+def test_retention_is_not_purged_when_the_save_fails(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    purged: list[int] = []
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda _days=None: purged.append(1))
+
+    def unwritable(*_a):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(common, "save_keys", unwritable)
+    before = path.read_text()
+    ctrl.set_retention(1)
+    _join("retention-set")
+    assert path.read_text() == before
+    assert purged == []  # no audio deleted under a setting that was not saved
+    assert ctrl.cfg.transcription.audio_retention_days == 0  # the menu shows what is saved
+    events = [ctrl.events.get_nowait() for _ in range(ctrl.events.qsize())]
+    assert events[-1] == ("retention_changed",)  # after the revert: the menus re-render
+
+
+def test_two_failed_retention_clicks_leave_the_value_on_disk(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    path.write_text(path.read_text() + "[transcription]\naudio_retention_days = 90\n")
+    ctrl.cfg.transcription.audio_retention_days = 90
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda _days=None: [])
+    go = threading.Event()
+
+    def failing_save(*_a):  # config.toml not writable; the second save queues behind it
+        assert go.wait(5)
+        raise OSError("read-only")
+
+    monkeypatch.setattr(common, "save_keys", failing_save)
+    ctrl.set_retention(7)
+    ctrl.set_retention(30)  # the value before it is the unsaved 7
+    go.set()
+    _join("retention-set")  # both workers
+    assert ctrl.cfg.transcription.audio_retention_days == 90  # what config.toml holds
+
+
+def test_menu_purge_uses_its_own_value_not_a_newer_click(tmp_path, monkeypatch):
+    ctrl, _path = _ctrl(tmp_path, monkeypatch)
+    calls: list[tuple] = []
+    monkeypatch.setattr(common, "purge_old_audio", lambda d, days: calls.append((d, days)) or [])
+    ctrl.cfg.transcription.audio_retention_days = 1  # click B, assigned after A's check
+    ctrl.purge_audio_now(30)  # A's purge
+    assert calls == [(ctrl.cfg.output_dir, 30)]  # A's value, not B's live 1
+    save_keys(_path, {"transcription.audio_retention_days": 1})  # B saved
+    ctrl.purge_audio_now()  # startup / hourly: the current setting
+    assert calls[-1] == (ctrl.cfg.output_dir, 1)
+    asked: list = []
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda days=None: asked.append(days) or [])
+    ctrl.set_retention(30)
+    _join("retention-set")
+    assert asked == [30]  # the worker passes its own value
+
+
+def test_unreadable_config_after_a_failed_retention_save_purges_nothing(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    purged: list = []
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda days=None: purged.append(days))
+    path.write_text("[summary\n")  # mid-edit: neither saved nor readable
+    ctrl.set_retention(30)
+    _join("retention-set")
+    assert path.read_text() == "[summary\n" and purged == []
+    # nothing on disk to restore: memory keeps the click until the next readable reload
+    assert ctrl.cfg.transcription.audio_retention_days == 30
+    events = [ctrl.events.get_nowait() for _ in range(ctrl.events.qsize())]
+    assert events[-1] == ("retention_changed",)
+
+
+def test_menu_purge_posts_a_count_only_notice(tmp_path, monkeypatch):
+    ctrl, _path = _ctrl(tmp_path, monkeypatch)
+    wavs = [tmp_path / "a" / "me.wav", tmp_path / "a" / "others.wav", tmp_path / "b" / "me.wav"]
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda _days=None: wavs)
+    ctrl.set_retention(1)
+    _join("retention-set")
+    events = [ctrl.events.get_nowait() for _ in range(ctrl.events.qsize())]
+    assert ("notice", "Delete audio after", "Deleted audio of 2 sessions") in events
+
+
+def test_superseded_retention_choice_does_not_purge(tmp_path, monkeypatch):
+    ctrl, _path = _ctrl(tmp_path, monkeypatch)
+    purged: list[int] = []
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda _days=None: purged.append(1))
+
+    def slow_save(*keys, **_kw):  # the user picks Never while "1 day" is being saved
+        ctrl.cfg.transcription.audio_retention_days = 0
+        return dict.fromkeys(keys, 1)
+
+    monkeypatch.setattr(ctrl, "_write_settings", slow_save)
+    ctrl.set_retention(1)
+    _join("retention-set")
+    assert purged == []  # the stale "1 day" purge is skipped; Never's own call decides
+
+
+def test_retention_click_survives_a_reload_before_its_save(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda _days=None: None)
+    go, real = threading.Event(), ctrl._write_settings
+
+    def blocked_save(*keys, **kw):  # the worker hasn't written yet
+        assert go.wait(5)
+        return real(*keys, **kw)
+
+    monkeypatch.setattr(ctrl, "_write_settings", blocked_save)
+    path.write_text(path.read_text() + "[transcription]\naudio_retention_days = 0\n")
+    ctrl._config_mtime = -1.0  # config.toml changed on disk, still with the old value
+    ctrl.set_retention(7)
+    ctrl._maybe_reload_config()
+    assert ctrl.cfg.transcription.audio_retention_days == 7  # the click is kept
+    go.set()
+    _join("retention-set")
+    assert _kept(path)["transcription"]["audio_retention_days"] == 7
+    assert ctrl._dirty == {}
 
 
 def _fake_autostart(monkeypatch, module) -> None:
@@ -877,24 +1003,101 @@ def test_retention_purges_only_after_a_successful_save(tmp_path, monkeypatch):
 
     monkeypatch.setattr(common, "save_keys", locked)
     tr = ctrl.cfg.transcription
-    tr.audio_retention_days = 1
-    ctrl.save_retention()
+    ctrl.set_retention(1)
+    _join("retention-set")
     assert purged == [] and tr.audio_retention_days == 0  # not saved: rolled back, no purge
     monkeypatch.setattr(common, "save_keys", real)
-    tr.audio_retention_days = 7
-    ctrl.save_retention()
+    ctrl.set_retention(7)
+    _join("retention-set")
     assert purged == [7]
     assert _kept(path)["transcription"]["audio_retention_days"] == 7
 
 
 def test_hourly_purge_waits_while_a_retention_save_is_pending(tmp_path, monkeypatch):
-    ctrl, _ = _ctrl(tmp_path, monkeypatch)
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
     purged = []
     monkeypatch.setattr(common, "purge_old_audio", lambda _out, days: purged.append(days))
     ctrl.cfg.transcription.audio_retention_days = 1
     ctrl._mark_dirty([common.RETENTION_KEY], 1)  # clicked, save still waiting on the lock
     ctrl.purge_audio_now()
     assert purged == []
+    save_keys(path, {"transcription.audio_retention_days": 1})  # the save ran
     ctrl._mark_dirty([common.RETENTION_KEY], -1)
     ctrl.purge_audio_now()
     assert purged == [1]
+
+
+def test_menu_purge_uses_the_value_written_not_the_click(tmp_path, monkeypatch):
+    ctrl, _path = _ctrl(tmp_path, monkeypatch)
+    purged: list = []
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda days=None: purged.append(days) or [])
+    tr = ctrl.cfg.transcription
+
+    def interleaved(*keys, **_kw):  # click A=7's save, while B and C come in
+        tr.audio_retention_days = 30  # B, before A reads memory
+        written = {k: ctrl._setting(k) for k in keys}  # A writes B's 30
+        tr.audio_retention_days = 7  # C, its save still pending
+        return written
+
+    monkeypatch.setattr(ctrl, "_write_settings", interleaved)
+    ctrl.set_retention(7)  # A
+    _join("retention-set")
+    assert purged == []  # not by 7: disk holds 30 and C's 7 may never be saved
+
+
+def test_menu_purge_skips_when_disk_no_longer_holds_its_value(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    purged: list = []
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda days=None: purged.append(days) or [])
+    real = ctrl._write_settings
+
+    def interleaved(*keys, **kw):  # A=7 writes 7, then B=30 writes 30, then C=7 in memory
+        written = real(*keys, **kw)
+        save_keys(path, {"transcription.audio_retention_days": 30})  # B's save
+        ctrl.cfg.transcription.audio_retention_days = 7  # C, its save still pending
+        return written
+
+    monkeypatch.setattr(ctrl, "_write_settings", interleaved)
+    ctrl.set_retention(7)  # A
+    _join("retention-set")
+    assert purged == []  # disk holds 30: A's 7 is no longer the saved choice
+
+
+def test_a_non_number_retention_never_breaks_the_hourly_loop(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    purged: list = []
+    monkeypatch.setattr(common, "purge_old_audio", lambda _out, days: purged.append(days) or [])
+    path.write_text('[transcription]\naudio_retention_days = "7"\n')
+    ctrl.cfg.transcription.audio_retention_days = "7"  # type: ignore[assignment]  # by hand
+    assert ctrl.purge_audio_now() == [] and purged == []  # no TypeError, nothing deleted
+    calls: list[str] = []
+
+    def boom(_days=None):
+        calls.append("purge")
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(ctrl, "purge_audio_now", boom)
+    monkeypatch.setattr(common.time, "sleep", lambda _s: setattr(ctrl, "_shut", True))
+    ctrl._retention_loop()  # returns at shutdown instead of dying on the error
+    assert calls == ["purge"]
+
+
+def test_hourly_purge_never_uses_an_unsaved_retention_click(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    purged: list = []
+    monkeypatch.setattr(common, "purge_old_audio", lambda _out, days: purged.append(days) or [])
+    save_keys(path, {"transcription.audio_retention_days": 30})
+    ctrl.cfg.transcription.audio_retention_days = 30
+    readable = path.read_text()
+    path.write_text("[summary\n")  # mid-edit: the save fails and nothing can be restored
+    ctrl.set_retention(1)  # a stricter click
+    _join("retention-set")
+    assert ctrl.cfg.transcription.audio_retention_days == 1  # kept in memory, unsaved
+    ctrl.purge_audio_now()  # startup / hourly
+    path.write_text(readable)  # readable again, still 30 on disk
+    ctrl.purge_audio_now()
+    assert purged == []  # never by the unsaved 1
+    ctrl.set_retention(1)  # now it saves ...
+    _join("retention-set")
+    ctrl.purge_audio_now()  # ... and the hourly purge follows the saved value
+    assert purged == [1, 1]  # the click's own purge, then the hourly one
