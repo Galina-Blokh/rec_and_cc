@@ -434,3 +434,16 @@ def test_new_empty_folder_from_the_picker_becomes_owner_only(tmp_path):
     _privatize_new_folder(used)
     assert fresh.stat().st_mode & 0o777 == 0o700
     assert used.stat().st_mode & 0o777 == 0o755  # a folder with content is left alone
+
+
+def test_only_unknown_languages_are_rejected_not_replaced_by_defaults():
+    with pytest.raises(ValueError):
+        validate_settings({"languages": ["xx", "yy"]})
+    with pytest.raises(ValueError):
+        validate_settings({"languages": ["en", "zz"]})
+
+
+def test_hand_edited_unknown_languages_still_degrade_gracefully(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[transcription]\nlanguages = ["xx"]\n')
+    assert load_config(path).transcription.languages == ["en", "ru"]  # defaults, with a warning

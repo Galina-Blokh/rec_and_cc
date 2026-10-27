@@ -232,3 +232,34 @@ def test_menu_save_after_reload_never_writes_stale_values(tmp_path, monkeypatch)
     ctrl.write_settings("live_captions", "transcription.keep_audio")
     saved = load_config(path)
     assert saved.live_captions is False and saved.transcription.keep_audio is False
+
+
+def test_menu_change_of_any_setting_during_reload_is_not_lost(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch, '["en"]')
+    path.write_text("live_captions = true\n[transcription]\nkeep_audio = false\n")
+    ctrl._config_mtime = -1.0
+    real = common.load_config
+
+    def load_then_click():
+        cfg = real()
+        ctrl.cfg.live_captions = False  # menu click while the file is being read
+        return cfg
+
+    monkeypatch.setattr(common, "load_config", load_then_click)
+    ctrl._maybe_reload_config()
+    assert ctrl.cfg.live_captions is False  # the click wins over the stale file value
+    assert ctrl.cfg.transcription.keep_audio is False  # untouched fields still reload
+
+
+def test_menu_change_waiting_for_its_save_survives_a_reload(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch, '["en"]')
+    path.write_text("live_captions = true\n")
+    ctrl._config_mtime = -1.0
+    ctrl.cfg.live_captions = False  # clicked ...
+    ctrl._mark_dirty(["live_captions"], 1)  # ... its save is queued, not written yet
+    ctrl._maybe_reload_config()
+    assert ctrl.cfg.live_captions is False
+    ctrl._mark_dirty(["live_captions"], -1)  # the save ran
+    ctrl.write_settings("live_captions")
+    assert load_config(path).live_captions is False
+    assert ctrl._dirty == {}
