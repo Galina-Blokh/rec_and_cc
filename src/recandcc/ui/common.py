@@ -35,6 +35,7 @@ from ..config import (
     CONFIG_PATH,
     LOG_DIR,
     Config,
+    ConfigLockTimeout,
     load_config,
     normalize_languages,
     save_keys,
@@ -1169,6 +1170,9 @@ class Controller:
             except ValueError as e:
                 log.warning("settings not saved: %s", type(e).__name__)  # no values in logs
                 self.post_notice("Settings not saved", str(e))
+            except ConfigLockTimeout:
+                log.warning("settings not saved: config lock timed out")
+                self.post_notice("Settings not saved", "config.toml is locked by another process")
             except OSError as e:
                 log.warning("settings not saved: %s (errno %s)", type(e).__name__, e.errno)
                 self.post_notice("Settings not saved", "the transcripts folder can't be created")

@@ -3,6 +3,7 @@
 Stories: US-17.
 """
 
+import errno
 import os
 import stat
 import subprocess
@@ -420,3 +421,118 @@ def test_save_keys_from_another_process_keeps_both_keys(tmp_path):
             child.kill()
             child.wait()
     assert tomllib.loads(path.read_text()) == {"a": 49, "b": 49}
+
+
+class _Clock:
+    """Fake time: sleep advances monotonic, so lock timeouts cost no real time."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, s: float) -> None:
+        self.now += s
+
+
+@pytest.fixture
+def fake_clock(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(config.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(config.time, "sleep", clock.sleep)
+    monkeypatch.setattr(config, "LOCK_TIMEOUT", 1.0)
+    return clock
+
+
+def _fake_fcntl(monkeypatch, held: list[bool]):
+    calls = []
+    fake = types.SimpleNamespace(LOCK_EX=1, LOCK_NB=2, LOCK_UN=8)
+
+    def flock(fd, op):
+        calls.append(op)
+        if op & fake.LOCK_NB and held[0]:
+            raise BlockingIOError(11, "held")
+
+    fake.flock = flock
+    monkeypatch.setitem(sys.modules, "fcntl", fake)
+    monkeypatch.setattr(sys, "platform", "linux")
+    return calls
+
+
+def test_posix_lock_times_out_when_held(tmp_path, monkeypatch, fake_clock):
+    _fake_fcntl(monkeypatch, [True])
+    with pytest.raises(config.ConfigLockTimeout), config._file_lock(tmp_path / "x.lock"):
+        pytest.fail("must not acquire")
+    assert fake_clock.now >= 1.0
+    assert issubclass(config.ConfigLockTimeout, OSError)
+
+
+def test_posix_lock_acquires_when_released(tmp_path, monkeypatch, fake_clock):
+    held = [True]
+    calls = _fake_fcntl(monkeypatch, held)
+    orig_sleep = config.time.sleep
+
+    def sleep(s):
+        orig_sleep(s)
+        held[0] = False  # the holder lets go after the first wait
+
+    monkeypatch.setattr(config.time, "sleep", sleep)
+    with config._file_lock(tmp_path / "x.lock"):
+        pass
+    assert calls[-1] == 8  # unlocked on exit
+
+
+def _fake_msvcrt(monkeypatch, fail_times: float, err: int = errno.EACCES):
+    state = {"n": 0}
+    fake = types.SimpleNamespace(LK_NBLCK=2, LK_UNLCK=0, unlocked=False)
+
+    def locking(fd, mode, nbytes):
+        if mode == fake.LK_UNLCK:
+            fake.unlocked = True
+            return
+        state["n"] += 1
+        if state["n"] <= fail_times:
+            raise OSError(err, "held")
+
+    fake.locking = locking
+    monkeypatch.setitem(sys.modules, "msvcrt", fake)
+    monkeypatch.setattr(sys, "platform", "win32")
+    return fake
+
+
+def test_windows_lock_retries_then_succeeds(tmp_path, monkeypatch, fake_clock):
+    fake = _fake_msvcrt(monkeypatch, 3, errno.EDEADLK)
+    with config._file_lock(tmp_path / "x.lock"):
+        pass
+    assert fake.unlocked
+    assert 0 < fake_clock.now < 1.0
+
+
+def test_windows_lock_times_out(tmp_path, monkeypatch, fake_clock):
+    fake = _fake_msvcrt(monkeypatch, float("inf"))
+    with pytest.raises(config.ConfigLockTimeout), config._file_lock(tmp_path / "x.lock"):
+        pytest.fail("must not acquire")
+    assert not fake.unlocked
+    assert fake_clock.now >= 1.0
+
+
+def test_windows_lock_other_errors_propagate(tmp_path, monkeypatch, fake_clock):
+    _fake_msvcrt(monkeypatch, float("inf"), errno.EBADF)
+    with pytest.raises(OSError) as ei, config._file_lock(tmp_path / "x.lock"):
+        pass
+    assert not isinstance(ei.value, config.ConfigLockTimeout)
+
+
+def test_write_atomic_logs_chmod_failure(tmp_path, monkeypatch, caplog):
+    path = tmp_path / "config.toml"
+    path.write_text("a = 1\n")
+
+    def boom(*a, **k):
+        raise OSError(errno.EPERM, "nope")
+
+    monkeypatch.setattr(config.os, "chmod", boom)
+    with caplog.at_level("DEBUG", logger=config.log.name):
+        config._write_atomic(path, b"a = 2\n")
+    assert path.read_text() == "a = 2\n"
+    assert "config.toml" in caplog.text
