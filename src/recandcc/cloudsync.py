@@ -23,6 +23,7 @@ import logging
 import ntpath
 import os
 import plistlib
+import posixpath
 import sys
 import time
 from collections.abc import Mapping
@@ -222,4 +223,131 @@ def warning_text(path: str | os.PathLike, provider: str) -> str:
     return (
         f"The transcripts folder {path} is synced to {provider}: recordings and transcripts "
         "may be uploaded. Set output_dir to a local folder to keep them on this device."
+    )
+
+
+# ------------------------------------------------------------------ network volumes
+# A network share is as much "off this device" as a cloud drive: the same warning UX.
+_NETWORK_FS = {  # filesystem type -> label
+    "smbfs": "SMB",
+    "afpfs": "AFP",
+    "nfs": "NFS",
+    "webdav": "WebDAV",
+    "cifs": "SMB",
+    "smb3": "SMB",
+    "smb2": "SMB",
+    "sshfs": "SSHFS",
+    "fuse.sshfs": "SSHFS",
+    "nfs4": "NFS",
+    "9p": "9P",
+}
+_MNT_LOCAL = 0x1000  # macOS statfs f_flags
+_DRIVE_REMOTE = 4  # GetDriveTypeW
+
+
+def _existing_ancestor(path: Path) -> Path:
+    """Closest existing parent: output_dir may not have been created yet."""
+    p = path
+    while not p.exists() and p.parent != p:
+        p = p.parent
+    return p
+
+
+def _mac_statfs(path: Path) -> tuple[str, int]:
+    """``(f_fstypename, f_flags)`` of the volume holding ``path``, via libc ``statfs``."""
+    import ctypes
+    import ctypes.util
+
+    class StatFS(ctypes.Structure):  # struct statfs, 64-bit inodes (sys/mount.h)
+        _fields_ = [
+            ("f_bsize", ctypes.c_uint32),
+            ("f_iosize", ctypes.c_int32),
+            ("f_blocks", ctypes.c_uint64),
+            ("f_bfree", ctypes.c_uint64),
+            ("f_bavail", ctypes.c_uint64),
+            ("f_files", ctypes.c_uint64),
+            ("f_ffree", ctypes.c_uint64),
+            ("f_fsid", ctypes.c_int32 * 2),
+            ("f_owner", ctypes.c_uint32),
+            ("f_type", ctypes.c_uint32),
+            ("f_flags", ctypes.c_uint32),
+            ("f_fssubtype", ctypes.c_uint32),
+            ("f_fstypename", ctypes.c_char * 16),
+            ("f_mntonname", ctypes.c_char * 1024),
+            ("f_mntfromname", ctypes.c_char * 1024),
+            ("f_reserved", ctypes.c_uint32 * 8),
+        ]
+
+    libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.dylib", use_errno=True)
+    fn = getattr(libc, "statfs$INODE64", None) or libc.statfs
+    buf = StatFS()
+    if fn(os.fsencode(_existing_ancestor(path)), ctypes.byref(buf)) != 0:
+        raise OSError(ctypes.get_errno(), "statfs failed")
+    return buf.f_fstypename.decode("ascii", "replace"), buf.f_flags
+
+
+def mac_network_volume(path: str | os.PathLike, statfs=None) -> str | None:
+    fstype, flags = (statfs or _mac_statfs)(_absolute(path))
+    fstype = fstype.lower()
+    if fstype in _NETWORK_FS:
+        return _NETWORK_FS[fstype]
+    if not flags & _MNT_LOCAL and fstype not in ("devfs", "autofs"):
+        return "a network volume"  # not local and not a known pseudo fs
+    return None
+
+
+def windows_network_volume(path: str | os.PathLike, drive_type=None) -> str | None:
+    text = ntpath.normpath(os.path.realpath(str(path)))  # junctions / links to shares
+    if text.lower().startswith("\\\\?\\unc\\"):
+        return "a network share"
+    if text.startswith(("\\\\?\\", "\\\\.\\")):  # \\?\Z:\... -> Z:\...
+        text = text[4:]
+    elif text.startswith("\\\\"):
+        return "a network share"  # UNC path
+    drive = ntpath.splitdrive(ntpath.abspath(text))[0]
+    if len(drive) != 2:
+        return None
+    if drive_type is None:
+        import ctypes
+
+        drive_type = ctypes.windll.kernel32.GetDriveTypeW  # type: ignore[attr-defined]
+    return "a network drive" if drive_type(drive + "\\") == _DRIVE_REMOTE else None
+
+
+def linux_network_volume(path: str | os.PathLike, mounts: str | None = None) -> str | None:
+    """Longest matching mount point in /proc/mounts decides."""
+    if mounts is None:
+        mounts = Path("/proc/mounts").read_text(encoding="utf-8", errors="replace")
+    target = posixpath.normpath(os.path.realpath(str(path)).replace("\\", "/"))
+    best, best_type = "", ""
+    for line in mounts.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        mnt = parts[1].replace("\\040", " ")
+        if (target == mnt or target.startswith(mnt.rstrip("/") + "/")) and len(mnt) > len(best):
+            best, best_type = mnt, parts[2]
+    return _NETWORK_FS.get(best_type)
+
+
+def network_volume(path: str | os.PathLike, platform: str | None = None) -> str | None:
+    """Kind of network share holding ``path`` ("SMB", "NFS", "a network drive", ...) or None."""
+    platform = platform or sys.platform
+    try:
+        if platform == "darwin":
+            return mac_network_volume(path)
+        if platform == "win32":
+            return windows_network_volume(path)
+        if platform.startswith("linux"):
+            return linux_network_volume(path)
+    except Exception:  # best effort, like the cloud check
+        log.debug("network-volume check failed", exc_info=True)
+    return None
+
+
+def network_warning_text(path: str | os.PathLike, kind: str) -> str:
+    where = kind if kind.startswith("a ") else f"{kind} storage"
+    return (
+        f"The transcripts folder {path} is on {where}: recordings and transcripts leave this "
+        "device over the network. Set output_dir to a local folder to keep them here."
     )

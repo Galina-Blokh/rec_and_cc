@@ -1483,11 +1483,16 @@ def test_hand_edited_semantic_setting_is_applied_to_a_running_app(tmp_path, monk
         cfg=Config(output_dir=tmp_path),
         _save_lock=threading.Lock(),
         _lang_lock=threading.Lock(),
+        _dirty_lock=threading.Lock(),
+        _dirty={},
         _config_mtime=-1.0,
         _mtime=lambda: 1.0,
         post_notice=lambda *a: None,
         apply_hotkey=lambda *a: None,
     )
+    ctrl._reloadable = Controller._reloadable
+    ctrl._dotted = Controller._dotted
+    ctrl._reload_target = lambda owner: Controller._reload_target(ctrl, owner)
     new = Config(output_dir=tmp_path)
     new.search.semantic = True
     monkeypatch.setattr("recandcc.ui.common.load_config", lambda *a, **k: new)

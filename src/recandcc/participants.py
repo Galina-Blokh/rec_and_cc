@@ -146,6 +146,7 @@ class ParticipantSampler:
         target: AppTarget,
         *,
         trusted: Callable[[], bool] | None = None,
+        active: Callable[[], bool] | None = None,
         read: Callable[[AppTarget], list[str] | None] | None = None,
         interval: float = INTERVAL_S,
         first_after: float = FIRST_SAMPLE_S,
@@ -156,6 +157,7 @@ class ParticipantSampler:
         # Without an explicit check the trust test is part of every `participants` run (it
         # reports untrusted itself), so a sample costs one helper process, not two.
         self._trusted = trusted
+        self._active = active  # the option is still on (read from the live config)
         self._read = read or (lambda t: read_participants(t, self._track))
         self._interval, self._first = interval, first_after
         self._names: list[str] = []
@@ -202,6 +204,11 @@ class ParticipantSampler:
         wait, warned, previous = self._first, False, []
         while not self._stop.wait(wait):
             wait = self._interval
+            if self._active is not None and not self._active():  # turned off mid-call
+                previous = []
+                with self._lock:
+                    self._names.clear()  # nothing gathered so far is kept
+                continue
             try:
                 # Trust is checked silently at every sample, so granting it mid-call works and
                 # nothing is ever read while it is missing.
@@ -238,6 +245,7 @@ def start_sampler(cfg: Config, target: AppTarget | None, **kwargs) -> Participan
     own thread, silently.)"""
     if target is None or not enabled(cfg):
         return None
+    kwargs.setdefault("active", lambda: enabled(cfg))  # cfg is live: menu and hot reload
     sampler = ParticipantSampler(target, **kwargs)
     sampler.start()
     return sampler
