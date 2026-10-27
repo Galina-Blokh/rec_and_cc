@@ -669,3 +669,19 @@ def test_cli_autostart_changes_nothing_when_the_save_fails(tmp_path, monkeypatch
     assert cli.cmd_autostart(types.SimpleNamespace(action="on")) == 1
     assert enabled == []  # the login item follows only a saved config.toml
     assert "launch at login not changed" in capsys.readouterr().err
+
+
+def test_cli_autostart_reverts_the_config_when_the_login_item_fails(tmp_path, monkeypatch, capsys):
+    from recandcc import autostart, cli
+
+    path = tmp_path / "config.toml"
+    path.write_text("autostart = false\n")
+    monkeypatch.setattr(cli, "CONFIG_PATH", path)
+
+    def broken():
+        raise OSError("launchctl failed")
+
+    monkeypatch.setattr(autostart, "enable", broken)
+    assert cli.cmd_autostart(types.SimpleNamespace(action="on")) == 1
+    assert tomllib.loads(path.read_text())["autostart"] is False  # still matches the OS
+    assert "Can't change launch at login" in capsys.readouterr().err

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import os
 import signal
@@ -290,10 +291,13 @@ def cmd_autostart(args) -> int:
                 file=sys.stderr,
             )
             return 1
-        if args.action == "on":
-            autostart.enable()
-        else:
-            autostart.disable()
+        try:
+            autostart.enable() if args.action == "on" else autostart.disable()
+        except Exception as e:  # keep config.toml in step with the login item that is there
+            with contextlib.suppress(OSError, ValueError):
+                save_keys(CONFIG_PATH, {"autostart": args.action != "on"})
+            print(f"Can't change launch at login: {type(e).__name__}", file=sys.stderr)
+            return 1
     print(f"Launch at login: {autostart.describe()}")
     return 0
 
