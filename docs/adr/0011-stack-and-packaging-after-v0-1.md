@@ -111,8 +111,8 @@ follow-up 4).
   rule "helper outside the bundle" is superseded by the ADR that records the packaging
   result, and AGENTS.md rule 4 is rewritten then.
 - Needs an Apple Developer Program membership and a signing identity kept out of the repo.
-  The hardened runtime may need JIT entitlements, because the numba/llvmlite JIT runs at
-  runtime (MLX may need them too). This is a risk; the spike lists the exact set. Windows
+  The hardened runtime may need JIT entitlements for MLX (the numba/llvmlite JIT no longer
+  ships, see follow-up 4, tier 2). This is a risk; the spike lists the exact set. Windows
   Authenticode signing is a separate cost (#5).
 - Two UI stacks stay for now; the settings-window spike decides how much of option B is
   worth it.
@@ -163,9 +163,17 @@ already cached and the network blocked.
    `uv tree --invert`). `.venv` on darwin/arm64 (`du -sk`): 1,380,000 KiB (1.32 GiB) →
    791,240 KiB (773 MiB), 575 MiB less. `tests/test_no_torch.py` checks that the MLX
    path (import, language ID and a real transcription) never imports torch.
-   **Tier 2 (open):** decide on numba/scipy
-   (patch, vendor or stub `mlx_whisper.timing`, or keep them), and record the choice and its
-   size in the packaging ADR from follow-up 3.
+   **Tier 2 done:** numba, llvmlite and scipy are imported only by `mlx_whisper/timing.py`
+   for word timestamps, which RecAndCC never requests (no `word_timestamps` anywhere in
+   `src/`; mlx_whisper calls `add_word_timestamps` only when it is true). They are excluded
+   too, and `transcribe/gpu.py` (`import_mlx_whisper`) registers a stub `mlx_whisper.timing`
+   before importing mlx_whisper whenever numba or scipy is missing; the stub raises a clear
+   error if word timestamps are ever requested. Nothing else needs them (`uv tree --invert`;
+   faster-whisper, CTranslate2, sherpa-onnx, onnxruntime and soundfile import without them).
+   `.venv` on darwin/arm64 (`du -sk`): 791,244 KiB (773 MiB) → 572,540 KiB (559 MiB),
+   214 MiB less (llvmlite 129 MB, scipy 70 MB, numba 13 MB). `tests/test_no_torch.py` checks
+   that none of the four is installed or loaded on the MLX path. The packaging ADR from
+   follow-up 3 starts from this trimmed environment.
 5. **Release pipeline: signed, notarized DMG** (after 3, with #17). AC: one script builds,
    signs, notarizes and staples from a tag; secrets come from the keychain/CI secrets, never
    the repo; the checksum is published with the release.
