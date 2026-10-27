@@ -65,6 +65,33 @@ def test_windows_acl_failure_is_logged_and_falls_back_to_mkdir(fake_windows, tmp
     assert "owner-only ACL" in caplog.text and "not supported" in caplog.text
     make_private_dir(tmp_path / "out2")  # the next session start doesn't warn again
     assert len(caplog.records) == 1
+    assert recmod._warned == {"acl-fallback:E:\\ (1234ABCD)"}  # same volume key as no-acl
+
+
+def test_warn_once_holds_under_concurrent_threads(fake_windows, caplog):
+    import threading
+
+    start = threading.Barrier(8)
+
+    def worker():
+        start.wait()
+        for _ in range(200):
+            recmod._not_private("no-acl:X", "not private")
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    with caplog.at_level(logging.WARNING, logger="recandcc.recorder"):
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    assert len(caplog.records) == 1
+
+
+def test_long_paths_use_the_extended_length_prefix():
+    assert recmod._win_long_path("C:\\a\\..\\b") == "\\\\?\\C:\\b"
+    assert recmod._win_long_path("\\\\host\\share\\r") == "\\\\?\\UNC\\host\\share\\r"
+    assert recmod._win_long_path("\\\\?\\C:\\x") == "\\\\?\\C:\\x"
+    assert recmod._win_long_path("rel\\x") == "rel\\x"
 
 
 def test_windows_sid_failure_falls_back_to_plain_mkdir_and_warns_once(
@@ -140,17 +167,23 @@ def _recorder(tmp_path, fail=False):
     )
 
 
-def _engine(rec):
+def _engine(rec, fail_first_notice=False):
     from recandcc.engine import Engine
 
     notices: list[str] = []
+
+    def on_notice(title, message):
+        notices.append(title)
+        if fail_first_notice and len(notices) == 1:
+            raise RuntimeError("UI not ready")
+
     monitor = type("Mon", (), {"snapshot": lambda self: [], "close": lambda self: None})()
     eng = Engine(
         rec.cfg,
         monitor,
         rec,
         type("Q", (), {"submit": lambda self, s: None})(),
-        on_notice=lambda title, message: notices.append(title),
+        on_notice=on_notice,
         run_in_background=lambda fn: fn(),
     )
     return eng, notices
@@ -173,6 +206,18 @@ def test_not_private_session_notice_once_per_volume_through_the_engine(fake_wind
     assert notices.count(recmod.PRIVACY_NOTICE[0]) == 2
     eng.stop()
     eng.tick()
+
+
+def test_failed_notice_delivery_does_not_burn_the_key(fake_windows, tmp_path):
+    fake_windows.state["persists"] = False
+    rec = _recorder(tmp_path)
+    eng, notices = _engine(rec, fail_first_notice=True)
+    for _ in range(3):
+        eng.start_manual()
+        eng.tick()
+        eng.stop()
+        eng.tick()
+    assert notices.count(recmod.PRIVACY_NOTICE[0]) == 2  # failed, delivered, then quiet
 
 
 def test_failed_start_leaves_no_privacy_notice(fake_windows, tmp_path):
@@ -248,12 +293,22 @@ def _assert_owner_and_system_only(paths):
         aces = [ln.strip() for ln in text.splitlines() if ":(" in ln]  # drops the summary
         aces = [a for a in aces if not a.lower().startswith("mandatory label\\")]
         names = {a.split(":(", 1)[0].lower() for a in aces}
-        assert "nt authority\\system" in names, out.stdout
+        # English CI: icacls prints localized names; accept the SYSTEM SID if it prints SIDs.
+        system = {"nt authority\\system", "*s-1-5-18"} & names
+        assert system, out.stdout
         assert any(n.rsplit("\\", 1)[-1] == user for n in names), out.stdout
-        others = {n for n in names if n != "nt authority\\system"}
+        others = names - system
         assert all(n.rsplit("\\", 1)[-1] == user for n in others), out.stdout
         if p.is_dir():  # the folders themselves inherit nothing from their parent
             assert not any("(I)" in a for a in aces), out.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows volume API")
+def test_real_windows_system_drive_persists_acls():
+    import os
+
+    volume, persists = recmod._volume_acl_support(Path(os.environ["SYSTEMDRIVE"] + "\\"))
+    assert persists and "(" in volume  # NTFS, keyed by root + serial number
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="NTFS ACLs")

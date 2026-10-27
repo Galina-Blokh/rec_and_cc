@@ -544,13 +544,16 @@ class Engine:
                 log.exception("on_prompt callback failed")
         self._notify()
 
-    def _notice(self, title: str, message: str) -> None:
+    def _notice(self, title: str, message: str) -> bool:
+        """Log and show a notice; False if the UI callback failed."""
         log.warning("%s: %s", title, message)
         if self.on_notice:
             try:
                 self.on_notice(title, message)
             except Exception:
                 log.exception("on_notice callback failed")
+                return False
+        return True
 
     def _preflight(self) -> None:
         if self.permission_status is None:
@@ -577,9 +580,12 @@ class Engine:
         try:
             notice = take() if take is not None else None
         except Exception:
+            log.debug("privacy_notice failed", exc_info=True)
             return
-        if notice:
-            self._notice(*notice)
+        if notice and self._notice(*notice):  # a failed UI callback retries next session
+            done = getattr(self.recorder, "privacy_noticed", None)
+            if done is not None:
+                done()
 
     def _check_silent_tracks(self) -> None:
         silent = getattr(self.recorder, "silent_tracks", None)

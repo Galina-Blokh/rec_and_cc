@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import errno
 import logging
+import ntpath
 import queue
 import re
 import shutil
@@ -41,6 +42,7 @@ _ERROR_ALREADY_EXISTS = 183
 _FILE_PERSISTENT_ACLS = 0x8  # GetVolumeInformationW file-system flag
 _warned: set[str] = set()  # "<reason>:<volume>" keys already logged
 _noticed: set[str] = set()  # "<reason>:<volume>" keys already shown to the user
+_keys_lock = threading.Lock()  # engine and UI threads both create folders
 PRIVACY_NOTICE = (
     "Recordings may be readable by other users",
     "RecAndCC couldn't make its recording folder private (no owner-only access list on this "
@@ -50,10 +52,31 @@ PRIVACY_NOTICE = (
 
 def _not_private(key: str, msg: str, *args: object) -> str:
     """Log a folder-not-private warning once per ``key`` and return ``key``."""
-    if key not in _warned:
+    with _keys_lock:
+        first = key not in _warned
         _warned.add(key)
+    if first:
         log.warning(msg, *args)
     return key
+
+
+def _win_long_path(path: Path | str) -> str:
+    """``\\\\?\\`` form of an absolute Windows path, so folders past MAX_PATH stay private."""
+    s = ntpath.normpath(str(path))
+    if s.startswith("\\\\?\\") or not ntpath.isabs(s):
+        return s
+    if s.startswith("\\\\"):  # \\host\share\... -> \\?\UNC\host\share\...
+        return "\\\\?\\UNC\\" + s[2:]
+    return "\\\\?\\" + s if s[1:3] == ":\\" else s
+
+
+def _volume_key(path: Path) -> tuple[str, bool]:
+    """``(volume key, persists ACLs)``; can't tell -> ``(drive, False)``: assume the worst."""
+    try:
+        return _volume_acl_support(path)
+    except Exception as e:
+        log.debug("could not check ACL support for %s: %s", path, e)
+        return path.anchor or str(path), False
 
 
 @cache
@@ -151,7 +174,7 @@ def _win_mkdir_owner_only(path: Path) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
         sa = SecurityAttributes(ctypes.sizeof(SecurityAttributes), sd, False)
-        if not k32.CreateDirectoryW(str(path), ctypes.byref(sa)):
+        if not k32.CreateDirectoryW(_win_long_path(path), ctypes.byref(sa)):
             err = ctypes.get_last_error()
             raise _exists_error(err, path) or ctypes.WinError(err)
     finally:
@@ -216,17 +239,13 @@ def _mkdir_private(path: Path) -> str | None:
     except Exception as e:  # keep recording, just warn
         path.mkdir(mode=PRIVATE_DIR_MODE)  # FileExistsError here reports nothing
         return _not_private(
-            f"acl-fallback:{path.anchor}",
+            f"acl-fallback:{_volume_key(path)[0]}",
             "could not create %s with an owner-only ACL (%s); recordings may be readable "
             "by other users",
             path,
             e,
         )
-    try:
-        volume, persists = _volume_acl_support(path)
-    except Exception as e:  # can't tell: assume the worst
-        volume, persists = path.anchor or str(path), False
-        log.debug("could not check ACL support for %s: %s", path, e)
+    volume, persists = _volume_key(path)
     if persists:
         return None
     return _not_private(
@@ -460,12 +479,18 @@ class Recorder:
 
     def privacy_notice(self) -> tuple[str, str] | None:
         """``(title, message)`` if the last successful start created a folder that isn't
-        private, once per (reason, volume) per process; cleared when read."""
+        private and no notice was delivered yet for its (reason, volume) in this process.
+        Call ``privacy_noticed()`` once the notice was shown."""
+        key = self._privacy_issue
+        with _keys_lock:
+            return None if key is None or key in _noticed else PRIVACY_NOTICE
+
+    def privacy_noticed(self) -> None:
+        """The notice from ``privacy_notice()`` reached the user: don't repeat it."""
         key, self._privacy_issue = self._privacy_issue, None
-        if key is None or key in _noticed:
-            return None
-        _noticed.add(key)
-        return PRIVACY_NOTICE
+        if key is not None:
+            with _keys_lock:
+                _noticed.add(key)
 
     def silent_tracks(self) -> list[Track]:
         """Tracks of the last stopped session that were digital silence the whole time
