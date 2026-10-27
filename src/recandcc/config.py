@@ -176,6 +176,13 @@ def _build(cls, data: dict):
     return cls(**{k: v for k, v in data.items() if k in known})
 
 
+def language_code(item) -> str:
+    """One `languages` entry as written by the user, lowercased and alias-mapped ("iw" ->
+    "he"). The result may still be an unknown code."""
+    code = str(item).strip().lower()
+    return LANGUAGE_ALIASES.get(code, code)
+
+
 def normalize_languages(value) -> list[str]:
     """`transcription.languages` as clean Whisper codes: lowercased, aliases mapped
     ("iw" -> "he"), duplicates and unknown codes dropped (with a warning). A single string is
@@ -191,8 +198,7 @@ def normalize_languages(value) -> list[str]:
         return list(DEFAULT_LANGUAGES)
     out: list[str] = []
     for item in items:
-        code = str(item).strip().lower()
-        code = LANGUAGE_ALIASES.get(code, code)
+        code = language_code(item)
         if code not in WHISPER_LANGUAGES:
             log.warning("ignoring unknown language %r in transcription.languages", item)
         elif code not in out:

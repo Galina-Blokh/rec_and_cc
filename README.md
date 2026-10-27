@@ -117,10 +117,15 @@ Menu items:
 - **Open transcripts folder**
 - **Permissions**: status and "Grant…" actions.
 - **Launch at login**: starts RecAndCC every time you log in. Turn it on once.
+- **Languages**: English / Russian / Hebrew checkboxes, plus **Any language**: which
+  languages speech is detected among (`languages` in the settings). Applies at once, also to
+  the rest of a recording in progress; at least one stays ticked unless Any is chosen. Codes
+  you added in the settings by hand are kept and listed as "Also from settings".
 - **Delete audio after**: Never / 1 / 7 / 30 / 90 days. Audio of transcribed recordings is
   deleted after that many days; transcripts are always kept. Any number of days can be set as
   `audio_retention_days` in the settings.
-- **Edit settings**: opens `config.toml` (changes to detection settings and `hotkey` apply live).
+- **Edit settings**: opens `config.toml` (changes to detection settings, `hotkey` and
+  `languages` apply live).
 - **Quit RecAndCC**
 
 ### Live captions

@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .. import hotkey as hotkey_mod
-from ..config import CONFIG_PATH, LOG_DIR, Config, load_config
+from ..config import CONFIG_PATH, LOG_DIR, Config, load_config, normalize_languages
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind, discard_session
 from ..recorder import make_private_dir
@@ -244,6 +244,7 @@ class Controller:
         self._refreshing = False
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
+        self._save_lock = threading.Lock()
         # global shortcut
         self._hotkey_lock = threading.Lock()
         self._hotkey = None  # HotkeyListener / WinHotkeyListener
@@ -542,10 +543,38 @@ class Controller:
         for f in fields(new.detection):
             setattr(self.cfg.detection, f.name, getattr(new.detection, f.name))
         self.cfg.output_dir = new.output_dir
+        tr, new_tr = self.cfg.transcription, new.transcription
+        tr._raw_languages = getattr(new_tr, "_raw_languages", None)  # type: ignore[attr-defined]
+        tr.languages = new_tr.languages
         if new.hotkey != self.cfg.hotkey:
             self.cfg.hotkey = new.hotkey
             self.apply_hotkey(new.hotkey)
         log.info("config reloaded from %s", CONFIG_PATH)
+
+    # --- settings changed from the menu (main thread; saved on a worker thread)
+    def toggle_language(self, code: str) -> None:
+        """Menu "Languages": check/uncheck ``code`` ("" = Any language). Applies at once: the
+        transcriber reads ``cfg.transcription.languages`` for every piece of audio."""
+        from .present import LANGUAGES_KEEP_ONE, toggle_languages
+
+        tr = self.cfg.transcription
+        new = toggle_languages(tr.languages, getattr(tr, "_raw_languages", None), code)
+        if new is None:
+            self.post_notice("Languages", LANGUAGES_KEEP_ONE)
+            return
+        langs = normalize_languages(new)
+        tr._raw_languages = new if new != langs else None  # type: ignore[attr-defined]
+        tr.languages = langs  # a new list: readers on other threads never see it half-built
+        threading.Thread(target=self._save_config, daemon=True, name="save-config").start()
+
+    def _save_config(self) -> None:
+        with self._save_lock:
+            try:
+                self.cfg.save()
+                self._config_mtime = self._mtime()  # our own write: nothing to reload
+            except Exception:
+                log.exception("saving settings failed")
+                self.post_notice("Settings not saved", "config.toml could not be written")
 
     @property
     def permissions(self) -> dict[str, str]:

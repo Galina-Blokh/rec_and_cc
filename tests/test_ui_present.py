@@ -1,7 +1,7 @@
 """Menu-bar presenter logic shared by the macOS and Windows shells: menu titles and check
 marks, notification texts, the ask-mode dialog script and its answers, toast placement.
 
-Stories: US-03, US-04, US-05, US-11, US-15, US-16, US-17.
+Stories: US-03, US-04, US-05, US-11, US-15, US-16, US-17, US-19.
 """
 
 from datetime import datetime
@@ -29,6 +29,33 @@ def test_record_item_title_shows_state_and_shortcut():
     assert p.record_item_title(True) == "Stop recording"
     assert p.record_item_title(True, "⌃⌥R") == "Stop recording  ⌃⌥R"
     assert p.record_item_title(False, "Ctrl+Alt+R", sep="\t") == "Start recording\tCtrl+Alt+R"
+
+
+def test_language_menu_reflects_the_setting():
+    assert p.language_menu(["en", "ru"]) == [
+        ("en", "English", True),
+        ("ru", "Russian", True),
+        ("he", "Hebrew", False),
+        ("", "Any language", False),
+    ]
+    assert [on for _, _, on in p.language_menu([])] == [False, False, False, True]
+    rows = p.language_menu(["he", "de", "fr"])  # codes added by hand stay visible
+    assert rows[2] == ("he", "Hebrew", True)
+    assert rows[3] == (None, "Also from settings: de, fr", True)
+
+
+def test_toggle_languages_keeps_one_and_the_users_spelling():
+    assert p.toggle_languages(["en", "ru"], None, "he") == ["en", "ru", "he"]
+    assert p.toggle_languages(["en", "ru"], None, "ru") == ["en"]
+    assert p.toggle_languages(["en"], None, "en") is None  # last one: refused
+    assert p.toggle_languages(["en", "ru"], None, p.ANY_LANGUAGE) == []
+    assert p.toggle_languages([], None, "he") == ["he"]
+    # hand-written entries ("iw", codes not in the menu, unknown ones) are kept as written
+    raw = ["EN", "iw", "de", "xx"]
+    assert p.toggle_languages(["en", "he", "de"], raw, "ru") == [*raw, "ru"]
+    assert p.toggle_languages(["en", "he", "de"], raw, "he") == ["EN", "de", "xx"]
+    # raw that falls back to the defaults on load: write clean codes instead
+    assert p.toggle_languages(["en", "ru"], ["xx"], "en") == ["ru"]
 
 
 def test_retention_labels():
