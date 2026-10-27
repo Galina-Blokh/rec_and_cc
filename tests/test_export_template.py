@@ -218,3 +218,21 @@ def test_a_template_that_is_not_a_file_is_ignored(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         assert export_template.load_template(str(tmp_path)) is None  # a directory
     assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
+def test_pdf_template_text_goes_through_pdf_safe_text(session, tmp_path, monkeypatch):
+    try:
+        export.find_font()
+    except export.ExportError:
+        pytest.skip("no system font")
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    seen: list[str] = []
+    real = export.pdf_safe_text
+    monkeypatch.setattr(export, "pdf_safe_text", lambda t, f: seen.append(t) or real(t, f))
+    tpl = write_tpl(
+        tmp_path,
+        'title = "T \U0001f600"\nheader = "H"\nfooter = "F"\n[headings]\nsummary = "Ov"\n',
+    )
+    export.export_session(session, "pdf", template=str(tpl))
+    for text in ("T \U0001f600", "H", "F", "Ov"):
+        assert text in seen

@@ -494,6 +494,61 @@ def test_a_session_folder_swapped_for_a_link_is_not_written_through(tmp_path):
     assert not list(real.iterdir())
 
 
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_pdf_safe_text_placeholder_bidi_and_scripts():
+    font = export.find_font()
+    cmap = export._font_cmap(font)
+    if 0xE000 in cmap:
+        pytest.skip("font covers the private-use probe")
+    out = export.pdf_safe_text("ab‫c⁦d؜", font)
+    assert out[0] == "a" and out[1] in "?�" and out[2:] == "bcd"
+    kept = "Привет שלום\n"
+    assert export.pdf_safe_text(kept, font) == kept
+    # LRM/RLM survive only where the font has a glyph; never a placeholder
+    marks = export.pdf_safe_text("x‏y‎z", font)
+    assert marks.replace("‏", "").replace("‎", "") == "xyz"
+    assert ("‏" in marks) == (0x200F in cmap)
+
+
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_pdf_safe_text_collapses_emoji_sequences():
+    font = export.find_font()
+    cmap = export._font_cmap(font)
+    if any(o in cmap for o in (0x1F468, 0x1F469, 0x1F466, 0x1F44D, 0x1F3FD)):
+        pytest.skip("font covers emoji")
+    family = "\U0001f468‍\U0001f469‍\U0001f466"
+    thumbs = "\U0001f44d\U0001f3fd"
+    out = export.pdf_safe_text(f"{family} {thumbs}", font)
+    assert out.count("?") + out.count("�") == 2 and " " in out
+
+
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_pdf_with_emoji_and_bidi_marks_reads_back(tmp_path):
+    from pypdf import PdfReader
+
+    text = "hi ‏ Привет שלום there"
+    seg = {"start": 0, "end": 1, "text": text, "speaker": "Me"}
+    (tmp_path / "transcript.json").write_text(json.dumps({"segments": [seg]}), "utf-8")
+    pdf = export.export_pdf(tmp_path)
+    got = "\n".join(pg.extract_text() for pg in PdfReader(str(pdf)).pages)
+    he = "שלום"
+    assert "Привет" in got and (he in got or he[::-1] in got)
+    assert "?" in got or "�" in got
+    assert "\ue000" not in got
+
+
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_pdf_safe_text_keeps_a_placeholder_after_zwj_and_normalises_controls():
+    font = export.find_font()
+    cmap = export._font_cmap(font)
+    if 0x1F468 in cmap or 0x4E2D in cmap or 0xE000 in cmap:
+        pytest.skip("font covers the probes")
+    # a lone ZWJ after an uncovered emoji must not swallow the next, non-emoji character
+    out = export.pdf_safe_text("\U0001f468‍中", font)
+    assert [c in "?�" for c in out] == [True, True]
+    assert export.pdf_safe_text("a\r\nb\rc\x00d\x07e", font) == "a\nb\ncde"
+
+
 def test_a_parent_swapped_for_a_link_during_rendering_is_refused(tmp_path):
     if sys.platform == "win32":
         pytest.skip("symlinks need privileges")
@@ -923,6 +978,18 @@ def test_a_year_is_not_a_numbered_item(session):
         ("p", "2026. The budget was approved"),
         ("num", "12. real item"),
     ]
+
+
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_pdf_summary_text_also_gets_a_placeholder(session):
+    from pypdf import PdfReader
+
+    if 0xE000 in export._font_cmap(export.find_font()):
+        pytest.skip("font covers the private-use probe")
+    (session / "summary.md").write_text("# Summary\n\nShip on Friday  ok.\n", "utf-8")
+    pdf = export.export_pdf(session)
+    got = "\n".join(pg.extract_text() for pg in PdfReader(str(pdf)).pages)
+    assert "" not in got and ("Friday ? ok" in got or "Friday � ok" in got)
 
 
 def _summary_texts(session):

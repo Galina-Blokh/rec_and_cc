@@ -27,6 +27,11 @@ class AudioSource(ABC):
     def stop(self) -> None:
         """Stop capturing and release the device. Idempotent."""
 
+    def confirmed_scope(self, timeout: float) -> str:
+        """``scope`` once the source knows it for sure (a per-app tap may fall back to "all"
+        after ``start``); "pending" if not within ``timeout`` seconds. Not on audio threads."""
+        return self.scope
+
     def add_target(self, target: AppTarget) -> bool:
         """Also record ``target`` (per-app system audio only). False if not supported."""
         return False
