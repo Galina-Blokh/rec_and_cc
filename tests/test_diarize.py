@@ -538,6 +538,47 @@ def test_slow_diarization_rewrites_the_transcript_later(tmp_path, monkeypatch):
     assert not (tmp_path / "others.wav").exists()
 
 
+def test_after_labels_waits_for_a_slow_diarization(tmp_path):
+    s = _session_with_audio(tmp_path)
+    t = Transcriber(TranscriptionConfig(model="fake"))
+    t.diarize_wait_s = 0.01
+    pending: Future = Future()
+    t.write_final(s, SEGS, 15.0, pending)
+    seen = []
+    data = tmp_path / "transcript.json"
+    t.after_labels(s.directory, lambda: seen.append(json.loads(data.read_text("utf-8"))))
+    assert seen == []  # still "Others": wait for the labels
+    pending.set_result(TURNS)
+    assert [x["speaker"] for x in seen[0]["segments"]][0] == "Speaker 1"
+    t.after_labels(s.directory, lambda: seen.append("now"))  # labels final: runs right away
+    assert seen[1:] == ["now"]
+
+
+def test_a_diarization_that_never_ends_stops_holding_its_waiters(tmp_path):
+    from recandcc.transcribe import engine
+
+    s = _session_with_audio(tmp_path)
+    t = Transcriber(TranscriptionConfig(model="fake"))
+    t.diarize_wait_s, now = 0.01, [0.0]
+    t.clock = lambda: now[0]
+    t.write_final(s, SEGS, 15.0, Future())  # never completes
+    seen = []
+    t.after_labels(s.directory, lambda: seen.append(1))
+    assert t.labels_pending(s.directory) and seen == []
+    now[0] = engine.LABEL_WAIT_MAX_S + 1  # dropped: the summary marker re-queues it
+    assert not t.labels_pending(s.directory) and t._label_waiters == {}
+
+
+def test_after_labels_runs_now_without_a_pending_diarization(tmp_path, monkeypatch):
+    s = _session_with_audio(tmp_path)
+    t = Transcriber(TranscriptionConfig(model="fake"))
+    monkeypatch.setattr(t, "start_diarization", lambda _s: _done(TURNS))
+    t.write_final(s, SEGS, 15.0)
+    seen = []
+    t.after_labels(s.directory, lambda: seen.append(1))
+    assert seen == [1]
+
+
 def test_slow_diarization_without_result_still_deletes_audio(tmp_path):
     s = _session_with_audio(tmp_path)
     t = Transcriber(TranscriptionConfig(model="fake", keep_audio=False))

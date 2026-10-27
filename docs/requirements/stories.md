@@ -218,7 +218,8 @@ while I decide.*
   background at a pinned revision, and en/ru regions by the default model; **given** it
   can't be loaded, **then** Hebrew falls back to the default model with a log warning and a
   one-time notice, and the load is retried after 5 minutes.
-- **Not yet:** a Hebrew evaluation set and WER (#6).
+- **Not yet:** a Hebrew evaluation set and WER (#6); `tests/test_hebrew_integration.py`
+  covers he/en/ru switching, RTL outputs and a two-speaker dialogue on synthetic `say` audio.
 - **Not yet:** the Windows (Tk) captions only right-justify Hebrew lines; Tk does no bidi
   reordering, so the label stays left of the Hebrew text and the glyph order is unverified
   on real hardware (#6).

@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+import time
 import types
 
 import numpy as np
@@ -155,6 +156,80 @@ def test_prefetch_loads_configured_languages_in_the_background():
     assert loads == [IVRIT] and t._model_for("he", wait=False) is t._routed[IVRIT]
     t.close()
     assert t._routed == {}
+
+
+def test_close_does_not_wait_for_a_routed_download_and_drops_its_result(monkeypatch):
+    class FakeMlx:  # a routed MLX model: must be closed when its late load is dropped
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(eng, "MlxWhisper", FakeMlx)
+    t = _loaded(Transcriber(_cfg()), HebrewFakeModel())
+    started, release, routed = threading.Event(), threading.Event(), FakeMlx()
+
+    def load(name):  # stands in for the ~1.6 GB first download
+        started.set()
+        release.wait(3)
+        return routed
+
+    t._load = load  # type: ignore[method-assign]
+    t.start_prefetch()
+    assert started.wait(5)
+    t0 = time.monotonic()
+    t.close()  # Quit, on the UI thread
+    assert time.monotonic() - t0 < 2
+    release.set()
+    with t._route_lock:
+        pass  # the prefetch has finished
+    assert routed.closed and t._routed == {}
+
+
+def test_routed_load_failing_after_close_is_silent():
+    t = _loaded(Transcriber(_cfg()), HebrewFakeModel())
+    started, release, notices = threading.Event(), threading.Event(), []
+    t.on_notice = lambda title, msg: notices.append((title, msg))
+
+    def load(name):  # the download ends after Quit, e.g. on the shut-down GPU thread
+        started.set()
+        release.wait(3)
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+    t._load = load  # type: ignore[method-assign]
+    t.start_prefetch()
+    assert started.wait(5)
+    t.close()
+    release.set()
+    with t._route_lock:
+        pass  # the prefetch has finished
+    assert t._route_retry == {} and t._routed == {} and notices == []
+
+
+def test_routed_mlx_download_does_not_block_the_shared_gpu_thread(monkeypatch):
+    started, release = threading.Event(), threading.Event()
+
+    def local_model_path(repo, *_a, **_k):
+        if "ivrit" in repo:  # a slow first download of the routed model
+            started.set()
+            release.wait(3)
+        return repo
+
+    monkeypatch.setattr(gpu, "local_model_path", local_model_path)
+    monkeypatch.setattr(gpu.MlxWhisper, "_get_model", lambda self: object())
+    main = gpu.MlxWhisper("large-v3-turbo")
+    main.load()
+    routed = gpu.MlxWhisper("ivrit-ai/whisper-large-v3-turbo", share=main)
+    loader = threading.Thread(target=routed.load, daemon=True)  # the prefetch thread
+    loader.start()
+    assert started.wait(5)
+    t0 = time.monotonic()
+    main._thread.submit(lambda: None).result()  # the next live caption pass
+    assert time.monotonic() - t0 < 2
+    release.set()
+    loader.join(5)
+    assert routed._model is not None
+    main.close()
 
 
 def test_live_hebrew_region_goes_to_the_routed_model(tmp_path):
