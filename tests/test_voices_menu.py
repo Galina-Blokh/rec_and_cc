@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import time
 
@@ -654,10 +655,12 @@ def test_waiting_for_another_process_does_not_hold_the_in_process_lock(tmp_path,
     import threading
 
     polling, release = threading.Event(), threading.Event()
+    real = voices._lock_windows if os.name == "nt" else voices._lock_posix
 
     def slow_os_lock(f):  # another process holds the voices lock until `release`
         polling.set()
         assert release.wait(5)
+        real(f)
 
     monkeypatch.setattr(voices, "_lock_posix", slow_os_lock)
     monkeypatch.setattr(voices, "_lock_windows", slow_os_lock)
