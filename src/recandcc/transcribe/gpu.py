@@ -18,12 +18,13 @@ import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 
 from ..config import TranscriptionConfig
 from .merge import language_confidence
-from .revisions import revision
+from .revisions import check_download_allowed, revision
 
 log = logging.getLogger("recandcc.transcribe")
 
@@ -31,6 +32,7 @@ log = logging.getLogger("recandcc.transcribe")
 MLX_REPOS = {
     "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
     "turbo": "mlx-community/whisper-large-v3-turbo",
+    "large": "mlx-community/whisper-large-v3-mlx",  # faster-whisper alias of large-v3
 }
 
 
@@ -41,25 +43,25 @@ def mlx_repo(model: str) -> str:
     return MLX_REPOS.get(model, f"mlx-community/whisper-{model}-mlx")
 
 
-def local_model_path(repo: str) -> str:
+def local_model_path(repo: str, allow_unpinned: bool = False) -> str:
     """Local snapshot path of ``repo``, downloading it only if it isn't on disk yet.
 
     Passing the local path to mlx_whisper (instead of the repo id) means loading never
     contacts Hugging Face once the model has been downloaded, so the app works offline. The
-    repo's pinned commit (revisions.py) is used, both on disk and for the download.
+    repo's pinned commit (revisions.py) is used, both on disk and for the download; an
+    unpinned repo is only downloaded with ``allow_unpinned`` (a cached copy loads either way).
     """
     if Path(repo).exists():
         return repo
     from huggingface_hub import snapshot_download
 
     rev = revision(repo)
-    if rev is None:
-        log.info("model %s has no pinned revision; using its latest version", repo)
     try:
         return snapshot_download(repo, revision=rev, local_files_only=True)
     except FileNotFoundError:
         # A missing or partial snapshot (LocalEntryNotFoundError, incl. IncompleteSnapshotError):
-        # download it, or finish the interrupted download.
+        # download it, or finish the interrupted download (a pinned one, or an opted-in one).
+        check_download_allowed(repo, rev, allow_unpinned)
         log.info("model %s not on disk yet; downloading it once", repo)
     except Exception:
         # A snapshot that is present but unreadable or corrupt must not go online: surface it.
@@ -102,13 +104,15 @@ def use_gpu(cfg: TranscriptionConfig) -> bool:
 class MlxWhisper:
     """One MLX Whisper model, driven from a single dedicated thread."""
 
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, allow_unpinned: bool = False) -> None:
         self.repo = mlx_repo(model)  # HF repo id; replaced by its local path in load()
+        self.allow_unpinned = allow_unpinned
         self._thread = ThreadPoolExecutor(1, thread_name_prefix="whisper-gpu")
         self._model = None
 
     def _get_model(self):
-        import mlx.core as mx
+        # mlx / mlx_whisper are installed only on Apple Silicon (see pyproject.toml).
+        import mlx.core as mx  # pyright: ignore[reportMissingImports]
 
         holder = importlib.import_module("mlx_whisper.transcribe").ModelHolder
         # Same cache mlx_whisper.transcribe() uses, so the weights are loaded once.
@@ -117,7 +121,7 @@ class MlxWhisper:
     def load(self) -> None:
         def _load():
             t0 = time.monotonic()
-            self.repo = local_model_path(self.repo)
+            self.repo = local_model_path(self.repo, self.allow_unpinned)
             self._model = self._get_model()
             log.info("loaded MLX whisper %s on the GPU in %.1fs", self.repo, time.monotonic() - t0)
 
@@ -127,7 +131,7 @@ class MlxWhisper:
         """(start, end, text) per segment, relative to the start of ``audio``."""
 
         def run():
-            import mlx_whisper
+            import mlx_whisper  # pyright: ignore[reportMissingImports]
 
             result = mlx_whisper.transcribe(
                 np.ascontiguousarray(audio, dtype=np.float32),
@@ -136,7 +140,8 @@ class MlxWhisper:
                 condition_on_previous_text=False,
                 verbose=None,
             )
-            return [(s["start"], s["end"], s["text"]) for s in result["segments"]]
+            segments = cast(list[dict[str, Any]], result["segments"])  # untyped in mlx_whisper
+            return [(s["start"], s["end"], s["text"]) for s in segments]
 
         return self._thread.submit(run).result()
 
@@ -144,8 +149,13 @@ class MlxWhisper:
         """Most likely language among ``allowed`` and its renormalised confidence."""
 
         def run():
-            import mlx.core as mx
-            from mlx_whisper.audio import N_FRAMES, N_SAMPLES, log_mel_spectrogram, pad_or_trim
+            import mlx.core as mx  # pyright: ignore[reportMissingImports]
+            from mlx_whisper.audio import (  # pyright: ignore[reportMissingImports]
+                N_FRAMES,
+                N_SAMPLES,
+                log_mel_spectrogram,
+                pad_or_trim,
+            )
 
             model = self._model or self._get_model()
             mel = log_mel_spectrogram(

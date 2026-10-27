@@ -236,7 +236,8 @@ repo):
 
 Audio and transcripts never leave your computer. The only network access is the one-time
 model download: Whisper from Hugging Face, pinned to exact repo commits
-([`revisions.py`](src/recandcc/transcribe/revisions.py)), and the 28 MB speaker model from the
+([`revisions.py`](src/recandcc/transcribe/revisions.py); unpinned custom repos are refused
+unless you opt in), and the 28 MB speaker model from the
 sherpa-onnx GitHub releases, verified by its SHA-256. After that the app works fully offline:
 models load from disk without contacting anything (tested with all network access blocked).
 

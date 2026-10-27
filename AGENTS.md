@@ -65,11 +65,12 @@ uv run pytest -q                          # fast suite: no models, no network; c
 uv run pytest -m slow                     # + real Whisper / diarization integration tests
 uv run ruff check . && uv run ruff format --check src tests
 uv run ruff format src tests              # apply formatting
+uv run pyright                            # type check src/ (basic mode, as in CI)
 ./native/macos/build.sh                   # rebuild bin/rcc-audiotap after Swift helper changes
 uv run recandcc monitor                   # watch detection live
 ```
 
-Run `ruff check` and the fast suite before every commit. Run `-m slow` when touching
+Run `ruff check`, `pyright` and the fast suite before every commit. Run `-m slow` when touching
 `transcribe/` or `capture/`.
 
 ## Workflow

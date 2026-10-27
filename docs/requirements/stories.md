@@ -22,7 +22,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-11 | Live captions and live transcript | ✅ |
 | US-12 | Speaker labels for the other side | ✅ |
 | US-13 | Readable transcripts in private folders | 🟡 owner-only not enforced on Windows (#37) |
-| US-14 | Works offline, nothing leaves the device | 🟡 some models unpinned (#39); no end-to-end offline test (#40) |
+| US-14 | Works offline, nothing leaves the device | 🟡 no end-to-end offline test (#40) |
 | US-15 | Delete old audio automatically | ✅ |
 | US-16 | Permissions set up from the app | ✅ |
 | US-17 | Always on, visible state | ✅ |
@@ -136,13 +136,14 @@ while I decide.*
 ### US-14 Works offline, nothing leaves the device
 - **Given** the models are on disk, **when** all network access is blocked, **then** a
   session records and transcribes end to end.
-- **Then** models download once: `tiny`, `base`, `small` and `large-v3-turbo` pinned to
-  exact revisions, the speaker model verified by SHA-256 (a bad checksum is rejected).
+- **Then** models download once: every offered Whisper model (`tiny` to `large-v3-turbo`,
+  both backends) pinned to an exact revision, the speaker model verified by SHA-256 (a bad
+  checksum is rejected). A custom repo without a pin is refused unless
+  `allow_unpinned_models = true`.
 - **Then** RecAndCC uploads nothing itself. The default output folder may still be synced
   by iCloud or OneDrive; the README warns, the app doesn't yet (#41).
-- **Not yet:** `medium`, `large-v3` and custom repos resolve without a pinned revision (#39), and
-  no automated test runs a whole session with the network blocked (`test_offline.py`
-  covers model loading; #40).
+- **Not yet:** no automated test runs a whole session with the network blocked
+  (`test_offline.py` and `test_model_pinning.py` cover model loading; #40).
 - **Then** logs contain events, app names and paths, never transcript text or audio.
 
 ### US-15 Delete old audio automatically

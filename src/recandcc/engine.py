@@ -410,7 +410,7 @@ class Engine:
                     if choice == "always":
                         det.app_modes[p.key] = Mode.AUTO
                         save = True
-                    if pending:
+                    if pending and r is not None:
                         r.provisional = False  # recording since the prompt appeared: keep it
                     elif r is None:
                         self._rec = _Rec(p.key, p.name, p.kind, now, manual=False)
@@ -437,6 +437,7 @@ class Engine:
             r = self._rec
             if (
                 r is not None
+                and r.key is not None  # always set for non-manual sessions
                 and not r.manual
                 and start_req is None
                 and not (stop_req or discard_req)
@@ -641,7 +642,9 @@ class Engine:
         self._session_end(session, False)
         # Also when stop() failed or dropped it as too short: whatever it wrote must go.
         session = session or started
-        if session is None:
+        # Already gone (stop() dropped it as too short): don't schedule a delete, as the next
+        # session may reuse the name. Only the engine thread creates folders, so no race here.
+        if session is None or not session.directory.exists():
             return
         mark_discarded(session.directory)
         directory = session.directory
@@ -649,7 +652,12 @@ class Engine:
 
     def _delete_discarded(self, directory) -> None:
         """Runs off the engine thread: deleting big WAVs mustn't delay detection."""
-        if discard_session(directory):
+        try:
+            deleted = discard_session(directory)
+        except Exception:
+            log.exception("could not delete discarded recording %s", directory)
+            return
+        if deleted:
             log.info("discarded recording %s", directory)
         else:
             self._notice(
