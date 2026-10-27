@@ -21,7 +21,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-10 | Fast local transcription | ✅ GPU · 🟡 CPU slower |
 | US-11 | Live captions and live transcript | ✅ |
 | US-12 | Speaker labels for the other side | ✅ |
-| US-13 | Readable transcripts in private folders | 🟡 owner-only not enforced on Windows (#37) |
+| US-13 | Readable transcripts in private folders | ✅ |
 | US-14 | Works offline, nothing leaves the device | ✅ |
 | US-15 | Delete old audio automatically | ✅ |
 | US-16 | Permissions set up from the app | ✅ |
@@ -31,6 +31,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-20 | Search my transcripts | 🟡 search only; summaries, export planned (#4) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
 | US-31 | Speaker names from the call app's participant list | 🟡 claimed (#1 A.3): opt-in, macOS, one-to-one only |
+| US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
 
 ---
 
@@ -137,9 +138,8 @@ while I decide.*
 ### US-13 Readable transcripts in private folders
 - **Then** each session is saved under `<output_dir>/<date>/<time>_<app>/` with
   `transcript.md`, `.srt`, `.json`, WAVs and `session.json`.
-- **Then** the folders RecAndCC creates are readable only by the owner (`0700` on macOS).
-- **Not yet:** on Windows, `chmod` doesn't restrict NTFS ACLs, so folders inherit the
-  parent's permissions; an owner-only ACL is needed (#37).
+- **Then** the folders RecAndCC creates are readable only by the owner: `0700` on macOS; on
+  Windows a protected access list (owner and SYSTEM only, nothing inherited from the parent).
 - **Then** the menu lists the 10 most recent transcripts.
 
 ### US-14 Works offline, nothing leaves the device
@@ -242,6 +242,12 @@ I don't have to work out who `Speaker 2` was every time.*
   never relabelled.
 - **Then** `recandcc voices list`, `voices delete <name>` and `voices delete --all` show and
   delete the profiles (`--all` also deletes every session's voices).
+- **Given** a `Speaker N` who introduces themself in their first 2 minutes ("I'm Anna",
+  "Меня зовут Анна", "קוראים לי דנה"), **when** I run `recandcc speakers <session>`,
+  **then** it shows `suggested: Anna (said: …)` next to that label (at most one per label,
+  never for `Me`; "I'm sure", "Я думаю", "This is Paris." or "אני מדבר" are not names), with
+  `speaker_names` on or off, and
+  nothing is renamed, stored or logged until I run `name-speaker`.
 - **Not yet:** naming from the menu with a voice sample, names from the call app, overlap
   handling and an accuracy measurement on real speech (#1, #13).
 
@@ -253,17 +259,43 @@ don't have to name them myself, without the app ever asking for more permission 
   **then** nothing is read from any other app.
 - **Given** it is on and Accessibility is granted, **when** a call is recorded and the call
   app's participants panel is open, **then** the visible names are sampled every ~15 s on a
-  worker thread and saved in `session.json` (`participants`); the panel is never opened or
-  clicked for me.
+  worker thread and kept in the owner-only voices store (not in the session folder); in a
+  browser only a Meet/Teams/Zoom window is read; the panel is never opened or clicked for me.
 - **Given** Accessibility is not granted, **then** nothing is read and macOS never shows its
   prompt because of RecAndCC: trust is only checked silently. Only **menu → Use names from the
   call app** explains why and opens System Settings > Accessibility.
-- **Given** exactly one unnamed speaker and one unused participant name after diarization,
-  **then** that speaker is named through the normal naming function (the profile and the
-  transcript stay consistent). With several unknown speakers and several names nothing is
-  assigned and `recandcc speakers` lists the names. A voice-profile match takes precedence and
-  `Me` is never renamed.
-- **Then** names appear nowhere in logs at INFO or above and nowhere outside the session's
-  folder and the owner-only voices store.
+- **Given** the participant names are exactly as many as the speakers besides `Me`, every
+  voice-matched speaker matches one of them, and one `Speaker N` and one name remain,
+  **then** that speaker is relabelled in the transcript (no voice profile is created from it).
+  Otherwise (several unknowns, mismatched spellings such as "Robert" vs "Bob Smith", extra
+  names, a disagreeing self-introduction) nothing is assigned and `recandcc speakers` lists the
+  names. `Me` is never renamed.
+- **Then** names appear nowhere in logs at INFO or above and nowhere outside the owner-only
+  voices store (and a transcript they were used in).
 - **Not yet:** matching several speakers to several names (needs active-speaker highlighting),
   self-introductions (A.4), tested layouts for each app version (see ARCHITECTURE).
+
+### US-27 Meeting summaries and action items
+*As the owner, I want a short summary and the action items of each meeting written next to
+its transcript, so that I know what was decided and who does what without rereading it.*
+
+- **Given** `summary.enabled = false` (default), **then** no summary is generated and no
+  summary model is downloaded or loaded.
+- **Given** `summary.enabled = true` on Apple silicon, **when** a session's final transcript
+  is written, **then** a background job (never on the audio or UI threads, and never while
+  a recording is in progress: it waits, and pauses between chunks) writes
+  `summary.md` next to `transcript.md`: a short summary and an **Action items** list, in the
+  meeting's main language (English, Russian or Hebrew headings; Hebrew right to left).
+- **Given** a transcript longer than the model's context, **then** it is summarised in
+  chunks and the chunk notes are merged (map-reduce).
+- **Then** the model runs locally (mlx-lm), pinned to an exact Hugging Face commit, loaded
+  from the local cache without the network, and downloaded once only on a genuine cache miss.
+- **Given** another platform, or the model missing while offline, **then** the summary is
+  skipped with an INFO log line and a one-time **Summary skipped** notice.
+- **When** I run `recandcc summarize <session_dir>`, **then** that session's `summary.md` is
+  (re)written, also with `summary.enabled = false`.
+- **Then** logs never contain transcript or summary text.
+- **Given** a 1-hour en/ru meeting on an M-series Mac, **then** the summary is ready within
+  ~1–2 min, offline.
+- **Not yet:** Windows/CPU backend (llama.cpp), a quality evaluation on real meetings,
+  summaries in the meeting-notes window (#4).

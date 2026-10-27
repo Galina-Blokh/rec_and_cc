@@ -494,8 +494,12 @@ class Transcriber:
             return
         try:
             callnames.apply(Path(session.directory))
-        except Exception:  # noqa: BLE001 - optional; the numbered label stays
-            log.exception("session %s: could not use call-app names", session.id)
+        except Exception as e:  # noqa: BLE001 - optional; the numbered label stays
+            # The exception text or traceback could quote a name: type at WARNING, rest at DEBUG
+            log.warning(
+                "session %s: could not use call-app names (%s)", session.id, type(e).__name__
+            )
+            log.debug("call-app names failure", exc_info=True)
 
     def _write(self, session: SessionInfo, segments: list[Segment], duration: float) -> None:
         write_outputs(session, segments, duration, self.cfg.model)

@@ -24,7 +24,6 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
 from dataclasses import fields
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +38,7 @@ from ..config import (
     load_config,
     normalize_languages,
     save_languages,
+    save_transcription_value,
 )
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind, discard_session
@@ -259,6 +259,7 @@ class Controller:
         self._config_mtime = self._mtime()
         self._save_lock = threading.Lock()  # menu writes to config.toml
         self._lang_lock = threading.Lock()  # transcription.languages + its raw spelling
+        self._summaries = None  # SummaryQueue, created on the first summary
         self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
         # global shortcut
         self._hotkey_lock = threading.Lock()
@@ -386,6 +387,21 @@ class Controller:
             threading.Thread(
                 target=self._index_session, args=(session.directory,), daemon=True, name="search"
             ).start()
+            if self.cfg.summary.enabled:
+                self._summarize(session.directory)
+
+    def _summarize(self, directory: Path) -> None:
+        """Queue summary.md for a final transcript (local LLM, own background thread)."""
+        summaries = getattr(self, "_summaries", None)
+        if summaries is None:
+            from ..transcribe.summary import SummaryQueue
+
+            summaries = self._summaries = SummaryQueue(
+                self.cfg,
+                notify=self.post_notice,
+                busy=lambda: self.engine.state.status != IDLE,  # never during a recording
+            )
+        summaries.submit(directory)
 
     # --- transcript search (worker threads; results arrive as a "search" event)
     @staticmethod
@@ -611,29 +627,63 @@ class Controller:
             return
         threading.Thread(target=self._save_languages, daemon=True, name="save-config").start()
 
-    def toggle_call_app_names(self, confirm: Callable[[], bool]) -> bool:
-        """Menu "Use names from the call app" (macOS). Returns the new state. Switching it on
-        without Accessibility trust calls ``confirm()`` (a dialog saying why) and, if the user
-        agrees, opens System Settings > Accessibility: the only way the user is ever pointed to
-        that permission. Trust is only checked silently, never requested."""
-        from .. import participants
-
+    def toggle_call_app_names(self) -> None:
+        """Menu "Use names from the call app" (macOS), from the main thread; never blocks.
+        Off is immediate. On needs `speaker_names` and Accessibility trust, checked silently on
+        a worker; without trust the UI is asked (a "call_names_confirm" event) to explain and,
+        if the user agrees, ``confirm_call_app_names`` opens System Settings > Accessibility:
+        the only way the user is ever pointed to that permission."""
         tr = self.cfg.transcription
         if tr.names_from_call_app:
-            tr.names_from_call_app = False
+            self._set_call_app_names(False)
         elif not tr.speaker_names:
             self.post_notice(
                 "Names from the call app", "Turn on transcription.speaker_names first."
             )
-            return False
         else:
-            if not participants.ax_trusted():
-                if not confirm():
-                    return False
-                participants.open_accessibility_settings()
-            tr.names_from_call_app = True
-        threading.Thread(target=self.cfg.save, daemon=True, name="save-config").start()
-        return tr.names_from_call_app
+            threading.Thread(target=self._check_ax_trust, daemon=True, name="ax-trust").start()
+
+    def _check_ax_trust(self) -> None:
+        from .. import participants
+
+        if participants.ax_trusted():
+            self._set_call_app_names(True)
+        else:
+            self.events.put(("call_names_confirm",))
+
+    def confirm_call_app_names(self) -> None:
+        """The user agreed to the explanation: open the Accessibility pane and switch on."""
+
+        def run() -> None:
+            from .. import participants
+
+            participants.open_accessibility_settings()
+            self._set_call_app_names(True)
+
+        threading.Thread(target=run, daemon=True, name="ax-settings").start()
+
+    def _set_call_app_names(self, on: bool) -> None:
+        self.cfg.transcription.names_from_call_app = on
+        threading.Thread(target=self._save_call_app_names, daemon=True, name="save-config").start()
+
+    def _save_call_app_names(self) -> None:
+        """Write only this key into config.toml (a hand edit made meanwhile is kept)."""
+        with self._save_lock:
+            value = bool(self.cfg.transcription.names_from_call_app)
+            edited = self._mtime() != self._config_mtime
+            try:
+                try:
+                    save_transcription_value("names_from_call_app", value, CONFIG_PATH)
+                except FileNotFoundError:
+                    self.cfg.save(CONFIG_PATH)
+                if not edited:
+                    self._config_mtime = self._mtime()
+            except ValueError:  # invalid TOML (mid-edit?): don't overwrite the user's file
+                log.warning("config.toml could not be parsed; setting not saved")
+                self.post_notice("Setting not saved", "config.toml could not be parsed")
+            except Exception:
+                log.exception("saving settings failed")
+                self.post_notice("Settings not saved", "config.toml could not be written")
 
     def _save_languages(self) -> None:
         """Write the menu's languages into config.toml, changing nothing else in the file: a

@@ -3,8 +3,8 @@
 Off by default (``transcription.names_from_call_app``) and only used with ``speaker_names``.
 While a call is recorded, a worker thread asks the ``rcc-audiotap participants`` helper every
 ~15 s for the names in the triggering app's participants panel, if the user has opened it. The
-union is kept in ``session.json`` (``participants``) and used after diarization, see
-``transcribe/callnames.py``. Names are personal data: never logged above DEBUG.
+union is kept in the owner-only voices store (not the session folder) and used after
+diarization, see ``transcribe/callnames.py``. Names are personal data: never logged above DEBUG.
 
 Accessibility trust is only ever *checked* here (``AXIsProcessTrusted`` via the helper), never
 requested: the single place that sends the user to the Accessibility settings is the explicit
@@ -29,12 +29,13 @@ log = logging.getLogger(__name__)
 INTERVAL_S = 15.0
 FIRST_SAMPLE_S = 3.0  # the panel is usually opened a little after the call starts
 HELPER_TIMEOUT_S = 8.0
+STOP_JOIN_S = 3.0  # an in-flight sample may be lost; the next ones are not needed
 MAX_NAMES = 60
 MAX_NAME_LEN = 60
 ACCESSIBILITY_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
 
-# "Anna (Me)", "Anna (You)": the user's own entry, who is already `Me`.
-_SELF = re.compile(r"\((me|you|host,\s*me|я|אני)\)", re.IGNORECASE)
+# "Anna (Me)", "Anna (You)", or a bare "You": the user's own entry, who is already `Me`.
+_SELF = re.compile(r"\((me|you|host,\s*me|я|אני)\)|^(me|you|я|ты|אני)$", re.IGNORECASE)
 _ROLE = re.compile(r"\s*\((host|co-host|guest|organizer|presenter|external)\)\s*$", re.IGNORECASE)
 _NOT_A_NAME = re.compile(r"^(participants?|people|attendees?|in this call|\d+)\b", re.IGNORECASE)
 
@@ -49,10 +50,10 @@ def clean_names(raw: list[str]) -> list[str]:
     """Display names from raw list rows: own entry, roles, status text and duplicates dropped."""
     out: list[str] = []
     for item in raw:
-        text = str(item).strip()
-        if not text or _SELF.search(text):
+        parts = [p.strip() for p in str(item).split("\n") if p.strip()]  # one per text of a row
+        if not parts or any(_SELF.search(p) for p in parts):
             continue
-        text = _ROLE.sub("", text.split(",")[0]).strip()  # Zoom: "Anna, Computer audio muted"
+        text = _ROLE.sub("", parts[0].split(",")[0]).strip()  # Zoom: "Anna, Computer audio muted"
         if not text or len(text) > MAX_NAME_LEN or _NOT_A_NAME.match(text):
             continue
         if text.casefold() not in {n.casefold() for n in out}:
@@ -139,11 +140,15 @@ class ParticipantSampler:
     def start(self) -> None:
         self._thread.start()
 
+    def signal(self) -> None:
+        """Ask the thread to end (returns at once); ``stop()`` then collects the names."""
+        self._stop.set()
+
     def stop(self) -> list[str]:
         """Stop sampling and return every name seen, in order of first appearance."""
-        self._stop.set()
+        self.signal()
         if self._thread.is_alive() and self._thread is not threading.current_thread():
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=STOP_JOIN_S)
         with self._lock:
             return list(self._names)
 
@@ -181,7 +186,15 @@ def start_sampler(cfg: Config, target: AppTarget | None, **kwargs) -> Participan
 
 
 def store(session: SessionInfo, names: list[str]) -> None:
-    """Keep the names with the session (session.json), only when there are any."""
-    if names:
-        session.participants = list(names)
-        log.info("session %s: saw %d participant name(s)", session.id, len(names))
+    """Keep the names in the owner-only voices store (not in the session folder, which may
+    sync to a cloud), only when there are any."""
+    if not names:
+        return
+    from .transcribe import voices
+
+    try:
+        voices.write_session_names(session, names)
+    except OSError:
+        log.warning("session %s: could not keep the participant names", session.id)
+        return
+    log.info("session %s: saw %d participant name(s)", session.id, len(names))

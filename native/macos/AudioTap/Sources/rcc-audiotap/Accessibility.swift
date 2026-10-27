@@ -33,11 +33,23 @@ private let listRoles: Set<String> = ["AXList", "AXTable", "AXOutline", "AXGroup
 private let textRoles: Set<String> = ["AXStaticText", "AXCell", "AXRow", "AXListItem", "AXGroup"]
 private let maxNodes = 4000
 private let maxDepth = 30
+private let perAppSeconds = 2.0
+
+// Browsers show many tabs and windows: only a window whose title says it is a call page is
+// read, never a LinkedIn/Contacts/GitHub "People" list in another tab. (A window's title is
+// the title of its selected tab.)
+private let browserIDs = [
+    "chrome", "safari", "firefox", "edgemac", "brave", "thebrowser", "opera", "vivaldi",
+]
+private let callPageWords = [
+    "google meet", "meet.google.com", "meet - ", "meet \u{2013} ", "meet \u{2014} ",
+    "microsoft teams", "teams.microsoft", "zoom",
+]
 
 private final class Walker {
     var nodes = 0
     var names: [String] = []
-    let deadline = Date().addingTimeInterval(3)
+    let deadline = Date().addingTimeInterval(perAppSeconds)  // each app has its own budget
 
     var exhausted: Bool { nodes >= maxNodes || Date() > deadline }
 
@@ -54,7 +66,7 @@ private final class Walker {
         for child in children(element) { find(child, depth: depth + 1) }
     }
 
-    /// The first text of each row of `list`. True if any was found.
+    /// One entry per row of `list`: all the row's texts, one per line. True if any was found.
     private func collect(_ list: AXUIElement) -> Bool {
         var found = false
         func rows(_ element: AXUIElement, _ depth: Int) {
@@ -63,8 +75,11 @@ private final class Walker {
             for row in children(element) {
                 let role = text(row, kAXRoleAttribute)
                 if role == "AXRow" || role == "AXListItem" {
-                    if let name = firstText(row, 0) {
-                        names.append(name)
+                    var texts: [String] = []
+                    allTexts(row, 0, &texts)
+                    if !texts.isEmpty {
+                        // every text of the row, so the caller can spot the user's own "(You)"
+                        names.append(texts.joined(separator: "\n"))
                         found = true
                     }
                 } else {
@@ -76,22 +91,19 @@ private final class Walker {
         return found
     }
 
-    private func firstText(_ element: AXUIElement, _ depth: Int) -> String? {
-        if exhausted || depth > 6 { return nil }
+    private func allTexts(_ element: AXUIElement, _ depth: Int, _ out: inout [String]) {
+        if exhausted || depth > 6 || out.count >= 8 { return }
         nodes += 1
-        if depth > 0, textRoles.contains(text(element, kAXRoleAttribute)) {
+        if textRoles.contains(text(element, kAXRoleAttribute)) {
             for name in [kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute] {
                 let value = text(element, name)
-                if !value.isEmpty { return value }
+                if !value.isEmpty {
+                    if !out.contains(value) { out.append(value) }
+                    break
+                }
             }
-        } else if depth == 0 {
-            let value = text(element, kAXTitleAttribute)
-            if !value.isEmpty { return value }
         }
-        for child in children(element) {
-            if let value = firstText(child, depth + 1) { return value }
-        }
-        return nil
+        for child in children(element) { allTexts(child, depth + 1, &out) }
     }
 }
 
@@ -111,12 +123,25 @@ func runParticipants(pids: [pid_t], matches: [String]) -> Never {
         return pids.contains(app.processIdentifier)
             || wanted.contains { id.contains($0) || name.contains($0) }
     }
+    // A slow app can't hang the whole read: a short timeout for every AX call of this process
+    // and a separate time budget per app.
+    AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
     var names: [String] = []
     for app in apps {
         let walker = Walker()
         let root = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetMessagingTimeout(root, 1.0)
-        walker.find(root, depth: 0)
+        let id = (app.bundleIdentifier ?? "").lowercased()
+        if browserIDs.contains(where: { id.contains($0) }) {
+            let windows = (attribute(root, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+            for window in windows {
+                let title = text(window, kAXTitleAttribute).lowercased()
+                if callPageWords.contains(where: { title.contains($0) }) {
+                    walker.find(window, depth: 0)
+                }
+            }
+        } else {
+            walker.find(root, depth: 0)
+        }
         names += walker.names
     }
     printJSON(["trusted": true, "names": names])

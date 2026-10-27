@@ -1,6 +1,6 @@
 """Opt-in speaker names from the call app's participant list, with fakes (no real
-Accessibility, no helper): gating, silent trust checks, storage, conservative assignment,
-logging and Windows import safety.
+Accessibility, no helper): gating, silent trust checks, private storage, conservative
+assignment, logging, the menu toggle and Windows import safety.
 
 Stories: US-31.
 """
@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 from pathlib import Path
 
 import numpy as np
@@ -20,15 +21,24 @@ import pytest
 from test_recorder import FakeSource, sine
 from test_transcribe import make_session
 
-from recandcc import participants
+from recandcc import config, participants
 from recandcc.config import Config
 from recandcc.models import AppTarget, SessionInfo, TriggerKind
 from recandcc.recorder import Recorder
 from recandcc.transcribe import callnames, voices
+from recandcc.ui import common
 from recandcc.ui.common import Controller
 
 TARGET = AppTarget(("us.zoom",), (123,))
 NAME = "Zelda Quuxington"  # a fake participant name, must never reach a log
+
+
+@pytest.fixture(autouse=True)
+def private_app_data(tmp_path, monkeypatch):
+    """Never touch the real config.toml or voices folder of whoever runs the tests."""
+    monkeypatch.setattr(voices, "VOICES_DIR", tmp_path / "app" / "voices")
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "app" / "config.toml")
+    monkeypatch.setattr(common, "CONFIG_PATH", tmp_path / "app" / "config.toml")
 
 
 def on_cfg(**kw) -> Config:
@@ -83,6 +93,8 @@ def test_sampler_collects_union_in_order():
 def test_clean_names():
     raw = ["Anna (Host)", "Participants (3)", "7", "Bob (You)", "x" * 99, "", "Дима", "Anna"]
     assert participants.clean_names(raw) == ["Anna", "Дима"]
+    # a row has several texts: the user's own marker may be any of them, or the whole name
+    assert participants.clean_names(["Bob\n(You)", "You", "Cleo\nmuted", "Me"]) == ["Cleo"]
 
 
 def test_trust_check_never_prompts(mac, monkeypatch):
@@ -100,17 +112,27 @@ def test_trust_check_never_prompts(mac, monkeypatch):
     assert "--pid" in calls[1] and "us.zoom" in calls[1]
 
 
-def test_helper_never_uses_the_prompting_api():
+def swift_sources() -> dict[str, str]:
     src = Path(participants.__file__).parents[2] / "native/macos/AudioTap/Sources"
+    return {p.name: p.read_text(encoding="utf-8") for p in src.rglob("*.swift")}
+
+
+def test_helper_never_uses_the_prompting_api():
     code = "\n".join(
         line
-        for p in src.rglob("*.swift")
-        for line in p.read_text(encoding="utf-8").splitlines()
+        for text in swift_sources().values()
+        for line in text.splitlines()
         if not line.lstrip().startswith("//")
     )
     assert "AXIsProcessTrusted()" in code
     assert "AXIsProcessTrustedWithOptions" not in code
     assert "kAXTrustedCheckOptionPrompt" not in code
+
+
+def test_helper_walk_is_limited_to_call_windows_and_has_budgets():
+    code = swift_sources()["Accessibility.swift"]
+    assert "browserIDs" in code and "callPageWords" in code  # browsers: call windows only
+    assert "AXUIElementCreateSystemWide()" in code and "perAppSeconds" in code
 
 
 def _recorder(tmp_path, cfg):
@@ -123,7 +145,7 @@ def _recorder(tmp_path, cfg):
     )
 
 
-def test_recorder_stores_names_in_session_json(mac, tmp_path, monkeypatch):
+def test_recorder_keeps_names_in_the_private_store_not_the_session(mac, tmp_path, monkeypatch):
     real = participants.ParticipantSampler
     monkeypatch.setattr(
         participants,
@@ -136,7 +158,9 @@ def test_recorder_stores_names_in_session_json(mac, tmp_path, monkeypatch):
     s = rec.start(TriggerKind.CALL, "zoom.us", target=TARGET)
     time.sleep(0.3)
     assert rec.stop() is not None
-    assert SessionInfo.load(s.directory).participants == ["Anna"]
+    assert voices.read_session_names(s.id) == ["Anna"]
+    # the session folder may sync to a cloud: no name in it
+    assert not any("Anna" in p.read_text(errors="ignore") for p in s.directory.glob("*.json"))
 
 
 def test_recorder_without_the_option_has_no_sampler(mac, tmp_path):
@@ -146,31 +170,51 @@ def test_recorder_without_the_option_has_no_sampler(mac, tmp_path):
     rec.stop()
 
 
+def test_stop_signals_the_sampler_and_joins_it_outside_the_lock(mac, tmp_path, monkeypatch):
+    order = []
+
+    class Fake:
+        def signal(self):
+            order.append("signal")
+
+        def stop(self):
+            order.append(("join", rec._op_lock.locked()))
+            return []
+
+    monkeypatch.setattr(participants, "start_sampler", lambda cfg, target: Fake())
+    rec = _recorder(tmp_path, on_cfg())
+    rec.start(TriggerKind.CALL, "zoom.us", target=TARGET)
+    rec.stop()
+    assert order == ["signal", ("join", False)]
+
+
 # -- assignment ---------------------------------------------------------------------------------
-def test_plan_assigns_only_the_one_to_one_case():
+def test_plan_assigns_only_the_certain_case():
     assert callnames.plan(["Me", "Speaker 1"], ["Anna"]) == {"Speaker 1": "Anna"}
-    assert callnames.plan(["Me", "Others"], ["Anna"]) == {"Others": "Anna"}
     # several unknowns and several names: nothing is guessed
     assert callnames.plan(["Speaker 1", "Speaker 2"], ["Anna", "Bob"]) == {}
+    # the number of names must equal the number of other speakers: an extra name (maybe from an
+    # unrelated list), a missing name or none make the panel untrustworthy
     assert callnames.plan(["Speaker 1"], ["Anna", "Bob"]) == {}
     assert callnames.plan(["Speaker 1", "Speaker 2"], ["Anna"]) == {}
     assert callnames.plan(["Speaker 1"], []) == {}
+    # "Others" (no diarization) is not a speaker to name
+    assert callnames.plan(["Me", "Others"], ["Anna"]) == {}
 
 
-def test_plan_profile_matches_take_precedence_and_me_is_untouched():
-    # Bob was recognized by voice: his name is taken, the one free name goes to Speaker 2
-    assert callnames.plan(["Me", "Bob", "Speaker 2"], ["Bob", "Anna"]) == {"Speaker 2": "Anna"}
-    # Me is never an unknown speaker, and its label is never a free name
+def test_plan_known_speakers_must_match_names_and_me_is_untouched():
+    labels = ["Me", "Bob Smith", "Speaker 2"]
+    assert callnames.plan(labels, ["bob", "Anna"]) == {"Speaker 2": "Anna"}  # first-name overlap
+    assert callnames.plan(labels, ["BOB SMITH", "Anna"]) == {"Speaker 2": "Anna"}
+    # "Robert" is not "Bob Smith": the panel doesn't show him, so it can't be trusted
+    assert callnames.plan(["Me", "Robert", "Speaker 2"], ["Bob Smith", "Anna"]) == {}
+    assert callnames.plan(["Me", "Bob", "Speaker 2"], ["Anna", "Cleo"]) == {}
     assert callnames.plan(["Me"], ["Anna"]) == {}
-    unnamed, free = callnames.split_candidates(["Me", "Speaker 1"], ["Me", "Anna"])
-    assert unnamed == ["Speaker 1"] and free == ["Anna"]
 
 
-def _session_with_voice(tmp_path, monkeypatch, names):
-    monkeypatch.setattr(voices, "VOICES_DIR", tmp_path / "voices")
+def _session_with_voice(tmp_path, names, said="hello"):
     s = make_session(tmp_path)
-    s.participants = names
-    s.save()
+    voices.write_session_names(s, names)
     seg = {"language": "en"}
     (tmp_path / "transcript.json").write_text(
         json.dumps(
@@ -179,7 +223,7 @@ def _session_with_voice(tmp_path, monkeypatch, names):
                 "model": "m",
                 "segments": [
                     {"start": 0, "end": 1, "text": "hi", "speaker": "Me", **seg},
-                    {"start": 1, "end": 2, "text": "hello", "speaker": "Speaker 1", **seg},
+                    {"start": 1, "end": 2, "text": said, "speaker": "Speaker 1", **seg},
                 ],
             }
         )
@@ -188,23 +232,34 @@ def _session_with_voice(tmp_path, monkeypatch, names):
     return s
 
 
-def test_apply_names_through_the_naming_function(tmp_path, monkeypatch):
-    _session_with_voice(tmp_path, monkeypatch, ["Anna"])
+def test_apply_renames_the_label_but_creates_no_voice_profile(tmp_path):
+    s = _session_with_voice(tmp_path, ["Anna"])
     assert callnames.apply(tmp_path) is True
     assert "Anna" in (tmp_path / "transcript.json").read_text()
-    assert [p.name for p in voices.load_profiles()] == ["Anna"]
+    assert voices.load_profiles() == []  # a name from another app is not a voice identity
+    assert list(voices.read_session_voices(s.id)) == ["Anna"]  # confirmable with name-speaker
+    assert voices.read_session_names(s.id) == []  # used up
 
 
-def test_apply_leaves_ambiguous_sessions_alone(tmp_path, monkeypatch):
-    _session_with_voice(tmp_path, monkeypatch, ["Anna", "Bob"])
+def test_apply_leaves_ambiguous_sessions_alone(tmp_path):
+    _session_with_voice(tmp_path, ["Anna", "Bob"])
     assert callnames.apply(tmp_path) is False
     assert "Speaker 1" in (tmp_path / "transcript.json").read_text()
     assert voices.load_profiles() == []
     assert callnames.suggestions(tmp_path) == ["Anna", "Bob"]
 
 
-def test_logs_never_contain_names(tmp_path, monkeypatch, caplog):
-    _session_with_voice(tmp_path, monkeypatch, [NAME])
+def test_a_disagreeing_self_introduction_wins(tmp_path):
+    _session_with_voice(tmp_path, ["Anna"], said="Hello everyone, my name is Bob and I run this")
+    assert callnames.apply(tmp_path) is False
+    assert "Speaker 1" in (tmp_path / "transcript.json").read_text()
+    # an agreeing introduction does not get in the way
+    _session_with_voice(tmp_path, ["Bob Smith"], said="Hello everyone, my name is Bob")
+    assert callnames.apply(tmp_path) is True
+
+
+def test_logs_never_contain_names(tmp_path, caplog):
+    _session_with_voice(tmp_path, [])
     caplog.set_level(logging.DEBUG)
     s = participants.ParticipantSampler(
         TARGET, trusted=lambda: True, read=lambda t: [NAME], interval=0.01, first_after=0
@@ -218,6 +273,20 @@ def test_logs_never_contain_names(tmp_path, monkeypatch, caplog):
     callnames.apply(tmp_path)
     assert names == [NAME]
     assert not [r for r in caplog.records if NAME in r.getMessage()]
+
+
+def test_failure_logs_the_type_only(tmp_path, monkeypatch, caplog):
+    from recandcc.config import TranscriptionConfig
+    from recandcc.transcribe.engine import Transcriber
+
+    def boom(_directory):
+        raise ValueError(NAME)
+
+    monkeypatch.setattr(callnames, "apply", boom)
+    t = Transcriber(TranscriptionConfig(model="fake", speaker_names=True, names_from_call_app=True))
+    caplog.set_level(logging.INFO)
+    t._name_from_call_app(make_session(tmp_path))
+    assert "ValueError" in caplog.text and NAME not in caplog.text
 
 
 # -- menu toggle --------------------------------------------------------------------------------
@@ -235,29 +304,59 @@ class Mon:
 
 
 def make_ctrl(**kw):
-    cfg = on_cfg(names=False, **kw)
-    cfg.save = lambda *_a, **_k: None  # type: ignore[method-assign]
+    path = common.CONFIG_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('[detection]\nmode = "off"\n[transcription]\nlive = false\n', encoding="utf-8")
+    cfg = config.load_config(path)
+    cfg.transcription.speaker_names = kw.get("speaker_names", True)
     return Controller(cfg, monitor=Mon(), recorder=object(), tq=Q(), start_threads=False)
 
 
-def test_toggle_explains_and_opens_settings_only_when_untrusted(monkeypatch):
-    opened = []
-    monkeypatch.setattr(participants, "ax_trusted", lambda: False)
+def settle():
+    for t in threading.enumerate():
+        if t.name in ("ax-trust", "ax-settings", "save-config"):
+            t.join(5)
+
+
+def saved():
+    return tomllib.loads(common.CONFIG_PATH.read_text(encoding="utf-8"))["transcription"]
+
+
+def test_toggle_checks_trust_off_the_main_thread_and_asks_before_opening_settings(monkeypatch):
+    opened, threads = [], []
+    monkeypatch.setattr(
+        participants, "ax_trusted", lambda: threads.append(threading.current_thread()) or False
+    )
     monkeypatch.setattr(participants, "open_accessibility_settings", lambda: opened.append(1))
     ctrl = make_ctrl()
-    assert ctrl.toggle_call_app_names(lambda: False) is False  # user said "Not now"
+    ctrl.toggle_call_app_names()
+    settle()
+    assert threads and threads[0] is not threading.main_thread()
+    assert ctrl.events.get_nowait() == ("call_names_confirm",)
     assert opened == [] and not ctrl.cfg.transcription.names_from_call_app
-    assert ctrl.toggle_call_app_names(lambda: True) is True
+    ctrl.confirm_call_app_names()  # the user said "Open Settings"
+    settle()
     assert opened == [1] and ctrl.cfg.transcription.names_from_call_app
-    assert ctrl.toggle_call_app_names(lambda: pytest.fail("no dialog to turn off")) is False
+    # only its own key is written; the rest of the file is as the user had it
+    assert saved() == {"live": False, "names_from_call_app": True}
+    assert 'mode = "off"' in common.CONFIG_PATH.read_text(encoding="utf-8")
+    ctrl.toggle_call_app_names()  # off: immediate
+    settle()
+    assert saved()["names_from_call_app"] is False
 
 
-def test_toggle_trusted_needs_no_dialog_and_speaker_names_is_required(monkeypatch):
+def test_toggle_when_trusted_needs_no_dialog_and_requires_speaker_names(monkeypatch):
     monkeypatch.setattr(participants, "ax_trusted", lambda: True)
     monkeypatch.setattr(participants, "open_accessibility_settings", lambda: pytest.fail("open"))
-    assert make_ctrl().toggle_call_app_names(lambda: pytest.fail("dialog")) is True
+    ctrl = make_ctrl()
+    ctrl.toggle_call_app_names()
+    settle()
+    assert ctrl.cfg.transcription.names_from_call_app and ctrl.events.empty()
     off = make_ctrl(speaker_names=False)
-    assert off.toggle_call_app_names(lambda: True) is False
+    off.toggle_call_app_names()
+    settle()
+    assert not off.cfg.transcription.names_from_call_app
+    assert off.events.get_nowait()[0] == "notice"
 
 
 def test_module_is_inert_off_macos(monkeypatch):
@@ -265,3 +364,19 @@ def test_module_is_inert_off_macos(monkeypatch):
     assert participants.ax_trusted() is False
     participants.open_accessibility_settings()  # no-op, no subprocess
     assert participants.enabled(on_cfg()) is False
+
+
+def test_names_are_pruned_with_their_session_and_deleted_with_all_voices(tmp_path):
+    day = tmp_path / "day"
+    folder = day / "s"
+    folder.mkdir(parents=True)
+    s = make_session(folder)
+    voices.write_session_names(s, ["Anna"])
+    assert voices.prune_session_voices() == 0 and voices.read_session_names(s.id) == ["Anna"]
+    import shutil
+
+    shutil.rmtree(folder)
+    assert voices.prune_session_voices() == 1 and voices.read_session_names(s.id) == []
+    voices.write_session_names(s, ["Anna"])
+    voices.delete_all_profiles()
+    assert voices.read_session_names(s.id) == []

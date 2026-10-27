@@ -206,6 +206,8 @@ class MacApp(rumps.App):
                     self._live_id = None
                     if self.captions is not None:
                         self.captions.end()
+            elif kind == "call_names_confirm":
+                self._confirm_call_names()
             elif kind == "search":
                 self._show_hits(ev[1], ev[2])
             elif kind == "refreshed":
@@ -226,6 +228,7 @@ class MacApp(rumps.App):
             self.rec_item.title = rec_title
         self.login_item.state = check(autostart.is_enabled())
         self._render_languages()
+        self.call_names_item.state = check(self.cfg.transcription.names_from_call_app)
         self._render_live(st)
         # close a stale prompt dialog (answered elsewhere, expired, mode changed, ...)
         with self._dialog_lock:
@@ -300,24 +303,26 @@ class MacApp(rumps.App):
 
         return cb
 
-    def _toggle_call_names(self, sender) -> None:
-        def confirm() -> bool:
-            return bool(
-                rumps.alert(
-                    title="Use names from the call app",
-                    message=(
-                        "RecAndCC can read the names in your call app's participants panel "
-                        "(Zoom, Teams, Meet) to name speakers. This needs the Accessibility "
-                        "permission, which macOS only lets you grant in System Settings. "
-                        "RecAndCC only reads the visible list, never clicks, and keeps the "
-                        "names on this Mac. Open Accessibility settings now?"
-                    ),
-                    ok="Open Settings",
-                    cancel="Not now",
-                )
-            )
+    def _toggle_call_names(self, _sender) -> None:
+        self.ctrl.toggle_call_app_names()  # the item's check mark follows the setting in _render
 
-        sender.state = check(self.ctrl.toggle_call_app_names(confirm))
+    def _confirm_call_names(self) -> None:
+        """Main thread, after the worker found Accessibility not granted: explain, then open
+        the settings pane if the user agrees. Nothing here asks macOS for the permission."""
+        agreed = rumps.alert(
+            title="Use names from the call app",
+            message=(
+                "RecAndCC can read the names in your call app's participants panel (Zoom, "
+                "Teams, Meet) to name speakers. This needs the Accessibility permission, which "
+                "macOS only lets you grant in System Settings. RecAndCC only reads the visible "
+                "list, never clicks, and keeps the names on this Mac. Open Accessibility "
+                "settings now?"
+            ),
+            ok="Open Settings",
+            cancel="Not now",
+        )
+        if agreed:
+            self.ctrl.confirm_call_app_names()
 
     def _toggle_rec(self, _sender) -> None:
         self.ctrl.toggle_recording()
