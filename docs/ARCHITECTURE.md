@@ -56,7 +56,7 @@ across platforms.
 | `ui/` | `common.Controller` (platform-independent glue) + `present.py` (pure presenter logic: menu titles and check marks, notice texts, the ask dialog script and its answers, toast placement) + `mac.py` (rumps) / `tray.py` (pystray) / `toast_mac.py`, thin shells that only apply it |
 | `ui/notes.py` | Meeting notes (pure logic, no UI imports): scan session folders newest first, row texts, `summary.md` excerpt, rename (`title` in `session.json`), delete to the Trash (Foundation / `SHFileOperationW`) or via `discard_session`, the macOS dialog scripts; the Windows window is `TkNotes` in `tray.py` |
 | `ui/captions*.py` | Live captions window: `captions.py` (pure logic: ordering, trimming, header, panel frame, speaker colours) + `captions_mac.py` (floating non-activating NSPanel); Windows uses a Tk window in `tray.py` |
-| `ui/bidi.py` | Pure visual reordering of right-to-left (Hebrew) text for Tk widgets on Windows |
+| `ui/bidi.py` | Pure visual reordering of right-to-left (Hebrew) text for Tk widgets on Windows; long lines are wrapped in logical order first, then each piece reordered |
 | `autostart.py` | LaunchAgent (macOS) / HKCU Run key (Windows) |
 | `logging_setup.py`, `metrics.py` | Log file + crash reporting (`sys`/`threading.excepthook` → log with traceback, thread crash → `notice` toast at most once per thread name per minute; `faulthandler` → `<log dir>/faults.log`); per-session pipeline metrics in `session.json` `metrics` + one INFO summary line |
 | `transcribe/voices.py` | Opt-in voice profiles (`speaker_names`): speaker names remembered across sessions, kept in the owner-only voices store |
