@@ -207,3 +207,23 @@ def test_startup_purge_skips_discarded_sessions(tmp_path):
     (d / SessionInfo.DISCARD_MARKER).write_bytes(b"")  # owned by purge_discarded_sessions
     assert purge_transcribed_audio(tmp_path) == []
     assert len(list(d.glob("*.wav"))) == 2
+
+
+def test_retention_spares_sessions_waiting_for_speaker_labels(tmp_path):
+    """A slow diarization still reads the WAVs: the hourly purge waits for its labels."""
+    import os
+    import time
+
+    d = make_session(tmp_path, "diarizing", 10)
+    marker = d / SessionInfo.LABELS_PENDING_MARKER
+    marker.touch()
+    assert purge_old_audio(tmp_path, 7, now=NOW) == []
+    assert len(list(d.glob("*.wav"))) == 2
+
+    stale = time.time() - SessionInfo.LABELS_PENDING_MAX_S - 60  # left by a crash
+    os.utime(marker, (stale, stale))
+    assert len(purge_old_audio(tmp_path, 7, now=NOW)) == 2
+
+    d2 = make_session(tmp_path, "labelled", 10)  # labels done: marker gone, purged
+    assert len(purge_old_audio(tmp_path, 7, now=NOW)) == 2
+    assert not list(d2.glob("*.wav"))
