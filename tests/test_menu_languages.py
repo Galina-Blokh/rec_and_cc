@@ -263,3 +263,43 @@ def test_menu_change_waiting_for_its_save_survives_a_reload(tmp_path, monkeypatc
     ctrl.write_settings("live_captions")
     assert load_config(path).live_captions is False
     assert ctrl._dirty == {}
+
+
+def _locked(*_a):
+    from recandcc.config import ConfigLockTimeout
+
+    raise ConfigLockTimeout("locked")
+
+
+def test_failed_language_save_restores_both_fields(tmp_path, monkeypatch):
+    """The raw spelling ("iw") is what the save tried; the rollback restores it and the
+    normalized list together."""
+    ctrl, path = _ctrl(tmp_path, monkeypatch, '["iw"]')
+    monkeypatch.setattr(common, "save_keys", _locked)
+    _toggle(ctrl, "ru")
+    tr = ctrl.cfg.transcription
+    assert tr.languages == ["he"]
+    assert tr._raw_languages == ["iw"]  # type: ignore[attr-defined]
+
+
+def test_failed_language_save_keeps_a_newer_queued_toggle(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch, '["en"]')
+    real = common.save_keys
+    calls = []
+
+    def first_fails(p, values):
+        calls.append(values["transcription.languages"])
+        if len(calls) == 1:
+            ctrl.toggle_language("de")  # toggle 2, queued behind save 1
+            raise __import__("recandcc.config").config.ConfigLockTimeout("locked")
+        return real(p, values)
+
+    monkeypatch.setattr(common, "save_keys", first_fails)
+    _toggle(ctrl, "ru")
+    for _ in range(3):
+        for t in threading.enumerate():
+            if t.name == "save-config":
+                t.join(5)
+    assert calls == [["en", "ru"], ["en", "ru", "de"]]
+    assert ctrl.cfg.transcription.languages == ["en", "ru", "de"]
+    assert load_config(path).transcription.languages == ["en", "ru", "de"]
