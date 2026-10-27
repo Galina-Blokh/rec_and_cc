@@ -37,6 +37,7 @@ from ..retention import purge_old_audio
 log = logging.getLogger(__name__)
 
 RECENT_COUNT = 10
+SEARCH_LIMIT = 20
 HOTKEY_DEBOUNCE_S = 0.5
 REFRESH_EVERY_S = 10.0
 PERM_KINDS = ("microphone", "system_audio")
@@ -120,6 +121,14 @@ def transcript_label(path: Path) -> str:
     hhmmss, _, slug = sess.partition("_")
     t = f"{hhmmss[:2]}:{hhmmss[2:4]}" if len(hhmmss) >= 4 and hhmmss[:4].isdigit() else hhmmss
     return f"{day} {t} {slug}".strip()
+
+
+def search_hit_label(hit) -> str:
+    """'2026-10-26 14:03 zoom-us · 12:05 Me: …the [budget] for…' for a search.Hit."""
+    t = int(hit.start)
+    when = f"{t // 60:02d}:{t % 60:02d}"
+    text = " ".join(hit.snippet.split())
+    return f"{transcript_label(hit.transcript)} · {when} {hit.speaker}: {text}"
 
 
 def untranscribed_sessions(output_dir: Path) -> list[SessionInfo]:
@@ -350,6 +359,36 @@ class Controller:
     def _on_transcribed(self, session: SessionInfo, result) -> None:
         self.events.put(("transcribed", session, result))
         self.refresh_async(force=True)
+        if not isinstance(result, Exception):
+            threading.Thread(
+                target=self._index_session, args=(session.directory,), daemon=True, name="search"
+            ).start()
+
+    # --- transcript search (worker threads; results arrive as a "search" event)
+    @staticmethod
+    def _index_session(directory: Path) -> None:
+        try:
+            from ..search import default_index
+
+            default_index().index_session(directory)
+        except Exception:  # noqa: BLE001 - search is optional; never break transcription
+            log.exception("could not update the search index")
+
+    def search_async(self, query: str) -> None:
+        """Search the transcripts off the UI thread; posts ``("search", query, hits)``, with
+        hits the exception if the search failed."""
+
+        def run() -> None:
+            try:
+                from ..search import search_transcripts
+
+                hits = search_transcripts(self.cfg.output_dir, query, SEARCH_LIMIT)
+            except Exception as e:  # noqa: BLE001
+                log.exception("transcript search failed")
+                hits = e
+            self.events.put(("search", query, hits))
+
+        threading.Thread(target=run, daemon=True, name="search").start()
 
     # --- live transcription (engine thread)
     def _on_session_start(self, session: SessionInfo) -> None:

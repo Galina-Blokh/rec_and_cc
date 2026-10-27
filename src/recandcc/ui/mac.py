@@ -39,7 +39,9 @@ from .common import (
     keep_prompt_text,
     open_output_folder,
     open_path,
+    osascript,
     reveal_logs,
+    search_hit_label,
     transcript_label,
 )
 
@@ -117,6 +119,7 @@ class MacApp(rumps.App):
             None,
             rumps.MenuItem("Open transcripts folder", callback=self._open_folder),
             self.recent_menu,
+            rumps.MenuItem("Search transcripts…", callback=self._search),
             None,
             self.perm_menu,
             self.login_item,
@@ -184,6 +187,8 @@ class MacApp(rumps.App):
                     self._live_id = None
                     if self.captions is not None:
                         self.captions.end()
+            elif kind == "search":
+                self._show_hits(ev[1], ev[2])
             elif kind == "refreshed":
                 self._render_recent()
                 self._render_permissions()
@@ -380,6 +385,42 @@ class MacApp(rumps.App):
             # cancelled/killed: leave it to the engine's timeout
 
         threading.Thread(target=run, daemon=True, name="prompt-dialog").start()
+
+    def _search(self, _sender) -> None:
+        """Ask for a query (osascript, worker thread); the search itself runs on another
+        worker and its hits come back as a ``search`` event."""
+        script = (
+            'display dialog "Search transcripts for:" default answer "" with title "RecAndCC" '
+            'buttons {"Cancel", "Search"} default button "Search"'
+        )
+
+        def run():
+            query = osascript(script).partition("text returned:")[2].strip()
+            if query:
+                self.ctrl.search_async(query)
+
+        threading.Thread(target=run, daemon=True, name="search-dialog").start()
+
+    def _show_hits(self, query: str, hits) -> None:
+        if isinstance(hits, Exception):
+            self._notify("Search failed", str(hits))
+            return
+        if not hits:
+            self._notify("Search", f"No matches for “{query}”")
+            return
+        labels = [f"{i}. {search_hit_label(h)}"[:200] for i, h in enumerate(hits, 1)]
+        script = (
+            f'choose from list {{{", ".join(map(as_str, labels))}}} with title "RecAndCC" '
+            f'with prompt {as_str(f"Matches for “{query}”:")} OK button name "Open"'
+        )
+
+        def run():
+            number = osascript(script).partition(".")[0]
+            if number.isdigit() and 0 < int(number) <= len(hits):
+                hit = hits[int(number) - 1]
+                open_path(hit.transcript if hit.transcript.exists() else hit.folder)
+
+        threading.Thread(target=run, daemon=True, name="search-results").start()
 
     def _maybe_onboard(self) -> None:
         if self._onboarded:
