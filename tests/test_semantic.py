@@ -1703,7 +1703,7 @@ def test_hand_edit_switching_semantic_off_stops_embedding_at_once(tmp_path, out,
         time.sleep(0.01)
     assert idx.embedder is None and vector_rows(idx) == 0
     n = len(emb.calls)
-    time.sleep(0.2)
+    assert idx.wait_embedded(10)  # worker idle: nothing more can arrive (no timing guess)
     assert len(emb.calls) == n and vector_rows(idx) == 0  # nothing embedded while off
 
 
@@ -1716,7 +1716,9 @@ def test_reload_without_a_semantic_change_does_not_sync(tmp_path, monkeypatch):
     ctrl = _reload_ctrl(Config(output_dir=tmp_path), new, lambda: synced.append(1))
     monkeypatch.setattr("recandcc.ui.common.load_config", lambda *a, **k: new)
     Controller._maybe_reload_config(ctrl)  # type: ignore[arg-type]
-    time.sleep(0.05)
+    for t in threading.enumerate():  # a spawned reload thread would have synced: wait for it
+        if t.name == "search-reload":
+            t.join(10)
     assert synced == [] and ctrl.cfg.hotkey == "<ctrl>+<alt>+x"
 
 
@@ -1890,3 +1892,40 @@ def test_sync_index_is_serialised_and_reads_the_setting_inside_the_lock():
     finally:
         search_mod.default_index = orig
     assert seen[-1] is False
+
+
+def test_blocked_write_skips_that_session_and_retries_it_later(tmp_path, out, monkeypatch):
+    """Another process holds the write lock past the timeout: the other sessions are still
+    embedded and the blocked one is retried by the next pass (not lost)."""
+    monkeypatch.setattr(search, "EMBED_BLOCKED_BACKOFF_S", 0.0)
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(
+        search.sqlite3, "connect", lambda path, **kw: real_connect(path, **{**kw, "timeout": 0.05})
+    )
+    make_session(out, 1, [seg(1, "alpha")])
+    make_session(out, 2, [seg(1, "beta")])
+    idx = make(tmp_path, FakeEmbedder())
+    gate = threading.Event()
+    holder = None
+    orig = idx._retry_embed_later
+
+    def retry():
+        gate.set()
+        assert holder is not None
+        holder.execute("ROLLBACK")  # the other process finishes before the retry pass
+        orig()
+
+    monkeypatch.setattr(idx, "_retry_embed_later", retry)
+    sync(idx, out)
+    # Re-run with the lock held from the start of the embed pass:
+    with sqlite3.connect(idx.path) as db:
+        db.execute("DELETE FROM seg_vec")
+        db.execute("DELETE FROM sem_sessions")
+    holder = real_connect(idx.path, isolation_level=None, check_same_thread=False)
+    holder.execute("BEGIN IMMEDIATE")
+    idx._kick_embed()
+    assert idx.wait_embedded(30)
+    assert gate.is_set()  # the blocked write was noticed and retried
+    assert vector_rows(idx) == 2  # both sessions embedded after the retry
+    assert holder is not None
+    holder.close()
