@@ -266,7 +266,7 @@ def test_missing_font_keeps_the_docx_when_both(session, monkeypatch):
 def test_both_formats_share_one_snapshot(session, monkeypatch):
     calls = []
     real = export.load_session
-    monkeypatch.setattr(export, "load_session", lambda f: calls.append(f) or real(f))
+    monkeypatch.setattr(export, "load_session", lambda f, *a: calls.append(f) or real(f, *a))
     export.export_session(session, "both")
     assert len(calls) == 1
 
@@ -309,7 +309,7 @@ def test_concurrent_exports_of_one_session_are_serialised(session):
 
 
 def test_a_pdf_failure_other_than_the_font_keeps_the_docx(session, monkeypatch):
-    def boom(folder, loaded=None, summary=None):
+    def boom(folder, loaded=None, summary=None, **kw):
         raise RuntimeError("Привет, секрет")
 
     monkeypatch.setattr(export, "export_pdf", boom)
@@ -320,6 +320,7 @@ def test_a_pdf_failure_other_than_the_font_keeps_the_docx(session, monkeypatch):
 
 
 def test_replace_is_retried_while_the_file_is_held_open(session, monkeypatch):
+    monkeypatch.setattr(export, "_DIR_FD", False)  # the Windows (path-based) write
     real, calls = export.os.replace, []
 
     def flaky(src, dst):
@@ -377,6 +378,8 @@ def test_controller_export_of_nothing_finished_posts_a_notice(tmp_path):
 
 
 def test_a_held_open_file_gets_a_clear_notice(session, monkeypatch):
+    monkeypatch.setattr(export, "_DIR_FD", False)  # the Windows (path-based) write
+
     def locked(src, dst):
         raise PermissionError("in use")
 
@@ -425,6 +428,7 @@ def test_a_write_error_is_not_reported_as_a_file_in_use(session, monkeypatch):
 
 
 def test_a_failing_cleanup_does_not_hide_the_export_error(session, monkeypatch):
+    monkeypatch.setattr(export, "_DIR_FD", False)  # the Windows (path-based) write
     from pathlib import Path
 
     def locked(src, dst):
@@ -487,6 +491,168 @@ def test_a_session_folder_swapped_for_a_link_is_not_written_through(tmp_path):
     with pytest.raises(export.ExportError, match="link"):
         export._write(link / "x.bin", b"data")
     assert not list(real.iterdir())
+
+
+def test_a_parent_swapped_for_a_link_during_rendering_is_refused(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("symlinks need privileges")
+    day, other = tmp_path / "day", tmp_path / "other"
+    (day / "s").mkdir(parents=True)
+    (other / "s").mkdir(parents=True)
+    with export._pinned(day / "s") as pin:
+        day.rename(tmp_path / "day-old")
+        day.symlink_to(other)  # an ancestor became a link; the session folder itself is not one
+        with pytest.raises(export.ExportError, match="moved"):
+            export._write(day / "s" / "x.bin", b"data", pin)
+    assert not list((other / "s").iterdir())
+    assert not list((tmp_path / "day-old" / "s").iterdir())
+
+
+def test_a_junction_session_folder_is_refused_without_expected(tmp_path, monkeypatch):
+    # runs on every platform: the junction check itself is faked
+    (tmp_path / "s").mkdir()
+    monkeypatch.setattr(export.Path, "is_junction", lambda self: True)
+    with pytest.raises(export.ExportError, match="link"):
+        export._write(tmp_path / "s" / "x.bin", b"data")
+    assert not list((tmp_path / "s").iterdir())
+
+
+def test_write_without_expected_into_a_plain_folder_is_unchanged(tmp_path):
+    out = export._write(tmp_path / "x.bin", b"data")
+    assert out.read_bytes() == b"data"
+    assert [p.name for p in tmp_path.iterdir()] == ["x.bin"]  # no temp left behind
+
+
+def test_a_session_folder_that_was_already_a_link_at_the_start_is_exported(tmp_path):
+    # e.g. a redirected or synced folder: linked before the export began, so it's legitimate
+    if sys.platform == "win32":
+        pytest.skip("symlinks need privileges")
+    real, link = tmp_path / "real", tmp_path / "link"
+    real.mkdir()
+    link.symlink_to(real)
+    with export._pinned(link) as pin:
+        out = export._write(link / "x.bin", b"data", pin)
+    assert (real / "x.bin").read_bytes() == b"data" and out == link / "x.bin"
+    assert [p.name for p in real.iterdir()] == ["x.bin"]
+
+
+def test_the_dir_fd_write_path_is_used_on_posix():
+    # the descriptor-pinned write must really run on macOS and Linux, not silently fall back
+    if sys.platform == "win32":
+        pytest.skip("no dir_fd on Windows: documented residual risk")
+    assert export._DIR_FD
+
+
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="symlinks and dir_fd: POSIX")
+
+
+def _swap_for_link(folder, target, keep_as):
+    folder.rename(keep_as)
+    folder.symlink_to(target)
+
+
+@posix_only
+def test_an_ancestor_swapped_between_resolve_and_stat_is_caught(tmp_path, monkeypatch):
+    # the folder is resolved, then opened (and fstat'ed): a parent swapped in that gap makes
+    # the open follow the new link, so the identity would be the swapped folder's. Resolving
+    # again after the open catches it.
+    day, other = tmp_path / "day", tmp_path / "other"
+    (day / "s").mkdir(parents=True)
+    (other / "s").mkdir(parents=True)
+    real_open = export.os.open
+
+    def swap_then_open(p, *a, **kw):
+        if "dir_fd" not in kw and not (tmp_path / "day-old").exists():
+            _swap_for_link(day, other, tmp_path / "day-old")
+        return real_open(p, *a, **kw)
+
+    monkeypatch.setattr(export.os, "open", swap_then_open)
+    with pytest.raises(export.ExportError, match="moved"):
+        export._pin_folder(day / "s")
+
+
+@posix_only
+def test_a_swap_after_the_pin_cannot_redirect_the_write(tmp_path):
+    # even if the path check were passed, the bytes go through the pinned descriptor
+    (tmp_path / "s").mkdir()
+    (tmp_path / "evil").mkdir()
+    with export._pinned(tmp_path / "s") as pin:
+        _swap_for_link(tmp_path / "s", tmp_path / "evil", tmp_path / "s-moved")
+        assert pin.dfd is not None
+        export._write_in_dir(pin.dfd, "x.bin", ".x.tmp", b"data")
+    assert not list((tmp_path / "evil").iterdir())
+    assert (tmp_path / "s-moved" / "x.bin").read_bytes() == b"data"
+
+
+@posix_only
+def test_a_swap_between_the_read_and_the_write_is_refused(session, tmp_path, monkeypatch):
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    real = export.load_summary
+
+    def read_then_swap(*a, **kw):
+        out = real(*a, **kw)
+        _swap_for_link(session, evil, session.with_name("moved"))
+        return out
+
+    monkeypatch.setattr(export, "load_summary", read_then_swap)
+    with pytest.raises(export.ExportError, match="moved"):
+        export.export_session(session, "docx")
+    assert not list(evil.iterdir())
+    assert not list(session.with_name("moved").glob("transcript.docx"))
+
+
+@posix_only
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_a_swap_between_docx_and_pdf_does_not_redirect_the_pdf(session, tmp_path, monkeypatch):
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    real_docx = export.export_docx
+
+    def docx_then_swap(*a, **kw):
+        out = real_docx(*a, **kw)
+        _swap_for_link(session, evil, session.with_name("moved"))
+        return out
+
+    monkeypatch.setattr(export, "export_docx", docx_then_swap)
+    skipped: list[str] = []
+    out = export.export_session(session, "both", skipped)
+    assert [p.name for p in out] == ["transcript.docx"]
+    assert skipped and "moved" in skipped[0]
+    assert not list(evil.iterdir())
+
+
+@posix_only
+def test_a_write_error_in_the_pinned_folder_is_an_export_error(session, monkeypatch):
+    def failing_replace(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(export.os, "replace", failing_replace)
+    with pytest.raises(export.ExportError, match=r"could not write transcript\.docx \(OSError\)"):
+        export.export_docx(session)
+    assert not list(session.glob(".*.tmp"))  # the temp is removed through the descriptor
+
+
+@posix_only
+def test_a_read_only_pinned_folder_is_an_export_error(session):
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    session.chmod(0o500)
+    try:
+        with pytest.raises(export.ExportError, match="could not write.*PermissionError"):
+            export.export_docx(session)
+    finally:
+        session.chmod(0o700)
+
+
+@posix_only
+def test_a_folder_linked_from_the_start_keeps_its_summary_in_the_export(session, tmp_path):
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    link = tmp_path / "linked"
+    link.symlink_to(session)
+    export.export_session(link, "docx")
+    paras = [p.text for p in Document(str(session / "transcript.docx")).paragraphs]
+    assert "Action items" in paras
 
 
 SUMMARY_MD = (
@@ -576,7 +742,8 @@ def test_a_linked_summary_or_folder_is_refused(session, tmp_path):
     link.symlink_to(session)
     (session / "summary.md").unlink()
     (session / "summary.md").write_text("# Summary\nbody\n", "utf-8")
-    assert export.load_summary(link) == []
+    # a folder that was a link from the start is legitimate (redirected or synced folders)
+    assert export.load_summary(link) == [("h1", "Summary"), ("p", "body")]
 
 
 def test_a_bom_does_not_hide_the_heading(session):
@@ -724,7 +891,9 @@ def test_both_formats_make_the_same_summary_decision(session, monkeypatch, caplo
     monkeypatch.setattr(
         export,
         "export_pdf",
-        lambda f, loaded=None, summary=None: seen.append(summary) or real_pdf(f, loaded, summary),
+        lambda f, loaded=None, summary=None, **kw: (
+            seen.append(summary) or real_pdf(f, loaded, summary, **kw)
+        ),
     )
     export.export_session(session)
     assert seen and seen[0]  # the PDF got the same, non-empty summary as the DOCX
@@ -753,3 +922,166 @@ def test_a_year_is_not_a_numbered_item(session):
         ("p", "2026. The budget was approved"),
         ("num", "12. real item"),
     ]
+
+
+def _summary_texts(session):
+    return [t for _, t in export.load_summary(session)]
+
+
+def _rewrite_transcript(session, edit):
+    path = session / "transcript.json"
+    data = json.loads(path.read_text("utf-8"))
+    edit(data["segments"])
+    path.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+    os.utime(path, (9e9, 9e9))  # a rewrite is always newer than the summary
+
+
+def _with_fingerprint(session):
+    from recandcc.transcribe.summary import SOURCE_NAME, transcript_fingerprint
+
+    segs = json.loads((session / "transcript.json").read_text("utf-8"))["segments"]
+    (session / SOURCE_NAME).write_text(transcript_fingerprint(segs), "utf-8")
+
+
+def test_summary_survives_a_speaker_rename_rewrite(session):
+    """Stories: US-25."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+
+    def rename(segs):
+        for s in segs:
+            s["speaker"] = "Anna"  # name-speaker / call-app names relabel in place
+
+    _rewrite_transcript(session, rename)
+    assert _summary_texts(session)
+
+
+def test_summary_is_dropped_when_the_text_changed(session):
+    """Stories: US-25."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    _rewrite_transcript(session, lambda segs: segs[0].update(text="something else entirely"))
+    assert _summary_texts(session) == []
+
+
+def test_summary_without_a_fingerprint_keeps_the_mtime_rule(session):
+    """Stories: US-25."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    os.utime(session / "summary.md", (9e9, 9e9))
+    assert _summary_texts(session)  # newer than the transcript
+    os.utime(session / "summary.md", (1, 1))
+    assert _summary_texts(session) == []
+
+
+def test_summarize_session_records_the_fingerprint(session):
+    """Stories: US-25."""
+    from recandcc.config import Config
+    from recandcc.transcribe import summary
+
+    gen = lambda messages, max_tokens: "- do it"  # noqa: E731
+    summary.summarize_session(session, Config(), gen)
+
+    def rename(segs):
+        segs[0]["speaker"] = "Zed"
+
+    _rewrite_transcript(session, rename)
+    assert _summary_texts(session)
+
+
+def test_a_null_segments_list_is_a_stale_fingerprint_not_a_crash(session):
+    """Stories: US-25. ``"segments": null`` makes the fingerprint raise TypeError."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    _rewrite_transcript_data(session, lambda d: d.update(segments=None))
+    os.utime(session / "summary.md", (9e9 + 1, 9e9 + 1))
+    assert _summary_texts(session)  # falls back to the mtime rule (summary is newer)
+
+
+def _rewrite_transcript_data(session, edit):
+    path = session / "transcript.json"
+    data = json.loads(path.read_text("utf-8"))
+    edit(data)
+    path.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+    os.utime(path, (9e9, 9e9))
+
+
+@pytest.mark.parametrize("garbage", [b"\xff\xfe\x00 not utf8", b"", b"deadbeef"])
+def test_an_unreadable_summary_source_falls_back_to_the_mtime_rule(session, garbage):
+    """Stories: US-25."""
+    from recandcc.transcribe.summary import SOURCE_NAME
+
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    (session / SOURCE_NAME).write_bytes(garbage)
+    if garbage == b"deadbeef":  # readable but wrong: the text "changed"
+        assert _summary_texts(session) == []
+        return
+    os.utime(session / "summary.md", (9e9, 9e9))
+    assert _summary_texts(session)
+    os.utime(session / "summary.md", (1, 1))
+    assert _summary_texts(session) == []
+
+
+def test_a_timing_only_change_makes_the_summary_stale(session):
+    """Stories: US-25."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    _rewrite_transcript(session, lambda segs: segs[1].update(start=3.5, end=5.5))
+    assert _summary_texts(session) == []
+
+
+def test_summary_survives_a_rename_through_write_outputs(session):
+    """Stories: US-25. The real rewrite path (what name-speaker and the menu use)."""
+    from dataclasses import replace
+    from datetime import datetime
+
+    from recandcc.models import TriggerKind
+    from recandcc.transcribe import output
+
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    info = SessionInfo(
+        id="x",
+        directory=session,
+        started_at=datetime(2026, 10, 26, 14, 3, 12),
+        trigger_kind=TriggerKind.CALL,
+        trigger_app="zoom-us",
+    )
+    segs = [replace(Segment(**s), speaker="Anna") for s in SEGS]
+    output.write_outputs(info, segs, 9.0, "test-model")
+    assert (
+        json.loads((session / "transcript.json").read_text("utf-8"))["segments"][0]["speaker"]
+        == "Anna"
+    )
+    os.utime(session / "transcript.json", (9e9, 9e9))  # newer than the summary
+    assert _summary_texts(session)
+
+
+def test_the_pending_marker_wins_over_a_matching_fingerprint(session):
+    """Stories: US-25."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    assert _summary_texts(session)
+    (session / ".summary-pending").touch()
+    assert _summary_texts(session) == []
+
+
+def test_a_failed_sidecar_write_leaves_no_old_fingerprint(session, monkeypatch):
+    """Stories: US-25. The old fingerprint must not drop the fresh summary."""
+    from recandcc.config import Config
+    from recandcc.transcribe import summary
+
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    _rewrite_transcript(session, lambda segs: segs[0].update(text="new words"))
+    real = summary.atomic_write
+
+    def fail_sidecar(path, text):
+        if path.name == summary.SOURCE_NAME:
+            raise OSError("disk full")
+        return real(path, text)
+
+    monkeypatch.setattr(summary, "atomic_write", fail_sidecar)
+    summary.summarize_session(session, Config(), lambda messages, max_tokens: "- do it")
+    assert not (session / summary.SOURCE_NAME).exists()
+    os.utime(session / "summary.md", (9e9 + 1, 9e9 + 1))  # fresh: newer than the transcript
+    assert _summary_texts(session)  # mtime rule

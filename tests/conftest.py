@@ -129,6 +129,7 @@ def _private_config(request, tmp_path, monkeypatch, _import_path_modules):
     }
     if request.node.get_closest_marker("slow") is None:  # slow tests need the real model cache
         private["MODELS_DIR"] = tmp_path / "private-models"
+        private["HF_CACHE_DIR"] = tmp_path / "private-hf-cache"
     for name, module in list(sys.modules.items()):
         if name.split(".")[0] != "recandcc":
             continue

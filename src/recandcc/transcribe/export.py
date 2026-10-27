@@ -24,11 +24,13 @@ import re
 import threading
 import time
 import unicodedata
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..models import Segment, is_rtl
 from .output import JSON_NAME, fmt_hms, languages_of
-from .summary import PENDING_MARKER, SUMMARY_NAME
+from .summary import PENDING_MARKER, SOURCE_NAME, SUMMARY_NAME, transcript_fingerprint
 
 log = logging.getLogger(__name__)
 
@@ -58,10 +60,103 @@ def _clean(text: str) -> str:
     return "".join(" " if unicodedata.category(c) == "Cc" else c for c in text).strip()
 
 
-def load_session(folder: Path) -> tuple[dict, list[Segment]]:
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_BINARY = getattr(os, "O_BINARY", 0)  # Windows: no newline translation on raw reads
+# POSIX can pin the checked folder with a directory descriptor; Windows can't (residual risk).
+# CPython lists os.rename (not os.replace) in supports_dir_fd; both use renameat.
+_DIR_FD = all(f in os.supports_dir_fd for f in (os.open, os.rename, os.unlink, os.stat))
+_MOVED = "The session folder moved during the export; not writing through it"
+
+
+@dataclass(frozen=True)
+class _Pin:
+    """The session folder as resolved once, when the export started: its real path, its
+    identity (device, inode) and, on POSIX, a descriptor that every read and write goes
+    through, so a later swap of the folder or of a parent can't redirect them."""
+
+    path: Path
+    ident: tuple[int, int]
+    dfd: int | None
+
+
+def _pin_folder(folder: Path) -> _Pin:
+    """Resolve ``folder`` once and capture its identity in the same step: the resolved path
+    is opened (POSIX) or stat'ed (Windows), then resolved again; if an ancestor was swapped
+    in between, the second resolve differs and the export is refused. A folder that was a
+    link or junction from the start is fine: it is the target that is pinned."""
+    try:
+        path = Path(folder).resolve(strict=True)
+    except FileNotFoundError:
+        raise ExportError(f"no {JSON_NAME} in {folder}") from None
+    except (OSError, RuntimeError) as e:
+        raise ExportError(f"can't open the session folder ({type(e).__name__})") from None
+    dfd = None
+    try:
+        if _DIR_FD:
+            dfd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | _NOFOLLOW)
+            st = os.fstat(dfd)
+        else:
+            st = os.stat(path)
+        if Path(folder).resolve() != path:
+            raise ExportError(_MOVED)
+    except OSError as e:
+        if dfd is not None:
+            os.close(dfd)
+        raise ExportError(f"can't open the session folder ({type(e).__name__})") from None
+    except BaseException:
+        if dfd is not None:
+            os.close(dfd)
+        raise
+    return _Pin(path, (st.st_dev, st.st_ino), dfd)
+
+
+@contextlib.contextmanager
+def _pinned(folder: Path, pin: _Pin | None = None) -> Iterator[_Pin]:
+    """``pin`` if the caller already has one, else the folder pinned for this call only."""
+    if pin is not None:
+        yield pin
+        return
+    own = _pin_folder(folder)
+    try:
+        yield own
+    finally:
+        if own.dfd is not None:
+            os.close(own.dfd)
+
+
+def _check_path_pin(pin: _Pin) -> None:
+    """Windows (no dir_fd): the folder must still resolve to, and be, the pinned one."""
+    try:
+        st = os.stat(pin.path)
+    except OSError as e:
+        raise ExportError(f"can't open the session folder ({type(e).__name__})") from None
+    if (st.st_dev, st.st_ino) != pin.ident:
+        raise ExportError(_MOVED)
+
+
+def _open_read(pin: _Pin, name: str) -> int:
+    """A read-only descriptor for ``name`` in the pinned folder; a linked file is refused."""
+    flags = os.O_RDONLY | _NOFOLLOW | _BINARY
+    if pin.dfd is not None:
+        return os.open(name, flags, dir_fd=pin.dfd)
+    _check_path_pin(pin)
+    path = pin.path / name
+    if not _NOFOLLOW and (path.is_symlink() or path.is_junction()):
+        raise OSError("linked file")  # best available without O_NOFOLLOW
+    return os.open(path, flags)
+
+
+def _stat_in(pin: _Pin, name: str) -> os.stat_result:
+    if pin.dfd is not None:
+        return os.stat(name, dir_fd=pin.dfd, follow_symlinks=False)
+    return os.stat(pin.path / name, follow_symlinks=False)
+
+
+def load_session(folder: Path, pin: _Pin | None = None) -> tuple[dict, list[Segment]]:
     path = Path(folder) / JSON_NAME
     try:
-        data = json.loads(path.read_text("utf-8"))
+        with _pinned(folder, pin) as p, os.fdopen(_open_read(p, JSON_NAME), "rb") as f:
+            data = json.loads(f.read().decode("utf-8"))
         segs = [
             Segment(
                 float(s["start"]),
@@ -86,30 +181,30 @@ _BULLET = re.compile(r"[-*+] +")
 _NUMBERED = re.compile(r"\d{1,3}[.)] +")
 
 
-def load_summary(folder: Path, transcript_mtime: float | None = None) -> list[tuple[str, str]]:
+def load_summary(
+    folder: Path, transcript_mtime: float | None = None, pin: _Pin | None = None
+) -> list[tuple[str, str]]:
     """The blocks of ``summary.md`` as (kind, text): ``h1`` / ``h2`` headings, ``bullet`` items,
     ``p`` paragraphs and ``note`` (the italic "generated by" line). Empty if there is no
     readable summary. Bidi isolates are dropped: the exports set the direction themselves.
-    ``transcript_mtime`` is the transcript's mtime when its snapshot was read (default: now)."""
-    path = Path(folder) / SUMMARY_NAME
+    ``transcript_mtime`` is the transcript's mtime when its snapshot was read (default: now).
+    It is read from the pinned folder (see ``_pin_folder``): a folder that was a link from the
+    start keeps its summary, one swapped since is not read through."""
     try:
-        if path.parent.is_symlink():
-            return []
-        # O_NOFOLLOW refuses a linked summary.md atomically (absent on Windows: the
-        # is_symlink check there is the best available); read one byte past the cap.
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        if not hasattr(os, "O_NOFOLLOW") and path.is_symlink():
-            return []
-        fd = os.open(path, flags)
-        with os.fdopen(fd, "rb") as f:
-            blob = f.read(_MAX_SUMMARY_BYTES + 1)
-        if len(blob) > _MAX_SUMMARY_BYTES:
-            return []
-        raw = blob.decode("utf-8-sig")
-        stale = _summary_is_stale(Path(folder), path, transcript_mtime)
+        with _pinned(folder, pin) as p:
+            # O_NOFOLLOW refuses a linked summary.md atomically; read one byte past the cap
+            with os.fdopen(_open_read(p, SUMMARY_NAME), "rb") as f:
+                blob = f.read(_MAX_SUMMARY_BYTES + 1)
+            if len(blob) > _MAX_SUMMARY_BYTES:
+                return []
+            raw = blob.decode("utf-8-sig")  # a Notepad BOM must not hide "# Summary"
+            stale = _summary_is_stale(p, transcript_mtime)
         if stale:
             log.debug("summary skipped: %s", stale)
-            return []  # a Notepad BOM must not hide "# Summary"
+            return []
+    except ExportError as e:
+        log.debug("summary skipped: %s", type(e).__name__)
+        return []
     except (OSError, ValueError) as e:
         if not isinstance(e, FileNotFoundError):
             log.debug("summary skipped: %s", type(e).__name__)
@@ -139,16 +234,28 @@ def load_summary(folder: Path, transcript_mtime: float | None = None) -> list[tu
     return [b for b in blocks if b[1]]
 
 
-def _summary_is_stale(folder: Path, summary: Path, transcript_mtime: float | None = None) -> str:
+def _summary_is_stale(pin: _Pin, transcript_mtime: float | None = None) -> str:
     """Why the summary must not head the transcript ("" if it may): it is being redone
-    (marker present) or is older than the transcript (re-transcribed since)."""
-    if (folder / PENDING_MARKER).exists():
+    (marker present) or made from other text than the transcript has now (re-transcribed).
+    A summary with a fingerprint survives speaker renames; an older one uses the mtime rule."""
+    with contextlib.suppress(OSError):
+        _stat_in(pin, PENDING_MARKER)
         return "pending marker"
+    try:
+        with os.fdopen(_open_read(pin, SOURCE_NAME), "rb") as f:
+            recorded = f.read().decode("utf-8").strip()
+        if not recorded:
+            raise ValueError("empty fingerprint")
+        with os.fdopen(_open_read(pin, JSON_NAME), "rb") as f:
+            segs = json.loads(f.read().decode("utf-8")).get("segments", [])
+        return "" if transcript_fingerprint(segs) == recorded else "transcript text changed"
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass  # no (or unreadable) fingerprint: an old session
     try:
         mtime = transcript_mtime
         if mtime is None:
-            mtime = (folder / JSON_NAME).stat().st_mtime
-        return "older than the transcript" if summary.stat().st_mtime < mtime else ""
+            mtime = _stat_in(pin, JSON_NAME).st_mtime
+        return "older than the transcript" if _stat_in(pin, SUMMARY_NAME).st_mtime < mtime else ""
     except OSError:
         return ""
 
@@ -200,16 +307,41 @@ def _create_exclusive(tmp: Path) -> int:
     raise AssertionError("unreachable")
 
 
-def _write(path: Path, data: bytes) -> Path:
+def _write(path: Path, data: bytes, pin: _Pin | None = None) -> Path:
     """Write ``data`` to a temp file and rename it into place. The temp file is created
     owner-only (0600) and written through that same descriptor (no reopen that a scanner
     could block), with a name unique per process and thread (on Windows the output ACLs are
     inherited from the owner-only session folder, #42). Windows may hold the target open, so
     only the rename is retried. Only exception types are kept: library messages can quote the
-    transcript."""
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    if path.parent.is_symlink():  # the folder was swapped for a link while rendering
-        raise ExportError("The session folder is a link; not writing through it")
+    transcript.
+
+    ``pin`` is the session folder pinned when the export started (``_pin_folder``: resolved
+    once, with its device and inode captured in the same step). The write is refused if the
+    folder path now resolves elsewhere (it, or a parent, was swapped for a link or junction
+    while the document was rendered); a folder that was already a link at the start is fine.
+    On POSIX the data then goes through the pinned directory descriptor, so no swap after the
+    pin can redirect it. On Windows the folder's identity is compared again just before the
+    path-based write; a swap in the moment between that check and the write remains possible.
+    Without ``pin`` any link or junction is refused."""
+    parent = path.parent
+    if pin is None:
+        if parent.is_symlink() or parent.is_junction():
+            raise ExportError("The session folder is a link; not writing through it")
+    else:
+        try:
+            moved = parent.resolve() != pin.path
+        except (OSError, RuntimeError):
+            moved = True
+        if moved:
+            raise ExportError(_MOVED)
+    tmp_name = f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    if pin is not None and pin.dfd is not None:
+        _write_in_dir(pin.dfd, path.name, tmp_name, data)
+        return path
+    if pin is not None:
+        _check_path_pin(pin)
+        parent = pin.path
+    tmp, target = parent / tmp_name, parent / path.name
     try:
         try:
             fd = _create_exclusive(tmp)
@@ -219,7 +351,7 @@ def _write(path: Path, data: bytes) -> Path:
             raise ExportError(f"could not write {path.name} ({type(e).__name__})") from None
         for attempt in range(_REPLACE_TRIES):
             try:
-                os.replace(tmp, path)
+                os.replace(tmp, target)
                 return path
             except PermissionError:
                 if attempt + 1 < _REPLACE_TRIES:
@@ -232,21 +364,48 @@ def _write(path: Path, data: bytes) -> Path:
             tmp.unlink(missing_ok=True)
 
 
+def _write_in_dir(dfd: int, name: str, tmp_name: str, data: bytes) -> None:
+    """POSIX: create, write and rename inside the pinned folder through its directory
+    descriptor (no path lookups at all), so the bytes land in the folder that was pinned."""
+    try:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp_name, dir_fd=dfd)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW
+        fd = os.open(tmp_name, flags, 0o600, dir_fd=dfd)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp_name, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+    except OSError as e:
+        raise ExportError(f"could not write {name} ({type(e).__name__})") from None
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name, dir_fd=dfd)
+
+
 STALE_TEMP_AGE_S = 3600.0
 
 
-def _sweep_stale_temps(folder: Path) -> None:
+def _sweep_stale_temps(pin: _Pin) -> None:
     """Remove export temp files (never the transcript's own ``.transcript.md.tmp`` etc.) that
     a crashed export left behind: ``.transcript.docx.<pid>.<tid>.tmp`` / ``.pdf``, untouched
     for an hour (so another process's export in flight is left alone)."""
     # No cross-process lock is needed: only temps untouched for an hour are removed, and an
     # export in flight (here or in another process) writes its temp within seconds.
     now = time.time()
-    for name in (DOCX_NAME, PDF_NAME):
-        for stale in Path(folder).glob(f".{name}.*.tmp"):
-            with contextlib.suppress(OSError):
-                if now - stale.stat().st_mtime > STALE_TEMP_AGE_S:
-                    stale.unlink()
+    prefixes = tuple(f".{n}." for n in (DOCX_NAME, PDF_NAME))
+    try:
+        names = os.listdir(pin.dfd if pin.dfd is not None else pin.path)
+    except OSError:
+        return
+    for name in names:
+        if not (name.startswith(prefixes) and name.endswith(".tmp")):
+            continue
+        with contextlib.suppress(OSError):
+            if now - _stat_in(pin, name).st_mtime > STALE_TEMP_AGE_S:
+                if pin.dfd is not None:
+                    os.unlink(name, dir_fd=pin.dfd)
+                else:
+                    (pin.path / name).unlink()
 
 
 def _type_only(fn):
@@ -285,18 +444,25 @@ def _set_bidi(paragraph) -> None:
 
 
 @_type_only
-def export_docx(folder: Path, loaded=None, summary=None) -> Path:
+def export_docx(folder: Path, loaded=None, summary=None, *, pin: _Pin | None = None) -> Path:
+    """Write ``transcript.docx``. ``pin`` is the folder pinned by ``export_session``; called
+    on its own, the folder is pinned once here, before anything is read."""
+    with _pinned(folder, pin) as p:
+        return _export_docx(folder, p, loaded, summary)
+
+
+def _export_docx(folder: Path, pin: _Pin, loaded, summary) -> Path:
     from docx import Document
     from docx.oxml import OxmlElement
     from docx.shared import Pt
 
-    data, segments = loaded or load_session(folder)
+    data, segments = loaded or load_session(folder, pin)
     doc = Document()
     doc.core_properties.title = _title(data)
     doc.add_heading(_title(data), level=1)
     doc.add_paragraph(_meta(data, segments))
     if summary is None:
-        summary = load_summary(folder)
+        summary = load_summary(folder, pin=pin)
     for kind, text in summary:
         if kind in ("h1", "h2"):
             p = doc.add_heading(text, level=2 if kind == "h1" else 3)
@@ -334,7 +500,7 @@ def export_docx(folder: Path, loaded=None, summary=None) -> Path:
         p.paragraph_format.space_after = Pt(6)
     buf = io.BytesIO()
     doc.save(buf)
-    return _write(Path(folder) / DOCX_NAME, buf.getvalue())
+    return _write(Path(folder) / DOCX_NAME, buf.getvalue(), pin)
 
 
 # Latin (with an accent), Cyrillic (with ё), Hebrew letters, niqqud, gershayim and geresh,
@@ -367,11 +533,17 @@ def find_font() -> Path:
 
 
 @_type_only
-def export_pdf(folder: Path, loaded=None, summary=None) -> Path:
+def export_pdf(folder: Path, loaded=None, summary=None, *, pin: _Pin | None = None) -> Path:
+    """Write ``transcript.pdf``; ``pin`` as for ``export_docx``."""
+    with _pinned(folder, pin) as p:
+        return _export_pdf(folder, p, loaded, summary)
+
+
+def _export_pdf(folder: Path, pin: _Pin, loaded, summary) -> Path:
     from fpdf import FPDF
     from fpdf.enums import WrapMode
 
-    data, segments = loaded or load_session(folder)
+    data, segments = loaded or load_session(folder, pin)
     font = find_font()
     pdf = FPDF(format="A4")
     pdf.set_title(_title(data))
@@ -401,7 +573,7 @@ def export_pdf(folder: Path, loaded=None, summary=None) -> Path:
     para(_title(data), 16, gap=3)
     para(_meta(data, segments), 9, gap=5)
     if summary is None:
-        summary = load_summary(folder)
+        summary = load_summary(folder, pin=pin)
     for kind, text in summary:
         rtl = _majority_rtl(text)
         if kind == "h1":
@@ -424,29 +596,33 @@ def export_pdf(folder: Path, loaded=None, summary=None) -> Path:
             para(seg.text, 11, rtl=True, gap=3)
         else:
             para(f"{label} {seg.text}", 11, gap=3)
-    return _write(Path(folder) / PDF_NAME, bytes(pdf.output()))
+    return _write(Path(folder) / PDF_NAME, bytes(pdf.output()), pin)
 
 
 def export_session(folder: Path, fmt: str = "both", skipped: list[str] | None = None) -> list[Path]:
     """Write the requested files next to the transcript; returns their paths. Both files are
     built from one read of transcript.json. With ``both``, a PDF that can't be made (no
-    font) doesn't lose the DOCX: the reason is appended to ``skipped`` if one is given."""
+    font) doesn't lose the DOCX: the reason is appended to ``skipped`` if one is given.
+
+    The folder is pinned once, before anything is read (``_pin_folder``); both reads and both
+    writes use that one pin, so a swap of the folder or a parent mid-export can't redirect
+    the PDF after the DOCX, nor write somewhere other than the folder that was read."""
     if fmt not in (*FORMATS, "both"):
         raise ExportError(f"unknown format {fmt!r}")
-    with _export_lock:
-        _sweep_stale_temps(folder)
+    with _export_lock, _pinned(folder) as pin:
+        _sweep_stale_temps(pin)
         try:
-            mtime = (Path(folder) / JSON_NAME).stat().st_mtime
+            mtime = _stat_in(pin, JSON_NAME).st_mtime
         except OSError:
             mtime = None
-        loaded = load_session(folder)
-        summary = load_summary(folder, mtime)  # one decision for both files
+        loaded = load_session(folder, pin)
+        summary = load_summary(folder, mtime, pin)  # one decision for both files
         out = []
         if fmt in ("docx", "both"):
-            out.append(export_docx(folder, loaded, summary))
+            out.append(export_docx(folder, loaded, summary, pin=pin))
         if fmt in ("pdf", "both"):
             try:
-                out.append(export_pdf(folder, loaded, summary))
+                out.append(export_pdf(folder, loaded, summary, pin=pin))
             except Exception as e:
                 err = (
                     e

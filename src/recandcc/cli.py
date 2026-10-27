@@ -9,6 +9,7 @@ import signal
 import sys
 import threading
 import time
+import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -69,7 +70,7 @@ def cmd_run(args) -> int:
         log.error("RecAndCC is already running (lock %s)", lock.path)
         print("RecAndCC is already running.", file=sys.stderr)
         return 1
-    cfg = load_config()
+    cfg = load_config(migrate=True)  # saves one-time migrations; the Controller notices them
     log.info(
         "starting RecAndCC (mode=%s, output=%s, pid=%d)",
         cfg.detection.mode,
@@ -278,16 +279,29 @@ def cmd_devices(args) -> int:
 def cmd_autostart(args) -> int:
     from . import autostart
 
-    if args.action == "on":
-        autostart.enable()
-    elif args.action == "off":
-        autostart.disable()
     if args.action in ("on", "off"):
-        load_config(CONFIG_PATH)  # creates the file on first run
+        # config.toml first, the login item only once it is saved: a failed save (locked,
+        # unwritable, invalid TOML) leaves both unchanged instead of out of step.
         try:
+            load_config(CONFIG_PATH)  # creates the file on first run (takes the lock too)
+            # exactly what the file said (None: no such key), for the revert below
+            previous = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8")).get("autostart")
             save_keys(CONFIG_PATH, {"autostart": args.action == "on"})  # keeps other hand edits
-        except OSError as e:  # incl. ConfigLockTimeout
-            print(f"Can't save the setting: {type(e).__name__}", file=sys.stderr)
+        except (OSError, ValueError) as e:  # incl. ConfigLockTimeout
+            print(
+                f"Can't save the setting: {type(e).__name__}; launch at login not changed",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            autostart.enable() if args.action == "on" else autostart.disable()
+        except Exception as e:  # login item unchanged: put config.toml back as it was
+            note = ""
+            try:
+                save_keys(CONFIG_PATH, {"autostart": previous})  # None removes the key again
+            except Exception:  # noqa: BLE001 - reported below
+                note = "; config.toml may now disagree with the login item"
+            print(f"Can't change launch at login: {type(e).__name__}{note}", file=sys.stderr)
             return 1
     print(f"Launch at login: {autostart.describe()}")
     return 0
@@ -349,7 +363,7 @@ def cmd_config(args) -> int:
     if provider:
         print(f"# WARNING: {warning_text(cfg.output_dir, provider)}")
     kind = network_volume(cfg.output_dir)
-    if kind:
+    if isinstance(kind, str):
         print(f"# WARNING: {network_warning_text(cfg.output_dir, kind)}")
     return 0
 
