@@ -24,6 +24,7 @@ import os
 import queue
 import threading
 import time
+from collections.abc import Callable
 
 import pystray  # pyright: ignore[reportMissingImports] - Windows-only dependency
 from PIL import Image, ImageDraw  # pyright: ignore[reportMissingImports] - Windows-only dependency
@@ -108,6 +109,7 @@ class TkCaptions:
     def _run(self) -> None:
         try:
             import tkinter as tk
+            from tkinter import font as tkfont
         except Exception:
             log.info("tkinter unavailable; no live captions window")
             return
@@ -145,6 +147,13 @@ class TkCaptions:
         buf = CaptionBuffer()
         st = {"title": "", "started": None, "ended": None, "visible": False}
 
+        def wrap_limit() -> tuple[float | None, Callable[[str], float]]:
+            # Usable text width and the font's measure; RTL lines are wrapped before reordering.
+            width = text.winfo_width() - 2 * 10 - 10
+            if width < 100:  # not mapped yet: fall back to a character count
+                return None, len
+            return width, tkfont.Font(font=text.cget("font")).measure
+
         def render(force_scroll: bool = False) -> None:
             follow = force_scroll or text.yview()[1] >= 0.999
             text.configure(state="normal")
@@ -152,7 +161,7 @@ class TkCaptions:
             for i, ln in enumerate(buf.lines):
                 tag = ln.label if ln.label in ("Me", "Others") else "other"
                 para = ("rtl",) if ln.rtl else ("line",)
-                for piece, is_label in tk_parts(ln):
+                for piece, is_label in tk_parts(ln, *wrap_limit()):
                     text.insert("end", piece, (tag, *para) if is_label else para)
                 if i < len(buf) - 1:
                     text.insert("end", "\n", para)

@@ -9,11 +9,11 @@ writing direction of each line (Hebrew lines are right-aligned and laid out righ
 from __future__ import annotations
 
 import bisect
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from ..models import Segment, is_rtl
-from .bidi import visual_rtl
+from .bidi import visual_rtl, wrap_logical
 
 MAX_LINES = 200
 AUTO_HIDE_AFTER_S = 10.0
@@ -69,16 +69,31 @@ def format_line(line: CaptionLine, width: int = 7) -> str:
     return f"{line.label:<{width}} {text}"
 
 
-def tk_parts(line: CaptionLine) -> list[tuple[str, bool]]:
+def tk_parts(
+    line: CaptionLine,
+    max_width: float | None = None,
+    measure: Callable[[str], float] = len,
+) -> list[tuple[str, bool]]:
     """What the Tk window inserts for one line, as ``(text, is_label)`` pieces, left to right.
 
     Tk on Windows paints characters in the order given (no bidi), so an RTL line is reordered
     here: the text in visual order, then the label at the right edge, and the widget
     right-justifies it. LTR lines are ``label<TAB>text``, unchanged.
+
+    With ``max_width`` (and ``measure``, e.g. ``font.measure``) an RTL line is wrapped in
+    logical order first and each piece reordered on its own, joined by newlines, so the widget
+    never wraps it again and the wrapped lines read in order. The label sits on the first line.
     """
     if not line.rtl:
         return [(line.label + "\t", True), (line.text, False)]
-    return [(visual_rtl(line.text), False), ("  " + line.label, True)]
+    label = "  " + line.label
+    if max_width is None:
+        return [(visual_rtl(line.text), False), (label, True)]
+    chunks = wrap_logical(line.text, max(1.0, max_width - measure(label)), measure)
+    parts: list[tuple[str, bool]] = [(visual_rtl(chunks[0]), False), (label, True)]
+    for chunk in chunks[1:]:
+        parts += [("\n", False), (visual_rtl(chunk), False)]
+    return parts
 
 
 def fmt_mmss(seconds: float) -> str:
