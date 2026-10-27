@@ -46,6 +46,7 @@ from .common import (
     transcript_label,
 )
 from .present import (
+    SEARCHING,
     live_transcript_target,
     prompt_notice,
     record_item_title,
@@ -204,8 +205,9 @@ class TkSearch:
 
     Like ``TkCaptions``: one thread owns its own ``Tk`` root and all tkinter calls; others
     only ``post()`` ``("ask",)`` (show the query entry) or ``("results", query, hits)``.
-    ``submit`` (a query, from the Tk thread) hands it to ``search``, which must not block.
-    Double-clicking a match opens it on a worker thread (the file check may be slow).
+    ``submit`` (a query, from the Tk thread) hands it to ``search``, which must not block;
+    results for a query other than the one in the entry are dropped. Double-clicking a match
+    opens it on a worker thread (the file check may be slow). If Tk fails, ``post`` stops.
     """
 
     POLL_MS = 150
@@ -221,8 +223,12 @@ class TkSearch:
         self._q: queue.Queue = queue.Queue()
         self._thread: threading.Thread | None = None
         self.hits: list = []
+        self.failed = False
+        self._status = None  # set by the Tk thread: shows a status line
 
     def post(self, *cmd) -> None:
+        if self.failed:
+            return
         if self._thread is None:
             self._thread = threading.Thread(target=self._run, daemon=True, name="search-tk")
             self._thread.start()
@@ -230,6 +236,8 @@ class TkSearch:
 
     def submit(self, query: str) -> None:
         if query := query.strip():
+            if self._status is not None:
+                self._status(SEARCHING)
             self._search(query)
 
     def open(self, index: int) -> None:
@@ -243,45 +251,53 @@ class TkSearch:
         try:
             import tkinter as tk
             from tkinter import ttk
-        except Exception:
-            log.info("tkinter unavailable; no search window")
+
+            root = tk.Tk()
+            root.withdraw()
+            win = tk.Toplevel(root)
+            win.withdraw()
+            win.title("Search transcripts")
+            win.geometry("720x360")
+            win.protocol("WM_DELETE_WINDOW", win.withdraw)
+            query = tk.StringVar()
+            top = tk.Frame(win, padx=8, pady=8)
+            top.pack(fill="x")
+            entry = tk.Entry(top, textvariable=query)
+            entry.pack(side="left", fill="x", expand=True)
+            tk.Button(top, text="Search", command=lambda: self.submit(query.get())).pack(
+                side="left"
+            )
+            entry.bind("<Return>", lambda _e: self.submit(query.get()))
+            status = tk.Label(win, anchor="w", padx=8)
+            status.pack(fill="x")
+            tree = ttk.Treeview(win, columns=[c[0] for c in self.COLUMNS], show="headings")
+            tree.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+            for col, head, width in self.COLUMNS:
+                tree.heading(col, text=head)
+                tree.column(col, width=width, stretch=col == "text")
+            tree.bind(
+                "<Double-1>", lambda _e: self.open(tree.index(f) if (f := tree.focus()) else -1)
+            )
+            self._status = lambda text: status.configure(text=text)
+        except Exception as e:
+            self.failed = True
+            log.warning("no search window (tkinter unavailable): %s", type(e).__name__)
             return
-        root = tk.Tk()
-        root.withdraw()
-        win = tk.Toplevel(root)
-        win.withdraw()
-        win.title("Search transcripts")
-        win.geometry("720x360")
-        win.protocol("WM_DELETE_WINDOW", win.withdraw)
-        query = tk.StringVar()
-        top = tk.Frame(win, padx=8, pady=8)
-        top.pack(fill="x")
-        entry = tk.Entry(top, textvariable=query)
-        entry.pack(side="left", fill="x", expand=True)
-        tk.Button(top, text="Search", command=lambda: self.submit(query.get())).pack(side="left")
-        entry.bind("<Return>", lambda _e: self.submit(query.get()))
-        status = tk.Label(win, anchor="w", padx=8)
-        status.pack(fill="x")
-        tree = ttk.Treeview(win, columns=[c[0] for c in self.COLUMNS], show="headings")
-        tree.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        for col, head, width in self.COLUMNS:
-            tree.heading(col, text=head)
-            tree.column(col, width=width, stretch=col == "text")
-        tree.bind("<Double-1>", lambda _e: self.open(tree.index(f) if (f := tree.focus()) else -1))
 
         def poll() -> None:
             try:
                 while True:
                     cmd = self._q.get_nowait()
-                    if cmd[0] == "results":
+                    if cmd[0] == "ask":
+                        win.deiconify()
+                        win.lift()
+                        entry.focus_set()
+                    elif cmd[0] == "results" and cmd[1] == query.get().strip():
                         self.hits = [] if isinstance(cmd[2], Exception) else list(cmd[2])
                         tree.delete(*tree.get_children())
                         for hit in self.hits:
                             tree.insert("", "end", values=search_hit_row(hit))
                         status.configure(text=search_status(cmd[1], cmd[2]))
-                    win.deiconify()
-                    win.lift()
-                    entry.focus_set()
             except queue.Empty:
                 pass
             except Exception as e:  # its text may quote a transcript: log the type only

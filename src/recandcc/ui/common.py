@@ -397,7 +397,8 @@ class Controller:
 
                 hits = search_transcripts(self.cfg.output_dir, query, SEARCH_LIMIT)
             except Exception as e:  # noqa: BLE001
-                log.exception("transcript search failed")
+                # the type only: an FTS5 syntax error quotes the query
+                log.error("transcript search failed: %s", type(e).__name__)
                 hits = e
             self.events.put(("search", query, hits))
 

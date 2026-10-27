@@ -80,12 +80,26 @@ def test_search_events_reach_the_window_including_failures(tray):
 def test_search_window_submits_queries_and_opens_matches(tray, tmp_path, monkeypatch):
     queries, opened, done = [], [], threading.Event()
     win = tray.TkSearch(queries.append)
+    shown: list[str] = []
+    win._status = shown.append
     win.submit("  ")
     win.submit(" budget ")
     assert queries == ["budget"]
+    assert shown == [tray.SEARCHING]
     monkeypatch.setattr(tray, "open_path", lambda p: (opened.append(p), done.set()))
     win.hits = [Hit(tmp_path, "s1", "", 1.0, "Me", "en", "x")]
     win.open(5)  # no such row: nothing
     win.open(0)
     assert done.wait(5)
     assert opened == [tmp_path]  # no transcript.md yet: its session folder
+
+
+def test_search_window_stops_queueing_when_tk_fails(tray, monkeypatch):
+    monkeypatch.setitem(sys.modules, "tkinter", None)  # import fails, as without Tk
+    win = tray.TkSearch(lambda q: None)
+    win.post("ask")
+    assert win._thread is not None
+    win._thread.join(5)
+    assert win.failed
+    win.post("ask")
+    assert win._q.qsize() == 1  # nothing queued after the failure

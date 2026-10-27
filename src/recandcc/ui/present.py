@@ -24,6 +24,7 @@ from .common import (
 
 MODE_LABELS = ((Mode.OFF, "Off"), (Mode.ASK, "Ask"), (Mode.AUTO, "Auto"))
 MIN_DIALOG_TIMEOUT_S = 5
+SEARCHING = "Searching…"
 ONBOARDING_GRANT = "Grant now"
 TOAST_SIZE = (340.0, 70.0)  # width, height
 TOAST_MARGIN = 16.0
