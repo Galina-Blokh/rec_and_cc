@@ -630,3 +630,37 @@ def test_real_model_summarises_en_and_ru(tmp_path):
         text = summary.summarize_session(d, Config()).read_text("utf-8")
         heading = summary.HEADINGS[lang][1]
         assert f"## {heading}" in text and len(text) > 80
+
+
+def test_a_numbered_room_session_says_the_owner_is_one_of_the_room_speakers():
+    system, _ = summary.build_messages("summary", "Speaker 1: hi", "en", room=True)
+    assert "one of the numbered speakers in the room" in system["content"]
+    assert "'Me' is the owner" not in system["content"]
+    asked = []
+
+    def gen(messages, _max_tokens):
+        asked.append(messages[0]["content"])
+        return "- x"
+
+    room = [seg("hi", speaker="Speaker 1"), seg("hello", speaker="Speaker 2", t=3)]
+    summary.summarize(room, gen, room=True)
+    assert asked and all("numbered speakers in the room" in a for a in asked)
+    asked.clear()
+    summary.summarize([seg("hi"), seg("ok", speaker="Speaker 1")], gen, room=True)  # lone Me
+    assert asked and all("'Me' is the owner" in a for a in asked)
+
+
+def test_summarize_session_reads_a_room_start_from_session_json(tmp_path):
+    room = [seg("hi", speaker="Speaker 1"), seg("hello", speaker="Speaker 2", t=3)]
+    d = make_session(tmp_path, room)
+    s = SessionInfo.load(d)
+    s.trigger_kind, s.started_as_room = TriggerKind.ROOM, True
+    s.save()
+    asked = []
+
+    def gen(messages, _max_tokens):
+        asked.append(messages[0]["content"])
+        return "- x"
+
+    summary.summarize_session(d, Config(), gen)
+    assert asked and all("one of the numbered speakers in the room" in a for a in asked)

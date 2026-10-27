@@ -94,6 +94,8 @@ All notable changes to RecAndCC are documented here. The format is based on
   ends in an HTTP 416 and a re-download; a meeting deleted while it was being embedded can't
   leave its text in the index; `recandcc search` leaves the download to a running app and
   waits at most 15 s for another process's download.
+- PDF export no longer silently drops characters its font lacks: bidi controls are stripped
+  and emoji or other uncovered glyphs become a visible placeholder (part of #4).
 - A summary stays at the top of DOCX/PDF exports after a speaker rename or call-app names:
   freshness follows the transcript text (`.summary-source` fingerprint), not its mtime (audit
   by rec-and-cc-7e). The CLI `recandcc name-speaker` still marks the summary pending so the app
