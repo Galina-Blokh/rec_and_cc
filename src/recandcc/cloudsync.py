@@ -24,6 +24,7 @@ import ntpath
 import os
 import plistlib
 import posixpath
+import re
 import sys
 import time
 from collections.abc import Mapping
@@ -253,8 +254,8 @@ def _existing_ancestor(path: Path) -> Path:
     return p
 
 
-def _mac_statfs(path: Path) -> tuple[str, int]:
-    """``(f_fstypename, f_flags)`` of the volume holding ``path``, via libc ``statfs``."""
+def _mac_statfs(path: Path) -> tuple[str, int, str]:
+    """``(f_fstypename, f_flags, f_mntfromname)`` of the volume holding ``path`` (libc statfs)."""
     import ctypes
     import ctypes.util
 
@@ -283,14 +284,38 @@ def _mac_statfs(path: Path) -> tuple[str, int]:
     buf = StatFS()
     if fn(os.fsencode(_existing_ancestor(path)), ctypes.byref(buf)) != 0:
         raise OSError(ctypes.get_errno(), "statfs failed")
-    return buf.f_fstypename.decode("ascii", "replace"), buf.f_flags
+    src = buf.f_mntfromname.decode("utf-8", "replace")
+    return buf.f_fstypename.decode("ascii", "replace"), buf.f_flags, src
+
+
+_LOCAL_FUSE = ("cryptomator", "veracrypt", "gocryptfs", "cryfs", "encfs", "cryptomator-")
+_NET_FUSE_SRC = re.compile(r"^(//|[^/\s]+@[^/\s]+:|[A-Za-z][\w.-]*:)|sshfs|rclone|smbnetfs|s3fs")
+
+
+def _fuse_volume(fstype: str, source: str) -> tuple[bool, str | None]:
+    """macFUSE / FUSE-T mounts all report a ``*fuse*`` type, so the mount source decides.
+    Known local encrypted vaults (Cryptomator, VeraCrypt, gocryptfs...) are local: None.
+    Network-looking sources (``user@host:``, ``remote:``, ``//host/``, sshfs, rclone,
+    smbnetfs) are a network volume. Anything else is undecided ``(False, None)``: the caller
+    falls back to MNT_LOCAL and, when unsure, warns (privacy first)."""
+    text = f"{fstype} {source}".lower()
+    if any(name in text for name in _LOCAL_FUSE):
+        return True, None
+    if _NET_FUSE_SRC.search(source) or "sshfs" in text:
+        return True, "a network volume"
+    return False, None
 
 
 def mac_network_volume(path: str | os.PathLike, statfs=None) -> str | None:
-    fstype, flags = (statfs or _mac_statfs)(_absolute(path))
-    fstype = fstype.lower()
+    info = (statfs or _mac_statfs)(_absolute(path))
+    fstype, flags = info[0].lower(), info[1]
+    source = info[2] if len(info) > 2 else ""
     if fstype in _NETWORK_FS:
         return _NETWORK_FS[fstype]
+    if "fuse" in fstype:
+        decided, kind = _fuse_volume(fstype, source)
+        if decided:
+            return kind
     if not flags & _MNT_LOCAL and fstype not in ("devfs", "autofs"):
         return "a network volume"  # not local and not a known pseudo fs
     return None
@@ -330,8 +355,25 @@ def linux_network_volume(path: str | os.PathLike, mounts: str | None = None) -> 
     return _NETWORK_FS.get(best_type)
 
 
-def network_volume(path: str | os.PathLike, platform: str | None = None) -> str | None:
-    """Kind of network share holding ``path`` ("SMB", "NFS", "a network drive", ...) or None."""
+class _ProbeFailed:
+    """Falsy like None: callers must test `is PROBE_FAILED` / isinstance(str), never `if kind:`.
+    Result of ``network_volume`` when the check itself errored: not "no network", unknown."""
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return "PROBE_FAILED"
+
+
+PROBE_FAILED = _ProbeFailed()
+
+
+def network_volume(
+    path: str | os.PathLike, platform: str | None = None
+) -> str | None | _ProbeFailed:
+    """Kind of network share holding ``path`` ("SMB", "NFS", "a network drive", ...), None if it
+    is not on one, or ``PROBE_FAILED`` (falsy) if the check errored, so callers can back off."""
     platform = platform or sys.platform
     try:
         if platform == "darwin":
@@ -342,6 +384,7 @@ def network_volume(path: str | os.PathLike, platform: str | None = None) -> str 
             return linux_network_volume(path)
     except Exception:  # best effort, like the cloud check
         log.debug("network-volume check failed", exc_info=True)
+        return PROBE_FAILED
     return None
 
 
