@@ -390,8 +390,7 @@ def _is_emoji(o: int) -> bool:
 def pdf_safe_text(text: str, path: Path) -> str:
     """Strip bidi controls and swap characters the font lacks (emoji, ...) for a visible
     placeholder, so the PDF never silently loses text the DOCX has. A ZWJ emoji sequence or
-    skin-tone run becomes one placeholder. ``path`` should be the same Path object every call
-    (the font cmap is cached by it)."""
+    skin-tone run becomes one placeholder. The font cmap is cached per ``path`` (by value)."""
     cmap = _font_cmap(path)
     mark = "\ufffd" if 0xFFFD in cmap else "?"
     text = text.replace("\r\n", "\n").replace("\r", "\n")
