@@ -3,13 +3,15 @@
 Stories: US-14, US-19.
 """
 
+import hashlib
+import io
 import sys
 import types
 
 import pytest
 from huggingface_hub.errors import IncompleteSnapshotError, LocalEntryNotFoundError
 
-from recandcc.transcribe import gpu, revisions
+from recandcc.transcribe import gpu, revisions, summary_cpu
 
 # What huggingface_hub raises with local_files_only=True for a missing snapshot and for one
 # left partial by an interrupted download: both must go online (once) to fetch the model.
@@ -202,3 +204,46 @@ def test_faster_whisper_user_folder_is_used_as_is(monkeypatch, tmp_path):
     _transcriber()._load(str(own))
     assert downloads == []
     assert [path for path, _ in models] == [str(own)]
+
+
+CPU_WEIGHTS = b"cpu weights" * 40
+
+
+def _pinned_cpu_model(monkeypatch, tmp_path) -> summary_cpu.CpuModel:
+    """A one-file CPU summary model, pinned to a made-up commit, stored under tmp_path."""
+    monkeypatch.setattr(summary_cpu, "MODELS_DIR", tmp_path / "models")
+    monkeypatch.setattr(summary_cpu, "_verified", set())
+    file = summary_cpu.ModelFile(
+        "onnx/model.onnx", hashlib.sha256(CPU_WEIGHTS).hexdigest(), len(CPU_WEIGHTS)
+    )
+    return summary_cpu.CpuModel(
+        repo="onnx-community/offline-test", revision="c" * 40, files=(file,)
+    )
+
+
+def test_cached_cpu_summary_model_never_touches_the_network(monkeypatch, tmp_path):
+    model = _pinned_cpu_model(monkeypatch, tmp_path)
+    (model.folder / "onnx").mkdir(parents=True)
+    (model.folder / "onnx" / "model.onnx").write_bytes(CPU_WEIGHTS)  # valid, as after a download
+
+    def unexpected(url):
+        raise AssertionError(f"a cached model made a request: {url}")
+
+    monkeypatch.setattr(summary_cpu, "_open", unexpected)
+    assert summary_cpu.model_dir(model) == model.folder
+
+
+def test_missing_cpu_summary_model_makes_exactly_one_pinned_request(monkeypatch, tmp_path):
+    model = _pinned_cpu_model(monkeypatch, tmp_path)
+    requests = []
+
+    def fake_hub(url):
+        requests.append(url)
+        return io.BytesIO(CPU_WEIGHTS)
+
+    monkeypatch.setattr(summary_cpu, "_open", fake_hub)
+    summary_cpu.model_dir(model)
+    assert requests == [model.url(model.files[0])]
+    assert requests[0].startswith(f"https://huggingface.co/{model.repo}/resolve/{model.revision}/")
+    summary_cpu.model_dir(model)  # now cached: no second request
+    assert len(requests) == 1
