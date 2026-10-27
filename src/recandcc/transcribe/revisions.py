@@ -40,8 +40,21 @@ HF_REVISIONS: dict[str, str] = {
     "Systran/faster-whisper-small": "536b0662742c02347bc0e980a01041f333bce120",
     "Systran/faster-whisper-base": "ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66",
     "Systran/faster-whisper-tiny": "d90ca5fe260221311c53c58e660288d3deb8d356",
+    # Hebrew-tuned ivrit.ai Whisper (transcription.language_models), faster-whisper builds
+    "ivrit-ai/whisper-large-v3-turbo-ct2": "72ad623a37947395efcc3933132353790e5a12f5",
+    "ivrit-ai/whisper-large-v3-ct2": "e9ed4a4a98d761b0f617d668303de2c514236c66",
+    # ... and their MLX conversions
+    "mlx-community/ivrit-ai-whisper-large-v3-turbo-mlx": "53ad8c6cd8b32eb0303f093a404ae13c1b1d567f",
+    "mlx-community/ivrit-ai-whisper-large-v3-mlx": "097c0cb2bb4288a3c82f6d524a39c4ce09afa187",
     # Local summary LLM (mlx-lm, Apple silicon), see summary.py
     "mlx-community/Qwen2.5-3B-Instruct-4bit": "4f83f8f146fdf28b512a06562b671d7af4fab457",
+}
+
+# The same ivrit.ai model in both formats: CTranslate2 (faster-whisper) repo -> MLX repo. Either
+# name in `transcription.language_models` loads the build that fits the backend in use.
+IVRIT_MLX_REPOS: dict[str, str] = {
+    "ivrit-ai/whisper-large-v3-turbo-ct2": "mlx-community/ivrit-ai-whisper-large-v3-turbo-mlx",
+    "ivrit-ai/whisper-large-v3-ct2": "mlx-community/ivrit-ai-whisper-large-v3-mlx",
 }
 
 # faster-whisper model names -> their repos (same mapping as faster_whisper.utils._MODELS,
@@ -56,6 +69,12 @@ FASTER_WHISPER_REPOS: dict[str, str] = {
     "base": "Systran/faster-whisper-base",
     "tiny": "Systran/faster-whisper-tiny",
 }
+
+
+def ct2_repo(model: str) -> str:
+    """The faster-whisper build of ``model``: an ivrit.ai MLX repo maps to its CTranslate2
+    repo, anything else is returned as is."""
+    return next((ct2 for ct2, mlx in IVRIT_MLX_REPOS.items() if mlx == model), model)
 
 
 class UnpinnedModelError(RuntimeError):
