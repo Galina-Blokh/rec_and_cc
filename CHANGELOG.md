@@ -6,6 +6,9 @@ All notable changes to RecAndCC are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- RecAndCC is licensed under the Apache License 2.0 (`LICENSE`, `NOTICE`); completes #17.
+
 ### Security
 - CI installs exactly what `uv.lock` pins (`uv sync --locked` / `uv run --locked`), and its
   GitHub Actions are pinned to commit SHAs.
