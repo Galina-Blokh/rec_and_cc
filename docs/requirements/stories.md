@@ -30,6 +30,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 stock model, no Hebrew test set (#6) |
 | US-20 | Search my transcripts | 🟡 search only; summaries, export planned (#4) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
+| US-28 | Browse past meetings | 🟡 Windows window untested on hardware (#5) |
 
 ---
 
@@ -218,7 +219,7 @@ open transcripts one by one.*
   transcript is re-indexed and a deleted or discarded session leaves the index.
 - **Then** the index is local and owner-only, outside `output_dir` (never synced), and logs
   never contain the searched or found text.
-- **Not yet:** summaries and action items with a local LLM, DOCX/PDF export, a notes window
+- **Not yet:** summaries and action items with a local LLM, DOCX/PDF export
   (#4).
 
 ### US-21 Speaker names remembered across sessions
@@ -243,3 +244,25 @@ I don't have to work out who `Speaker 2` was every time.*
   delete the profiles (`--all` also deletes every session's voices).
 - **Not yet:** naming from the menu with a voice sample, names from the call app, overlap
   handling and an accuracy measurement on real speech (#1, #13).
+
+### US-28 Browse past meetings
+*As the owner, I want to see my past meetings in one place and open, rename or delete them,
+so that I don't have to dig through dated folders.*
+
+- **When** I choose **Meeting notes…** (macOS menu or Windows tray), **then** I see the
+  sessions in `output_dir`, newest first, each with its title (the triggering app, "Manual
+  recording", or the title I gave it), date and time, duration, speakers, languages and
+  whether it is transcribed; discarded sessions are not listed. The folder is read off the
+  UI thread.
+- **Given** a session folder with a `summary.md`, **then** its first lines show as an
+  excerpt and I can open it; without one the listing works the same, minus that action.
+- **When** I pick a session, **then** I can open its transcript, reveal its folder, rename
+  it or delete it. A rename is stored as `title` in `session.json` (older files without it
+  still load) and an empty title goes back to the default.
+- **When** I delete a session and confirm, **then** its folder goes to the Trash / Recycle
+  Bin (permanently via `discard_session` where there is none), it leaves the search index
+  and the recent list; if the Trash refuses, nothing is deleted and I am told.
+- **Given** a session still recording or waiting to be transcribed, **then** rename and
+  delete are refused with a notice.
+- **Then** logs never contain titles, excerpts or transcript text.
+- **Not yet:** a native macOS window (it is a pair of dialogs), summaries themselves (#4).

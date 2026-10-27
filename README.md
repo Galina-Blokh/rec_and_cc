@@ -116,6 +116,13 @@ Menu items:
   any language); pick a match to open its transcript. Same as `recandcc search`. On
   Windows the tray item opens a small window: type the words, press Enter, and
   double-click a match (time, speaker, snippet) to open it.
+- **Meeting notes…**: your past sessions, newest first, with title (the app that triggered
+  it, or one you gave it), date and time, duration, speakers, languages and whether it is
+  transcribed. Pick one to open its transcript or `summary.md` (if there is one; its first
+  lines show as an excerpt), reveal its folder, rename it (the title is kept in
+  `session.json`) or delete it. Delete moves the folder to the Trash / Recycle Bin and drops
+  it from the search index; a session still recording or waiting to be transcribed can't be
+  changed. On macOS it is a pair of dialogs; on Windows a small window with buttons.
 - **Open transcripts folder**
 - **Permissions**: status and "Grant…" actions.
 - **Launch at login**: starts RecAndCC every time you log in. Turn it on once.
@@ -296,7 +303,8 @@ local folder (for example `~/Transcribes`) if recordings must stay on this devic
   by a quit are deleted at the next startup).
 - `audio_retention_days = N` (menu → **Delete audio after**: Never / 1 / 7 / 30 / 90 days)
   deletes the audio N days after transcription; `0` keeps it forever.
-- Transcripts are never deleted automatically. Delete a session by deleting its folder.
+- Transcripts are never deleted automatically. Delete a session from **Meeting notes…**
+  (it goes to the Trash; empty the Trash to remove it for good) or by deleting its folder.
   Its text leaves the search index at the next search, the next app start, or the app's
   hourly check, whichever comes first. Removed or replaced text is overwritten in
   `search.sqlite3`, so it can't be recovered from the file. To remove the whole index at

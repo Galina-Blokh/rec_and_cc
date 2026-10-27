@@ -27,6 +27,7 @@ from ..config import CONFIG_PATH
 from ..engine import RECORDING
 from ..models import Mode, TriggerKind
 from ..retention import RETENTION_CHOICES
+from . import notes as notes_ui
 from .common import (
     PERM_KINDS,
     PERM_TITLES,
@@ -137,6 +138,7 @@ class MacApp(rumps.App):
             rumps.MenuItem("Open transcripts folder", callback=self._open_folder),
             self.recent_menu,
             rumps.MenuItem("Search transcripts…", callback=self._search),
+            rumps.MenuItem("Meeting notes…", callback=lambda _: ctrl.notes_async()),
             None,
             self.perm_menu,
             self.login_item,
@@ -203,6 +205,8 @@ class MacApp(rumps.App):
                         self.captions.end()
             elif kind == "search":
                 self._show_hits(ev[1], ev[2])
+            elif kind == "notes":
+                self._show_notes(ev[1])
             elif kind == "refreshed":
                 self._render_recent()
                 self._render_permissions()
@@ -435,6 +439,32 @@ class MacApp(rumps.App):
                 open_path(search_open_target(hits[int(number) - 1]))
 
         threading.Thread(target=run, daemon=True, name="search-results").start()
+
+    def _show_notes(self, notes: list) -> None:
+        """Meeting notes as AppleScript dialogs on a worker thread (pick a meeting, then an
+        action); rename and delete run on the Controller, which posts a fresh list."""
+        if not notes:
+            self._notify("Meeting notes", "No meetings yet")
+            return
+
+        def run():
+            i = notes_ui.chosen_index(osascript(notes_ui.list_script(notes)), len(notes))
+            if i is None:
+                return
+            note = notes[i]
+            action = osascript(notes_ui.actions_script(note))
+            if action == "Rename…":
+                out = osascript(notes_ui.rename_script(note))
+                if "button returned:Rename" in out:
+                    title = out.partition("text returned:")[2]
+                    self.ctrl.note_action_async(note.directory, "rename", title)
+            elif action == "Delete…":
+                if "button returned:Delete" in osascript(notes_ui.delete_script(note)):
+                    self.ctrl.note_action_async(note.directory, "delete")
+            elif action in notes_ui.ACTIONS:
+                open_path(notes_ui.action_target(note, action))
+
+        threading.Thread(target=run, daemon=True, name="notes-dialog").start()
 
     def _maybe_onboard(self) -> None:
         if self._onboarded:

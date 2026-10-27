@@ -396,6 +396,53 @@ class Controller:
         except Exception:  # noqa: BLE001 - search is optional; never break transcription
             log.exception("could not update the search index")
 
+    # --- meeting notes (worker threads; the list arrives as a ("notes", notes) event)
+    def notes_async(self) -> None:
+        def run() -> None:
+            from .notes import scan_notes
+
+            self.events.put(("notes", scan_notes(self.cfg.output_dir)))
+
+        threading.Thread(target=run, daemon=True, name="notes").start()
+
+    def note_busy(self, directory: Path) -> str | None:
+        """Why a session can't be renamed or deleted now, or None."""
+        if self.engine.state.session_dir and Path(self.engine.state.session_dir) == directory:
+            return "It is still recording."
+        try:
+            ready = SessionInfo.load(directory).transcribed
+        except Exception:  # noqa: BLE001 - unreadable: let the action report it
+            return None
+        if not ready and self.tq.pending() > 0:
+            return "It may still be transcribing; try again when the queue is done."
+        return None
+
+    def note_action_async(self, directory: Path, action: str, title: str = "") -> None:
+        """Rename (``action="rename"``) or delete a session off the UI thread, then post a
+        notice and a fresh ``notes`` list."""
+
+        def run() -> None:
+            from .notes import delete_session, rename_session, scan_notes
+
+            if why := self.note_busy(directory):
+                self.events.put(("notice", "Can't change this meeting", why))
+                return
+            try:
+                if action == "rename":
+                    rename_session(directory, title)
+                else:
+                    result = delete_session(directory)
+                    self._index_session(directory)  # gone: drops it from the search index
+                    self.refresh_async(force=True)
+                    if result == "failed":
+                        self.events.put(("notice", "Could not delete the meeting", directory.name))
+            except Exception as e:  # noqa: BLE001
+                log.error("meeting %s failed for %s: %s", action, directory, type(e).__name__)
+                self.events.put(("notice", f"Could not {action} the meeting", directory.name))
+            self.events.put(("notes", scan_notes(self.cfg.output_dir)))
+
+        threading.Thread(target=run, daemon=True, name="notes-action").start()
+
     def search_async(self, query: str) -> None:
         """Search the transcripts off the UI thread; posts ``("search", query, hits)``, with
         hits the exception if the search failed."""

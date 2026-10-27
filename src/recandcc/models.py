@@ -109,6 +109,8 @@ class SessionInfo:
     # Pipeline measurements, by stage ("recording", "live", "transcription", ...): plain
     # JSON values. Absent in session.json files written before it existed.
     metrics: dict[str, dict] = field(default_factory=dict)
+    # Display title the user gave it in Meeting notes (None: never renamed, "": reset).
+    title: str | None = None
 
     FILENAME = "session.json"
     # Present in a folder the user discarded: never transcribe or list it (discard_session).
@@ -120,6 +122,10 @@ class SessionInfo:
             self.metrics[stage] = {**self.metrics.get(stage, {}), **values}
 
     def save(self) -> None:
+        if self.title is None:  # keep a rename made meanwhile through another copy
+            with contextlib.suppress(OSError, ValueError, AttributeError):
+                on_disk = json.loads((self.directory / self.FILENAME).read_text("utf-8"))
+                self.title = on_disk.get("title")
         with _METRICS_LOCK:
             data = asdict(self)
         data["directory"] = str(self.directory)
@@ -159,6 +165,7 @@ class SessionInfo:
             tracks={Track(k): v for k, v in data.get("tracks", {}).items()},
             transcribed=data.get("transcribed", False),
             metrics=data.get("metrics") or {},
+            title=data.get("title"),
         )
 
 
