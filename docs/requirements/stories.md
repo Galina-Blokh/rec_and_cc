@@ -23,7 +23,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-12 | Speaker labels for the other side | ✅ |
 | US-13 | Readable transcripts in private folders | 🟡 owner-only not enforced on Windows (#37) |
 | US-14 | Works offline, nothing leaves the device | 🟡 no warning for synced folders yet (#41) |
-| US-15 | Delete old audio automatically | 🟡 `keep_audio = false` can miss a crash (#38) |
+| US-15 | Delete old audio automatically | ✅ |
 | US-16 | Permissions set up from the app | ✅ |
 | US-17 | Always on, visible state | ✅ |
 | US-18 | Runs on Windows | 🟡 untested on hardware (#5) |
@@ -151,9 +151,9 @@ while I decide.*
 ### US-15 Delete old audio automatically
 - **Given** `audio_retention_days = N` (menu: Never / 1 / 7 / 30 / 90), **then** WAVs of
   transcribed sessions older than N days are deleted; transcripts are always kept.
-- **Given** `keep_audio = false`, **then** WAVs are deleted right after transcription.
-- **Not yet:** when diarization is slow, deletion waits for it in memory; if the app quits
-  or crashes first, the WAVs stay (until `audio_retention_days` removes them, if set) (#38).
+- **Given** `keep_audio = false`, **then** WAVs are deleted right after transcription. WAVs
+  left behind (the app quit before a slow diarization finished, or a delete failed) are
+  deleted at the next startup; audio of sessions not yet transcribed is never deleted.
 
 ### US-16 Permissions set up from the app
 - **Given** first run on macOS, **then** a setup dialog requests Microphone and System audio.
