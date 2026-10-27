@@ -275,6 +275,10 @@ class MacApp(rumps.App):
             self.rec_item.title = rec_title
         self.login_item.state = check(autostart.is_enabled())
         self.room_item.state = check(self.cfg.detection.room_listening)  # hand edits too
+        if self.captions_item.state != check(self.cfg.live_captions):  # hand edits too
+            self.captions_item.state = check(self.cfg.live_captions)
+            self._apply_captions()
+        self._render_retention()
         if self.ctrl.sensitivity_preset() != self._sensitivity_shown:
             self._render_sensitivity()  # hand edits and config reloads too
         self._render_languages()

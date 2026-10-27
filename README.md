@@ -382,6 +382,9 @@ backup) or `%USERPROFILE%\Dropbox`, also through symlinks and junctions, it logs
 one-time notification, and `recandcc config` prints the same warning. Other sync tools (for
 example a Google Drive drive letter on Windows) are not detected. Set `output_dir` to a
 local folder (for example `~/Transcribes`) if recordings must stay on this device only.
+The same warning appears (once per folder) when `output_dir` is on a network volume: an SMB, AFP,
+NFS or WebDAV mount on macOS, a UNC path or mapped network drive on Windows (NFS/CIFS/SSHFS on
+Linux). It never blocks recording, and the log names the kind of share, not the path.
 
 ### Retention
 
