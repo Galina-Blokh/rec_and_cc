@@ -30,7 +30,7 @@ from ..metrics import log_session_metrics, rounded
 from ..models import SAMPLE_RATE, Segment, SessionInfo, Track
 from . import voices
 from .chunking import Chunk, find_speech, load_track, merge_labelled, slice_chunk
-from .diarize import Diarizer, Turn, label_speakers
+from .diarize import Diarizer, Turn, label_speakers, model_path
 from .gpu import MlxWhisper, hf_cache_folder, use_gpu
 from .merge import (
     ME,
@@ -367,7 +367,13 @@ class Transcriber:
                 chunk.language,
             )
         speaker = SPEAKERS[chunk.track]
-        words = speaker == OTHERS and self.cfg.diarize and self.cfg.split_on_speaker_change
+        # word timings only matter if a split can happen: needs the speaker model on disk
+        words = (
+            speaker == OTHERS
+            and self.cfg.diarize
+            and self.cfg.split_on_speaker_change
+            and model_path(download=False) is not None
+        )
         return self.transcribe_audio(
             piece, chunk.start, speaker, lang, max_end=chunk.end, words=words
         )
@@ -443,8 +449,13 @@ class Transcriber:
                         speaker=speaker,
                         language=language,
                         words=[
-                            (round(offset + w.start, 3), round(offset + w.end, 3), w.word)
+                            (
+                                round(offset + w.start, 3),
+                                round(min(offset + w.end, end_cap), 3),
+                                w.word,
+                            )
                             for w in ws
+                            if offset + w.start < end_cap
                         ],
                     )
                 )

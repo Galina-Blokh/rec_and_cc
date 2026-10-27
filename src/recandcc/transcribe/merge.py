@@ -163,10 +163,9 @@ def _runs(
 
 
 def _join(raw: Sequence[str]) -> str:
-    """Words back to text: faster-whisper words carry their leading space; otherwise space-join."""
-    if any(w[:1].isspace() for w in raw[1:]):
-        return "".join(raw).strip()
-    return " ".join(w.strip() for w in raw)
+    """Words back to text exactly: faster-whisper words carry their own leading space (none for
+    CJK, sub-word tokens or punctuation), so they are concatenated as they are."""
+    return "".join(raw).strip()
 
 
 def split_on_speaker_change(

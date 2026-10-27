@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import fields
 from pathlib import Path
 
 from ..models import Segment, SessionInfo, is_rtl
@@ -102,6 +102,11 @@ def format_srt(segments: list[Segment]) -> str:
     return "\n".join(blocks)
 
 
+def _segment_dict(s: Segment) -> dict:
+    """Segment fields for JSON, without the in-memory word timings (and without deep copies)."""
+    return {f.name: getattr(s, f.name) for f in fields(s) if f.name != "words"}
+
+
 def format_json(session: SessionInfo, segments: list[Segment], duration: float, model: str) -> str:
     data = {
         "session_id": session.id,
@@ -112,7 +117,7 @@ def format_json(session: SessionInfo, segments: list[Segment], duration: float, 
         "duration": round(duration, 3),
         "languages": languages_of(segments),
         "model": model,
-        "segments": [{k: v for k, v in asdict(s).items() if k != "words"} for s in segments],
+        "segments": [_segment_dict(s) for s in segments],
     }
     return json.dumps(data, indent=2, ensure_ascii=False)
 

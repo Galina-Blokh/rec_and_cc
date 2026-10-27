@@ -52,8 +52,54 @@ def test_short_flicker_is_not_split():
 def test_text_is_preserved_word_for_word():
     s = seg(words(12))
     out = split_on_speaker_change([s], [Turn(0, 2, 0), Turn(2, 4, 1), Turn(4, 6, 0)])
-    assert len(out) == 3
-    assert " ".join(o.text for o in out) == s.text
+    assert [o.text for o in out] == ["w0 w1 w2 w3", "w4 w5 w6 w7", "w8 w9 w10 w11"]
+
+
+def test_a_b_a_with_long_b_splits_into_three():
+    s = seg(words(12))
+    out = split_on_speaker_change([s], [Turn(0, 2, 0), Turn(2, 4, 1), Turn(4, 6, 0)])
+    assert [(o.start, o.end) for o in out] == [(0.0, 2.0), (2.0, 4.0), (4.0, 6.0)]
+
+
+def test_flicker_tie_is_absorbed_by_one_neighbour():
+    s = seg(words(8))  # equal-length neighbours (1.5 s each) around a 1-word flicker
+    out = split_on_speaker_change([s], [Turn(0, 2, 0), Turn(2, 2.5, 1), Turn(2.5, 4, 2)])
+    assert len(out) == 2
+    assert "".join(o.text for o in out).replace(" ", "") == "w0w1w2w3w4w5w6w7"
+
+
+def test_zero_length_word_is_kept_and_assigned():
+    ws = [(0.0, 1.0, " a"), (1.0, 2.0, " b"), (2.0, 2.0, " c"), (2.0, 3.0, " d"), (3.0, 4.0, " e")]
+    out = split_on_speaker_change([seg(ws)], [Turn(0, 2, 0), Turn(2, 4, 1)])
+    assert [o.text for o in out] == ["a b", "c d e"] or [o.text for o in out] == ["a b c", "d e"]
+    assert "".join(o.text for o in out).replace(" ", "") == "abcde"
+
+
+def test_punctuation_stays_attached_to_its_word():
+    ws = [
+        (0.0, 1.0, " Hello"),
+        (1.0, 1.5, ","),
+        (1.5, 2.0, " there"),
+        (2.0, 3.0, " Hi"),
+        (3.0, 4.0, "!"),
+    ]
+    out = split_on_speaker_change([seg(ws)], [Turn(0, 2, 0), Turn(2, 4, 1)])
+    assert [o.text for o in out] == ["Hello, there", "Hi!"]
+
+
+def test_cjk_and_subword_tokens_are_not_given_spaces():
+    cjk = [(0.0, 1.0, "你"), (1.0, 2.0, "好"), (2.0, 3.0, "吗"), (3.0, 4.0, "好"), (4.0, 5.0, "的")]
+    out = split_on_speaker_change([seg(cjk)], [Turn(0, 3, 0), Turn(3, 5, 1)])
+    assert [o.text for o in out] == ["你好吗", "好的"]
+    sub = [
+        (0.0, 1.0, " Hel"),
+        (1.0, 2.0, "lo"),
+        (2.0, 3.0, " wor"),
+        (3.0, 4.0, "ld"),
+        (4.0, 5.0, "!"),
+    ]
+    out = split_on_speaker_change([seg(sub)], [Turn(0, 2, 0), Turn(2, 5, 1)])
+    assert [o.text for o in out] == ["Hello", "world!"]
 
 
 def test_no_words_means_unchanged():
@@ -77,6 +123,17 @@ def test_outputs_carry_the_split_segments(tmp_path):
     data = json.loads(format_json(session, out, 4.0, "m"))
     assert [s["text"] for s in data["segments"]] == ["w0 w1 w2 w3", "w4 w5 w6 w7"]
     assert all("words" not in s for s in data["segments"])
+
+
+def test_json_without_words_is_byte_identical_to_asdict(tmp_path):
+    from dataclasses import asdict
+
+    segs = [Segment(0.0, 1.5, "héllo", "Me", "en"), Segment(1.5, 3.0, "привет", "Others", "ru")]
+    session = make_session(tmp_path)
+    got = json.loads(format_json(session, segs, 3.0, "m"))["segments"]
+    want = [{k: v for k, v in asdict(s).items() if k != "words"} for s in segs]
+    assert got == want
+    assert list(got[0]) == ["start", "end", "text", "speaker", "language"]
 
 
 class _W:
@@ -127,3 +184,36 @@ def test_mlx_path_never_requests_word_timestamps():
     t = _transcriber(model)
     out = t.transcribe_audio(np.zeros(SAMPLE_RATE, np.float32), 0.0, "Others", "en", words=True)
     assert model.calls == [{}] and out[0].words == []
+
+
+def test_word_times_are_clamped_to_the_chunk_end():
+    class Late(_Model):
+        def transcribe(self, audio, **kw):
+            ws = [_W(0.0, 0.5, " a"), _W(0.5, 1.5, " b"), _W(1.2, 1.4, " c")]
+            s = types.SimpleNamespace(start=0.0, end=1.5, text=" a b c", words=ws)
+            return iter([s]), None
+
+    t = _transcriber(Late())
+    out = t.transcribe_audio(
+        np.zeros(2 * SAMPLE_RATE, np.float32), 10.0, "Others", "en", max_end=11.0, words=True
+    )
+    assert out[0].end == 11.0
+    assert out[0].words == [(10.0, 10.5, " a"), (10.5, 11.0, " b")]
+
+
+def _chunk_words(monkeypatch, present, cfg=None):
+    model = _Model()
+    t = eng.Transcriber(cfg or TranscriptionConfig(model="fake"))
+    t._model = model
+    t._lid_model = None
+    monkeypatch.setattr(eng, "model_path", lambda *a, **k: "/x" if present else None)
+    chunk = eng.Chunk("others", 0.0, 1.0, language="en")
+    t._transcribe_chunk(chunk, np.zeros(SAMPLE_RATE, np.float32))
+    return model.calls[0]["word_timestamps"]
+
+
+def test_words_only_requested_when_the_speaker_model_is_on_disk(monkeypatch):
+    assert _chunk_words(monkeypatch, True) is True
+    assert _chunk_words(monkeypatch, False) is False
+    off = TranscriptionConfig(model="fake", split_on_speaker_change=False)
+    assert _chunk_words(monkeypatch, True, off) is False
