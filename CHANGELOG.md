@@ -7,6 +7,9 @@ All notable changes to RecAndCC are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Live captions label other speakers `Speaker 1`, `Speaker 2`, … within a session instead of
+  `Others` (`diarize.live_speaker_labels`, on by default; display only, uses the downloaded
+  speaker model) (#1).
 - RecAndCC is licensed under the Apache License 2.0 (`LICENSE`, `NOTICE`); completes #17.
 
 ### Security
