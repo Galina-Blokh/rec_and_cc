@@ -32,7 +32,7 @@ from ..models import SAMPLE_RATE, Segment, SessionInfo, Track, TriggerKind
 from . import callnames, voices
 from .chunking import Chunk, find_speech, load_track, merge_labelled, slice_chunk
 from .diarize import Diarizer, Turn, label_speakers, model_path
-from .gpu import MlxWhisper, hf_cache_folder, use_gpu
+from .gpu import MlxWhisper, hf_cache_folder, mlx_word_timestamps, use_gpu
 from .merge import (
     ME,
     OTHERS,
@@ -144,6 +144,10 @@ class Transcriber:
         self._pool: ThreadPoolExecutor | None = None
         self._init_lock = threading.Lock()
         self._run_lock = threading.Lock()
+        # Word-timestamp failures in the current session (reset per session in _run); after
+        # the first one the session's remaining chunks are transcribed without words.
+        self._word_failures = 0
+        self._word_failures_lock = threading.Lock()
         self._diarizer: Diarizer | None = None
         # cfg.language_models: model name -> loaded model (under _route_lock, on first use or
         # prefetched). Until it is loaded, or after a failed load until _route_retry[name]
@@ -486,27 +490,35 @@ class Transcriber:
         ``offset`` + position in the piece, clipped to ``max_end``. Blocking; call it from a
         pool worker (see ``submit``) to run pieces in parallel. ``language`` picks the model
         (cfg.language_models); ``wait_for_model=False`` uses the main model while that one is
-        still loading (live). ``words``: keep word timings in ``Segment.words`` (faster-whisper
-        only; never requested from MLX, whose word timestamps need numba and scipy)."""
+        still loading (live). ``words``: keep word timings in ``Segment.words`` (on MLX only
+        when ``mlx_word_timestamps()``: mlx-whisper 0.4.3 with our numpy aligner)."""
         model = self._model_for(language, wait_for_model)
-        if isinstance(model, MlxWhisper):
-            pieces = [(a, b, t, []) for a, b, t in model.transcribe(audio, language)]
-        else:
-            segments, _ = model.transcribe(
-                audio,
-                language=language,
-                vad_filter=False,
-                beam_size=beam_size,
-                condition_on_previous_text=False,
-                word_timestamps=words,
-            )
-            pieces = [(s.start, s.end, s.text, getattr(s, "words", None) or []) for s in segments]
+        if words and self._word_failures:
+            words = False  # circuit breaker: this session's word pass already failed
+        failure = None
+        try:
+            pieces = self._pieces(model, audio, language, beam_size, words)
+        except Exception as e:
+            if not words:
+                raise
+            failure = type(e).__name__
+            log.debug("word timestamp failure", exc_info=True)
+        if failure is not None:
+            # Retried outside the except block, so the failed call (and its frames) are gone.
+            # One odd chunk must not fail the session: keep it whole (no words, never split).
+            self._note_word_failure(type(model).__name__, failure, offset)
+            pieces = self._pieces(model, audio, language, beam_size, False)
         end_cap = max_end if max_end is not None else offset + len(audio) / SAMPLE_RATE
         out = []
         for start, end, raw, ws in pieces:
             text = raw.strip()
             if text:
-                kept = [w for w in ws if offset + w.start < end_cap]
+                # Both backends' words as (start, end, " word"), in session time.
+                kept = [
+                    (round(offset + a, 3), round(min(offset + b, end_cap), 3), w)
+                    for a, b, w in ws
+                    if offset + a < end_cap
+                ]
                 out.append(
                     Segment(
                         start=round(offset + start, 3),
@@ -514,19 +526,57 @@ class Transcriber:
                         text=text,
                         speaker=speaker,
                         language=language,
-                        words=[
-                            (
-                                round(offset + w.start, 3),
-                                round(min(offset + w.end, end_cap), 3),
-                                w.word,
-                            )
-                            for w in kept
-                        ]
-                        if len(kept) == len(ws)
-                        else [],  # words were cut off: the text is whole, so never split it
+                        # words were cut off: the text is whole, so never split it
+                        words=kept if len(kept) == len(ws) else [],
                     )
                 )
         return out
+
+    def _note_word_failure(self, backend: str, error: str, offset: float) -> None:
+        """Count, and warn once per session (no transcript text); chunks already running
+        in parallel may fail too, and only log at DEBUG."""
+        with self._word_failures_lock:
+            self._word_failures += 1
+            first = self._word_failures == 1
+        (log.warning if first else log.debug)(
+            "word timestamps failed (%s, %s) for the chunk at %.1f s; kept without words, "
+            "and off for the rest of this session",
+            backend,
+            error,
+            offset,
+        )
+
+    @staticmethod
+    def _pieces(
+        model: Any, audio: np.ndarray, language: str, beam_size: int, words: bool
+    ) -> list[tuple[float, float, str, list[tuple[float, float, str]]]]:
+        """(start, end, text, [(start, end, " word")]) per segment, relative to ``audio``."""
+        if isinstance(model, MlxWhisper):
+            if words and mlx_word_timestamps():
+                return model.transcribe(audio, language, words=True)
+            return [(a, b, t, []) for a, b, t in model.transcribe(audio, language)]
+        segments, _ = model.transcribe(
+            audio,
+            language=language,
+            vad_filter=False,
+            beam_size=beam_size,
+            condition_on_previous_text=False,
+            word_timestamps=words,
+        )
+        try:  # faster-whisper decodes lazily: consume it here, and always close it
+            return [
+                (
+                    s.start,
+                    s.end,
+                    s.text,
+                    [(w.start, w.end, w.word) for w in getattr(s, "words", None) or []],
+                )
+                for s in segments
+            ]
+        finally:
+            close = getattr(segments, "close", None)
+            if close is not None:
+                close()
 
     # -- public ------------------------------------------------------------------------------
 
@@ -554,6 +604,7 @@ class Transcriber:
     def _run(self, session: SessionInfo, progress: ProgressCallback | None) -> list[Segment]:
         report = progress or (lambda _f: None)
         report(0.0)
+        self._word_failures = 0
         diarization = self.start_diarization(session)  # CPU threads, overlaps with Whisper
         audio: dict[Track, np.ndarray] = {}
         for track, name in session.tracks.items():

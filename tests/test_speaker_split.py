@@ -9,6 +9,7 @@ import json
 import types
 
 import numpy as np
+import pytest
 from test_transcribe import make_session
 
 from recandcc.config import TranscriptionConfig
@@ -193,19 +194,31 @@ def test_faster_whisper_words_are_requested_and_offset():
     assert model.calls[1]["word_timestamps"] is False
 
 
-def test_mlx_path_never_requests_word_timestamps():
-    class FakeMlx(eng.MlxWhisper):
-        def __init__(self):
-            self.calls = []
+class _FakeMlx(eng.MlxWhisper):
+    def __init__(self, ws=((0.0, 0.5, " a"), (0.5, 1.5, " b"))):
+        self.calls, self.ws = [], list(ws)
 
-        def transcribe(self, audio, language, **kw):
-            self.calls.append(kw)
-            return [(0.0, 1.0, "a b")]
+    def transcribe(self, audio, language, words=False):
+        self.calls.append(words)
+        text = "".join(w for _, _, w in self.ws)
+        return [(0.0, 1.0, text, self.ws)] if words else [(0.0, 1.0, text)]
 
-    model = FakeMlx()
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("aligner", [False, True])
+def test_mlx_requests_words_only_when_the_numpy_aligner_is_available(monkeypatch, aligner):
+    monkeypatch.setattr(eng, "mlx_word_timestamps", lambda: aligner)
+    model = _FakeMlx()
     t = _transcriber(model)
-    out = t.transcribe_audio(np.zeros(SAMPLE_RATE, np.float32), 0.0, "Others", "en", words=True)
-    assert model.calls == [{}] and out[0].words == []
+    audio = np.zeros(SAMPLE_RATE, np.float32)
+    out = t.transcribe_audio(audio, 10.0, "Others", "en", words=True)
+    assert model.calls == [aligner]
+    # session time, the word's own leading space, clamped to the chunk end
+    assert out[0].words == ([(10.0, 10.5, " a"), (10.5, 11.0, " b")] if aligner else [])
+    t.transcribe_audio(audio, 0.0, "Me", "en")
+    assert model.calls[-1] is False
 
 
 def test_word_times_are_clamped_to_the_chunk_end():
@@ -223,6 +236,16 @@ def test_word_times_are_clamped_to_the_chunk_end():
     # a word was cut off, so the words no longer cover the text: unsplittable, nothing is lost
     assert out[0].text == "a b c" and out[0].words == []
     assert split_on_speaker_change(out, [Turn(0, 10.5, 0), Turn(10.5, 12, 1)]) == out
+
+
+def test_mlx_words_crossing_max_end_clear_the_segment_words(monkeypatch):
+    monkeypatch.setattr(eng, "mlx_word_timestamps", lambda: True)
+    t = _transcriber(_FakeMlx([(0.0, 0.5, " a"), (0.5, 1.5, " b"), (1.2, 1.4, " c")]))
+    audio = np.zeros(2 * SAMPLE_RATE, np.float32)
+    out = t.transcribe_audio(audio, 10.0, "Others", "en", max_end=11.0, words=True)
+    assert out[0].text == "a b c" and out[0].words == []  # same rule as faster-whisper
+    out = t.transcribe_audio(audio, 10.0, "Others", "en", max_end=12.0, words=True)
+    assert out[0].words == [(10.0, 10.5, " a"), (10.5, 11.5, " b"), (11.2, 11.4, " c")]
 
 
 def test_words_are_kept_when_nothing_is_cut():
@@ -431,3 +454,76 @@ def test_split_pieces_keep_the_transcript_in_time_order(tmp_path):
     assert [s.start for s in out] == [0.0, 3.0, 5.0]
     md = format_markdown(sess, out, 10.0)
     assert md.index("w0 w1") < md.index("hello") < md.index("w5 w6")
+
+
+def test_a_failing_word_pass_keeps_the_session_and_the_chunk_whole(tmp_path, monkeypatch, caplog):
+    """MLX word alignment raising on a chunk must not fail the session: that chunk is
+    transcribed again without words (unsplit), and the warning carries no transcript text."""
+    import logging
+
+    from test_transcribe import FakeModel, _install, _write_tracks
+
+    class Flaky(_FakeMlx):
+        def transcribe(self, audio, language, words=False):
+            self.calls.append(words)
+            if words:
+                raise IndexError("jump_times")
+            return [(0.0, len(audio) / SAMPLE_RATE, " secret words")]
+
+    regions = _write_tracks(tmp_path)
+    monkeypatch.setattr(eng, "find_speech", lambda a: regions)
+    monkeypatch.setattr(eng, "mlx_word_timestamps", lambda: True)
+    s = make_session(tmp_path, {eng.Track.ME: "me.wav", eng.Track.OTHERS: "others.wav"})
+    t = eng.Transcriber(TranscriptionConfig(model="fake", workers=1, split_on_speaker_change=True))
+    model = Flaky()
+    monkeypatch.setattr(t, "_ensure_loaded", lambda: _install(t, model, FakeModel()))
+    monkeypatch.setattr(t, "_word_tracks", lambda _s: (eng.Track.OTHERS,))
+    with caplog.at_level(logging.DEBUG, "recandcc.transcribe"):
+        segs = t.transcribe_session(s)
+    others = [x for x in segs if x.speaker == "Others"]
+    assert others and all(x.text == "secret words" and x.words == [] for x in others)
+    # one worker, so chunks run in order: the first failure turns words off for the session
+    assert len([c for c in model.calls if c]) == 1 < len(others)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert sum("off for the rest of this session" in m for m in warnings) == 1
+    assert not any("secret" in m for m in warnings)
+    # a new session starts with words on again
+    model.calls.clear()
+    t2_segs = t.transcribe_session(s)
+    t.close()
+    assert t2_segs and len([c for c in model.calls if c]) == 1
+
+
+def test_failed_lazy_word_pass_is_closed_before_the_retry():
+    """faster-whisper yields segments lazily: a failure mid-iteration must close that
+    generator before the same model transcribes the chunk again without words."""
+    events = []
+
+    class Lazy:
+        def __init__(self, fail):
+            self.fail = fail
+
+        def __iter__(self):
+            ws = [_W(0.0, 0.5, " a")] if self.fail else []
+            yield types.SimpleNamespace(start=0.0, end=0.5, text=" a", words=ws)
+            if self.fail:
+                raise IndexError("boom")
+            yield types.SimpleNamespace(start=0.5, end=1.0, text=" b", words=[])
+
+        def close(self):
+            events.append(("close", self.fail))
+
+    class Model(_Model):
+        def transcribe(self, audio, **kw):
+            events.append(("transcribe", kw["word_timestamps"]))
+            return Lazy(kw["word_timestamps"]), None
+
+    t = _transcriber(Model())
+    out = t.transcribe_audio(np.zeros(SAMPLE_RATE, np.float32), 0.0, "Others", "en", words=True)
+    assert events == [
+        ("transcribe", True),
+        ("close", True),
+        ("transcribe", False),
+        ("close", False),
+    ]
+    assert [x.text for x in out] == ["a", "b"] and all(x.words == [] for x in out)

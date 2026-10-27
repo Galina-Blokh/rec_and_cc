@@ -52,9 +52,9 @@ dev = [
 # mlx-whisper declares torch, but only its unused mlx_whisper/torch_whisper.py imports it;
 # RecAndCC never loads it (tests/test_no_torch.py). Excluding it drops ~0.57 GB of torch,
 # sympy, networkx, mpmath, jinja2, markupsafe and setuptools. numba (with llvmlite) and
-# scipy are imported only by mlx_whisper/timing.py for word timestamps, which RecAndCC never
-# requests; transcribe/gpu.py stubs that module before importing mlx_whisper. See ADR 0011,
-# follow-up 4.
+# scipy are imported only by mlx_whisper/timing.py for word timestamps; transcribe/gpu.py
+# replaces that module with transcribe/mlx_timing.py (a numpy port, mlx-whisper 0.4.3) or a
+# stub before importing mlx_whisper. See ADR 0011, follow-up 4.
 exclude-dependencies = ["torch", "numba", "scipy"]
 
 [tool.ruff]
