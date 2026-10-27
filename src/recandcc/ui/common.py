@@ -51,6 +51,7 @@ log = logging.getLogger(__name__)
 
 RECENT_COUNT = 10
 SEARCH_LIMIT = 20
+MAX_SCAN = 10_000  # sessions looked at to find the newest finished one
 HOTKEY_DEBOUNCE_S = 0.5
 REFRESH_EVERY_S = 10.0
 PERM_KINDS = ("microphone", "system_audio")
@@ -527,11 +528,11 @@ class Controller:
 
         threading.Thread(target=run, daemon=True, name="search").start()
 
-    def export_async(self, transcript: Path | list[Path], fmt: str = "both") -> None:
+    def export_async(self, transcript: Path | None = None, fmt: str = "both") -> None:
         """Export a session's transcript to DOCX + PDF off the UI thread; posts a ``notice``
-        (never the transcript text). One export at a time: a second click is ignored. A list
-        means "the newest of these that is finished", resolved on the worker (no file access on
-        the UI thread)."""
+        (never the transcript text). One export at a time: a second click is ignored. None
+        means "the newest finished session", found on the worker (no file access on the UI
+        thread). Only session folders inside ``output_dir`` are exported (no symlinks out)."""
         if not self._export_lock.acquire(blocking=False):
             return
 
@@ -542,11 +543,15 @@ class Controller:
 
                 skipped: list[str] = []
                 try:
-                    target = (
-                        latest_finished(transcript) if isinstance(transcript, list) else transcript
-                    )
+                    from .notes import inside
+
+                    target = transcript
+                    if target is None:
+                        target = latest_finished(recent_transcripts(self.cfg.output_dir, MAX_SCAN))
                     if target is None:
                         raise ExportError("No finished transcripts yet")
+                    if not inside(target.parent, self.cfg.output_dir):
+                        raise ExportError("That session is outside the transcripts folder")
                     paths = export_session(target.parent, fmt, skipped)
                     names = " and ".join(p.name for p in paths)
                     msg = f"Saved {names} ({transcript_label(target)})"

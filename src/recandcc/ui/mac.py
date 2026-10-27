@@ -374,7 +374,7 @@ class MacApp(rumps.App):
             self._notify("Can't open transcripts folder", err)
 
     def _export(self, _sender) -> None:
-        self.ctrl.export_async(self.ctrl.recent)  # picks the newest finished one on a worker
+        self.ctrl.export_async()  # picks the newest finished session on a worker
 
     def _open_recent(self, sender) -> None:
         open_path(sender.path)

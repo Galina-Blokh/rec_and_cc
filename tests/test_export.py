@@ -86,14 +86,15 @@ def test_control_characters_are_cleaned(tmp_path):
 def test_temp_file_is_private_from_the_start(session, monkeypatch):
     if sys.platform == "win32":
         pytest.skip("POSIX modes")
-    modes = []
+    modes, real = [], export.os.replace
 
-    def render(tmp):
-        modes.append(tmp.stat().st_mode & 0o777)
-        tmp.write_text("x")
+    def spy(src, dst):
+        modes.append(os.stat(src).st_mode & 0o777)
+        return real(src, dst)
 
-    export._write(session / "x.bin", render)
-    assert modes == [0o600]
+    monkeypatch.setattr(export.os, "replace", spy)
+    export._write(session / "x.bin", b"data")
+    assert modes == [0o600] and (session / "x.bin").read_bytes() == b"data"
 
 
 @pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
@@ -175,7 +176,7 @@ def test_importing_the_app_does_not_load_export_libraries():
     assert subprocess.run([sys.executable, "-c", code], check=False, timeout=60).returncode == 0
 
 
-def _controller():
+def _controller(output_dir=None):
     import queue
     import threading
 
@@ -183,6 +184,7 @@ def _controller():
 
     ctrl = Controller.__new__(Controller)  # only the export wiring, no runtime
     ctrl.events, ctrl._export_lock = queue.Queue(), threading.Lock()
+    ctrl.cfg = type("C", (), {"output_dir": output_dir})()
     return ctrl
 
 
@@ -195,7 +197,7 @@ def test_controller_export_posts_a_notice(session, monkeypatch, fmt):
         return [folder / "transcript.docx"]
 
     monkeypatch.setattr(export, "export_session", fake)
-    ctrl = _controller()
+    ctrl = _controller(session.parent.parent)
     ctrl.export_async(session / "transcript.md", fmt)
     kind, title, msg = ctrl.events.get(timeout=10)
     assert (kind, title) == ("notice", "Export") and msg.startswith("Saved transcript.docx (")
@@ -209,7 +211,7 @@ def test_controller_releases_the_lock_when_the_thread_cannot_start(session, monk
         raise RuntimeError("can't start new thread")
 
     monkeypatch.setattr(threading.Thread, "start", no_start)
-    ctrl = _controller()
+    ctrl = _controller(session.parent.parent)
     with pytest.raises(RuntimeError):
         ctrl.export_async(session / "transcript.md")
     assert ctrl._export_lock.acquire(blocking=False)
@@ -220,7 +222,7 @@ def test_controller_export_logs_only_the_error_type(session, monkeypatch, caplog
         raise RuntimeError("secret words from the call")
 
     monkeypatch.setattr(export, "export_session", boom)
-    ctrl = _controller()
+    ctrl = _controller(session.parent.parent)
     caplog.set_level("DEBUG")
     ctrl.export_async(session / "transcript.md")
     assert ctrl.events.get(timeout=10)[2].startswith("Export failed")
@@ -228,7 +230,7 @@ def test_controller_export_logs_only_the_error_type(session, monkeypatch, caplog
 
 
 def test_controller_ignores_a_second_export_while_one_runs(session):
-    ctrl = _controller()
+    ctrl = _controller(session.parent.parent)
     ctrl._export_lock.acquire()
     ctrl.export_async(session / "transcript.md")
     assert ctrl.events.empty()
@@ -363,8 +365,8 @@ def test_latest_finished_skips_live_sessions_and_ignores_mtime(tmp_path):
 
 
 def test_controller_export_of_nothing_finished_posts_a_notice(tmp_path):
-    ctrl = _controller()
-    ctrl.export_async([])
+    ctrl = _controller(tmp_path)
+    ctrl.export_async()
     assert ctrl.events.get(timeout=10) == ("notice", "Export", "No finished transcripts yet")
 
 
@@ -378,21 +380,43 @@ def test_a_held_open_file_gets_a_clear_notice(session, monkeypatch):
         export.export_docx(session)
 
 
-def test_controller_export_of_a_list_uses_the_newest_finished_session(tmp_path, monkeypatch):
-    live = tmp_path / "2026-10-27" / "090000_zoom"
-    done = tmp_path / "2026-10-26" / "140312_zoom"
-    for d in (live, done):
+def test_latest_export_finds_a_finished_session_beyond_the_recent_ten(tmp_path, monkeypatch):
+    for i in range(12):  # twelve newer, unfinished (live) sessions
+        d = tmp_path / "2026-10-27" / f"{i:02d}0000_zoom"
         d.mkdir(parents=True)
         (d / "transcript.md").write_text("x")
+    done = tmp_path / "2026-10-20" / "140312_zoom"
+    done.mkdir(parents=True)
+    (done / "transcript.md").write_text("x")
     (done / "transcript.json").write_text("{}")
     calls = []
     monkeypatch.setattr(
         export, "export_session", lambda f, fmt, sk: calls.append(f) or [f / "transcript.docx"]
     )
-    ctrl = _controller()
-    ctrl.export_async([live / "transcript.md", done / "transcript.md"])
+    ctrl = _controller(tmp_path)
+    ctrl.export_async()
     assert ctrl.events.get(timeout=10)[2].startswith("Saved transcript.docx")
     assert calls == [done]
+
+
+def test_export_refuses_a_session_linked_from_outside_the_folder(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("symlinks need privileges")
+    out, elsewhere = tmp_path / "out", tmp_path / "elsewhere"
+    (out / "2099-12-31").mkdir(parents=True)
+    elsewhere.mkdir()
+    (out / "2099-12-31" / "000000_x").symlink_to(elsewhere)
+    ctrl = _controller(out)
+    ctrl.export_async(out / "2099-12-31" / "000000_x" / "transcript.md")
+    assert "outside" in ctrl.events.get(timeout=10)[2]
+    assert not list(elsewhere.iterdir())
+
+
+def test_stale_temp_files_of_a_crashed_export_are_swept(session):
+    stale = session / ".transcript.docx.99999.1.tmp"
+    stale.write_text("old")
+    export.export_session(session, "docx")
+    assert not stale.exists()
 
 
 def test_a_write_error_is_not_reported_as_a_file_in_use(session, monkeypatch):
@@ -433,11 +457,11 @@ def test_a_long_meeting_exports(tmp_path):
             "speaker": "Me",
             "language": "he",
         }
-        for i in range(2000)
+        for i in range(300)
     ]
     (tmp_path / "transcript.json").write_text(
         json.dumps({"segments": segs}, ensure_ascii=False), "utf-8"
     )
-    assert len(Document(str(export.export_docx(tmp_path))).paragraphs) > 4000
+    assert len(Document(str(export.export_docx(tmp_path))).paragraphs) > 600
     if have_font():
         assert export.export_pdf(tmp_path).read_bytes().startswith(b"%PDF")

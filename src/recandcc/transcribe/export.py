@@ -12,6 +12,8 @@ text is never logged.
 from __future__ import annotations
 
 import contextlib
+import functools
+import io
 import json
 import logging
 import os
@@ -92,29 +94,21 @@ _REPLACE_TRIES, _REPLACE_WAIT_S = 20, 0.1  # ~2 s: Word, a viewer or sync may ho
 _export_lock = threading.Lock()  # one export at a time in this process
 
 
-def _write(path: Path, render) -> Path:
-    """``render(tmp_path)`` writes the file, which is then renamed into place. The temp file
-    is created owner-only (0600) up front, with a name unique per process and thread, so the
-    content is never readable by others (on Windows the output ACLs are inherited from the
-    owner-only session folder, #42). Windows may hold the target open, so the rename is
-    retried. Only the exception type of a library failure is kept: those messages can quote
-    the transcript."""
+def _write(path: Path, data: bytes) -> Path:
+    """Write ``data`` to a temp file and rename it into place. The temp file is created
+    owner-only (0600) and written through that same descriptor (no reopen that a scanner
+    could block), with a name unique per process and thread (on Windows the output ACLs are
+    inherited from the owner-only session folder, #42). Windows may hold the target open, so
+    only the rename is retried. Only exception types are kept: library messages can quote the
+    transcript."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         try:
             with contextlib.suppress(OSError):  # a stale file must not block O_EXCL
                 tmp.unlink(missing_ok=True)
-            os.close(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
-            for attempt in range(_REPLACE_TRIES):  # Windows: a scanner may hold the new file
-                try:
-                    render(tmp)  # the library rewrites the existing file: mode kept
-                    break
-                except PermissionError:
-                    if attempt + 1 == _REPLACE_TRIES:
-                        raise
-                    time.sleep(_REPLACE_WAIT_S)
-        except ExportError:
-            raise
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
         except Exception as e:
             raise ExportError(f"could not write {path.name} ({type(e).__name__})") from None
         for attempt in range(_REPLACE_TRIES):
@@ -132,6 +126,32 @@ def _write(path: Path, render) -> Path:
             tmp.unlink(missing_ok=True)
 
 
+def _sweep_stale_temps(folder: Path) -> None:
+    """Remove temp files a crashed export left behind (their names carry an old pid)."""
+    for stale in Path(folder).glob(".transcript.*.tmp"):
+        with contextlib.suppress(OSError):
+            stale.unlink()
+
+
+def _type_only(fn):
+    """Library failures become ExportError with the exception type only: their messages can
+    quote the transcript."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except ExportError:
+            raise
+        except Exception as e:
+            raise ExportError(
+                f"{fn.__name__.removeprefix('export_').upper()} failed ({type(e).__name__})"
+            ) from None
+
+    return wrapper
+
+
+@_type_only
 def export_docx(folder: Path, loaded=None) -> Path:
     from docx import Document
     from docx.oxml import OxmlElement
@@ -159,7 +179,9 @@ def export_docx(folder: Path, loaded=None) -> Path:
             p.add_run(label + " ").bold = True
             p.add_run(seg.text)
         p.paragraph_format.space_after = Pt(6)
-    return _write(Path(folder) / DOCX_NAME, lambda tmp: doc.save(str(tmp)))
+    buf = io.BytesIO()
+    doc.save(buf)
+    return _write(Path(folder) / DOCX_NAME, buf.getvalue())
 
 
 def _covers_scripts(path: Path) -> bool:
@@ -185,6 +207,7 @@ def find_font() -> Path:
     )
 
 
+@_type_only
 def export_pdf(folder: Path, loaded=None) -> Path:
     from fpdf import FPDF
     from fpdf.enums import WrapMode
@@ -228,7 +251,7 @@ def export_pdf(folder: Path, loaded=None) -> Path:
             para(seg.text, 11, rtl=True, gap=3)
         else:
             para(f"{label} {seg.text}", 11, gap=3)
-    return _write(Path(folder) / PDF_NAME, lambda tmp: pdf.output(str(tmp)))
+    return _write(Path(folder) / PDF_NAME, bytes(pdf.output()))
 
 
 def export_session(folder: Path, fmt: str = "both", skipped: list[str] | None = None) -> list[Path]:
@@ -238,6 +261,7 @@ def export_session(folder: Path, fmt: str = "both", skipped: list[str] | None = 
     if fmt not in (*FORMATS, "both"):
         raise ExportError(f"unknown format {fmt!r}")
     with _export_lock:
+        _sweep_stale_temps(folder)
         loaded = load_session(folder)
         out = []
         if fmt in ("docx", "both"):
