@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..config import language_code, normalize_languages
 from ..models import Mode, SessionInfo, TriggerKind
 from .common import (
     ONBOARDING_TEXT,
@@ -23,6 +24,9 @@ from .common import (
 )
 
 MODE_LABELS = ((Mode.OFF, "Off"), (Mode.ASK, "Ask"), (Mode.AUTO, "Auto"))
+MENU_LANGUAGES = (("en", "English"), ("ru", "Russian"), ("he", "Hebrew"))
+ANY_LANGUAGE = ""  # the "Any language" item's code: languages = []
+LANGUAGES_KEEP_ONE = "Keep at least one language checked, or choose Any language"
 MIN_DIALOG_TIMEOUT_S = 5
 SEARCHING = "Searching…"
 ONBOARDING_GRANT = "Grant now"
@@ -49,6 +53,38 @@ def retention_label(days: int) -> str:
     if days == 0:
         return "Never (keep audio)"
     return f"{days} day" + ("s" if days > 1 else "")
+
+
+def language_menu(languages: list[str]) -> list[tuple[str | None, str, bool]]:
+    """Rows of the "Languages" submenu as (code, title, checked). Codes added in config.toml
+    beyond en/ru/he get one disabled row (code None) so they are not invisible; "Any language"
+    (code ``ANY_LANGUAGE``) is checked when the list is empty."""
+    rows: list[tuple[str | None, str, bool]] = [
+        (code, title, code in languages) for code, title in MENU_LANGUAGES
+    ]
+    extra = [c for c in languages if c not in dict(MENU_LANGUAGES)]
+    if extra:
+        rows.append((None, f"Also from settings: {', '.join(extra)}", True))
+    rows.append((ANY_LANGUAGE, "Any language", not languages))
+    return rows
+
+
+def toggle_languages(current: list[str], raw: object, code: str) -> list | None:
+    """New ``transcription.languages`` after clicking ``code`` in the menu, or None when the
+    click would leave no language (and "Any" is not chosen). ``current`` is the normalised
+    list, ``raw`` the user's own spelling from config.toml (or None): its entries are kept as
+    written ("iw", codes not in the menu), so ``Config.save()`` doesn't rewrite them."""
+    if code == ANY_LANGUAGE:
+        return []
+    want = [c for c in current if c != code] if code in current else [*current, code]
+    if not want:
+        return None
+    items = list(raw) if isinstance(raw, list) else list(current)
+    if code in current:
+        items = [i for i in items if language_code(i) != code]
+    else:
+        items.append(code)
+    return items if normalize_languages(items) == want else want
 
 
 def permission_title(kind: str, status: str) -> str:

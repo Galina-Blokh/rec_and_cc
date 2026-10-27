@@ -47,6 +47,7 @@ from .common import (
 )
 from .present import (
     SEARCHING,
+    language_menu,
     live_transcript_target,
     prompt_notice,
     record_item_title,
@@ -343,6 +344,14 @@ class TrayApp:
             ]
             return items or [Item("(none yet)", None, enabled=False)]
 
+        def language_item(code: str | None, title: str, on: bool):
+            action = None if code is None else lambda: self.ctrl.toggle_language(code)
+            return Item(title, action, checked=lambda _i: on, enabled=code is not None)
+
+        def languages():
+            rows = language_menu(self.cfg.transcription.languages)
+            return [language_item(*row) for row in rows]
+
         def perms():
             perm = self.ctrl.permissions
             items = [
@@ -400,6 +409,7 @@ class TrayApp:
             Item("Recent transcripts", pystray.Menu(recent)),
             Item("Search transcripts…", lambda: self.search.post("ask")),
             Item("Permissions", pystray.Menu(perms)),
+            Item("Languages", pystray.Menu(languages)),
             Item("Launch at login", self._toggle_login, checked=lambda _i: autostart.is_enabled()),
             Item("Edit settings", lambda: open_path(CONFIG_PATH, True)),
             Item("Reveal logs", lambda: reveal_logs()),
