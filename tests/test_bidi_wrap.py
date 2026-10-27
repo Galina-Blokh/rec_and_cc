@@ -99,3 +99,18 @@ def test_label_measured_with_its_own_font():
     parts = tk_parts(_line(SENT), 40, len, lambda s: len(s) * 5)
     assert sum(1 for p, _ in parts if p == "\n") >= 1
     assert parts[1] == ("  Others", True)
+
+
+def test_english_and_digit_only_chunk_keeps_order_and_stays_in_the_rtl_line():
+    text = f"{W} {W} {W} hello 2024-05-01 3.5 {W}"
+    parts = tk_parts(_line(text), 24)
+    shown = [p for p, lab in parts if not lab and p != "\n"]
+    logical = wrap_logical(text, 24 - len("  Others"))
+    only_ltr = [c for c in logical if not any("֐" <= ch <= "׿" for ch in c)]
+    assert only_ltr  # the sample really has a chunk without Hebrew
+    for c in only_ltr:
+        assert visual_rtl(c) == c  # reading order kept: no letters or digits reversed
+        assert visual_rtl(c) in shown
+    # every piece, including that chunk, is inserted as text of the rtl paragraph: the caller
+    # tags all pieces of an RTL line with "rtl" (right-justified), so nothing here is a label
+    assert [lab for _, lab in parts].count(True) == 1

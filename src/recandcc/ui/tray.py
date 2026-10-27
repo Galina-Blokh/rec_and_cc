@@ -161,6 +161,10 @@ class TkCaptions:
         def wrap_limit() -> tuple[float | None, Callable[[str], float], Callable[[str], float]]:
             # Usable text width and font measures; RTL lines are wrapped before reordering.
             # A withdrawn window has no real width yet: use the one it will get from geometry.
+            try:
+                rmargin = float(text.tag_cget("rtl", "rmargin") or 0)
+            except ValueError:  # a unit string such as '10c'
+                rmargin = 0.0
             widget_w = text.winfo_width()
             if widget_w < 100:
                 widget_w = geometry_width(win.geometry())
@@ -169,7 +173,7 @@ class TkCaptions:
                 float(text.cget("padx")),
                 float(text.cget("borderwidth")),
                 float(text.cget("highlightthickness")),
-                float(text.tag_cget("rtl", "rmargin") or 0),
+                rmargin,
             )
             if width is None:  # no usable size at all: fall back to a character count
                 return None, len, len
