@@ -515,8 +515,11 @@ class Transcriber:
         speaker = SPEAKERS[diarized_track(session)]  # "Me" in a room session
         out, labels = label_speakers(segments, turns or [], speaker, names=names)
         try:  # opt-in only, in the private voices folder: lets `name-speaker` name them later
-            if centroids and labels and Path(session.directory).exists():
-                speakers = {lbl: centroids[k] for k, lbl in labels.items() if k in centroids}
+            # A lone speaker in a room session keeps "Me", which is never renamed: no voice.
+            speakers = {
+                lbl: centroids[k] for k, lbl in labels.items() if k in centroids and lbl != ME
+            }
+            if speakers and Path(session.directory).exists():
                 voices.write_session_voices(session.id, speakers)
             else:  # never leave voices of an older transcript of this session behind
                 voices.delete_session_voices(session.id)
