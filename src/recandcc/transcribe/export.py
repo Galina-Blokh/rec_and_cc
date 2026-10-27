@@ -116,6 +116,8 @@ def _write(path: Path, data: bytes) -> Path:
     only the rename is retried. Only exception types are kept: library messages can quote the
     transcript."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    if path.parent.is_symlink():  # the folder was swapped for a link while rendering
+        raise ExportError("The session folder is a link; not writing through it")
     try:
         try:
             fd = _create_exclusive(tmp)
@@ -223,6 +225,7 @@ def _covers_scripts(path: Path) -> bool:
         return False
 
 
+@functools.lru_cache(maxsize=1)
 def find_font() -> Path:
     windir = Path(os.environ.get("WINDIR", "C:/Windows"))
     for c in (*map(Path, _FONT_CANDIDATES), windir / "Fonts" / "arial.ttf"):

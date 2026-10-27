@@ -120,6 +120,7 @@ def test_a_very_long_unbroken_token_does_not_break_the_pdf(tmp_path):
 def test_font_without_hebrew_is_not_picked(monkeypatch, tmp_path):
     f = tmp_path / "a.ttf"
     f.write_bytes(b"not a font")
+    export.find_font.cache_clear()
     monkeypatch.setattr(export, "_FONT_CANDIDATES", (str(f),))
     monkeypatch.setenv("WINDIR", str(tmp_path / "none"))
     with pytest.raises(export.ExportError):
@@ -418,6 +419,7 @@ def test_a_write_error_is_not_reported_as_a_file_in_use(session, monkeypatch):
         return real(path, *a, **kw)
 
     monkeypatch.setattr(export.os, "open", denied)
+    monkeypatch.setattr(export.time, "sleep", lambda _s: None)
     with pytest.raises(export.ExportError, match=r"could not write.*PermissionError"):
         export.export_docx(session)
 
@@ -474,3 +476,14 @@ def test_a_wrapped_rtl_paragraph_keeps_its_line_order():
     lines = pdf.multi_cell(150, 6, " ".join(words), align="R", dry_run=True, output="LINES")
     assert len(lines) > 1  # it wrapped
     assert " ".join(lines).split() == words  # logical order kept across the wrap points
+
+
+def test_a_session_folder_swapped_for_a_link_is_not_written_through(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("symlinks need privileges")
+    real, link = tmp_path / "real", tmp_path / "link"
+    real.mkdir()
+    link.symlink_to(real)
+    with pytest.raises(export.ExportError, match="link"):
+        export._write(link / "x.bin", b"data")
+    assert not list(real.iterdir())
