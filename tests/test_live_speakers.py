@@ -429,7 +429,8 @@ def test_transcriber_that_never_runs_starts_no_labeler_thread(tmp_path, emitted)
     live = manual(tr, make_session(tmp_path), emitted)
     assert live._labeler is not None
     assert live._labeler._thread is None
-    assert set(threading.enumerate()) == before
+    # only new threads count: a daemon thread from an earlier test may exit meanwhile
+    assert set(threading.enumerate()) - before == set()
 
 
 class SamePhraseTranscriber(FakeTranscriber):
