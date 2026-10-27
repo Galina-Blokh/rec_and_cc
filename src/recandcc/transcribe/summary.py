@@ -195,7 +195,8 @@ def summarize_session(directory: Path, cfg: Config, generate: Generator | None =
     segments = [Segment(**s) for s in data.get("segments", [])]
     try:
         room = SessionInfo.load(directory).started_as_room
-    except (OSError, ValueError, KeyError):  # no or old session.json: a call's prompt
+    except Exception as e:  # noqa: BLE001 - only a hint for the prompt
+        log.debug("no session.json for the summary prompt (%s)", type(e).__name__)
         room = False
     t0 = time.monotonic()
     owned = None

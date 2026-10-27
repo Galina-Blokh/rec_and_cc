@@ -66,6 +66,9 @@ class MacSystemAudioSource(AudioSource):
         self._target_args = _target_args(target) if target is not None else []
         # "app" until the helper reports otherwise ("scope: all" on stderr = it fell back).
         self.scope = "app" if self._target_args else "all"
+        self._scope_known = threading.Event()  # the helper said "scope: app/all" (or global)
+        if not self._target_args:
+            self._scope_known.set()
         self._proc: subprocess.Popen[bytes] | None = None
         self._reader: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -83,6 +86,8 @@ class MacSystemAudioSource(AudioSource):
                     helper,
                 )
                 self._target_args, self.scope = [], "all"
+            if not self._target_args:  # also an outdated helper: global, known now
+                self._scope_known.set()
             cmd = [str(helper), "capture", "--exclude-pid", str(os.getpid())]
             for pid in self._exclude_pids:
                 cmd += ["--exclude-pid", str(pid)]
@@ -186,3 +191,8 @@ class MacSystemAudioSource(AudioSource):
                 log.warning("per-app system audio unavailable; recording all system audio")
             elif line:
                 log.info("%s", line)
+            if line.endswith(("scope: all", "scope: app")):
+                self._scope_known.set()
+
+    def confirmed_scope(self, timeout: float) -> str:
+        return self.scope if self._scope_known.wait(timeout) else "pending"

@@ -7,18 +7,20 @@ Stories: US-12, US-22.
 
 from __future__ import annotations
 
+import subprocess
 import threading
 import time
 import tomllib
 from datetime import datetime
 
 import numpy as np
+import pytest
 import soundfile as sf
 
 from recandcc.capture.base import AudioSource
 from recandcc.config import Config, DetectionConfig, load_config
 from recandcc.detect.room import WINDOW, RoomMonitor, plain_thresholds, silero_vad
-from recandcc.models import SAMPLE_RATE, SessionInfo, Track, TriggerKind
+from recandcc.models import SAMPLE_RATE, AppTarget, SessionInfo, Track, TriggerKind
 from recandcc.recorder import Recorder, should_record_mic
 
 SR = SAMPLE_RATE
@@ -593,51 +595,103 @@ def test_speaker_hints_count_the_remote_side_only(tmp_path, monkeypatch):
 
 
 class TappedSource(ManualSource):
-    def __init__(self, target=None, scope=None):
-        super().__init__()
+    """System audio stand-in. ``early``: frames pushed from inside ``start`` (before the
+    recorder switched to it); ``confirmed``: what the helper reports after ``start``."""
+
+    def __init__(self, target=None, scope=None, early=None, confirmed=None, fail_start=False):
+        super().__init__(fail=fail_start)
         self.target, self.scope = target, scope or ("app" if target else "all")
+        self.early, self.confirmed, self.fail_stop = early, confirmed, False
+
+    def start(self, on_frames):
+        super().start(on_frames)
+        if self.early is not None:
+            self.early()
+
+    def confirmed_scope(self, timeout):
+        return self.confirmed or self.scope
+
+    def stop(self):
+        if self.fail_stop:
+            self.fail_stop = False  # once: the recorder's own stop() succeeds later
+            raise subprocess.TimeoutExpired("rcc-audiotap", 3)
+        super().stop()
 
 
-def _app_scope_recorder(tmp_path, scope=None):
+def _app_scope_recorder(tmp_path, **per_app):
     cfg = Config(output_dir=tmp_path)
     cfg.detection.system_audio_scope = "app"
     made: list[TappedSource] = []
 
     def system(*target):
-        made.append(TappedSource(*target, scope=scope))
+        made.append(TappedSource(*target, **(per_app if target else {})))
         return made[-1]
 
-    return Recorder(cfg, system_factory=system, min_session_s=0), made
+    rec = Recorder(cfg, mic_factory=ManualSource, system_factory=system, min_session_s=0)
+    return rec, made
+
+
+ZOOM = AppTarget(("us.zoom",), (10,))
 
 
 def test_upgraded_room_session_in_app_scope_reopens_others_for_the_call_app(tmp_path):
-    from recandcc.models import AppTarget
-
-    rec, made = _app_scope_recorder(tmp_path)
     mic = ManualSource()
+
+    def switching():  # half a second passes while the taps switch; the new tap's first
+        mic.push(np.full(SR // 2, 0.1, np.float32))  # frames are held back (dropped)
+        made[1].push(np.full(800, 0.9, np.float32))
+
+    rec, made = _app_scope_recorder(tmp_path, early=switching)
     session = rec.start(TriggerKind.ROOM, "Room", mic_source=lambda: mic)
-    mic.push(np.full(2 * SR, 0.1, np.float32))
-    made[0].push(np.full(SR, 0.25, np.float32))  # music on the system-wide tap
-    zoom = AppTarget(("us.zoom",), (10,))
-    assert rec.upgrade_to_call("zoom.us", target=zoom) is True
-    assert [m.target for m in made] == [None, zoom] and made[0].stopped
+    mic.push(np.full(SR, 0.1, np.float32))
+    made[0].push(np.full(SR, 0.25, np.float32))  # aligned: music on the system-wide tap
+    assert rec.upgrade_to_call("zoom.us", target=ZOOM) is True
+    assert [m.target for m in made] == [None, ZOOM] and made[0].stopped
     made[1].push(np.full(SR, 0.5, np.float32))  # only the call app from now on
     mic.push(np.full(SR, 0.1, np.float32))
     out = rec.stop()
-    assert out is not None and out.metrics["recording"]["system_audio_scope"] == "app"
+    assert out is not None and out.metrics["recording"]["system_audio_scope"] == "all→app"
     me, _ = sf.read(session.directory / "me.wav", dtype="float32")
     others, _ = sf.read(session.directory / "others.wav", dtype="float32")
-    assert len(me) == len(others) == 3 * SR  # the switch is padded: still aligned
+    assert len(me) == len(others) == 5 * SR // 2  # the switch is padded: still aligned
     np.testing.assert_allclose(others[:SR], 0.25, atol=1e-4)
-    assert not others[SR : 2 * SR].any()
-    np.testing.assert_allclose(others[2 * SR :], 0.5, atol=1e-4)
+    assert not others[SR : 3 * SR // 2].any()  # the pad is the switch time, 0.9 dropped
+    np.testing.assert_allclose(others[3 * SR // 2 :], 0.5, atol=1e-4)
 
 
-def test_room_upgrade_keeps_the_system_wide_tap_when_per_app_is_unavailable(tmp_path):
-    from recandcc.models import AppTarget
+@pytest.mark.parametrize(
+    "case",
+    [
+        {"scope": "all"},  # Windows, an outdated helper: never started
+        {"confirmed": "all"},  # no audio process of the call app yet: the helper taps all
+        {"confirmed": "pending"},  # no report within SCOPE_WAIT_S
+        {"fail_start": True},
+        "old stop fails",
+    ],
+)
+def test_room_upgrade_keeps_the_system_wide_tap_unless_per_app_is_confirmed(tmp_path, case):
+    rec, made = _app_scope_recorder(tmp_path, **(case if isinstance(case, dict) else {}))
+    session = rec.start(TriggerKind.ROOM, "Room", mic_source=ManualSource)
+    made[0].fail_stop = case == "old stop fails"
+    assert rec.upgrade_to_call("zoom.us", target=ZOOM) is True
+    assert made[1].stopped  # the per-app source is never left running or orphaned
+    others = next(w for w in rec._writers if w.track == Track.OTHERS)
+    assert others.source is made[0] and others.scope is None and not made[0].stopped
+    made[0].push(np.full(SR, 0.25, np.float32))
+    out = rec.stop()
+    assert out is not None and out.metrics["recording"]["system_audio_scope"] == "all"
+    audio, _ = sf.read(session.directory / "others.wav", dtype="float32")
+    assert len(audio) == SR  # one tap on the track, no frames from the per-app one
 
-    rec, made = _app_scope_recorder(tmp_path, scope="all")  # Windows, an outdated helper
-    rec.start(TriggerKind.ROOM, "Room", mic_source=ManualSource)
-    assert rec.upgrade_to_call("zoom.us", target=AppTarget(("us.zoom",))) is True
-    assert not made[0].stopped and made[1].cb is None  # the fallback was never started
+
+def test_room_upgrade_without_a_mic_track_switches_with_no_padding(tmp_path):
+    rec, made = _app_scope_recorder(tmp_path)
+    session = rec.start(TriggerKind.ROOM, "Room", mic_source=lambda: ManualSource(fail=True))
+    assert list(session.tracks) == [Track.OTHERS]  # the room mic could not open
+    made[0].push(np.full(SR, 0.25, np.float32))
+    assert rec.upgrade_to_call("zoom.us", target=ZOOM) is True
+    made[1].push(np.full(SR, 0.5, np.float32))
     rec.stop()
+    others, _ = sf.read(session.directory / "others.wav", dtype="float32")
+    assert len(others) == 2 * SR  # lead 0: nothing padded
+    np.testing.assert_allclose(others[SR:], 0.5, atol=1e-4)

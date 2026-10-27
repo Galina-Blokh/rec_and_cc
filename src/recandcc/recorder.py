@@ -337,6 +337,18 @@ def should_record_mic(policy: str, kind: TriggerKind) -> bool:
     return kind in (TriggerKind.CALL, TriggerKind.MANUAL, TriggerKind.ROOM)
 
 
+SCOPE_WAIT_S = 1.0  # how long a room upgrade waits for the helper to confirm a per-app tap
+
+
+def _stop_quietly(source: AudioSource | None) -> None:
+    if source is None:
+        return
+    try:
+        source.stop()
+    except Exception:
+        log.exception("could not stop a system audio source")
+
+
 class _TrackWriter:
     def __init__(self, track: Track, path: Path, source: AudioSource, recorder: Recorder):
         self.track = track
@@ -352,6 +364,7 @@ class _TrackWriter:
         self.level_dbfs = -120.0
         self.peak = 0.0  # max |sample| over the session (0.0 => digital silence throughout)
         self.error: BaseException | None = None
+        self.scope: str | None = None  # for the metrics, if not the source's ("all→app")
         self._tap_lock = threading.Lock()  # frames_received + listeners + replay buffer
         self._listeners: tuple[FrameListener, ...] = recorder._listeners
         self._recent: deque[tuple[int, np.ndarray]] = deque()
@@ -742,28 +755,36 @@ class Recorder:
         in app scope, record only the call app from now on: the per-app tap starts first,
         its frames held back until the system-wide one has stopped, and the moment between
         is padded with silence to the longest track, so the WAV stays aligned and continuous.
-        False (the system-wide tap is kept) if a per-app tap can't be started."""
+        False (the system-wide tap is kept) unless the helper confirms a per-app tap within
+        ``SCOPE_WAIT_S`` (waited for on the engine thread, outside the engine lock)."""
         gate = threading.Event()
 
         def on_frames(frames: np.ndarray) -> None:  # capture thread: drop until switched
             if gate.is_set():
                 w.on_frames(frames)
 
+        new: AudioSource | None = None
         try:
             new = self.system_factory(target)
             if new.scope == "app":  # not on Windows
                 new.start(on_frames)
+                confirmed = new.confirmed_scope(SCOPE_WAIT_S) == "app"
+            else:
+                confirmed = False
         except Exception:
             log.exception("per-app system audio unavailable; still recording all system audio")
+            confirmed = False
+        if not confirmed:  # e.g. no audio process of the call app yet: the helper taps all
+            _stop_quietly(new)
             return False
-        if new.scope != "app":  # also an outdated helper (it falls back to all in start())
-            new.stop()
-            return False
-        old, w.source = w.source, new
+        assert new is not None  # noqa: S101 - type narrowing: confirmed implies a source
         try:
-            old.stop()
-        except Exception:
-            log.exception("could not stop the system-wide tap")
+            w.source.stop()
+        except Exception:  # it may still deliver: keep it, never two taps on one track
+            log.exception("could not stop the system-wide tap; still recording all of it")
+            _stop_quietly(new)
+            return False
+        w.source, w.scope = new, "all→app"
         lead = max(x.frames_received for x in self._writers) - w.frames_received
         if lead > 0:
             w.pad_silence(lead)
@@ -829,7 +850,8 @@ class Recorder:
                     "audio_s": round(longest, 1),
                     # Effective: "all" also when a per-app tap fell back to the global one.
                     "system_audio_scope": next(
-                        (w.source.scope for w in writers if w.track == Track.OTHERS), None
+                        (w.scope or w.source.scope for w in writers if w.track == Track.OTHERS),
+                        None,
                     ),
                     "writer_backlog_max_s": {
                         str(w.track): round(w.backlog_max / SAMPLE_RATE, 3) for w in writers

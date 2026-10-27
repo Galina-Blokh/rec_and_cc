@@ -133,3 +133,20 @@ def test_a_failed_support_probe_is_not_remembered(tmp_path, monkeypatch):
     assert system_mac._supports_targets(helper, 1.0) is True  # asked again, now remembered
     assert system_mac._supports_targets(helper, 1.0) is True
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        (b"rcc-audiotap: scope: app\n", "app"),
+        (b"rcc-audiotap: scope: all\n", "all"),
+        (b"", "pending"),
+    ],
+)
+def test_confirmed_scope_waits_for_the_helpers_report(procs, monkeypatch, stderr, expected):
+    monkeypatch.setattr(FakeProc, "stderr_text", stderr)
+    source = MacSystemAudioSource(target=AppTarget(("us.zoom",)))
+    source.start(lambda frames: None)
+    assert source.confirmed_scope(0.5) == expected
+    source.stop()
+    assert MacSystemAudioSource().confirmed_scope(0) == "all"  # a global tap: known at once
