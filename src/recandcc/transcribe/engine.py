@@ -26,7 +26,7 @@ import numpy as np
 
 from ..config import TranscriptionConfig
 from ..metrics import log_session_metrics, rounded
-from ..models import SAMPLE_RATE, Segment, SessionInfo, Track
+from ..models import SAMPLE_RATE, Segment, SessionInfo, Track, TriggerKind
 from .chunking import Chunk, find_speech, load_track, merge_labelled, slice_chunk
 from .diarize import Diarizer, Turn, assign_speakers
 from .gpu import MlxWhisper, hf_cache_folder, use_gpu
@@ -38,6 +38,13 @@ log = logging.getLogger("recandcc.transcribe")
 
 ProgressCallback = Callable[[float], None]
 SPEAKERS = {Track.ME: ME, Track.OTHERS: OTHERS}
+
+
+def diarized_track(session: SessionInfo) -> Track:
+    """The track whose speakers get numbered: "Others", except in a room session, where
+    everyone in the room is on the mic ("Me")."""
+    return Track.ME if session.trigger_kind == TriggerKind.ROOM else Track.OTHERS
+
 
 LANGUAGE_ID_MODEL = "base"  # small multilingual model used only for per-region language ID
 MIN_LANGUAGE_CONFIDENCE = 0.75  # below this a chunk's language is re-checked with the main model
@@ -420,11 +427,11 @@ class Transcriber:
     # -- final transcript + speaker diarization ----------------------------------------------
 
     def start_diarization(self, session: SessionInfo) -> Future | None:
-        """Start diarizing the session's "Others" track in the background (CPU threads).
-        None if disabled (cfg.diarize) or there is no others track on disk."""
+        """Start diarizing the session's ``diarized_track`` in the background (CPU threads).
+        None if disabled (cfg.diarize) or that track is not on disk."""
         if not self.cfg.diarize:
             return None
-        name = session.tracks.get(Track.OTHERS)
+        name = session.tracks.get(diarized_track(session))
         path = Path(session.directory) / name if name else None
         if path is None or not path.exists():
             return None
@@ -500,7 +507,7 @@ class Transcriber:
     ) -> list[Segment]:
         if not turns:
             return segments
-        out = assign_speakers(segments, turns)
+        out = assign_speakers(segments, turns, SPEAKERS[diarized_track(session)])
         speakers = sorted({s.speaker for s in out} - {ME, OTHERS})
         log.info(
             "session %s: %s", session.id, ", ".join(speakers) if speakers else "one other speaker"

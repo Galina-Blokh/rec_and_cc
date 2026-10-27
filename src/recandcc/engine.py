@@ -15,10 +15,12 @@ Threading model
   or deleted (discarded); ``session`` is None if the recorder dropped it (too short) or failed.
 * A discarded session is marked before ``recorder.stop()`` and deleted afterwards via
   ``run_in_background`` (a daemon thread), so big WAVs don't delay detection or the hotkey.
-* Room listening (opt-in): ``room_monitor`` (``detect/room.RoomMonitor``) owns its own mic
-  stream. The engine thread opens it while idle and closes it before ``recorder.start`` (so
-  the mic is never opened twice) and while recording; its ``active`` flag is a pseudo-app
-  ``room`` that only triggers when no app session is recording or pending.
+* Room listening (opt-in): ``room_monitor`` (``detect/room.RoomMonitor``) owns a mic stream,
+  opened and closed by the engine thread only. Its ``triggered()`` is a pseudo-app ``room``
+  that only starts a session when nothing records or asks. A room session's mic track is
+  the monitor's own stream (``session_source()``: pre-roll, then live), so it stays open
+  for that session; before any other session starts it is closed, so the mic is never
+  opened twice, and it reopens when the engine is idle again.
 * Time comes from an injectable ``clock`` so tests can drive the state machine with a fake
   clock by calling ``tick()`` directly without starting the thread.
 """
@@ -39,7 +41,9 @@ from .models import AudioProcess, Mode, SessionInfo, TriggerKind, discard_sessio
 log = logging.getLogger(__name__)
 
 IDLE, PROMPTING, RECORDING = "idle", "prompting", "recording"
-ROOM_KEY, ROOM_NAME = "room", "Room"
+# "@" keeps the pseudo-app out of the substring matching of real apps ("Zoom Rooms").
+ROOM_KEY, ROOM_NAME = "@room", "Room"
+OWN_AUDIO = ("recandcc", "rcc-audiotap")  # our own mic use (the room monitor) never blocks it
 ROOM_RETRY_S = 60.0  # wait this long before reopening a room-listening mic that failed
 
 
@@ -167,6 +171,7 @@ class _Rec:
     session: SessionInfo | None = None
     # Started while asking the user (ask mode): kept or discarded depending on the answer.
     provisional: bool = False
+    room_mic: bool = False  # the mic track is the room monitor's stream (keep it open)
 
 
 class Engine:
@@ -187,7 +192,7 @@ class Engine:
         on_session_start: Callable[[SessionInfo], None] | None = None,
         on_session_end: Callable[[SessionInfo | None, bool], None] | None = None,
         run_in_background: Callable[[Callable[[], None]], None] | None = None,
-        room_monitor=None,  # RoomMonitor-like: start(speech_s, window_s), stop(), active
+        room_monitor=None,  # RoomMonitor-like (detect/room.py)
     ):
         self.cfg = cfg
         self.monitor = monitor
@@ -259,7 +264,7 @@ class Engine:
         if rec is not None:
             self._do_stop()
         if self.room is not None:
-            self.room.stop()
+            self.room.close()
         try:
             self.monitor.close()
         except Exception:
@@ -361,7 +366,15 @@ class Engine:
         apps = group_activity(procs, self.det, self.own_pids)
         now = self.clock()
         room = self.room
-        room_active = room is not None and room.running and room.active and self._room_wanted()
+        room_active, room_quiet = False, 0.0
+        if room is not None and room.running:
+            # Any other app using the mic (even an ignored or switched-off one): not "the room".
+            mic_busy = any(
+                p.input_active and p.pid not in self.own_pids and not match_pattern(OWN_AUDIO, p)
+                for p in procs
+            )
+            room_active = self._room_wanted() and not mic_busy and room.triggered()
+            room_quiet = room.seconds_since_speech()
 
         start_req: tuple[TriggerKind, str | None] | None = None
         stop_req = False
@@ -465,6 +478,9 @@ class Engine:
                 if not is_room and r.key not in apps and now - last >= inactive_s:
                     log.info("stopping: %s inactive for %.0fs", r.name, now - last)
                     stop_req = True
+                elif is_room and r.room_mic and room_quiet >= det.room_stop_after_silence_s:
+                    log.info("stopping: no speech in the room for %.0fs", room_quiet)
+                    stop_req = True
                 elif silence >= silence_s:
                     log.info("stopping: silent for %.0fs", silence)
                     if not is_room:
@@ -509,10 +525,16 @@ class Engine:
                     if k not in self._suppressed and now - self._first_seen[k] >= det.min_active_s
                 ]
                 cands.sort(key=lambda a: (a.kind != TriggerKind.CALL, self._first_seen[a.key]))
-                if room_active and ROOM_KEY not in self._suppressed:  # apps take precedence
+                # Apps take precedence; no app doing audio at all (an app the user switched
+                # off or stopped may be what the mic hears).
+                if room_active and not apps and ROOM_KEY not in self._suppressed:
                     cands.append(AppActivity(ROOM_KEY, ROOM_NAME, TriggerKind.ROOM, []))
                 for a in cands:
-                    m = effective_mode(det, a.key, a.procs)
+                    m = (
+                        effective_mode(det, a.key, a.procs)
+                        if a.key != ROOM_KEY
+                        else Mode(det.app_modes.get(ROOM_KEY, det.mode))  # exact key only
+                    )
                     if m == Mode.OFF:
                         continue
                     if m == Mode.AUTO:
@@ -556,20 +578,19 @@ class Engine:
         return bool(det.room_listening) and Mode(det.mode) != Mode.OFF and det.record_mic != "never"
 
     def _sync_room(self, now: float) -> None:
-        """Engine thread, outside the lock: the room mic is open only while idle and wanted."""
+        """Engine thread, outside the lock: open the room mic while idle and wanted."""
         room = self.room
         if room is None:
             return
         with self._lock:
-            want = self._rec is None and self._room_wanted()
-        try:
-            if want and not room.running and now >= self._room_retry_at:
-                room.start(self.det.room_speech_s, self.det.room_window_s)
-            elif not want and room.running:
-                room.stop()
-        except Exception:
-            log.exception("room listening: could not open the microphone")
-            self._room_retry_at = now + ROOM_RETRY_S
+            r = self._rec
+            # A room session's mic track is the monitor's stream: keep it open until it ends.
+            want = r.room_mic if r is not None else self._room_wanted()
+        if want and not room.running and now >= self._room_retry_at:
+            if not room.start():
+                self._room_retry_at = now + ROOM_RETRY_S
+        elif not want and room.running:
+            room.close_mic()
 
     def _notice(self, title: str, message: str) -> None:
         log.warning("%s: %s", title, message)
@@ -631,11 +652,18 @@ class Engine:
             )
 
     def _do_start(self, kind: TriggerKind, app: str | None) -> None:
-        if self.room is not None and self.room.running:
-            self.room.stop()  # hand the mic over to the recorder
+        room, mic_source = self.room, None
+        if room is not None and room.running:
+            if kind == TriggerKind.ROOM:
+                mic_source = room.session_source  # pre-roll + live, on the same stream
+            else:
+                room.close_mic()  # the recorder opens the mic itself
         self._preflight()
         try:
-            session = self.recorder.start(kind, app)
+            if mic_source is not None:
+                session = self.recorder.start(kind, app, mic_source=mic_source)
+            else:
+                session = self.recorder.start(kind, app)
         except Exception:
             log.exception("could not start recording")
             with self._lock:
@@ -647,6 +675,7 @@ class Engine:
             if self._rec is not None:
                 self._rec.session = session
                 self._rec.started = self.clock()
+                self._rec.room_mic = mic_source is not None
         if self.on_session_start:
             try:
                 self.on_session_start(session)

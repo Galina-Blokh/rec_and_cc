@@ -270,7 +270,7 @@ class Controller:
             permission_status=permission_status,
             on_session_start=self._on_session_start,
             on_session_end=self._on_session_end,
-            room_monitor=RoomMonitor(),  # opens the mic only if detection.room_listening
+            room_monitor=RoomMonitor(cfg.detection),  # mic only if room_listening
         )
         if start_threads:
             self.engine.start()
@@ -552,6 +552,11 @@ class Controller:
         threading.Thread(target=save, daemon=True, name="settings-save").start()
         if on:
             self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
+            if self.permissions.get("microphone") == "denied":
+                self.post_notice(
+                    "Room listening can't hear anything",
+                    "RecAndCC has no microphone access — grant it in the Permissions menu.",
+                )
 
     def toggle_recording(self) -> None:
         if self.engine.state.status == RECORDING:
@@ -604,7 +609,8 @@ class _LiveAwareQueue:
 ROOM_ITEM = "Listen for conversations in the room"
 ROOM_LISTENING_NOTICE = (
     "While idle, the microphone stays on (orange dot) to notice conversations near the "
-    "laptop; nothing leaves the device. Recording people may need their consent."
+    "laptop, which costs some battery; nothing leaves the device. Recording people may "
+    "need their consent: tell them."
 )
 
 

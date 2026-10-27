@@ -32,9 +32,12 @@ Changes to `[detection]` are picked up while the app runs. Restart the app after
 | `ask_timeout_s` | `30.0` | The "Keep it?" pop-up closes after this |
 | `ask_timeout_action` | `"record"` | What an unanswered pop-up means: `record` keeps the recording (nothing is lost if you're away), `ignore` discards it. In Ask mode recording always starts right away; the pop-up only decides whether to keep it |
 | `record_mic` | `"calls"` | `always` · `calls` (calls and manual recordings only) · `never` |
-| `room_listening` | `false` | Opt-in. While nothing records, keep the mic open and start a `room` session when people talk near the laptop (no app involved). macOS shows the orange mic indicator the whole time. Apps take precedence: a call starting during a room session turns it into a call session. A room session stops after `stop_after_silence_s` of silence. Needs `mode` other than `off` and `record_mic` other than `never` |
-| `room_speech_s` | `6.0` | Room listening triggers once speech totals this many seconds … |
-| `room_window_s` | `15.0` | … within this sliding window. Short remarks (yours or the TV's) stay below it |
+| `room_listening` | `false` | Opt-in **room listening**: while nothing records, keep the mic open and start a `room` session when people talk near the laptop. Menu: **Listen for conversations in the room**. macOS shows the orange mic indicator the whole time. Only when no app is doing audio and no other app uses the mic; a call that starts during a room session turns it into a call session. Needs `mode` other than `off` and `record_mic` other than `never`. Ask/Auto apply as for apps; override with `app_modes = {"@room" = "auto"}` |
+| `room_speech_s` | `6.0` | Room listening starts a session once speech totals this many seconds … |
+| `room_window_s` | `15.0` | … within this sliding window, so a short remark doesn't start one |
+| `room_preroll_s` | `15.0` | Audio from before the trigger put at the start of a room session, so the first sentence is kept (at least `room_window_s`; kept only in memory) |
+| `room_stop_after_silence_s` | `90.0` | A room session stops after this long without speech |
+| `room_vad_threshold` | `0.5` | Silero speech probability (0–1) that counts as speech; raise it if noise starts sessions |
 | `call_apps` | Zoom, Teams, FaceTime, Slack, Discord, Telegram, WhatsApp, Skype, Webex | Patterns for call apps |
 | `media_apps` | browsers, QuickTime, VLC, Podcasts, TV | Patterns for media apps |
 | `ignore_apps` | Spotify, Music, system sounds, Siri, Voice Memos | Never trigger |

@@ -27,7 +27,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-16 | Permissions set up from the app | ✅ |
 | US-17 | Always on, visible state | ✅ |
 | US-18 | Runs on Windows | 🟡 untested on hardware (#5) |
-| US-22 | Room listening (opt-in) | 🟡 no pre-roll, locked screen unverified (#2) |
+| US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
 
 ---
 
@@ -175,24 +175,31 @@ while I decide.*
 - **Not yet:** a real-hardware test pass, per-app capture, installer (#5).
 
 ### US-22 Room listening (opt-in)
-*As the owner, I want a conversation next to the laptop recorded without pressing anything,
-so that in-person meetings are captured like calls.* (#2)
+*As the owner, I want a conversation next to the laptop (an in-person meeting) recorded
+without pressing anything, like a call, and only when I have turned that on.* (#2, with #58)
 
-- **Given** `room_listening = false` (the default), **then** the microphone is never opened
-  while nothing records.
-- **Given** room listening is on and nothing records, **when** speech totals `room_speech_s`
-  (6 s) within `room_window_s` (15 s), **then** a `room` session starts (mode `auto`), or
-  starts and asks whether to keep it (mode `ask`); short remarks don't trigger it.
-- **Then** the room monitor's mic is closed before the recorder opens its own and reopened
-  after the session; voice detection never runs on the audio callback thread.
-- **Given** an app session is recording or pending, **then** room speech starts nothing; a
-  call that starts during a room session turns it into that call's session.
-- **Given** a room session, **then** it stops after `stop_after_silence_s` of silence; after
-  a manual stop or a discard it doesn't restart until the room was quiet for
-  `stop_after_inactive_s`.
+- **Given** a fresh install (`room_listening = false`), **then** the microphone is never
+  opened while nothing records.
+- **Given** room listening is on and nothing records, **when** nobody speaks or I make a
+  short remark (less than `room_speech_s` of speech within `room_window_s`), **then**
+  nothing is recorded; **when** people talk for `room_speech_s` (6 s) within
+  `room_window_s` (15 s), **then** a `room` session starts (Auto), or starts and asks whether
+  to keep it (Ask).
+- **Then** the session's audio begins up to `room_preroll_s` (15 s) before the trigger, so
+  the first sentence is kept, with no gap or overlap, and the other track stays aligned.
+- **Then** the mic is never opened twice: a room session records the monitor's own stream,
+  and the monitor's mic is closed before any other session opens one.
+- **Given** an app is doing audio or another app uses the mic (even one I switched off,
+  stopped or that is ignored), **then** room speech starts nothing; a call that starts
+  during a room session turns it into that call's session, without a second session.
+- **Given** a room session, **then** it stops after `room_stop_after_silence_s` (90 s)
+  without speech; after a manual stop or a discard it doesn't restart until the room was
+  quiet for `stop_after_inactive_s`.
+- **Given** a room session, **then** the final transcript numbers the speakers on the mic
+  track (`Speaker 1`, `Speaker 2`, …).
 - **Given** the menu item "Listen for conversations in the room", **then** it switches the
-  setting (saved) and turning it on explains the always-on mic indicator and consent.
-- **Then** nothing about the room audio is logged beyond on/off states, and nothing leaves
-  the device.
-- **Not yet:** pre-roll of the first sentence, a VAD-based stop, `Speaker N` labels on the
-  mic track, locked-screen and battery measurements.
+  setting (saved) and closes or reopens the mic; turning it on explains the always-on mic
+  indicator, the battery cost and consent, and warns if mic access is denied.
+- **Then** speech detection runs on its own thread (the audio thread only copies frames);
+  nothing about the room audio is logged beyond on/off states, and nothing leaves the device.
+- **Not yet:** verified with the screen locked; idle CPU and battery impact measured.

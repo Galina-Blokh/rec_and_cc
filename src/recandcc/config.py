@@ -95,6 +95,9 @@ class DetectionConfig:
     room_listening: bool = False
     room_speech_s: float = 6.0
     room_window_s: float = 15.0
+    room_preroll_s: float = 15.0  # audio before the trigger kept at the session's start
+    room_stop_after_silence_s: float = 90.0  # no speech this long ends a room session
+    room_vad_threshold: float = 0.5  # Silero speech probability that counts as speech
     call_apps: list[str] = field(default_factory=lambda: list(DEFAULT_CALL_APPS))
     media_apps: list[str] = field(default_factory=lambda: list(DEFAULT_MEDIA_APPS))
     ignore_apps: list[str] = field(default_factory=lambda: list(DEFAULT_IGNORE_APPS))
