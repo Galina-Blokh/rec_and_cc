@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import logging
+import math
 import os
 import sys
 import tempfile
@@ -581,6 +582,11 @@ def save_settings(updates: dict, path: Path | None = None) -> float:
     )
 
 
+def _positive(v: object) -> bool:
+    """A finite number above zero (not a bool)."""
+    return not isinstance(v, bool) and isinstance(v, int | float) and math.isfinite(v) and v > 0
+
+
 def load_config(path: Path | None = None, *, migrate: bool = False) -> Config:
     """Load config, creating a default file on first run. Unknown keys are ignored.
 
@@ -601,6 +607,17 @@ def load_config(path: Path | None = None, *, migrate: bool = False) -> Config:
         if v is not None and (isinstance(v, bool) or not isinstance(v, int | float)):
             log.warning("config: [detection] %s must be a number 0-100; ignoring it", key)
             setattr(det, key, None)
+    # Zero would start a room session the moment the mic opens: fall back to the defaults.
+    bad = [key for key in ("room_speech_s", "room_window_s") if not _positive(getattr(det, key))]
+    if bad:
+        defaults = DetectionConfig()
+        log.warning(
+            "config: [detection] %s must be positive; using the default%s",
+            " and ".join(f"{k} ({getattr(det, k)!r})" for k in bad),
+            "s" if len(bad) > 1 else "",
+        )
+        for key in bad:
+            setattr(det, key, getattr(defaults, key))
     # Could never trigger: say so. Clamped where it is used (the file keeps the value); with
     # an outside sensitivity the window widens instead.
     if det.outside_sensitivity is None and det.room_speech_s > det.room_window_s:
