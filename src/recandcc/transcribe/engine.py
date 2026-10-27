@@ -21,6 +21,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -33,12 +34,22 @@ from .diarize import Diarizer, Turn, label_speakers
 from .gpu import MlxWhisper, hf_cache_folder, use_gpu
 from .merge import ME, OTHERS, language_confidence, merge_tracks, smooth_languages
 from .output import write_outputs
-from .revisions import check_download_allowed, faster_whisper_revision
+from .revisions import (
+    UnpinnedModelError,
+    check_download_allowed,
+    ct2_repo,
+    faster_whisper_revision,
+)
 
 log = logging.getLogger("recandcc.transcribe")
 
 ProgressCallback = Callable[[float], None]
 SPEAKERS = {Track.ME: ME, Track.OTHERS: OTHERS}
+
+# A language_models entry that failed to load is retried after this long (an unpinned repo,
+# which is refused by config, is not retried).
+ROUTE_RETRY_S = 300.0
+LANGUAGE_NAMES = {"he": "Hebrew", "en": "English", "ru": "Russian"}  # for notices
 
 
 def diarized_track(session: SessionInfo) -> Track:
@@ -91,6 +102,16 @@ class Transcriber:
         self._init_lock = threading.Lock()
         self._run_lock = threading.Lock()
         self._diarizer: Diarizer | None = None
+        # cfg.language_models: model name -> loaded model (under _route_lock, on first use or
+        # prefetched). Until it is loaded, or after a failed load until _route_retry[name]
+        # (clock time; inf = never), its language uses the main model.
+        self._routed: dict[str, Any] = {}
+        self._route_retry: dict[str, float] = {}
+        self._route_noticed: set[str] = set()
+        self._route_lock = threading.Lock()
+        self.clock = time.monotonic
+        # (title, message) toast from any thread, e.g. the controller's post_notice
+        self.on_notice: Callable[[str, str], None] | None = None
         self.diarize_wait_s = DIARIZE_WAIT_S
         # model -> load seconds, not yet reported in a session's metrics (the session that
         # waited for the load gets them)
@@ -185,6 +206,76 @@ class Transcriber:
                     self._model = model
         return self._model
 
+    def _model_for(self, language: str, wait: bool = True):
+        """The model that transcribes ``language``: its cfg.language_models entry or the main
+        model. ``wait``: block while the routed model loads; else (live) the main model is
+        used until a background load has finished."""
+        main = self._ensure_loaded()
+        name = self.cfg.language_models.get(language)
+        if not name or name == self.cfg.model:
+            return main
+        return self._routed_model(name, language, main, wait) or main
+
+    def _routed_model(self, name: str, language: str, main, wait: bool):
+        """The loaded routed model ``name``, loading it if due; None = use ``main`` for now."""
+        model = self._routed.get(name)
+        if model is not None or self.clock() < self._route_retry.get(name, 0.0):
+            return model
+        if not wait:
+            if not self._route_lock.locked():  # not being loaded yet: load it off this thread
+                threading.Thread(
+                    target=self._routed_model,
+                    args=(name, language, main, True),
+                    name="whisper-prefetch",
+                    daemon=True,
+                ).start()
+            return None
+        with self._route_lock:  # other languages keep transcribing while this one loads
+            if self._model is not main:  # closed meanwhile
+                return None
+            if name not in self._routed and self.clock() >= self._route_retry.get(name, 0.0):
+                model = self._load_routed(name, language, main)
+                if model is not None:
+                    self._routed[name] = model
+            return self._routed.get(name)
+
+    def start_prefetch(self) -> None:
+        """Load the routed models of the configured languages in the background, so the first
+        region in such a language doesn't wait for a load (or the one-time download). Needs
+        the main model loaded; never blocks."""
+        main, langs = self._model, self.cfg.languages
+        if main is None:
+            return
+        for language, name in self.cfg.language_models.items():
+            if name != self.cfg.model and (not langs or language in langs):
+                self._routed_model(name, language, main, wait=False)
+
+    def _load_routed(self, name: str, language: str, main):
+        try:
+            if isinstance(main, MlxWhisper):
+                t0 = time.monotonic()
+                model = MlxWhisper(name, allow_unpinned=self.cfg.allow_unpinned_models, share=main)
+                model.load()
+                self._load_times[f"{name} (gpu)"] = rounded(time.monotonic() - t0, 2)
+                return model
+            return self._load(ct2_repo(name))
+        except Exception as e:  # noqa: BLE001 - the main model still transcribes this language
+            permanent = isinstance(e, UnpinnedModelError)
+            self._route_retry[name] = float("inf") if permanent else self.clock() + ROUTE_RETRY_S
+            log.warning(
+                "model %s for language %s failed to load (%s); using %s for it%s",
+                name,
+                language,
+                type(e).__name__,
+                self.cfg.model,
+                "" if permanent else f", retrying in {ROUTE_RETRY_S / 60:.0f} min",
+            )
+            if self.on_notice is not None and name not in self._route_noticed:
+                self._route_noticed.add(name)
+                lang = LANGUAGE_NAMES.get(language, language)
+                self.on_notice(f"{lang} model unavailable", f"Using the default model for {lang}")
+            return None
+
     def _require_pool(self) -> ThreadPoolExecutor:
         """The worker pool; only valid after _ensure_loaded() and before close()."""
         if self._pool is None:
@@ -202,6 +293,11 @@ class Transcriber:
         with self._init_lock:
             if self._pool:
                 self._pool.shutdown(wait=True)
+            with self._route_lock:
+                routed, self._routed, self._route_retry = self._routed, {}, {}
+            for model in routed.values():
+                if isinstance(model, MlxWhisper):
+                    model.close()  # before the main model, whose GPU thread it shares
             if isinstance(self._model, MlxWhisper):
                 self._model.close()
             self._pool, self._model, self._lid_model = None, None, None
@@ -312,11 +408,14 @@ class Transcriber:
         *,
         beam_size: int = 5,
         max_end: float | None = None,
+        wait_for_model: bool = True,
     ) -> list[Segment]:
         """Transcribe one piece of audio (<= 30 s) in a fixed language. Segment times are
         ``offset`` + position in the piece, clipped to ``max_end``. Blocking; call it from a
-        pool worker (see ``submit``) to run pieces in parallel."""
-        model = self._ensure_loaded()
+        pool worker (see ``submit``) to run pieces in parallel. ``language`` picks the model
+        (cfg.language_models); ``wait_for_model=False`` uses the main model while that one is
+        still loading (live)."""
+        model = self._model_for(language, wait_for_model)
         if isinstance(model, MlxWhisper):
             pieces = model.transcribe(audio, language)  # GPU thread; greedy + fallback
         else:
@@ -375,6 +474,7 @@ class Transcriber:
         segments: list[Segment] = []
         if audio:
             self._ensure_loaded()
+            self.start_prefetch()  # routed models load while VAD and language ID run
             t0 = time.monotonic()
             pool = self._require_pool()
             tracks = list(audio)
