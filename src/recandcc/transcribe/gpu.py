@@ -28,7 +28,7 @@ import numpy as np
 
 from ..config import TranscriptionConfig
 from .merge import language_confidence
-from .revisions import check_download_allowed, revision
+from .revisions import IVRIT_MLX_REPOS, check_download_allowed, revision
 
 log = logging.getLogger("recandcc.transcribe")
 
@@ -45,7 +45,9 @@ MLX_REPOS = {
 
 def mlx_repo(model: str) -> str:
     """HF repo of the MLX version of ``model`` (a repo id or local path is used as is)."""
-    if "/" in model:
+    if model in IVRIT_MLX_REPOS:  # a CTranslate2 build named in language_models
+        return IVRIT_MLX_REPOS[model]
+    if "/" in model or "\\" in model or Path(model).is_dir():  # repo id or local folder
         return model
     return MLX_REPOS.get(model, f"mlx-community/whisper-{model}-mlx")
 
@@ -143,10 +145,15 @@ def import_mlx_whisper() -> Any:
 class MlxWhisper:
     """One MLX Whisper model, driven from a single dedicated thread."""
 
-    def __init__(self, model: str, allow_unpinned: bool = False) -> None:
+    def __init__(
+        self, model: str, allow_unpinned: bool = False, share: MlxWhisper | None = None
+    ) -> None:
         self.repo = mlx_repo(model)  # HF repo id; replaced by its local path in load()
         self.allow_unpinned = allow_unpinned
-        self._thread = ThreadPoolExecutor(1, thread_name_prefix="whisper-gpu")
+        # `share`: another model's GPU thread, so that two models (language_models) never
+        # drive MLX from two threads at once.
+        self._owns_thread = share is None
+        self._thread = share._thread if share else ThreadPoolExecutor(1, "whisper-gpu")
         self._model = None
 
     def _get_model(self):
@@ -155,6 +162,10 @@ class MlxWhisper:
 
         import_mlx_whisper()
         holder = importlib.import_module("mlx_whisper.transcribe").ModelHolder
+        if self._model is not None:
+            # mlx_whisper.transcribe() caches one model only: hand it ours (both stay in memory)
+            # instead of reloading weights whenever the other language's model ran last.
+            holder.model, holder.model_path = self._model, self.repo
         # Same cache mlx_whisper.transcribe() uses, so the weights are loaded once.
         return holder.get_model(self.repo, mx.float16)
 
@@ -173,6 +184,7 @@ class MlxWhisper:
 
         def run():
             with MLX_LOCK:
+                self._get_model()  # make ours the model mlx_whisper.transcribe() uses
                 result = import_mlx_whisper().transcribe(
                     np.ascontiguousarray(audio, dtype=np.float32),
                     path_or_hf_repo=self.repo,
@@ -213,5 +225,6 @@ class MlxWhisper:
         return language_confidence(self._thread.submit(run).result(), allowed)
 
     def close(self) -> None:
-        self._thread.shutdown(wait=True)
+        if self._owns_thread:
+            self._thread.shutdown(wait=True)
         self._model = None
