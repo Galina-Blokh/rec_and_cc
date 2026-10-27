@@ -82,6 +82,10 @@ class Segment:
     speaker: str  # "Me", "Others" (later: "Speaker 1", ...)
     language: str  # ISO 639-1 code, e.g. "en", "ru", "he"
     overlap: bool = False  # diarization: two other speakers at once (json only, when True)
+    # The diarized track the label came from ("me" or "others"; json only, when set): call-app
+    # names go to "others" speakers only, since a room session numbers the mic track too.
+    # "" = not diarized, or a transcript written before tracks were recorded.
+    track: str = field(default="", compare=False)
     # (start, end, text) per word, when the backend gave word timestamps (faster-whisper, only
     # for "Others" while diarizing). In memory only: used to split at a speaker change, never
     # written to transcript.json.
@@ -131,6 +135,10 @@ class SessionInfo:
     FILENAME = "session.json"
     # Present in a folder the user discarded: never transcribe or list it (discard_session).
     DISCARD_MARKER = ".discarded"
+    # Present while a slow diarization still reads the WAVs to relabel the transcript:
+    # retention keeps the audio. One older than LABELS_PENDING_MAX_S is stale (a crash).
+    LABELS_PENDING_MARKER = ".labels-pending"
+    LABELS_PENDING_MAX_S = 3600.0
 
     def update_metrics(self, stage: str, values: dict) -> None:
         """Merge `values` into ``metrics[stage]`` (thread-safe; not saved until ``save``)."""

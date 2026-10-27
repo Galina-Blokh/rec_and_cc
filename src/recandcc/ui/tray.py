@@ -16,11 +16,15 @@ Export and "Delete audio after" use the same Controller calls as the macOS menu
 (``export_async`` on a worker, its result a ``notice``; ``set_retention``).
 Global shortcut (default Ctrl+Shift+R): ``hotkey.WinHotkeyListener``, owned by the Controller;
 the Start/Stop item shows it after a tab (Win32 menus right-align text after ``\t``).
+Speaker names (US-26): "Recent transcripts > Name speakers…" (greyed out unless
+``transcription.speaker_names``) and "Forget all voices…" use the macOS menu's Controller
+calls; their dialogs (``tk_dialog``, own Tk root, time out as Cancel) run on worker threads.
 """
 
 from __future__ import annotations
 
 import contextlib
+import gc
 import logging
 import os
 import queue
@@ -46,6 +50,7 @@ from .captions import (
     tk_parts,
 )
 from .common import (
+    DIALOG_TIMEOUT_S,
     ONBOARDING_TEXT,
     PERM_KINDS,
     PERM_LABELS,
@@ -63,15 +68,20 @@ from .common import (
     transcript_label,
 )
 from .present import (
+    FORGET_VOICES_TEXT,
     SEARCHING,
+    forgot_notice,
     language_menu,
     live_transcript_target,
+    named_notice,
     prompt_notice,
     record_item_title,
     retention_menu,
     search_hit_row,
     search_open_target,
     search_status,
+    speaker_choice_label,
+    speakers_notice,
 )
 
 log = logging.getLogger(__name__)
@@ -336,7 +346,7 @@ class TkSearch:
             win.title("Search transcripts")
             win.geometry("720x360")
             win.protocol("WM_DELETE_WINDOW", win.withdraw)
-            query = tk.StringVar()
+            query = tk.StringVar(master=root)
             top = tk.Frame(win, padx=8, pady=8)
             top.pack(fill="x")
             entry = tk.Entry(top, textvariable=query)
@@ -513,7 +523,95 @@ class TkNotes:
         root.mainloop()
 
 
+def tk_dialog(
+    title: str,
+    text: str,
+    *,
+    choices: list[str] | None = None,
+    entry: bool = False,
+    ok: str = "OK",
+    danger: bool = False,
+    timeout_s: float = DIALOG_TIMEOUT_S,
+):
+    """A small topmost dialog with its own ``Tk`` root, run on the calling (worker) thread.
+    Returns the chosen index (``choices``), the typed text (``entry``) or True; None on
+    Cancel, close, timeout or when Tk fails. ``danger``: Cancel has the focus and Return does
+    not confirm. UNTESTED (written without access to Windows)."""
+    result = None
+    root = None
+    try:
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.title(title)
+        root.attributes("-topmost", True)
+        root.resizable(False, False)
+        tk.Label(root, text=text, padx=16, pady=10, justify="left", wraplength=480).pack(anchor="w")
+        box = field = None
+        if choices is not None:
+            box = tk.Listbox(root, width=70, height=min(12, max(3, len(choices))))
+            for c in choices:
+                box.insert("end", c)
+            box.selection_set(0)
+            box.pack(padx=16, fill="both", expand=True)
+        elif entry:
+            field = tk.Entry(root, width=40)
+            field.pack(padx=16, fill="x")
+
+        finished = False
+
+        def done(accept: bool) -> None:
+            nonlocal result, finished
+            if finished:
+                return
+            finished = True
+            if accept and box is not None:
+                result = sel[0] if (sel := box.curselection()) else None
+            elif accept and field is not None:
+                result = field.get().strip() or None
+            elif accept:
+                result = True
+            if root is not None:
+                root.destroy()
+
+        row = tk.Frame(root, pady=10)
+        row.pack()
+        cancel = tk.Button(row, text="Cancel", width=10, command=lambda: done(False))
+        cancel.pack(side="left", padx=4)
+        tk.Button(row, text=ok, width=max(10, len(ok) + 2), command=lambda: done(True)).pack(
+            side="left", padx=4
+        )
+        root.protocol("WM_DELETE_WINDOW", lambda: done(False))
+        root.bind("<Escape>", lambda _e: done(False))
+        if not danger:
+            root.bind("<Return>", lambda _e: done(True))
+        if box is not None:
+            box.bind("<Double-1>", lambda _e: done(True))
+        (cancel if danger else box or field or cancel).focus_force()
+        root.after(int(timeout_s * 1000), lambda: done(False))  # unanswered = Cancel
+        root.mainloop()
+    except Exception as e:  # labels may quote a transcript: log the type only
+        log.warning("dialog failed (tkinter unavailable?): %s", type(e).__name__)
+        if root is not None:  # a widget failed after Tk(): don't leave an orphan window
+            with contextlib.suppress(Exception):
+                root.destroy()
+        return None
+    finally:
+        # The callbacks form a cycle with the root; free the Tk app here, on its own thread,
+        # not later from the cyclic GC on another thread (Tcl aborts with
+        # "Tcl_AsyncDelete: async handler deleted by the wrong thread").
+        root = None
+        gc.collect()
+    return result
+
+
+# Two dialogs plus the speakers worker; a naming flow older than this is assumed lost.
+NAMING_STALE_S = 2 * DIALOG_TIMEOUT_S + 60
+
+
 class TrayApp:
+    _dialog = staticmethod(tk_dialog)  # tests replace it
+
     def __init__(self, ctrl: Controller):
         self.ctrl = ctrl
         self.cfg = ctrl.cfg
@@ -525,6 +623,10 @@ class TrayApp:
         self.notes = TkNotes(ctrl)
         self._live_id: str | None = None
         self._live_dir: str | None = None
+        self._naming_open = False  # a speaker chooser/name dialog is up
+        self._naming_since = 0.0  # monotonic start of the open flow
+        self._naming_lock = threading.Lock()
+        self._forget_open = False  # the forget confirmation is up
         self.icon = pystray.Icon(
             "RecAndCC", make_icon(COLORS["ask"], False, False), "RecAndCC", menu=self._menu()
         )
@@ -537,7 +639,7 @@ class TrayApp:
         def mode_item(label, mode):
             return Item(
                 label,
-                lambda: self.ctrl.engine.set_mode(mode),
+                lambda: self.ctrl.set_mode(mode),
                 checked=lambda _i: st().mode == mode,
                 radio=True,
             )
@@ -555,7 +657,11 @@ class TrayApp:
                 Item(transcript_label(p), (lambda p=p: lambda: open_path(p))())  # noqa: B023 — p is bound by the default arg
                 for p in self.ctrl.recent
             ]
-            return items or [Item("(none yet)", None, enabled=False)]
+            return [
+                *(items or [Item("(none yet)", None, enabled=False)]),
+                pystray.Menu.SEPARATOR,  # greyed out unless transcription.speaker_names is on
+                Item("Name speakers…", self._name_speakers, enabled=self._can_name()),
+            ]
 
         def language_item(code: str | None, title: str, on: bool):
             action = None if code is None else lambda: self.ctrl.toggle_language(code)
@@ -644,6 +750,7 @@ class TrayApp:
             Item("Search transcripts…", lambda: self.search.post("ask")),
             Item("Export latest transcript (DOCX + PDF)", lambda: self.ctrl.export_async()),
             Item("Meeting notes…", lambda: self.ctrl.notes_async()),
+            Item("Forget all voices…", self._forget_voices),
             Item("Permissions", pystray.Menu(perms)),
             Item("Languages", pystray.Menu(languages)),
             Item("Delete audio after", pystray.Menu(retention)),
@@ -663,8 +770,7 @@ class TrayApp:
         self.icon.update_menu()  # Win32 caches the native menu: move the radio check now
 
     def _toggle_captions(self) -> None:
-        self.cfg.live_captions = not self.cfg.live_captions
-        self.ctrl.save_settings("live_captions")
+        self.ctrl.menu_set("live_captions", not self.cfg.live_captions)
         if not self.cfg.live_captions:
             self.captions.post("hide")
         elif self._live_id is not None:
@@ -683,11 +789,10 @@ class TrayApp:
         try:
             if autostart.is_enabled():
                 autostart.disable()
-                self.cfg.autostart = False
+                self.ctrl.menu_set("autostart", False)
             else:
                 autostart.enable()
-                self.cfg.autostart = True
-            self.ctrl.save_settings("autostart")
+                self.ctrl.menu_set("autostart", True)
         except Exception:
             log.exception("autostart toggle failed")
 
@@ -697,6 +802,103 @@ class TrayApp:
             self.ctrl.shutdown()
         finally:
             self.icon.stop()
+
+    # ------------------------------------------------------------------ speaker names
+    def _can_name(self) -> bool:
+        return bool(self.ctrl.speaker_names_enabled and self.ctrl.recent)
+
+    def _begin_naming(self) -> bool:
+        """One naming flow at a time. A flow older than NAMING_STALE_S (longer than its dialogs
+        can stay open) is treated as lost, so a worker that never reported can't block naming
+        until restart."""
+        with self._naming_lock:
+            now = time.monotonic()
+            if self._naming_open and now - self._naming_since < NAMING_STALE_S:
+                return False
+            self._naming_open, self._naming_since = True, now
+            return True
+
+    def _end_naming(self) -> None:
+        with self._naming_lock:
+            self._naming_open = False
+
+    def _name_speakers(self) -> None:
+        """Pick a recent session (dialog on a worker), then list its speakers (Controller
+        worker, ``speakers`` event). One flow, one dialog at a time."""
+        recent = list(self.ctrl.recent)
+        if not self._can_name():
+            return
+        if not self._begin_naming():
+            self._notify("Naming already in progress", "Finish or cancel the open dialog first.")
+            return  # cleared by the "named" event or a cancel/notice below
+
+        def run() -> None:
+            handed_over = False
+            try:
+                labels = [transcript_label(p) for p in recent]
+                i = self._dialog(
+                    "Name speakers", "Name the speakers of:", choices=labels, ok="Next"
+                )
+                if isinstance(i, int) and 0 <= i < len(recent):
+                    self.ctrl.speakers_async(recent[i].parent)
+                    handed_over = True  # the "speakers" event continues the flow
+            finally:
+                if not handed_over:
+                    self._end_naming()
+
+        threading.Thread(target=run, daemon=True, name="name-speakers-pick").start()
+
+    def _pick_speaker(self, directory, speakers) -> None:
+        if notice := speakers_notice(speakers):
+            self._end_naming()
+            self._notify(*notice)
+            return
+
+        def run() -> None:
+            dispatched = False
+            try:
+                labels = [
+                    speaker_choice_label(n, lbl, ln) for n, (lbl, ln) in enumerate(speakers, 1)
+                ]
+                i = self._dialog(
+                    "Name speakers", "Who is this? (first lines shown)", choices=labels, ok="Name…"
+                )
+                if not (isinstance(i, int) and 0 <= i < len(speakers)):
+                    return
+                label = speakers[i][0]
+                name = self._dialog("Name speakers", f"Name for {label}:", entry=True, ok="Save")
+                if isinstance(name, str) and name.strip():
+                    dispatched = True  # the "named" event clears the guard
+                    self.ctrl.name_speaker_async(directory, label, name.strip())
+            finally:
+                if not dispatched:
+                    self._end_naming()
+
+        threading.Thread(target=run, daemon=True, name="name-speaker-dialog").start()
+
+    def _forget_voices(self) -> None:
+        """Confirm, then delete through ``voices.forget_all`` (as ``voices delete --all``).
+        Cancel, closing or leaving the dialog until it times out deletes nothing."""
+
+        with self._naming_lock:  # a second click while the confirmation is up does nothing
+            if self._forget_open:
+                return
+            self._forget_open = True
+
+        def run() -> None:
+            try:
+                if (
+                    self._dialog(
+                        "Forget all voices", FORGET_VOICES_TEXT, ok="Forget all voices", danger=True
+                    )
+                    is True
+                ):
+                    self.ctrl.forget_voices_async()
+            finally:
+                with self._naming_lock:
+                    self._forget_open = False
+
+        threading.Thread(target=run, daemon=True, name="forget-voices-dialog").start()
 
     # ------------------------------------------------------------------ polling
     def _poll(self) -> None:
@@ -738,6 +940,13 @@ class TrayApp:
                 if ev[1] == self._live_id:
                     self._live_id = None
                     self.captions.post("end")
+            elif ev[0] == "speakers":
+                self._pick_speaker(ev[1], ev[2])
+            elif ev[0] == "named":  # notices never carry a name or label
+                self._end_naming()
+                self._notify(*named_notice(ev[3]))
+            elif ev[0] == "forgot":
+                self._notify(*forgot_notice(ev[1]))
             elif ev[0] == "search":
                 self.search.post("results", ev[1], ev[2])  # failures and no matches too
             elif ev[0] == "notes":
@@ -821,12 +1030,20 @@ class TrayApp:
         if not self.ctrl.missing_permissions():
             return
         try:
+            import tkinter as tk
             from tkinter import messagebox
 
-            if messagebox.askyesno(
-                "Welcome to RecAndCC", ONBOARDING_TEXT + "\n\nOpen microphone privacy settings now?"
-            ):
-                os.startfile("ms-settings:privacy-microphone")  # type: ignore[attr-defined]
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                if messagebox.askyesno(
+                    "Welcome to RecAndCC",
+                    ONBOARDING_TEXT + "\n\nOpen microphone privacy settings now?",
+                    parent=root,
+                ):
+                    os.startfile("ms-settings:privacy-microphone")  # type: ignore[attr-defined]
+            finally:
+                root.destroy()
         except Exception:
             log.debug("onboarding dialog failed", exc_info=True)
 

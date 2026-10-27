@@ -7,6 +7,8 @@ All notable changes to RecAndCC are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Windows tray: "Recent transcripts → Name speakers…" (with `speaker_names = true`) and
+  "Forget all voices…" (confirmed), the same Controller calls as the macOS menu (#1).
 - Opt-in semantic transcript search (`[search] semantic = true`): a pinned, checksum-verified
   multilingual sentence model, downloaded once, merged with full-text results (#4).
 - Repeated semantic searches reuse an in-memory vector cache instead of re-reading every

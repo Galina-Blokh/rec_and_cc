@@ -69,10 +69,18 @@ def paragraphs(segments: list[Segment], gap_s: float = PARAGRAPH_GAP_S) -> list[
         ):
             text = f"{p.text} {s.text}".strip()
             out[-1] = Segment(
-                p.start, max(p.end, s.end), text, p.speaker, p.language, p.overlap or s.overlap
+                p.start,
+                max(p.end, s.end),
+                text,
+                p.speaker,
+                p.language,
+                p.overlap or s.overlap,
+                p.track,
             )
         else:
-            out.append(Segment(s.start, s.end, s.text.strip(), s.speaker, s.language, s.overlap))
+            out.append(
+                Segment(s.start, s.end, s.text.strip(), s.speaker, s.language, s.overlap, s.track)
+            )
     return out
 
 
@@ -125,10 +133,12 @@ def format_json(session: SessionInfo, segments: list[Segment], duration: float, 
 
 def _segment_json(s: Segment) -> dict:
     """Segment fields for JSON: never the in-memory word timings (no deep copy of them), and
-    `overlap` only where diarization found overlapped speech."""
+    `overlap` only where diarization found overlapped speech, `track` only where it is known."""
     data = {f.name: getattr(s, f.name) for f in fields(s) if f.name != "words"}
     if not s.overlap:
         del data["overlap"]
+    if not s.track:
+        del data["track"]
     return data
 
 

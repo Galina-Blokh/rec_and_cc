@@ -51,8 +51,21 @@ class FakeRecorder:
         self.fail = False
         self.silent = []
         self.targets = []
+        self.op_lock = threading.RLock()  # like Recorder._op_lock: start and stop serialise
+        self.start_gate: threading.Event | None = None  # set: start() blocks until it is set
+        self.start_entered = threading.Event()
+        self.session = None  # like Recorder.session: the running session
+        self.stop_calls = 0
 
     def start(self, kind, app=None, target=None):
+        with self.op_lock:
+            self.start_entered.set()
+            if self.start_gate is not None:
+                self.start_gate.wait(5)
+            self.session = self._start(kind, app, target)
+            return self.session
+
+    def _start(self, kind, app, target):
         if self.fail:
             raise RuntimeError("boom")
         self.is_recording = True
@@ -69,6 +82,14 @@ class FakeRecorder:
         )
 
     def stop(self):
+        with self.op_lock:
+            self.stop_calls += 1
+            self.session = None
+            return self._stop()
+
+    def _stop(self):
+        if self.start_gate is not None and not self.is_recording:
+            return None  # like Recorder.stop: nothing recording (another stop ended it)
         self.is_recording = False
         self.stops += 1
         from datetime import datetime
@@ -467,6 +488,91 @@ def test_thread_and_shutdown():
     h.eng.shutdown()
     assert h.status == IDLE and h.rec.stops == 1 and len(h.q.submitted) == 1
     assert h.mon.closed
+
+
+def test_recording_that_starts_after_shutdown_gave_up_is_stopped():
+    """shutdown() stops waiting for an engine thread stuck in recorder.start(): once that
+    start returns, the engine stops the recorder itself, so the mic doesn't stay on."""
+    h = Harness(Mode.AUTO)
+    h.cfg.detection.poll_interval_s = 0.01
+    h.eng.clock = time.monotonic
+    entered, release = threading.Event(), threading.Event()
+    real_start, ops = h.rec.start, []
+
+    def slow_start(*a, **k):
+        entered.set()
+        release.wait(5)
+        ops.append("start")
+        return real_start(*a, **k)
+
+    real_stop = h.rec.stop
+
+    def stop():
+        ops.append("stop")
+        return real_stop()
+
+    h.rec.start, h.rec.stop = slow_start, stop
+    h.eng.start()
+    thread = h.eng._thread
+    assert thread is not None
+    h.eng.start_manual()
+    assert entered.wait(2)
+    h.eng.shutdown(timeout=0.05)  # gives up: the thread is still inside start()
+    release.set()
+    thread.join(2)
+    assert not thread.is_alive()
+    assert ops[-1] == "stop" and not h.rec.is_recording
+    assert h.status == IDLE
+
+
+def _shutdown_during_blocked_start(h):
+    """Start a recording on the engine thread, shut down while recorder.start() blocks
+    (holding the lock stop() needs, like Recorder._op_lock), then let start() return.
+    Returns the session-end calls and how long shutdown() took."""
+    ends = []
+    h.eng.on_session_end = lambda s, kept: ends.append((s, kept))
+    h.rec.start_gate = threading.Event()
+    h.eng.start()
+    thread = h.eng._thread
+    assert thread is not None
+    assert h.rec.start_entered.wait(2)
+    t0 = time.monotonic()
+    h.eng.shutdown(timeout=0.05)  # gives up on the thread; must not wait for start()
+    took = time.monotonic() - t0
+    h.rec.start_gate.set()
+    thread.join(2)
+    assert not thread.is_alive()
+    return ends, took
+
+
+def test_shutdown_returns_while_start_blocks_and_the_session_ends_once():
+    """shutdown() returns within its timeout while recorder.start() holds the recorder's
+    lock; the engine thread stops the session once start() returns. Exactly one stop
+    reports the real session, and the silence check runs once."""
+    h = Harness(Mode.AUTO)
+    h.cfg.detection.poll_interval_s = 0.01
+    h.rec.silent = [Track.ME]
+    h.perm = {}
+    h.eng.start_manual()
+    ends, took = _shutdown_during_blocked_start(h)
+    assert took < 1.0  # the main thread at quit never waits on a stuck recorder
+    assert not h.rec.is_recording and h.rec.stop_calls == h.rec.stops == 1
+    assert len(ends) == 1 and ends[0][0] is not None and ends[0][1] is True
+    assert h.notices.count("Recording was completely silent") == 1
+    assert len(h.q.submitted) == 1
+
+
+def test_no_prompt_for_a_session_stopped_at_shutdown():
+    """Ask mode: a recording whose start returns after shutdown gave up is stopped, and no
+    "keep it?" prompt is shown for it while the app quits."""
+    h = Harness(Mode.ASK)
+    h.cfg.detection.min_active_s = 0
+    h.cfg.detection.poll_interval_s = 0.01
+    h.mon.procs = [ZOOM]
+    ends, _ = _shutdown_during_blocked_start(h)
+    assert not h.rec.is_recording
+    assert h.prompts == []
+    assert len(ends) == 1
 
 
 def test_monitor_closed_on_the_engine_thread():

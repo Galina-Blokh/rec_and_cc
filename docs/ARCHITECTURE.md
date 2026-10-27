@@ -52,7 +52,7 @@ across platforms.
 | `permissions.py` | Query, request and open settings for mic and system-audio permissions |
 | `native.py` | Locates the native helper binary (`rcc-audiotap`) |
 | `settings_window.py` | Native settings window: runs `rcc-audiotap settings` with a JSON snapshot and saves the values it returns through `config` validation |
-| `retention.py` | Audio retention: deletes the WAV files of fully transcribed sessions (`audio_retention_days`); transcripts are kept |
+| `retention.py` | Audio retention: deletes the WAV files of fully transcribed sessions (`audio_retention_days`); transcripts are kept. A session whose slow diarization still needs its WAVs (a fresh `.labels-pending` marker, written by the transcriber until the late relabel ends) keeps them |
 | `ui/` | `common.Controller` (platform-independent glue) + `present.py` (pure presenter logic: menu titles and check marks, notice texts, the ask dialog script and its answers, toast placement) + `mac.py` (rumps) / `tray.py` (pystray) / `toast_mac.py`, thin shells that only apply it |
 | `ui/notes.py` | Meeting notes (pure logic, no UI imports): scan session folders newest first, row texts, `summary.md` excerpt, rename (`title` in `session.json`), delete to the Trash (Foundation / `SHFileOperationW`) or via `discard_session`, the macOS dialog scripts; the Windows window is `TkNotes` in `tray.py` |
 | `ui/captions*.py` | Live captions window: `captions.py` (pure logic: ordering, trimming, header, panel frame, speaker colours) + `captions_mac.py` (floating non-activating NSPanel); Windows uses a Tk window in `tray.py` |
@@ -424,8 +424,13 @@ store (`voices/sessions/<hash>.names.json`; not in `session.json`, because the s
 sync to a cloud). After the transcript is written the transcriber relabels one speaker only
 when it is certain (`callnames.plan`: name count equals non-`Me` speaker count, voice-matched
 speakers match names by shared word, one `Speaker N` and one name left, no disagreeing
-self-introduction). It rewrites the transcript only and never creates a voice profile from a
-call-app name. The menu toggle checks Accessibility trust on a worker thread and writes only
+self-introduction). In a room session a call upgraded (`started_as_room`) the mic track is
+numbered too, so the owner can be a `Speaker N`: `_labelled` records each label's track on its
+segments (`Segment.track`, `"track"` in `transcript.json`; renames keep it), and
+`callnames.call_side` counts and offers only the "others" track's labels. A transcript without
+that (written before it, or a label of unknown/mixed track) fails closed, and `_rename`
+re-checks the track under `NAMING_LOCK`. It rewrites the transcript only and never creates a
+voice profile from a call-app name. The menu toggle checks Accessibility trust on a worker thread and writes only
 its own key to `config.toml`. Helper runs are killed (and waited for) when the session stops. Only Zoom, new Teams and browser windows titled as a Meet/Teams/Zoom page are walked; a name must be in two samples in a row before it is kept (and kept after it scrolls out of view). With more than one call-titled browser window nothing is read from browsers (fail closed).
 
 Whose Accessibility grant is used? Checked on a Mac with `rcc-audiotap ax-status` started from

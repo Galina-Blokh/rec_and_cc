@@ -48,6 +48,7 @@ from .common import (
     transcript_label,
 )
 from .present import (
+    FORGET_VOICES_TEXT,
     MODE_LABELS,
     check,
     dialog_timeout,
@@ -355,7 +356,7 @@ class MacApp(rumps.App):
     # ------------------------------------------------------------------ callbacks
     def _set_mode_cb(self, mode: Mode):
         def cb(_sender):
-            self.ctrl.engine.set_mode(mode)
+            self.ctrl.set_mode(mode)
             self._render()
 
         return cb
@@ -388,11 +389,10 @@ class MacApp(rumps.App):
         try:
             if autostart.is_enabled():
                 autostart.disable()
-                self.cfg.autostart = False
+                self.ctrl.menu_set("autostart", False)
             else:
                 autostart.enable()
-                self.cfg.autostart = True
-            self.ctrl.save_settings("autostart")
+                self.ctrl.menu_set("autostart", True)
         except Exception as e:
             log.exception("autostart toggle failed")
             self._notify("Launch at login", f"Failed: {e}")
@@ -438,9 +438,8 @@ class MacApp(rumps.App):
         self._render_retention()
 
     def _toggle_captions(self, sender) -> None:
-        self.cfg.live_captions = not self.cfg.live_captions
+        self.ctrl.menu_set("live_captions", not self.cfg.live_captions)
         sender.state = 1 if self.cfg.live_captions else 0
-        self.ctrl.save_settings("live_captions")
         self._apply_captions()
 
     def _apply_captions(self) -> None:
@@ -613,8 +612,7 @@ class MacApp(rumps.App):
 
     def _forget_voices(self, _sender) -> None:
         script = (
-            'display dialog "Delete all saved voice profiles and the voice data of every '
-            'session? Names already written into transcripts stay." with title "RecAndCC" '
+            f'display dialog {as_str(FORGET_VOICES_TEXT)} with title "RecAndCC" '
             'buttons {"Cancel", "Forget all voices"} default button "Cancel" with icon caution'
         )
 
