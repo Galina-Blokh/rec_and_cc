@@ -378,6 +378,25 @@ def test_failed_write_rolls_back_and_keeps_the_mode(tmp_path, monkeypatch):
 
 
 @mac_only
+def test_write_error_does_not_overwrite_hand_edits(tmp_path, monkeypatch):
+    """FileNotFoundError while config.toml exists is a write failure (a lost temp file), not
+    "no file yet": no full Config.save over the user's file."""
+    ctrl, path = make_ctrl(tmp_path, monkeypatch)
+    before = path.read_text()
+
+    def lost_temp(*_a, **_k):
+        raise FileNotFoundError("temp file gone")
+
+    monkeypatch.setattr(common, "save_settings", lost_temp)
+    fake_helper(tmp_path, monkeypatch, reply({"settings": "saved", "values": good(tmp_path)}))
+    ctrl.open_settings_async()
+    ev = next_event(ctrl, {"settings_saved", "settings_fallback", "notice"})
+    assert ev[0] == "notice"
+    assert path.read_text() == before  # the hand-written comment and keys survive
+    assert ctrl.cfg.detection.mode == Mode.ASK  # rolled back
+
+
+@mac_only
 def test_turning_off_keep_audio_deletes_nothing_until_startup(tmp_path, monkeypatch):
     from datetime import datetime, timedelta
 
