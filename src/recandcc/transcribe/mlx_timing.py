@@ -82,7 +82,9 @@ def find_alignment(
     medfilt_width: int = 7,
     qk_scale: float = 1.0,
 ) -> list[WordTiming]:
-    if len(text_tokens) == 0:
+    if len(text_tokens) == 0 or num_frames // 2 == 0:
+        # RecAndCC: a 1-frame tail window (seek leaves one) has no cross-attention columns;
+        # upstream's numba dtw returns nothing for it, ours raises on an empty matrix.
         return []
     import mlx.core as mx  # pyright: ignore[reportMissingImports]
 
