@@ -1,0 +1,197 @@
+// `rcc-audiotap ax-status` and `rcc-audiotap participants`: read-only Accessibility access, used
+// only for the opt-in "names from the call app" feature.
+//
+// Trust is only ever checked silently (AXIsProcessTrusted). This file never calls
+// AXIsProcessTrustedWithOptions, so the helper can't make macOS show the Accessibility prompt;
+// the user is sent to System Settings by an explicit menu action instead.
+// Nothing is clicked, focused or opened: only attributes of already visible elements are read.
+
+import AppKit
+import ApplicationServices
+import Darwin
+import Foundation
+
+func runAXStatus() -> Never {
+    printJSON(["trusted": AXIsProcessTrusted()])
+    exit(0)
+}
+
+/// No AX call is issued after this moment (the current app's budget is used up).
+private var axDeadline = Date.distantFuture
+
+private func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+    if Date() > axDeadline { return nil }
+    // Every element gets its own short timeout: it is not inherited from the system-wide one.
+    AXUIElementSetMessagingTimeout(element, 0.5)
+    var value: CFTypeRef?
+    return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
+}
+
+private func text(_ element: AXUIElement, _ name: String) -> String {
+    (attribute(element, name) as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+}
+
+private func children(_ element: AXUIElement) -> [AXUIElement] {
+    (attribute(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+}
+
+private let listWords = ["participant", "people", "attendee", "участник", "משתתפ"]
+private let listRoles: Set<String> = ["AXList", "AXTable", "AXOutline", "AXGroup", "AXScrollArea"]
+private let textRoles: Set<String> = ["AXStaticText", "AXCell", "AXRow", "AXListItem", "AXGroup"]
+private let maxNodes = 4000
+private let maxDepth = 30
+private let perAppSeconds = 2.0
+
+// Browsers show many tabs and windows: only a window whose title says it is a call page is
+// read, never a LinkedIn/Contacts/GitHub "People" list in another tab. (A window's title is
+// the title of its selected tab.)
+private let browserIDs = [
+    "chrome", "safari", "firefox", "edgemac", "brave", "thebrowser", "opera", "vivaldi",
+]
+// Host-like or exact product titles only (no bare "meet - "): a Meet tab is titled
+// "Meet - abc-defg-hij".
+private let callPageWords = [
+    "google meet", "meet.google.com", "microsoft teams", "teams.microsoft.com",
+    "teams.live.com", "zoom.us", "zoom meeting", "zoom workplace",
+]
+private let meetTitlePattern = "^meet [-\u{2013}\u{2014}] [a-z]{3}-[a-z]{4}-[a-z]{3}"
+
+private func isCallPage(_ title: String) -> Bool {
+    callPageWords.contains(where: { title.contains($0) })
+        || title.range(of: meetTitlePattern, options: .regularExpression) != nil
+}
+// Native apps that are read at all: Zoom and (new) Teams. Everything else (Slack, Discord,
+// WhatsApp, FaceTime, Telegram, ...) is skipped, however it is labelled.
+private let nativeCallIDs = ["us.zoom", "com.microsoft.teams"]
+
+private final class Walker {
+    var nodes = 0
+    var lists: [[String]] = []  // every participant list found, one entry per list
+    let deadline = Date().addingTimeInterval(perAppSeconds)  // each app has its own budget
+
+    var exhausted: Bool { nodes >= maxNodes || Date() > deadline }
+
+    /// Looks for a list-like element labelled "Participants"/"People" and reads its rows.
+    func find(_ element: AXUIElement, depth: Int) {
+        if exhausted || depth > maxDepth { return }
+        nodes += 1
+        let role = text(element, kAXRoleAttribute)
+        let label = (text(element, kAXTitleAttribute) + " " + text(element, kAXDescriptionAttribute))
+            .lowercased()
+        if listRoles.contains(role), listWords.contains(where: { label.contains($0) }) {
+            let rows = collect(element)
+            if !rows.isEmpty {
+                lists.append(rows)  // do not look inside it, but go on: a second list matters
+                return
+            }
+        }
+        for child in children(element) { find(child, depth: depth + 1) }
+    }
+
+    /// One entry per row of `list`: all the row's texts, one per line.
+    private func collect(_ list: AXUIElement) -> [String] {
+        var found: [String] = []
+        func rows(_ element: AXUIElement, _ depth: Int) {
+            if exhausted || depth > 8 { return }
+            nodes += 1
+            for row in children(element) {
+                let role = text(row, kAXRoleAttribute)
+                if role == "AXRow" || role == "AXListItem" {
+                    var texts: [String] = []
+                    allTexts(row, 0, &texts)
+                    if !texts.isEmpty {
+                        // every text of the row, so the caller can spot the user's own "(You)"
+                        found.append(texts.joined(separator: "\n"))
+                    }
+                } else {
+                    rows(row, depth + 1)
+                }
+            }
+        }
+        rows(list, 0)
+        return found
+    }
+
+    private func allTexts(_ element: AXUIElement, _ depth: Int, _ out: inout [String]) {
+        if exhausted || depth > 6 || out.count >= 8 { return }
+        nodes += 1
+        if textRoles.contains(text(element, kAXRoleAttribute)) {
+            for name in [kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute] {
+                let value = text(element, name)
+                if !value.isEmpty {
+                    if !out.contains(value) { out.append(value) }
+                    break
+                }
+            }
+        }
+        for child in children(element) { allTexts(child, depth + 1, &out) }
+    }
+}
+
+/// Defense in depth, not a security boundary: `participants` runs only when started by the
+/// RecAndCC app's Python, which passes its own pid. (macOS attributes Accessibility to the
+/// responsible app that spawned the helper, so another process's run is not covered by
+/// RecAndCC's grant anyway; this just refuses the obvious misuse.)
+private func startedByRecAndCC(_ expected: pid_t?) -> Bool {
+    guard let expected, getppid() == expected else { return false }
+    var buffer = [CChar](repeating: 0, count: 4096)
+    guard proc_pidpath(expected, &buffer, UInt32(buffer.count)) > 0 else { return false }
+    let path = String(cString: buffer).lowercased()
+    return path.contains("python") || path.contains("recandcc")
+}
+
+/// Prints {"trusted": bool, "names": [...]} for the visible participant list of the running
+/// apps whose pid is in `pids` or whose bundle id / name contains one of `matches`.
+func runParticipants(pids: [pid_t], matches: [String], parentPID: pid_t?) -> Never {
+    guard startedByRecAndCC(parentPID) else {
+        logError("participants runs only when started by RecAndCC")
+        printJSON(["trusted": false, "names": [String](), "refused": true])
+        exit(3)
+    }
+    guard AXIsProcessTrusted() else {
+        printJSON(["trusted": false, "names": [String]()])
+        exit(0)
+    }
+    let wanted = matches.map { $0.lowercased() }
+    let apps = NSWorkspace.shared.runningApplications.filter { app in
+        // Regular apps only: audio helper processes have no windows of their own.
+        guard app.activationPolicy == .regular else { return false }
+        let id = (app.bundleIdentifier ?? "").lowercased()
+        let name = (app.localizedName ?? "").lowercased()
+        return pids.contains(app.processIdentifier)
+            || wanted.contains { id.contains($0) || name.contains($0) }
+    }
+    // A slow app can't hang the whole read: a short timeout for every AX call of this process
+    // and a separate time budget per app.
+    AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
+    var lists: [[String]] = []
+    var callWindows: [AXUIElement] = []
+    for app in apps {
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        let id = (app.bundleIdentifier ?? "").lowercased()
+        axDeadline = Date().addingTimeInterval(perAppSeconds)  // each app has its own budget
+        if browserIDs.contains(where: { id.contains($0) }) {
+            let windows = (attribute(root, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+            for window in windows where isCallPage(text(window, kAXTitleAttribute).lowercased()) {
+                callWindows.append(window)
+            }
+        } else if nativeCallIDs.contains(where: { id.contains($0) }) {
+            let walker = Walker()
+            walker.find(root, depth: 0)
+            lists += walker.lists
+        }
+    }
+    // Fail closed: with two call windows open (two meetings, or a call and a look-alike) it is
+    // unclear whose list this is, so browsers contribute nothing.
+    if callWindows.count == 1 {
+        axDeadline = Date().addingTimeInterval(perAppSeconds)
+        let walker = Walker()
+        walker.find(callWindows[0], depth: 0)
+        lists += walker.lists
+    }
+    // Exactly one participant list in everything read (several Zoom/Teams windows, or a native
+    // app and a browser call at once): otherwise it is unclear whose it is, so no names.
+    let names = lists.count == 1 ? lists[0] : []
+    printJSON(["trusted": true, "names": names])
+    exit(0)
+}

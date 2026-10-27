@@ -11,7 +11,9 @@ account, nothing uploaded.
   `Speaker 1`, `Speaker 2`, … in the final transcript (offline speaker diarization, a few
   seconds per hour of audio). Live captions keep showing `Others`. Opt in to
   `speaker_names` and name a speaker once (`recandcc name-speaker`): later sessions
-  recognize that voice and write `Anna` instead of `Speaker 2`.
+  recognize that voice and write `Anna` instead of `Speaker 2`. Optionally (macOS,
+  `names_from_call_app`, off by default) the name shown in the call app's open participants
+  panel can be used when it is unambiguous; see [Names from the call app](#names-from-the-call-app).
 - 🌍 **English and Russian** are detected automatically, even when the language switches
   mid-meeting. **Hebrew** can be added (`languages = ["en", "ru", "he"]`): captions and
   transcripts show it right to left (Windows captions reorder RTL text themselves, as Tk does no
@@ -281,6 +283,29 @@ repo):
 | `recandcc speakers <session_dir>` | List a transcript's speakers with their first lines. A speaker who introduces themself in their first 2 minutes ("I'm Anna", "Меня зовут Анна", "קוראים לי דנה") gets a hint, `suggested: Anna (said: …)`. Only a hint: nothing is renamed or saved until you run `name-speaker` |
 | `recandcc name-speaker <session_dir> "Speaker 2" "Anna"` | Name a speaker: rewrites that transcript and saves Anna's voice profile, so later sessions say `Anna` (needs `speaker_names = true`) |
 | `recandcc voices list\|delete <name>\|delete --all` | List or delete saved voice profiles |
+
+## Names from the call app
+
+Off by default, macOS only, and only together with `transcription.speaker_names`. Switch it on
+with **menu → Use names from the call app** (or `names_from_call_app = true`). While a call is
+recorded, RecAndCC reads the names in the call app's **participants panel, if you have it
+open**, through the macOS Accessibility API: it only reads what is on screen and never clicks,
+opens or changes anything; only the Zoom and Teams apps and, in a browser, a window showing a Meet/Teams/Zoom call page are read (never Slack, Discord, WhatsApp, FaceTime, Telegram and the like). A name counts only if it is in two samples in a row.
+A speaker is named only when it is certain: the panel shows exactly as many people as there
+are speakers besides `Me`, every speaker recognized by voice matches one of them, and one
+`Speaker N` and one name are left (a self-introduction that disagrees wins). Otherwise nothing
+is guessed (`recandcc speakers` lists the names). This only relabels the transcript: no voice
+profile is saved from it (confirm with `recandcc name-speaker` to remember the voice). A
+recognized voice or `Me` is never overridden.
+
+- **Permission:** it needs **Accessibility**. RecAndCC never triggers the system prompt by
+  itself; the menu item explains why and opens System Settings > Privacy & Security >
+  Accessibility, where you add RecAndCC yourself. Without it nothing is read.
+- **Privacy:** the names stay on your Mac, in the owner-only app-data `voices/` folder (not in
+  the transcripts folder, which may sync to a cloud); they are removed when the session is
+  deleted, once they are used, and by `recandcc voices delete --all`. Names that were not used
+  stay there until the session is deleted. They are personal data of the other people on the
+  call (see below) and are never logged. Once a name is in a transcript it is part of it.
 
 ## Privacy & consent
 
