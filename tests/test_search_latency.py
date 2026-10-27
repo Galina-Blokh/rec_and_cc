@@ -11,6 +11,8 @@ for any other slow runner.
 
 from __future__ import annotations
 
+import logging
+import math
 import os
 import random
 import statistics
@@ -23,6 +25,8 @@ import pytest
 from recandcc.models import Segment, SessionInfo, TriggerKind
 from recandcc.search import TranscriptIndex, has_fts5
 from recandcc.transcribe.output import write_outputs
+
+log = logging.getLogger(__name__)
 
 SESSIONS = 120
 SEGMENTS = 150  # about a 30 minute meeting
@@ -99,10 +103,18 @@ RARE_RU = "квазар"
 
 
 def _factor() -> float:
+    default = WINDOWS_HEADROOM if sys.platform == "win32" else 1.0
     env = os.environ.get("RCC_SEARCH_LATENCY_FACTOR")
-    if env:
-        return float(env)
-    return WINDOWS_HEADROOM if sys.platform == "win32" else 1.0
+    if not env:
+        return default
+    try:
+        value = float(env)
+    except ValueError:
+        value = 0.0
+    if not (value > 0 and math.isfinite(value)):
+        log.warning("ignoring invalid RCC_SEARCH_LATENCY_FACTOR; using %s", default)
+        return default
+    return value
 
 
 def _segments(rng: random.Random, n: int) -> list[Segment]:
