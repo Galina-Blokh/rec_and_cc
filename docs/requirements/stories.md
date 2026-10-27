@@ -195,8 +195,12 @@ while I decide.*
   Hebrew/English correctly; en/ru lines and `transcript.json` are unchanged.
 - **Given** `"iw"` or an unknown code in `languages`, **then** it is mapped to `he` or
   dropped with a log warning.
-- **Not yet:** a Hebrew-tuned model (ivrit.ai) and per-language model routing, language
-  checkboxes in the menu, a Hebrew evaluation set and WER (#6).
+- **Given** the menu **Languages** (English, Russian, Hebrew, Any language), **when** I tick
+  or untick one, **then** `languages` is saved (codes added by hand and their spelling kept)
+  and the next piece of audio is transcribed with it; unticking the last language is refused
+  unless **Any language** is chosen.
+- **Not yet:** a Hebrew-tuned model (ivrit.ai) and per-language model routing, a Hebrew
+  evaluation set and WER (#6).
 - **Not yet:** the Windows (Tk) captions only right-justify Hebrew lines; Tk does no bidi
   reordering, so the label stays left of the Hebrew text and the glyph order is unverified
   on real hardware (#6).
