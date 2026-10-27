@@ -657,7 +657,6 @@ class TranscriptIndex:
                         self._bump(db)
                         self._commit(db)
                 except sqlite3.OperationalError:  # another process holds the write lock
-                    self._vec_dirty = False  # rolled back on close: nothing to drop
                     blocked = True  # skip this session; the others still get embedded
                     log.warning("search index busy: embedding a session is retried shortly")
             if blocked:
