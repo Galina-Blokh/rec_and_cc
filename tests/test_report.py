@@ -197,7 +197,7 @@ def test_sessions_count_prompts_and_dedupe_usage(tmp_path):
     assert "secret" not in json.dumps(out)
 
 
-def test_render_produces_every_section(tmp_path):
+def _report_data(claude=None, docs=None):
     raw = _data()
     now = collect.ts("2026-10-26T14:00:00Z")
     prs = collect.build_prs(raw, raw["runs"], now)
@@ -213,8 +213,7 @@ def test_render_produces_every_section(tmp_path):
             "ai": True,
         }
     ]
-    sessions = collect.summarize_sessions({}, {})
-    data = {
+    return {
         "repo": "o/r",
         "generated_at": "2026-10-26T14:00:00+00:00",
         "window": {"start": "2026-10-26T10:00:00+00:00", "end": "2026-10-26T14:00:00+00:00"},
@@ -223,37 +222,99 @@ def test_render_produces_every_section(tmp_path):
         "series": collect.series(prs, ledger),
         "commits": collect.build_commits(ledger),
         "ci": collect.build_ci(raw["runs"]),
-        "claude": sessions,
-        "docs": {"adrs": [], "roadmap": []},
+        "claude": claude or collect.summarize_sessions({}, {}),
+        "docs": docs or {"adrs": [], "roadmap": []},
         "prs": prs,
         "issues": issues,
-        "prices": {},
+        "prices": {"claude-opus-5-5": {"input": 4.0, "output": 20.0, "cache_read": 0.2}},
         "sources": {"github_calls": 0, "ref": "origin/main"},
     }
-    page = render.render(data)
-    for sid in (
-        "tldr",
-        "how",
-        "delivery",
-        "prd",
-        "size",
-        "cycle",
-        "quality",
-        "team",
-        "ai",
-        "lessons",
-        "deferrals",
-        "dq",
-        "recos",
-        "allprs",
-        "allissues",
-        "allci",
-        "sources",
-        "glossary",
-    ):
+
+
+SECTIONS = (
+    "tldr",
+    "how",
+    "delivery",
+    "prd",
+    "size",
+    "cycle",
+    "quality",
+    "team",
+    "work",
+    "ai",
+    "lessons",
+    "deferrals",
+    "dq",
+    "recos",
+    "allprs",
+    "allissues",
+    "allci",
+    "sources",
+    "glossary",
+)
+
+
+def test_render_produces_every_section():
+    page = render.render(_report_data())
+    for sid in SECTIONS:
         assert f'id="{sid}"' in page
     assert "None" not in page.replace("NoneType", "")
     assert "<script src" not in page and "https://cdn" not in page
+
+
+def test_render_with_claude_usage_and_docs_and_fragment():
+    usage = {"input_tokens": 1, "output_tokens": 2, "cache_read_input_tokens": 3}
+    sessions = {
+        "s": {
+            "subagent": False,
+            "prompts": 2,
+            "first": None,
+            "last": None,
+            "branches": {},
+            "usage": [("claude-opus-5-5", usage, None, "b1")],
+        }
+    }
+    claude = collect.summarize_sessions(sessions, {"b1": 1})
+    docs = {
+        "adrs": [
+            {"id": "0001", "title": "Python core", "status": "Accepted", "path": "docs/adr/x.md"}
+        ],
+        "roadmap": [{"section": "Future work", "done": False, "text": "Hebrew support"}],
+    }
+    page = render.render(_report_data(claude, docs))
+    assert "Python core" in page and "Hebrew support" in page and "claude-opus-5-5" in page
+    frag = render.fragment(page)
+    assert frag.startswith("<title>") and "<html" not in frag and "<body" not in frag
+    assert 'name="claude:viewport-fit-sides"' in frag and 'charset="utf-8"' not in frag
+
+
+def test_findings_fire_from_the_evidence():
+    data = _report_data()
+    titles = {f["title"]: f["severity"] for f in render.findings(data)}
+    assert titles.get("No review by a person") == "medium"
+    assert titles.get("Open issues have no owner") == "low"
+    assert "Changes merged while CI was red" not in titles
+    data["summary"]["merged_red"] = 2
+    assert render.findings(data)[0] == {**render.findings(data)[0], "severity": "high"}
+    data["summary"]["reviewed_human"] = 1
+    assert "No review by a person" not in {f["title"] for f in render.findings(data)}
+
+
+def test_fill_hours_fills_gaps_and_switches_to_days_on_long_spans():
+    short = render.fill_hours(
+        [{"hour": "2026-10-26 10:00", "n": 1}, {"hour": "2026-10-26 13:00", "n": 2}], ["n"]
+    )
+    assert [r["n"] for r in short] == [1, 0, 0, 2]
+    long = render.fill_hours(
+        [
+            {"hour": "2026-10-01 10:00", "n": 1},
+            {"hour": "2026-10-01 11:00", "n": 1},
+            {"hour": "2026-10-14 09:00", "n": 3},
+        ],
+        ["n"],
+    )
+    assert len(long) == 14 and long[0] == {"hour": "2026-10-01", "n": 2} and long[-1]["n"] == 3
+    assert render.hour_label(long[0]["hour"]) == "01/10"
 
 
 def test_diff_lists_moved_headline_figures():

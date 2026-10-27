@@ -168,22 +168,39 @@ def day_labels(start: float, end: float, k: int = 6) -> list[tuple[float, str]]:
     ]
 
 
+MAX_SLOTS = 96  # beyond four days of hours, chart by day instead
+
+
 def fill_hours(rows: list[dict], keys: list[str]) -> list[dict]:
-    """Every UK hour between the first and last row, zeros where nothing happened."""
+    """Every UK hour between the first and last row, zeros where nothing happened.
+
+    When that would be more than MAX_SLOTS hours, rows are summed per day instead (keyed
+    "YYYY-MM-DD"), so the chart and its table grow with the days covered, not the hours.
+    """
     if not rows:
         return []
-    have = {r["hour"]: r for r in rows}
-    cur = datetime.strptime(rows[0]["hour"], "%Y-%m-%d %H:00")
+    first = datetime.strptime(rows[0]["hour"], "%Y-%m-%d %H:00")
     last = datetime.strptime(rows[-1]["hour"], "%Y-%m-%d %H:00")
+    daily = (last - first) / timedelta(hours=1) >= MAX_SLOTS
+    fmt, step = ("%Y-%m-%d", timedelta(days=1)) if daily else ("%Y-%m-%d %H:00", timedelta(hours=1))
+    have: dict[str, dict] = {}
+    for r in rows:
+        key = datetime.strptime(r["hour"], "%Y-%m-%d %H:00").strftime(fmt)
+        slot = have.setdefault(key, {"hour": key, **dict.fromkeys(keys, 0)})
+        for name in keys:
+            slot[name] += r.get(name, 0)
+    cur = first.replace(hour=0) if daily else first
     out = []
     while cur <= last:
-        key = cur.strftime("%Y-%m-%d %H:00")
+        key = cur.strftime(fmt)
         out.append(have.get(key) or {"hour": key, **dict.fromkeys(keys, 0)})
-        cur += timedelta(hours=1)
+        cur += step
     return out
 
 
 def hour_label(key: str) -> str:
+    if len(key) == 10:
+        return datetime.strptime(key, "%Y-%m-%d").strftime("%d/%m")
     return datetime.strptime(key, "%Y-%m-%d %H:00").strftime("%d/%m %Hh")
 
 
