@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import threading
 import time
 import unicodedata
@@ -209,6 +210,74 @@ def _replace_json(target: Path, text: str) -> None:
     finally:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
+
+
+RECORDING_LOCK = ".recording.lock"  # in a session folder another process records into
+
+
+def pid_alive(pid: int) -> bool:
+    """Whether process ``pid`` exists (never signals it: ``os.kill`` would end it on
+    Windows)."""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: it exists
+        try:
+            code = wintypes.DWORD()
+            if not k32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # someone else's process
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def hold_recording_lock(directory: Path) -> Path:
+    """Mark ``directory`` as being recorded by this process (``recandcc record``): startup
+    recovery leaves it alone while this pid is alive. Remove the returned file when done."""
+    lock = Path(directory) / RECORDING_LOCK
+    lock.write_text(str(os.getpid()), encoding="utf-8")
+    return lock
+
+
+def recording_lock_held(directory: Path) -> bool:
+    """True if a live process holds ``directory``'s recording lock (an unreadable lock counts
+    as held). A lock whose process is gone is deleted."""
+    lock = Path(directory) / RECORDING_LOCK
+    try:
+        text = lock.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        pid = int(text)
+    except ValueError:
+        pid = 0  # cut short while being written: its writer died with it
+    if pid_alive(pid):
+        return True
+    with contextlib.suppress(OSError):
+        lock.unlink(missing_ok=True)
+    log.info("removed stale recording lock in %s", directory)
+    return False
 
 
 def mark_discarded(directory: Path) -> None:

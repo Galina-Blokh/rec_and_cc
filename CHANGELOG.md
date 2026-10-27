@@ -76,6 +76,10 @@ All notable changes to RecAndCC are documented here. The format is based on
 - A recording cut off by a crash, force-quit or power loss is transcribed at the next start:
   its end time comes from the audio on disk, and `session.json` marks it `recovered`. A full
   disk at stop no longer keeps a session's end time off disk (#150).
+  A recovered session follows the normal retention rules: if it is already older than
+  `audio_retention_days`, the next hourly retention run deletes its audio once it is
+  transcribed. `recandcc record` keeps a `.recording.lock` in the session folder while it
+  records, so the app never finishes that session early.
 - With `keep_audio = false`, audio left behind by a quit during slow diarization or a failed
   delete is removed at the next start (#45).
 - A discarded session is never transcribed later, even if deleting it failed; the delete is

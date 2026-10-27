@@ -114,13 +114,25 @@ def _transcribe_now(cfg, session) -> None:
 def cmd_record(args) -> int:
     setup_logging(to_file=False, level=logging.INFO if args.verbose else logging.WARNING)
     cfg = load_config()
-    from .models import TriggerKind
+    from .models import TriggerKind, hold_recording_lock
     from .recorder import Recorder
 
     rec = Recorder(cfg)
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     session = rec.start(TriggerKind.MANUAL, "manual", record_mic=False if args.no_mic else None)
+    try:  # the app's startup recovery must not finish this session while it records
+        lock = hold_recording_lock(session.directory)
+    except OSError:
+        rec.stop()
+        raise
+    try:
+        return _record_session(args, cfg, rec, session, stop)
+    finally:
+        lock.unlink(missing_ok=True)  # also when stop() deleted a too-short session
+
+
+def _record_session(args, cfg, rec, session, stop: threading.Event) -> int:
     print(f"Recording to {session.directory} (tracks: {', '.join(map(str, session.tracks))})")
     live: LiveTranscriber | None = None
     transcriber: Transcriber | None = None
