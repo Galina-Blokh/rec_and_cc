@@ -33,6 +33,9 @@ from .common import (
     PERM_KINDS,
     PERM_TITLES,
     ROOM_ITEM,
+    SENSITIVITY_HINT,
+    SENSITIVITY_ITEM,
+    SENSITIVITY_PRESETS,
     Controller,
     as_str,
     chooser_script,
@@ -138,6 +141,13 @@ class MacApp(rumps.App):
         self.captions_item.state = check(self.cfg.live_captions)
         self.room_item = rumps.MenuItem(ROOM_ITEM, callback=self._toggle_room)
         self.room_item.state = check(self.cfg.detection.room_listening)
+        self.sensitivity_menu = rumps.MenuItem(SENSITIVITY_ITEM)
+        self._sensitivity_shown: str | None = None
+        for name in SENSITIVITY_PRESETS:
+            self.sensitivity_menu.add(rumps.MenuItem(name, callback=self._set_sensitivity))
+        self.sensitivity_menu.add(None)
+        self.sensitivity_menu.add(rumps.MenuItem(SENSITIVITY_HINT))  # no callback: greyed out
+        self._render_sensitivity()
         self.live_open_item = rumps.MenuItem("Open live transcript")
         self.call_names_item = rumps.MenuItem(
             "Use names from the call app", callback=self._toggle_call_names
@@ -151,6 +161,7 @@ class MacApp(rumps.App):
             self.rec_item,
             self.captions_item,
             self.room_item,
+            self.sensitivity_menu,
             self.live_open_item,
             None,
             rumps.MenuItem("Open transcripts folder", callback=self._open_folder),
@@ -264,6 +275,8 @@ class MacApp(rumps.App):
             self.rec_item.title = rec_title
         self.login_item.state = check(autostart.is_enabled())
         self.room_item.state = check(self.cfg.detection.room_listening)  # hand edits too
+        if self.ctrl.sensitivity_preset() != self._sensitivity_shown:
+            self._render_sensitivity()  # hand edits and config reloads too
         self._render_languages()
         self.call_names_item.state = check(self.cfg.transcription.names_from_call_app)
         self._render_live(st)
@@ -437,6 +450,15 @@ class MacApp(rumps.App):
     def _toggle_room(self, sender) -> None:
         self.ctrl.set_room_listening(not self.cfg.detection.room_listening)
         sender.state = check(self.cfg.detection.room_listening)
+
+    def _render_sensitivity(self) -> None:
+        preset = self._sensitivity_shown = self.ctrl.sensitivity_preset()
+        for name, item in self.sensitivity_menu.items():
+            item.state = check(name == preset)
+
+    def _set_sensitivity(self, sender) -> None:
+        self.ctrl.set_sensitivity(sender.title)
+        self._render_sensitivity()
 
     def _open_live(self, _sender) -> None:
         if not self._live_dir:

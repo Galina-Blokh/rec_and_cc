@@ -667,6 +667,10 @@ class Recorder:
         try:
             src = factory()
             w = _TrackWriter(track, path, src, self)
+            # A room source knows its pre-roll (a low outside sensitivity widens it).
+            src_preroll = getattr(src, "preroll_s", None)
+            if isinstance(src_preroll, int | float) and replay_s:
+                replay_s = max(replay_s, float(src_preroll) + 5)
             if replay_s:
                 w.replay_s = max(w.replay_s, replay_s)
         except Exception:
