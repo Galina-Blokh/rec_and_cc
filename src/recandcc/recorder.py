@@ -13,11 +13,9 @@ sends a sentinel to each writer, joins them, and persists session.json.
 from __future__ import annotations
 
 import logging
-import os
 import queue
 import re
 import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -37,79 +35,125 @@ from .models import SAMPLE_RATE, SessionInfo, Track, TriggerKind
 log = logging.getLogger(__name__)
 
 PRIVATE_DIR_MODE = 0o700  # owner-only on POSIX; Windows gets an owner-only DACL instead
-SYSTEM_SID = "S-1-5-18"  # LocalSystem: keeps backup / indexing / AV working on Windows
-
-
-def _system32(exe: str) -> str:
-    """Absolute path of a Windows system tool, so a stray copy on PATH is never run."""
-    return str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / exe)
-
-
-def _no_window() -> int:
-    return getattr(subprocess, "CREATE_NO_WINDOW", 0)  # no console flash from the tray app
 
 
 @cache
 def _current_user_sid() -> str:
     """SID of the user running the app, e.g. ``S-1-5-21-...-1001`` (Windows only)."""
-    out = subprocess.run(  # noqa: S603 - fixed argv (absolute System32 path), no shell
-        [_system32("whoami.exe"), "/user", "/fo", "csv", "/nh"],
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=10,
-        creationflags=_no_window(),
-    ).stdout
-    # One CSV line: "DOMAIN\user","S-1-5-21-..."
-    sid = out.strip().rsplit(",", 1)[-1].strip().strip('"')
-    if not sid.startswith("S-1-"):
-        raise ValueError(f"unexpected whoami output: {out!r}")
-    return sid
+    import ctypes
+    from ctypes import wintypes
 
-
-def icacls_owner_only_argv(path: Path, user_sid: str) -> list[str]:
-    """icacls argv that makes ``path`` accessible only to ``user_sid`` and SYSTEM.
-
-    ``/inheritance:r`` drops the ACEs inherited from the parent folder (e.g. ``Users: Read``
-    on a shared drive), ``/grant:r`` sets full control for the owner and SYSTEM, and
-    ``(OI)(CI)`` makes files and subfolders created inside inherit the same two entries.
-    """
-    return [
-        _system32("icacls.exe"),
-        str(path),
-        "/inheritance:r",
-        "/grant:r",
-        f"*{user_sid}:(OI)(CI)F",
-        f"*{SYSTEM_SID}:(OI)(CI)F",
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.LocalFree.argtypes = [ctypes.c_void_p]
+    adv.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p]
+    adv.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_void_p,
     ]
+    adv.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-
-def restrict_to_owner(path: Path) -> None:
-    """Make a folder this app just created private to the current user.
-
-    POSIX: ``chmod 0700``. Windows: an owner-only DACL (``chmod`` there only toggles the
-    read-only flag). A failure on Windows is logged, never raised: recording must go on.
-    """
-    path.chmod(PRIVATE_DIR_MODE)
-    if sys.platform != "win32":
-        return
+    token = wintypes.HANDLE()
+    if not adv.OpenProcessToken(k32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+        raise ctypes.WinError(ctypes.get_last_error())  # TOKEN_QUERY ^
     try:
-        argv = icacls_owner_only_argv(path, _current_user_sid())
-        r = subprocess.run(  # noqa: S603 - fixed argv; the path is our own folder, no shell
-            argv, capture_output=True, text=True, timeout=30, creationflags=_no_window()
-        )
-        if r.returncode != 0:
-            raise OSError(f"icacls exited {r.returncode}: {(r.stderr or r.stdout).strip()}")
-    except Exception as e:  # keep recording, just warn
-        log.warning("could not restrict %s to the current user: %s", path, e)
+        size = wintypes.DWORD()
+        adv.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))  # 1 = TokenUser
+        buf = ctypes.create_string_buffer(size.value)
+        if not adv.GetTokenInformation(token, 1, buf, size, ctypes.byref(size)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        psid = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]  # TOKEN_USER.User.Sid
+        text = wintypes.LPWSTR()
+        if not adv.ConvertSidToStringSidW(psid, ctypes.byref(text)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return str(text.value)
+        finally:
+            k32.LocalFree(ctypes.cast(text, ctypes.c_void_p))
+    finally:
+        k32.CloseHandle(token)
+
+
+def owner_only_sddl(user_sid: str) -> str:
+    """DACL with full control for ``user_sid`` and SYSTEM only.
+
+    ``P`` (protected) blocks inheritance from the parent folder (e.g. ``Users: Read`` on a
+    shared drive); ``OICI`` passes the same two entries to files and subfolders inside.
+    """
+    return f"D:P(A;OICI;FA;;;{user_sid})(A;OICI;FA;;;SY)"
+
+
+def _win_mkdir_owner_only(path: Path) -> None:
+    """Create one folder with an owner-only DACL in a single call (no permissive window)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class SecurityAttributes(ctypes.Structure):
+        _fields_ = [
+            ("nLength", wintypes.DWORD),
+            ("lpSecurityDescriptor", ctypes.c_void_p),
+            ("bInheritHandle", wintypes.BOOL),
+        ]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    k32.CreateDirectoryW.argtypes = [wintypes.LPCWSTR, ctypes.c_void_p]
+    k32.LocalFree.argtypes = [ctypes.c_void_p]
+    adv.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    sd = ctypes.c_void_p()
+    sddl = owner_only_sddl(_current_user_sid())
+    if not adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl,
+        1,
+        ctypes.byref(sd),
+        None,  # 1 = SDDL_REVISION_1
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        sa = SecurityAttributes(ctypes.sizeof(SecurityAttributes), sd, False)
+        if not k32.CreateDirectoryW(str(path), ctypes.byref(sa)):
+            raise ctypes.WinError(ctypes.get_last_error())  # 183 -> FileExistsError
+    finally:
+        k32.LocalFree(sd)
+
+
+def _mkdir_private(path: Path) -> None:
+    """Create one folder (parent must exist), private to the current user from the start.
+
+    POSIX: ``0700`` (chmod-ed too: ``mkdir(mode=...)`` is filtered by the umask). Windows: an
+    owner-only DACL set at creation. If Windows refuses the DACL (e.g. some network shares),
+    this warns and falls back to a plain ``mkdir(mode=0o700)``: recording must go on.
+    Raises ``FileExistsError`` if something is already at ``path``.
+    """
+    if sys.platform == "win32":
+        try:
+            _win_mkdir_owner_only(path)
+            return
+        except FileExistsError:
+            raise
+        except Exception as e:  # keep recording, just warn
+            log.warning("could not create %s with an owner-only ACL: %s", path, e)
+        path.mkdir(mode=PRIVATE_DIR_MODE)
+        return
+    path.mkdir(mode=PRIVATE_DIR_MODE)
+    path.chmod(PRIVATE_DIR_MODE)
 
 
 def make_private_dir(path: Path) -> None:
     """Create ``path`` (and missing parents) with owner-only permissions, if it doesn't exist.
 
-    ``mkdir(mode=...)`` is filtered by the umask and only applies to the last component, so
-    each folder this creates is restricted explicitly (``restrict_to_owner``). Existing
-    folders are left untouched.
+    Each folder this creates is made private (``_mkdir_private``); existing folders are left
+    untouched.
     """
     if path.is_dir():
         return
@@ -118,12 +162,11 @@ def make_private_dir(path: Path) -> None:
     if not path.parent.is_dir():
         make_private_dir(path.parent)
     try:
-        path.mkdir(mode=PRIVATE_DIR_MODE)
+        _mkdir_private(path)
     except FileExistsError:
         if path.is_dir():
             return  # created concurrently
         raise  # a file (or dangling symlink) is in the way
-    restrict_to_owner(path)
 
 
 # Sessions with less audio than this (longest track) are deleted instead of transcribed.
@@ -352,8 +395,7 @@ class Recorder:
         # at every level the recorder creates. An existing output folder keeps its permissions.
         for p in (self.cfg.output_dir, day):
             make_private_dir(p)
-        d.mkdir(mode=PRIVATE_DIR_MODE)
-        restrict_to_owner(d)
+        _mkdir_private(d)
         return f"{now.strftime('%Y-%m-%d')}_{d.name}", d
 
     def start(
