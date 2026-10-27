@@ -140,6 +140,10 @@ class TranscriptionConfig:
     # Split "Others" into "Speaker 1", "Speaker 2", ... in the final transcript (offline
     # speaker diarization). Live captions keep showing "Others".
     diarize: bool = True
+    # Hints for diarization when you know how many other people are on the call: the number of
+    # speakers is picked automatically within [min_speakers, max_speakers]. 0 = no hint.
+    min_speakers: int = 0
+    max_speakers: int = 0
     # Remember speakers' voices so that a speaker named once (`recandcc name-speaker`) is named
     # in later sessions. Off by default: voice profiles are biometric data. See voices.py.
     speaker_names: bool = False

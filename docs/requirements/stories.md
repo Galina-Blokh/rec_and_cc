@@ -133,6 +133,10 @@ while I decide.*
 - **Given** several people on the `Others` track, **then** the final transcript labels them
   `Speaker 1`, `Speaker 2`… in order of first appearance; `Me` is never relabelled.
 - **Given** one speaker, or no speaker model, **then** the label stays `Others`.
+- **Given** a large meeting (up to 20 other speakers, some with similar voices) or one speaker
+  with noisy audio, **then** the number of speakers is estimated per session instead of fixed
+  by a threshold, within `min_speakers` / `max_speakers` if set, and an hour still
+  diarizes in seconds.
 
 ### US-13 Readable transcripts in private folders
 - **Then** each session is saved under `<output_dir>/<date>/<time>_<app>/` with

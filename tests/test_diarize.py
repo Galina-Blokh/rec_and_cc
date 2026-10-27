@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import threading
+import time
 from concurrent.futures import Future
 from datetime import timedelta
 
@@ -143,6 +144,69 @@ def test_cluster_subsample_for_huge_inputs():
     rng = np.random.default_rng(3)
     emb, truth = _voices(rng, 3, 100)
     got = cluster_embeddings(emb, np.full(len(emb), 2.0), max_units=60)
+    assert _same_partition(got, truth)
+
+
+# --------------------------------------------------------------------------- adaptive count
+def _k(emb, **hints):
+    return len(set(cluster_embeddings(emb, np.full(len(emb), 2.0), **hints).tolist()))
+
+
+@pytest.mark.parametrize("n_voices", [2, 4, 8, 12])
+def test_adaptive_count_recovers_many_voices(n_voices):
+    rng = np.random.default_rng(10 + n_voices)
+    emb, truth = _voices(rng, n_voices, 20, dim=192, noise=0.8)
+    assert _same_partition(cluster_embeddings(emb, np.full(len(emb), 2.0)), truth)
+
+
+def test_one_noisy_speaker_stays_one():
+    # within-speaker cosine ~0.5: the fixed threshold alone split this into 4-27 "speakers"
+    for s in range(5):
+        emb, _ = _voices(np.random.default_rng(s), 1, 60, noise=1.0)
+        assert _k(emb) == 1
+
+
+def _close_pair(rng, cos, per=30, dim=64):
+    base, other = rng.normal(size=(2, dim))
+    base /= np.linalg.norm(base)
+    other -= other @ base * base
+    other /= np.linalg.norm(other)
+    centres = 8 * np.stack([base, cos * base + np.sqrt(1 - cos**2) * other])
+    labels = np.repeat([0, 1], per)
+    return centres[labels] + 0.35 * rng.normal(size=(len(labels), dim)), labels
+
+
+def test_close_but_distinct_voices_separate():
+    # windows of the two voices are ~0.55 cosine apart: within the fixed threshold (merged)
+    for s in range(5):
+        emb, truth = _close_pair(np.random.default_rng(s), cos=0.65)
+        assert _same_partition(cluster_embeddings(emb, np.full(len(emb), 2.0)), truth)
+
+
+def test_speaker_hints_are_respected():
+    emb, truth = _voices(np.random.default_rng(7), 6, 15)
+    assert _k(emb) == 6
+    assert _k(emb, max_speakers=3) == 3
+    assert _k(emb, min_speakers=8) >= 8
+    assert _same_partition(cluster_embeddings(emb, np.full(len(emb), 2.0), min_speakers=6), truth)
+    one, _ = _voices(np.random.default_rng(8), 1, 40)
+    assert _k(one, min_speakers=2) == 2
+    assert _k(one, min_speakers=3, max_speakers=2) == 2  # max wins
+    assert _k(emb[:4], max_speakers=1) == 1  # few windows: threshold cut, still clamped
+
+
+def test_few_windows_keep_the_threshold_behaviour():
+    emb, truth = _voices(np.random.default_rng(9), 2, 4)  # 8 < MIN_ADAPTIVE_UNITS
+    assert _same_partition(cluster_embeddings(emb, np.full(len(emb), 2.0)), truth)
+    assert _k(emb, threshold=1.5) == 1  # the threshold still decides
+
+
+def test_adaptive_clustering_of_an_hour_takes_seconds():
+    # an hour of speech is ~1800 two-second windows; MAX_CLUSTER_UNITS bounds bigger inputs
+    emb, truth = _voices(np.random.default_rng(11), 12, 500, dim=192, noise=0.8)
+    t0 = time.perf_counter()
+    got = cluster_embeddings(emb, np.full(len(emb), 2.0))
+    assert time.perf_counter() - t0 < 5.0  # ~0.15 s on an M5 Max
     assert _same_partition(got, truth)
 
 
