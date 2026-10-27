@@ -68,9 +68,9 @@ def load_manifest(root: Path) -> list[Clip]:
         try:
             cid, utts = c["id"], [Utterance(**u) for u in c["utterances"]]
             audio = (root / c["audio"]).resolve()
-        except (KeyError, TypeError) as e:
+            utts = [replace(u, language=lang_code(u.language)) for u in utts]
+        except (KeyError, TypeError, AttributeError) as e:
             raise ValueError(f"clip {c.get('id', n)}: bad manifest entry ({e})") from None
-        utts = [replace(u, language=lang_code(u.language)) for u in utts]
         if not audio.is_relative_to(root):  # e.g. "../Documents/..." or an absolute path
             raise ValueError(f"clip {cid}: audio path is outside the eval folder")
         duration = sf.info(str(audio)).duration
@@ -314,9 +314,9 @@ def main(argv: list[str] | None = None) -> int:
     clips = load_manifest(args.root.expanduser())
     transcriber = Transcriber(cfg)
     diarizer = None if args.no_diarize else Diarizer()
-    if diarizer is not None:  # load the model now, so it isn't counted in the first clip's time
-        diarizer.diarize(np.zeros(SAMPLE_RATE, dtype=np.float32))
     try:
+        if diarizer is not None:  # load the model now, not in the first clip's time
+            diarizer.diarize(np.zeros(SAMPLE_RATE, dtype=np.float32))
         # one private (0700, created atomically) folder per run, removed by this run only
         with tempfile.TemporaryDirectory(prefix="rcc-eval-") as root:
             results = [run_clip(c, transcriber, diarizer, Path(root)) for c in clips]

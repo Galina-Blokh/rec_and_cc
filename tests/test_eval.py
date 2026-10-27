@@ -284,6 +284,7 @@ def test_manifest_language_tags_are_normalised(tmp_path):
         {"audio": "c.wav", "utterances": [U]},  # no id
         {"id": "c", "utterances": [U]},  # no audio
         {"id": "c", "audio": "c.wav", "utterances": [{**U, "who": "x"}]},  # unknown key
+        {"id": "c", "audio": "c.wav", "utterances": [{**U, "language": None}]},  # null language
     ],
 )
 def test_manifest_entry_errors_name_the_clip(tmp_path, clip):
