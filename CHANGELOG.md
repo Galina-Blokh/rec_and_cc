@@ -43,7 +43,9 @@ All notable changes to RecAndCC are documented here. The format is based on
   with a short summary and action items after each transcript, from a pinned Qwen2.5 1.5B
   Instruct model (Apache-2.0) via mlx-lm; `recandcc summarize <session_dir>` (#4). The
   larger Qwen2.5 3B is also pinned and selectable with `[summary] model`, but its Qwen
-  Research licence allows non-commercial use only.
+  Research licence allows non-commercial use only: it also needs
+  `accept_qwen_research_licence = true`, otherwise a config saved while it was the default
+  moves to the 1.5B, and the old ~1.7 GB cache can be deleted.
 - Speaker names that carry over between sessions, from opt-in local voice profiles; name a
   speaker once from the CLI (#62).
 - `recandcc speakers` suggests a name when a speaker introduces themself in their first

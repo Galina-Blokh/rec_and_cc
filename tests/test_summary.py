@@ -20,6 +20,7 @@ from recandcc.config import (
     DEFAULT_SUMMARY_MODEL,
     QWEN_RESEARCH_SUMMARY_MODEL,
     Config,
+    SummaryConfig,
     load_config,
 )
 from recandcc.models import Segment, SessionInfo, TriggerKind
@@ -161,6 +162,26 @@ def test_summary_is_off_by_default(tmp_path):
     cfg = load_config(tmp_path / "config.toml")
     assert cfg.summary.enabled is False
     assert "[summary]" in (tmp_path / "config.toml").read_text("utf-8")
+
+
+def test_saved_old_default_model_follows_the_new_default(tmp_path):
+    # Config.save writes every key, so configs saved before this change hold the 3B without
+    # anyone choosing it: it is read as unset unless its licence was explicitly accepted.
+    path = tmp_path / "config.toml"
+    Config(summary=SummaryConfig(model=QWEN_RESEARCH_SUMMARY_MODEL)).save(path)
+    cfg = load_config(path)
+    assert cfg.summary.model == DEFAULT_SUMMARY_MODEL
+    cfg.save(path)
+    assert load_config(path).summary.model == DEFAULT_SUMMARY_MODEL
+
+
+def test_accepted_qwen_research_licence_keeps_the_3b(tmp_path):
+    path = tmp_path / "config.toml"
+    keep = SummaryConfig(model=QWEN_RESEARCH_SUMMARY_MODEL, accept_qwen_research_licence=True)
+    Config(summary=keep).save(path)
+    assert load_config(path).summary.model == QWEN_RESEARCH_SUMMARY_MODEL
+    Config(summary=SummaryConfig(model="me/custom-llm")).save(path)
+    assert load_config(path).summary.model == "me/custom-llm"  # other models untouched
 
 
 def _controller(cfg):

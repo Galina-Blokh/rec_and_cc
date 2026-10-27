@@ -253,7 +253,9 @@ in the background after the transcript is final, and waits while you are recordi
 captions are never slowed; it is downloaded once, pinned to an exact version, and nothing is
 sent anywhere. It is a draft: check names and dates against the transcript. The larger
 `model = "mlx-community/Qwen2.5-3B-Instruct-4bit"` (~1.7 GB, also pinned) is under the Qwen
-Research licence: non-commercial use only. On Windows, or
+Research licence: non-commercial use only. It was the default before, and older settings
+files hold it without anyone choosing it, so it is replaced by the default unless you also set
+`accept_qwen_research_licence = true` under `[summary]`. On Windows, or
 offline before the model is downloaded, the summary is skipped with a notice. It waits for
 the speaker labels (a slow diarization delays it), a summary cut short by quitting is redone
 at the next start (a `.summary-pending` marker in the session folder), and after
@@ -319,6 +321,7 @@ models load from disk without contacting anything (tested with all network acces
 | Speaker-diarization model | `~/Library/Caches/RecAndCC/models/` | `%LOCALAPPDATA%\RecAndCC\Cache\models\` |
 | Whisper models (shared Hugging Face cache) | `~/.cache/huggingface/hub/models--*whisper*` | `%USERPROFILE%\.cache\huggingface\hub\` |
 | Summary model (only with summaries on) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-*-Instruct-4bit` | not used |
+| Old summary model, unused after the switch to the 1.5B default (~1.7 GB, safe to delete) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-3B-Instruct-4bit` | not used |
 | Launch at login | `~/Library/LaunchAgents/com.gblokh.recandcc.plist` | registry `HKCU\…\CurrentVersion\Run\RecAndCC` |
 
 The folders RecAndCC creates for recordings (the transcripts folder, each day and each

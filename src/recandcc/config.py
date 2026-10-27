@@ -188,6 +188,9 @@ class SummaryConfig:
     # ~1-1.5 GB of RAM and a one-time ~0.9 GB model download.
     enabled: bool = False
     model: str = DEFAULT_SUMMARY_MODEL  # pinned in transcribe/revisions.py, or a local path
+    # Keep `model = QWEN_RESEARCH_SUMMARY_MODEL` (non-commercial licence). Without it, that
+    # model is read as the old default that save() wrote to every config.toml, and replaced.
+    accept_qwen_research_licence: bool = False
     max_tokens: int = 400  # longest generated answer (summary, action list, chunk notes)
 
 
@@ -350,6 +353,14 @@ def load_config(path: Path | None = None) -> Config:
                 code,
             )
     summary = _build(SummaryConfig, data.pop("summary", {}))
+    if summary.model == QWEN_RESEARCH_SUMMARY_MODEL and not summary.accept_qwen_research_licence:
+        log.info(
+            "summary.model %s (the old default, non-commercial licence) -> %s; set "
+            "summary.accept_qwen_research_licence = true to keep it",
+            summary.model,
+            DEFAULT_SUMMARY_MODEL,
+        )
+        summary.model = DEFAULT_SUMMARY_MODEL
     cfg = _build(Config, data)
     cfg.output_dir = Path(cfg.output_dir).expanduser()
     cfg.detection, cfg.transcription, cfg.summary = det, tr, summary
