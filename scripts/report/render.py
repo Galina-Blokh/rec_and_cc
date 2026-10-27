@@ -3,7 +3,7 @@
 Every number and sentence on the page is computed here from the data file, so a refresh
 only needs `collect.py` then `render.py`. No CDN, no network.
 
-Usage: python scripts/report/render.py [--data report-data.json] [--out report.html]
+Usage: python scripts/report/render.py [--data .report/report-data.json] [--out .report/report.html]
 """
 
 from __future__ import annotations
@@ -12,15 +12,19 @@ import argparse
 import json
 import re
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from html import escape
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import charts  # noqa: E402
 
-UK = ZoneInfo("Europe/London")
+UK: tzinfo
+try:
+    UK = ZoneInfo("Europe/London")
+except ZoneInfoNotFoundError:  # Windows without the tzdata package: report in UTC
+    UK = UTC
 TITLE = "RecAndCC Workshop Report"
 
 
@@ -1480,8 +1484,8 @@ def fragment(page: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--data", type=Path, default=Path("report-data.json"))
-    ap.add_argument("--out", type=Path, default=Path("report.html"))
+    ap.add_argument("--data", type=Path, default=Path(".report") / "report-data.json")
+    ap.add_argument("--out", type=Path, default=Path(".report") / "report.html")
     ap.add_argument(
         "--fragment", action="store_true", help="page body without the html/head/body wrapper"
     )
@@ -1489,6 +1493,7 @@ def main(argv: list[str] | None = None) -> int:
     ap_page = render(json.loads(args.data.read_text(encoding="utf-8")))
     if args.fragment:
         ap_page = fragment(ap_page)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(ap_page, encoding="utf-8")
     print(f"wrote {args.out}")
     return 0
