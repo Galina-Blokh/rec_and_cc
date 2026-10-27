@@ -316,7 +316,7 @@ def summarize_session(
     def run_model(name: str) -> tuple[str, str, list[str]]:
         notice = on_download
         hook = None if notice is None else lambda: notice(name)
-        owned = create_generator(name, cfg.transcription.allow_unpinned_models, hook)
+        owned = create_generator(name, cfg.transcription.allow_unpinned_models, hook, before_call)
         try:  # the real model, freed again after this session
             return run(owned)
         finally:
@@ -387,16 +387,20 @@ def mlx_lm_available() -> bool:
 
 
 def create_generator(
-    model: str, allow_unpinned: bool = False, on_download: Callable[[], None] | None = None
+    model: str,
+    allow_unpinned: bool = False,
+    on_download: Callable[[], None] | None = None,
+    pause: Callable[[], None] | None = None,
 ) -> ModelGenerator:
     """The summary model's generator on this machine: mlx-lm on Apple silicon, else the CPU
     one (onnxruntime-genai, summary_cpu.py, imported only here). With neither, MlxGenerator,
-    whose load() says why summaries can't run."""
+    whose load() says why summaries can't run. ``pause`` goes to the CPU generator only, which
+    runs it before each token (MLX waits between model calls instead)."""
     if not mlx_lm_available():
         from . import summary_cpu
 
         if summary_cpu.cpu_available():
-            return summary_cpu.CpuGenerator(model, allow_unpinned, on_download)
+            return summary_cpu.CpuGenerator(model, allow_unpinned, on_download, pause)
     return MlxGenerator(model, allow_unpinned, on_download)
 
 

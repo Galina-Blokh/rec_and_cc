@@ -121,3 +121,35 @@ def test_other_model_without_cpu_build_falls_back_to_summary_model(
     assert f"summary model {routed} has no CPU build" in caplog.text
     assert f"summary model {routed} unavailable; using {DEFAULT_SUMMARY_MODEL}" in caplog.text
     assert not any("3B" in u for u in hub.urls)
+
+
+def test_the_pause_hook_reaches_the_cpu_generator_only(monkeypatch):
+    waits: list[int] = []
+    monkeypatch.setattr(summary, "mlx_lm_available", lambda: False)
+    monkeypatch.setattr(summary_cpu, "cpu_available", lambda: True)
+    cpu = summary.create_generator("m/qwen", pause=lambda: waits.append(1))
+    assert isinstance(cpu, CpuGenerator) and cpu.pause is not None
+    cpu.pause()
+    assert waits == [1]
+    monkeypatch.setattr(summary, "mlx_lm_available", lambda: True)
+    mlx = summary.create_generator("m/qwen", pause=lambda: waits.append(1))
+    assert type(mlx) is summary.MlxGenerator and not hasattr(mlx, "pause")
+
+
+def test_summarize_session_hands_its_before_call_to_the_generator(hub, og, tmp_path, monkeypatch):
+    monkeypatch.setattr(summary, "mlx_lm_available", lambda: False)
+    monkeypatch.setattr(summary_cpu, "CPU_MODELS", {Config().summary.model: _fake_model()})
+    d = make_session(tmp_path, [seg(SPOKEN)])
+    seen = []
+    real = summary.create_generator
+
+    def spy(model, allow_unpinned=False, on_download=None, pause=None):
+        seen.append(pause)
+        return real(model, allow_unpinned, on_download, pause)
+
+    def wait_idle():
+        pass
+
+    monkeypatch.setattr(summary, "create_generator", spy)
+    summary.summarize_session(d, Config(), before_call=wait_idle)
+    assert seen == [wait_idle]
