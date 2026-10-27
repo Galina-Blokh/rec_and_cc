@@ -325,7 +325,8 @@ transcriber's own labelling (`match_profiles` against the stored profiles,
 `MATCH_MARGIN` 0.1; `MATCH_SIMILARITY` 0.6 before this measurement, 0.75 after). Transcript segments are the true sentences, one per
 turn, instead of Whisper's, so only diarization and matching are measured. 2026-10-27, Apple
 M5 Max, offline, cached `3dspeaker_speech_campplus_sv_zh_en_16k` embedding model. Everything
-(audio, transcripts, profiles) goes to a temp dir. Two runs gave identical numbers.
+(audio, transcripts, profiles) goes to a temp dir. One data set (4 named voices with 21 segments, 2 strangers with 9),
+run twice with identical numbers.
 
 Before and after raising `MATCH_SIMILARITY` from 0.6 to 0.75 (the margin is unchanged):
 
@@ -347,13 +348,16 @@ What the clusters scored against the profiles (cosine of centroid to profile, al
 sessions): the named voice's own cluster 0.92-0.96, with the next profile at least 0.36
 behind; clusters of the never-named voices 0.51-0.68 (Karen 0.68 to Anna, Moira 0.56 and 0.51
 to Boris). Sweeping `MATCH_SIMILARITY` over the same run: 0.6 and 0.65 give 5 / 9 false names;
-0.7 to 0.9 all give 21 / 21 and 3 / 9; 0.95 drops recall to 6 / 21. (One run: 4 named voices with 21 segments, 2 strangers with 9.)
+0.7 to 0.9 all give 21 / 21 and 3 / 9; 0.95 drops recall to 6 / 21.
+(Same small data set as above.)
 
 Reading it:
 
-- **Chosen rule: cosine ≥ 0.75 and 0.1 ahead of the next profile.** 0.75 is the low end of
-  the clean plateau (0.7-0.9), so the same voice on a worse microphone, which scores lower
-  than studio TTS, still has room, and it sits 0.07 above the highest stranger (one small run; see the sample size above). The other
+- **Chosen rule: cosine ≥ 0.75 and 0.1 ahead of the next profile.** 0.75 sits in the lower
+  part of the clean plateau (0.7-0.9) and 0.07 above the highest stranger. Tuned and checked
+  on the same small synthetic set, so it is not validated: a real microphone, codec or room
+  scores lower than studio TTS, and a real voice may fall below 0.75 and stay `Speaker N`.
+  #1's real-audio criterion stays open until the consented set (#13). The other
   ideas did not separate the cases on this data. A larger margin: Karen's was 0.16 and the
   named voices' at least 0.36, so it would need about 0.2, a looser hold on the stranger than
   the threshold, which already has a 0.24 gap. A minimum of speech: Karen's cluster had 6.4 s,
