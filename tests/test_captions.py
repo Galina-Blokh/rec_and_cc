@@ -109,8 +109,10 @@ def test_default_frame_is_bottom_center_and_fits_the_screen():
 
 
 def test_speaker_colors():
-    assert speaker_rgb("Me") != speaker_rgb("Others")
-    assert speaker_rgb("Speaker 2") == speaker_rgb("?")
+    assert speaker_rgb("Me") == (0.55, 0.86, 0.62)
+    assert speaker_rgb("Others") == (0.52, 0.74, 1.0)
+    assert speaker_rgb("Speaker 2") == (0.85, 0.75, 0.5)
+    assert speaker_rgb("?") == (0.85, 0.75, 0.5)
 
 
 def test_hebrew_lines_are_right_to_left():

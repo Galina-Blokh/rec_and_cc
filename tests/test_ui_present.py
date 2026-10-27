@@ -39,8 +39,11 @@ def test_retention_labels():
 
 
 def test_permission_titles():
-    assert p.permission_title("microphone", "granted").startswith("Microphone: ")
-    assert p.permission_title("microphone", "granted") != "Microphone: granted"
+    assert p.permission_title("microphone", "granted") == "Microphone: ✅ granted"
+    assert p.permission_title("microphone", "denied") == "Microphone: ❌ denied"
+    assert p.permission_title("system_audio", "undetermined") == "System audio: ⚠️ not asked"
+    assert p.permission_title("system_audio", "restricted") == "System audio: ⛔ restricted"
+    assert p.permission_title("system_audio", "unknown") == "System audio: ❔ unknown"
     assert p.permission_title("system_audio", "weird") == "System audio: weird"
 
 
@@ -73,8 +76,11 @@ def test_prompt_dialog_script_and_timeout():
 
 
 def test_prompt_dialog_choice_maps_buttons_and_ignores_the_rest():
+    assert PROMPT_BUTTONS == (("Discard", "ignore"), ("Always", "always"), ("Keep", "record"))
     for label, choice in PROMPT_BUTTONS:
         assert p.prompt_dialog_choice(f"button returned:{label}, gave up:false\n") == choice
+    # an answer that matches no button leaves it to the engine's timeout, as before
+    assert p.prompt_dialog_choice("button returned:Later, gave up:false\n") is None
     assert p.prompt_dialog_choice("button returned:, gave up:true") is None
     assert p.prompt_dialog_choice("") is None
     assert p.prompt_dialog_choice(None) is None
