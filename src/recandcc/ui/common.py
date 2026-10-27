@@ -299,7 +299,7 @@ class Controller:
             monitor,
             recorder,
             _LiveAwareQueue(self),
-            save_config=self._save_cfg,
+            save_config=self._save_cfg_async,
             on_prompt=self._on_prompt,
             on_notice=self.post_notice,
             on_state_change=lambda st: self.events.put(("state", st)),
@@ -758,6 +758,11 @@ class Controller:
                 log.exception("saving settings failed")
                 self.post_notice("Settings not saved", "config.toml could not be written")
 
+    def _save_cfg_async(self) -> None:
+        """Engine's config save (mode changes), off the calling thread: that may be the
+        AppKit thread or the engine thread, and must not wait for _save_lock."""
+        threading.Thread(target=self._save_cfg, daemon=True, name="set-mode").start()
+
     def _save_cfg(self) -> None:
         """Engine's config save (mode changes): merges into the file under the save lock."""
         with self._save_lock:
@@ -795,6 +800,8 @@ class Controller:
                         self._config_mtime = self._mtime()  # our own write: nothing to reload
                 if "output_dir" in updates:
                     self.refresh_async(force=True)  # cloud-sync warning for the new folder
+                if updates.get("keep_audio") is False:
+                    self._purge_leftover_audio()  # opted out: delete what is already there
                 self.events.put(("settings_saved", updates))
             except SettingsUnavailable as e:
                 log.info("native settings unavailable: %s", e)

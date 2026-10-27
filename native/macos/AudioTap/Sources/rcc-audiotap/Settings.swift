@@ -175,6 +175,11 @@ func runSettings(configPath: String) -> Never {
         window.makeKeyAndOrderFront(nil)
     }
     raise.resume()
+    // The parent holds our stdin open; EOF means it is gone (crashed or killed): close.
+    Thread.detachNewThread {
+        _ = FileHandle.standardInput.readDataToEndOfFile()
+        DispatchQueue.main.async { emitAndExit(nil) }
+    }
     app.run()
     exit(0)
 }

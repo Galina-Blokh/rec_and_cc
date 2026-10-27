@@ -192,15 +192,15 @@ class Config:
         """Write the config, keeping keys this version does not know (hand-added keys,
         newer versions' keys)."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        data = asdict(self)
-        data["output_dir"] = str(self.output_dir)
-        # Keep the user's own spelling of `languages` ("iw", unknown codes) unless the list
-        # was changed since loading: load_config only normalises the in-memory copy.
-        tr = self.transcription
-        raw = getattr(tr, "_raw_languages", None)
-        if raw is not None and normalize_languages(raw) == tr.languages:
-            data["transcription"]["languages"] = raw
-        with _WRITE_LOCK:
+        with _WRITE_LOCK:  # snapshot and write in one step: no older snapshot lands later
+            data = asdict(self)
+            data["output_dir"] = str(self.output_dir)
+            # Keep the user's own spelling of `languages` ("iw", unknown codes) unless the
+            # list was changed since loading: load_config only normalises the in-memory copy.
+            tr = self.transcription
+            raw = getattr(tr, "_raw_languages", None)
+            if raw is not None and normalize_languages(raw) == tr.languages:
+                data["transcription"]["languages"] = raw
             try:
                 existing = tomllib.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):

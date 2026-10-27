@@ -66,11 +66,8 @@ def close_settings() -> None:
     with _proc_lock:
         proc = _proc
     if proc is not None and proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=2.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        proc.terminate()  # never waits here: this runs on the UI thread during Quit
+        threading.Timer(2.0, proc.kill).start()  # in case it ignores SIGTERM
 
 
 def run_settings(cfg: Config, timeout: float = SETTINGS_TIMEOUT_S) -> dict | None:
@@ -96,9 +93,9 @@ def run_settings(cfg: Config, timeout: float = SETTINGS_TIMEOUT_S) -> dict | Non
         try:
             proc = subprocess.Popen(  # noqa: S603 - fixed argv: our own helper, no shell
                 [str(helper), "settings", "--config", str(snap)],
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE,  # held open: EOF (we died) closes the window
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,  # nothing worth keeping, and never a full pipe
                 text=True,
             )
         except OSError as e:
@@ -107,19 +104,21 @@ def run_settings(cfg: Config, timeout: float = SETTINGS_TIMEOUT_S) -> dict | Non
             _proc = proc
             if _closing.is_set():
                 proc.kill()  # quit raced with the start: don't leave a Dock icon behind
+        timer = threading.Timer(timeout, proc.kill)
+        timer.start()
         try:
-            stdout, _err = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            try:
-                proc.communicate(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                log.warning("settings helper did not exit after kill")
-            log.warning("settings window timed out; treated as cancelled")
-            return None
+            stdout = proc.stdout.read() if proc.stdout else ""  # until the helper exits
+            proc.wait()
+            timed_out = not timer.is_alive() and proc.returncode == -signal.SIGKILL
         finally:
+            timer.cancel()
             with _proc_lock:
                 _proc = None
+            if proc.stdin is not None:
+                proc.stdin.close()
+        if timed_out:
+            log.warning("settings window timed out; treated as cancelled")
+            return None
     lines = [ln for ln in stdout.splitlines() if ln.strip()]
     try:
         reply = json.loads(lines[-1])
