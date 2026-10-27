@@ -166,7 +166,7 @@ class SummaryConfig:
 
 @dataclass
 class Config:
-    output_dir: Path = DEFAULT_OUTPUT_DIR
+    output_dir: Path = field(default_factory=lambda: DEFAULT_OUTPUT_DIR)
     autostart: bool = False
     # Global start/stop shortcut. ⌃⌥R by default: ⌘⇧R would override Chrome/Safari shortcuts.
     hotkey: str = "<ctrl>+<alt>+r"

@@ -32,13 +32,42 @@ def _private_voices_dir(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(voices, "VOICES_DIR", tmp_path_factory.mktemp("voices"))
 
 
-@pytest.fixture(autouse=True)
-def _private_config(tmp_path, monkeypatch):
-    """No test reads or writes the user's real config.toml, even through a bare
-    `Config().save()` / `load_config()` or a module that imported CONFIG_PATH by name."""
+@pytest.fixture(scope="session", autouse=True)
+def _import_path_modules():
+    """Import the modules that bind user-level paths by name up front, so the guard below
+    patches (and restores) their bindings in every test."""
+    import contextlib
+    import importlib
     import sys
 
-    path = tmp_path / "private-config" / "config.toml"
+    names = ["recandcc.config", "recandcc.autostart", "recandcc.logging_setup", "recandcc.cli"]
+    names.append("recandcc.ui.common")
+    if sys.platform == "darwin":
+        names.append("recandcc.ui.mac")
+    for name in names:
+        with contextlib.suppress(ImportError):
+            importlib.import_module(name)
+
+
+@pytest.fixture(autouse=True)
+def _private_config(tmp_path, monkeypatch, _import_path_modules):
+    """No test reads or writes the user's real config, logs, LaunchAgent plist, lock file or
+    default output folder, even through a bare `Config().save()` or a module that imported
+    the constant by name."""
+    import sys
+
+    private = {
+        "CONFIG_DIR": tmp_path / "private-config",
+        "CONFIG_PATH": tmp_path / "private-config" / "config.toml",
+        "LOG_DIR": tmp_path / "private-logs",
+        "LOG_FILE": tmp_path / "private-logs" / "recandcc.log",
+        "FAULTS_FILE": tmp_path / "private-logs" / "faults.log",
+        "PLIST_PATH": tmp_path / "private-launchagents" / "recandcc.plist",
+        "DEFAULT_OUTPUT_DIR": tmp_path / "private-transcribes",
+    }
     for name, module in list(sys.modules.items()):
-        if name.split(".")[0] == "recandcc" and hasattr(module, "CONFIG_PATH"):
-            monkeypatch.setattr(module, "CONFIG_PATH", path)
+        if name.split(".")[0] != "recandcc":
+            continue
+        for const, value in private.items():
+            if hasattr(module, const):
+                monkeypatch.setattr(module, const, value)
