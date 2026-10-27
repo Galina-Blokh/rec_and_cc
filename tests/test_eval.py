@@ -487,3 +487,202 @@ def test_failed_live_replay_keeps_the_clip(tmp_path, monkeypatch, capsys):
     r = ev.run_clip(clip, FakeTranscriber([]), None, tmp_path, live=True)
     assert r["live_ok"] is False and "live" not in r and "text" in r
     assert "live replay of clip c failed (RuntimeError)" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------- backends and resources
+def patch_pipeline(monkeypatch, cfg, seen, gpu=True):
+    import recandcc.config as config
+    import recandcc.transcribe as transcribe
+    import recandcc.transcribe.gpu as gpu_mod
+
+    class Tr(FakeTranscriber):
+        def __init__(self, c):
+            super().__init__([seg(0, 1, "да", "ru")])
+            seen["cfg"], self.gpu = c, gpu_mod.use_gpu(c)
+
+        def close(self):
+            pass
+
+    def no_save(*a, **k):
+        raise AssertionError("eval must never save the config")
+
+    monkeypatch.setattr(config, "load_config", lambda: cfg)
+    monkeypatch.setattr(config.Config, "save", no_save)
+    monkeypatch.setattr(transcribe, "Transcriber", Tr)
+    monkeypatch.setattr(gpu_mod, "gpu_available", lambda: gpu)
+
+
+@pytest.mark.parametrize(
+    ("flag", "backend", "device", "label"),
+    [("mlx", "mlx", "auto", "mlx"), ("cpu", "faster-whisper", "cpu", "faster-whisper (cpu)")],
+)
+def test_backend_flag_reaches_the_transcriber_config(
+    tmp_path, monkeypatch, capsys, flag, backend, device, label
+):
+    import recandcc.config as config
+
+    write_set(tmp_path, {"id": "c", "audio": "c.wav", "utterances": [U]})
+    cfg, seen = config.Config(), {}
+    cfg.transcription.device = "cpu" if flag == "mlx" else "auto"  # the flag wins over config
+    patch_pipeline(monkeypatch, cfg, seen)
+    out = tmp_path / "r.json"
+    assert ev.main([str(tmp_path), "--backend", flag, "--no-diarize", "--json", str(out)]) == 0
+    assert (seen["cfg"].backend, seen["cfg"].device) == (backend, device)
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["backend"] == label
+    assert report["wall_s"] >= 0 and report["peak_memory_mb"] > 0
+    assert f"[{label}]" in capsys.readouterr().out
+
+
+def test_backend_mlx_without_mlx_is_an_error(tmp_path, monkeypatch):
+    import recandcc.config as config
+
+    write_set(tmp_path, {"id": "c", "audio": "c.wav", "utterances": [U]})
+    patch_pipeline(monkeypatch, config.Config(), {}, gpu=False)
+    with pytest.raises(SystemExit):
+        ev.main([str(tmp_path), "--backend", "mlx", "--no-diarize", "--json", str(tmp_path / "r")])
+
+
+def test_maxrss_units_and_peak_memory():
+    assert ev.maxrss_mb(512 * 2**20, "darwin") == 512.0  # bytes on macOS
+    assert ev.maxrss_mb(512 * 1024, "linux") == 512.0  # kilobytes on Linux
+    assert ev.peak_memory_mb() > 0  # resource on POSIX, psutil on Windows
+
+
+# ----------------------------------------------------------------------------- hypotheses
+TWO = [
+    {"start": 0, "end": 1, "speaker": "A", "language": "en", "text": "hello there"},
+    {"start": 1, "end": 2, "speaker": "B", "language": "ru", "text": "да нет"},
+]
+
+
+def hyp_set(tmp_path, files):
+    write_set(tmp_path, {"id": "c", "audio": "c.wav", "utterances": TWO})
+    hyp = tmp_path / "hyp"
+    hyp.mkdir()
+    for name, content in files.items():
+        (hyp / name).write_text(content, encoding="utf-8")
+    (clip,) = ev.load_manifest(tmp_path)
+    return clip, hyp
+
+
+def test_hypothesis_json_scores_wer_lid_and_der(tmp_path):
+    segs = [
+        {"start": 0, "end": 1, "text": "Hello there", "language": "EN", "speaker": "0"},
+        {"start": 1, "end": 2, "text": "да", "language": "ru", "speaker": "1"},
+    ]
+    clip, hyp = hyp_set(tmp_path, {"c.json": json.dumps({"segments": segs, "elapsed_s": 0.4})})
+    r = ev.score_hypothesis(clip, hyp)
+    assert r["diarization"]["der"] == 0.0 and r["elapsed_s"] == 0.4 and r["audio_s"] == 2.0
+    s = ev.summarize([r])
+    assert s["languages"]["all"] == {"wer": 0.25, "lid_accuracy": 1.0, "words": 4, "utterances": 2}
+    assert s["der"] == 0.0 and s["rtf"] == 0.2
+
+
+def test_hypothesis_without_language_or_speaker_is_na(tmp_path):
+    segs = [{"start": 0, "end": 2, "text": "hello there да нет"}]  # bare list
+    clip, hyp = hyp_set(tmp_path, {"c.json": json.dumps(segs)})
+    s = ev.summarize([ev.score_hypothesis(clip, hyp)])
+    assert s["languages"]["all"]["wer"] == 0.0
+    assert s["languages"]["all"]["lid_accuracy"] is None and s["der"] is None
+
+
+def test_hypothesis_txt_is_wer_only_over_the_clip(tmp_path):
+    clip, hyp = hyp_set(tmp_path, {"c.txt": "Hello there. Да!"})
+    r = ev.score_hypothesis(clip, hyp)
+    assert r["text"] == {"mixed": {"words": 4, "edits": 1, "utts": 2, "lid_ok": 0}}
+    s = ev.summarize([r])
+    assert s["languages"]["all"]["wer"] == 0.25 and s["languages"]["all"]["lid_accuracy"] is None
+    assert s["der"] is None and s["rtf"] is None
+
+
+@pytest.mark.parametrize(
+    ("files", "msg"),
+    [
+        ({}, "no c.json or c.txt"),
+        ({"c.json": json.dumps([{"start": 0, "end": 1}])}, r"segment 0 \(KeyError 'text'\)"),
+        ({"c.json": json.dumps([{"start": 2, "end": 1, "text": "a"}])}, "start <= end"),
+        ({"c.json": json.dumps([{"start": 0, "end": 9, "text": "a"}])}, "after the audio"),
+        ({"c.json": json.dumps([{"start": 0, "end": 1, "text": "a", "x": 1}])}, "unknown key"),
+        ({"c.json": json.dumps({"segs": []})}, r"file \(KeyError 'segments'\)"),
+        ({"c.json": json.dumps({"segments": [], "elapsed_s": -1})}, "elapsed_s"),
+        ({"c.json": '{"segments": [], "elapsed_s": NaN}'}, "elapsed_s"),
+        ({"c.json": "{secret words"}, r"file \(JSONDecodeError\)"),
+        ({"c.json": json.dumps([{"start": "secret words", "end": 1, "text": "a"}])}, "ValueError"),
+    ],
+)
+def test_bad_hypothesis_files_name_the_clip_but_no_values(tmp_path, files, msg):
+    clip, hyp = hyp_set(tmp_path, files)
+    with pytest.raises(ValueError, match=msg) as e:
+        ev.score_hypothesis(clip, hyp)
+    assert str(e.value).startswith("clip c: ") and "secret" not in str(e.value)
+
+
+def test_hypothesis_json_bom_int_speakers_and_json_before_txt(tmp_path):
+    segs = [
+        {"start": 0, "end": 1, "text": "hello there", "speaker": 0},
+        {"start": 1, "end": 2, "text": "да нет", "speaker": 1},
+    ]
+    files = {"c.json": "﻿" + json.dumps(segs), "c.txt": "something else"}
+    clip, hyp = hyp_set(tmp_path, files)
+    r = ev.score_hypothesis(clip, hyp)
+    assert r["diarization"]["der"] == 0.0 and r["text"]["en"]["edits"] == 0  # .json wins
+    assert "diarization" not in ev.score_hypothesis(clip, hyp, diarize=False)
+
+
+def test_main_scores_hypotheses_without_the_pipeline(tmp_path, monkeypatch, capsys):
+    import recandcc.config as config
+    import recandcc.transcribe as transcribe
+
+    def boom(*a, **k):
+        raise AssertionError("the pipeline must not run")
+
+    monkeypatch.setattr(config, "load_config", boom)
+    monkeypatch.setattr(transcribe, "Transcriber", boom)
+    _, hyp = hyp_set(tmp_path, {"c.txt": "hello there да нет"})
+    out = tmp_path / "r.json"
+    assert ev.main([str(tmp_path), "--hypotheses", str(hyp), "--json", str(out)]) == 0
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["backend"] == "external" and report["language_id"] == "engine's own"
+    assert report["summary"]["languages"]["all"]["wer"] == 0.0
+    assert report["wall_s"] is None and report["peak_memory_mb"] is None  # the engine's, not ours
+    printed = capsys.readouterr().out
+    assert "hypotheses hyp [external]" in printed and "language-ID n/a" in printed
+    assert "wall n/a s, peak memory n/a MB" in printed
+    assert "1 clip(s) without a time, not in RTF" in printed
+    assert "да" not in out.read_text(encoding="utf-8") + printed  # no text
+    for flag in (["--backend", "cpu"], ["--model", "small"], ["--live"]):  # no model runs
+        with pytest.raises(SystemExit):
+            ev.main([str(tmp_path), "--hypotheses", str(hyp), *flag])
+
+
+def test_hypothesis_txt_single_language_clip(tmp_path):
+    write_set(tmp_path, {"id": "c", "audio": "c.wav", "utterances": [U]})
+    (tmp_path / "c.txt").write_text("да", encoding="utf-8")
+    (clip,) = ev.load_manifest(tmp_path)
+    assert ev.score_hypothesis(clip, tmp_path)["text"] == {
+        "ru": {"words": 1, "edits": 0, "utts": 1, "lid_ok": 0}
+    }
+
+
+def test_peak_memory_falls_back_to_psutil_then_na(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setitem(sys.modules, "resource", None)  # as on Windows: import fails
+    info = SimpleNamespace(peak_wset=300 * 2**20)
+    proc = SimpleNamespace(memory_info=lambda: info)
+    fake = SimpleNamespace(Process=lambda: proc)
+    monkeypatch.setitem(sys.modules, "psutil", fake)
+    assert ev.peak_memory_mb() == 300.0
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    assert ev.peak_memory_mb() is None
+
+
+def test_mlx_peak_memory(monkeypatch):
+    from types import SimpleNamespace
+
+    fake = SimpleNamespace(get_peak_memory=lambda: 2 * 2**30)
+    monkeypatch.setitem(sys.modules, "mlx.core", fake)
+    assert ev.mlx_peak_mb() == 2048.0
+    monkeypatch.setitem(sys.modules, "mlx.core", None)
+    assert ev.mlx_peak_mb() is None
