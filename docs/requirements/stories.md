@@ -28,13 +28,13 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-17 | Always on, visible state | ✅ |
 | US-18 | Runs on Windows | 🟡 untested on Windows hardware (none available; #5 not planned) |
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 no Hebrew test set, ivrit.ai routing not evaluated (#6) |
-| US-20 | Search my transcripts | ✅ (summaries: US-27, export: US-25) |
+| US-20 | Search my transcripts | ✅ search (summaries and export: see US-27, US-25) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
 | US-31 | Speaker names from the call app's participant list | 🟡 claimed (#1 A.3): opt-in, macOS, one-to-one only |
 | US-25 | Export a transcript to DOCX and PDF | 🟡 CLI and macOS menu; Windows tray, templates planned (#4) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
 | US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
-| US-23 | Sensitivity: room vs system audio | ✅ presets and keys (#7, #102); no live meters |
+| US-23 | Sensitivity: room vs system audio | 🟡 presets and keys shipped (#7, #102); live level meters not yet |
 | US-28 | Browse past meetings | 🟡 Windows window untested on Windows hardware (none available) |
 | US-29 | Right-to-left text readable in the Windows captions | 🟡 unit-tested, no hardware check (#6) |
 | US-30 | Change common settings in a window | 🟡 claimed (#3): macOS spike, not on Windows |

@@ -40,6 +40,10 @@ across platforms.
 | `engine.py` | Detection state machine: classify apps, debounce, ask/auto/off, stop conditions |
 | `sensitivity.py` | Pure functions: the outside/inside sensitivity settings and their presets → effective trigger thresholds |
 | `transcribe/` | VAD chunking, language ID, parallel Whisper, merge + echo removal, md/srt/json output, background queue, live transcription (`live.py`) |
+| `transcribe/chunking.py` | VAD speech regions and chunking of a track for parallel Whisper |
+| `transcribe/merge.py` | Merges the `Me`/`Others` segments in time order and drops speaker-phone echo |
+| `transcribe/output.py` | Writes `transcript.md` / `.srt` / `.json` (right-to-left marks for Hebrew) |
+| `transcribe/queue.py` | Background transcription queue: one session at a time, in order |
 | `transcribe/_align_np.py` | Pure-numpy word-alignment kernels (DTW, median filter) for the MLX path, replacing mlx-whisper's numba/scipy ones (wired in a follow-up) |
 | `transcribe/diarize.py` | Offline speaker diarization of the `Others` track (speaker embeddings + clustering) and `Others` → `Speaker N` relabelling of the final transcript; one-time, checksum-verified model download |
 | `hotkey.py` | Global start/stop shortcut: parses `hotkey`, runs `rcc-audiotap hotkey` (macOS) or `RegisterHotKey` (Windows) |
