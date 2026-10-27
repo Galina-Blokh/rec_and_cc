@@ -28,6 +28,15 @@ FALLBACK_ORIGIN = (200.0, 120.0)  # when there is no main screen
 # (r, g, b) per speaker label; anything else gets the "other" color.
 SPEAKER_RGB = {"Me": (0.55, 0.86, 0.62), "Others": (0.52, 0.74, 1.0)}
 OTHER_RGB = (0.85, 0.75, 0.5)
+# "Speaker N" (live captions) cycles through these; "Me" and "Others" keep their colours above.
+SPEAKER_PALETTE = (
+    (0.98, 0.78, 0.40),  # amber
+    (0.86, 0.62, 0.95),  # violet
+    (0.45, 0.88, 0.85),  # teal
+    (0.98, 0.60, 0.60),  # coral
+    (0.78, 0.88, 0.45),  # lime
+    (0.95, 0.70, 0.85),  # pink
+)
 
 
 @dataclass(frozen=True)
@@ -91,7 +100,18 @@ def is_at_bottom(visible_bottom: float, content_height: float, slack: float = SC
 
 
 def speaker_rgb(label: str) -> tuple[float, float, float]:
-    return SPEAKER_RGB.get(label, OTHER_RGB)
+    if label in SPEAKER_RGB:
+        return SPEAKER_RGB[label]
+    head, _, num = label.partition(" ")
+    if head == "Speaker" and num.isdigit() and int(num) >= 1:
+        return SPEAKER_PALETTE[(int(num) - 1) % len(SPEAKER_PALETTE)]
+    return OTHER_RGB
+
+
+def speaker_hex(label: str) -> str:
+    """``speaker_rgb`` as ``#rrggbb`` (Tk)."""
+    r, g, b = speaker_rgb(label)
+    return f"#{round(r * 255):02x}{round(g * 255):02x}{round(b * 255):02x}"
 
 
 def default_frame(

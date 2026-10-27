@@ -113,7 +113,7 @@ class _Job:
     lang_ready: threading.Event = field(default_factory=threading.Event)
     future: Future | None = None
     emb_futs: list[Future | None] = field(default_factory=list)  # per segment, Others only
-    emb_deadline: float = 0.0  # time.monotonic() after which a missing embedding is skipped
+    emb_deadline: float = 0.0  # LiveTranscriber.clock() after which a missing embedding is skipped
 
 
 def _ready_embeddings(job: _Job, n: int) -> list[np.ndarray | None]:
@@ -218,7 +218,8 @@ class LiveTranscriber:
         self.clock = clock
         # "Speaker N" labels for Others captions (display only, see live_speakers.py)
         if labeler is None and getattr(self.cfg, "live_speaker_labels", False):
-            labeler = SpeakerLabeler()
+            labeler = SpeakerLabeler(clock=clock)
+            labeler.warm()  # load the speaker model now, off the first caption's critical path
         self._labeler = labeler
 
         self._inq: queue.SimpleQueue = queue.SimpleQueue()
@@ -485,8 +486,13 @@ class LiveTranscriber:
             )
             if job.track == Track.OTHERS and self._labeler is not None and not self._cancelled:
                 # never wait here: the pool is shared. _collect attaches what is ready.
-                job.emb_futs = [self._labeler.submit(_slice(audio, job, s)) for s in segs]
-                job.emb_deadline = time.monotonic() + EMBED_WAIT_S
+                job.emb_deadline = self.clock() + EMBED_WAIT_S
+                job.emb_futs = [
+                    self._labeler.submit(_slice(audio, job, s), job.emb_deadline) for s in segs
+                ]
+                for f in job.emb_futs:
+                    if f is not None:  # wake the worker when an embedding lands
+                        f.add_done_callback(lambda _f: self._wake.set())
             return segs
         finally:
             job.audio = None
@@ -527,7 +533,11 @@ class LiveTranscriber:
             horizon = max(s.end for s in new_others) - 600.0
             while self._shown_others and self._shown_others[0].end < horizon:
                 self._shown_others.popleft()
-        emit += self._release_me(final, now)
+        embed_wait = any(
+            tb.jobs and tb.jobs[0].future is not None and tb.jobs[0].future.done()
+            for tb in self._tracks.values()
+        )  # finished jobs still waiting for embeddings (bounded by EMBED_WAIT_S)
+        emit += self._release_me(final, now, embed_wait)
         if emit and self.on_segments:
             emit.sort(key=lambda s: (s.start, s.end))
             try:
@@ -541,9 +551,9 @@ class LiveTranscriber:
         pending = [f for f in job.emb_futs if f is not None and not f.done()]
         if not pending:
             return True
-        remaining = job.emb_deadline - time.monotonic()
+        remaining = job.emb_deadline - self.clock()
         if final and remaining > 0:
-            futures_wait(pending, timeout=remaining)
+            futures_wait(pending, timeout=min(remaining, EMBED_WAIT_S))
             return True
         return remaining <= 0
 
@@ -554,11 +564,11 @@ class LiveTranscriber:
         if labeler is None:
             return list(segs)
         return [
-            replace(seg, speaker=labeler.label(emb))
+            replace(seg, speaker=labeler.label(emb, seg.start, seg.end))
             for seg, emb in zip(segs, embeddings, strict=True)
         ]
 
-    def _release_me(self, final: bool, now: float) -> list[Segment]:
+    def _release_me(self, final: bool, now: float, embed_wait: bool = False) -> list[Segment]:
         if not self._held:
             return []
         others = self._tracks.get(Track.OTHERS)
@@ -569,7 +579,9 @@ class LiveTranscriber:
         through = others.done_through()
         out, keep = [], []
         for seg, t in self._held:
-            if final or through >= seg.end or now - t >= self.echo_hold_s:
+            # an Others job blocked only on embeddings must not use up the hold budget
+            expired = now - t >= self.echo_hold_s and not embed_wait
+            if final or through >= seg.end or expired:
                 near = [o for o in self._shown_others if o.start < seg.end + ECHO_TOLERANCE_S]
                 if dedupe_echo([seg], near):
                     out.append(seg)

@@ -31,7 +31,7 @@ from .. import autostart
 from ..config import CONFIG_PATH
 from ..engine import PROMPTING, RECORDING
 from ..models import Mode, TriggerKind
-from .captions import CaptionBuffer, header_text, should_auto_hide
+from .captions import CaptionBuffer, header_text, should_auto_hide, speaker_hex
 from .common import (
     ONBOARDING_TEXT,
     PERM_KINDS,
@@ -128,7 +128,7 @@ class TkCaptions:
         )
         text.tag_configure("Me", foreground="#8cdc9e", font=("Segoe UI", 10, "bold"))
         text.tag_configure("Others", foreground="#85bdff", font=("Segoe UI", 10, "bold"))
-        text.tag_configure("other", foreground="#d9bf80", font=("Segoe UI", 10, "bold"))
+        tags: set[str] = set()
         text.tag_configure("line", lmargin2=64, tabs=(64,))
         # Right-to-left (Hebrew) lines: right-justified, label then text separated by spaces
         # (tab stops don't mirror in Tk); the OS text renderer orders the Hebrew glyphs.
@@ -144,7 +144,10 @@ class TkCaptions:
             text.configure(state="normal")
             text.delete("1.0", "end")
             for i, ln in enumerate(buf.lines):
-                tag = ln.label if ln.label in ("Me", "Others") else "other"
+                tag = ln.label if ln.label in ("Me", "Others") else "spk:" + speaker_hex(ln.label)
+                if tag not in tags:  # one Tk tag per colour, created on this (the Tk) thread
+                    tags.add(tag)
+                    text.tag_configure(tag, foreground=tag[4:], font=("Segoe UI", 10, "bold"))
                 para = ("rtl",) if ln.rtl else ("line",)
                 text.insert("end", ln.label + ("  " if ln.rtl else "\t"), (tag, *para))
                 text.insert("end", ln.text + ("\n" if i < len(buf) - 1 else ""), para)
