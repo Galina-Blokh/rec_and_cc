@@ -32,6 +32,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
 | US-28 | Browse past meetings | 🟡 Windows window untested on hardware (#5) |
+| US-29 | Right-to-left text readable in the Windows captions | 🟡 unit-tested, no hardware check (#6) |
 
 ---
 
@@ -296,4 +297,18 @@ so that I don't have to dig through dated folders.*
 - **Given** a session from its start until its transcription is done, **then** rename and
   delete are refused with a notice.
 - **Then** logs never contain titles, excerpts or transcript text.
-- **Not yet:** a native macOS window (it is a pair of dialogs), summaries themselves (#4).
+- **Not yet:** a native macOS window (it is a pair of dialogs) (#4).
+
+### US-29 Right-to-left text readable in the Windows captions
+*As a Hebrew speaker on Windows, I want mixed Hebrew/English/number captions to read
+correctly, even though Tk does no bidi.*
+
+- **Given** a Hebrew line in the Tk captions, **then** its text is reordered to visual order
+  with the speaker label at the right edge, and the line is right-justified.
+- **Given** English words or numbers inside Hebrew, **then** they keep their reading order
+  (`3.5`, `1,000` stay whole), brackets are mirrored, and no Unicode control characters
+  reach Tk.
+- **Given** an English or Russian line, **then** it is unchanged (`label<TAB>text`); macOS
+  captions and the transcript files are unchanged.
+- **Not yet:** a visual check on Windows hardware (#6); long RTL lines that wrap are reordered
+  as one line, so the wrap point may read oddly.
