@@ -233,6 +233,11 @@ def shared_extractor(download: bool = True) -> Any:
         return _shared_extractor
 
 
+def peek_shared_extractor() -> Any:
+    """The shared extractor if already resident, else None. Never loads or downloads."""
+    return _shared_extractor
+
+
 def reset_shared_extractor() -> None:  # tests
     global _shared_extractor
     with _shared_lock:

@@ -21,7 +21,9 @@ from recandcc.ui.captions import (
     header_text,
     is_at_bottom,
     should_auto_hide,
+    speaker_hex,
     speaker_rgb,
+    tk_label_tag,
 )
 
 
@@ -178,3 +180,25 @@ def test_mac_panel_late_segment_after_auto_hide_keeps_captions_off():
     assert panel._started is None
     panel.append([seg(0.0, "late", "Me")])  # implicit start must honour display=False
     assert panel._panel is None and panel.active
+
+
+def test_tk_label_tags_never_reconfigure_me_and_others():
+    """Stories: US-33. "Me"/"Others" keep their set-up tags; Speaker N gets its hex colour."""
+
+    class FakeText:
+        def __init__(self):
+            self.calls = []
+
+        def tag_configure(self, tag, **kw):
+            self.calls.append((tag, kw))
+
+    t, known = FakeText(), set()
+    font = ("f", 10)
+    assert tk_label_tag(t, known, "Me", font) == "Me"
+    assert tk_label_tag(t, known, "Others", font) == "Others"
+    assert t.calls == []
+    tag = tk_label_tag(t, known, "Speaker 2", font)
+    assert tag == "spk:" + speaker_hex("Speaker 2")
+    assert t.calls == [(tag, {"foreground": speaker_hex("Speaker 2"), "font": font})]
+    assert tk_label_tag(t, known, "Speaker 2", font) == tag
+    assert len(t.calls) == 1  # configured once

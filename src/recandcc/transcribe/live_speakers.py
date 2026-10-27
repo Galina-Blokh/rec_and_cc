@@ -72,7 +72,9 @@ def _get_extractor() -> Any:
     key = _model_key(path)
     with _failed_lock:
         if _extractor_failed == key:
-            return None
+            if diarize.peek_shared_extractor() is None:
+                return None
+            _extractor_failed = None  # loaded since (e.g. by the final diarization)
     try:
         return diarize.shared_extractor(download=False)
     except Exception as e:  # noqa: BLE001 - ImportError (Windows) or a bad model
@@ -189,6 +191,10 @@ class SpeakerLabeler:
         returns None if too short, closed or the queue is full."""
         if len(audio) < MIN_AUDIO_S * SAMPLE_RATE:
             return None
+        win = int(diarize.WINDOW_S * SAMPLE_RATE)
+        if len(audio) > win:  # the central window is enough to tell voices apart, and cheap
+            lo = (len(audio) - win) // 2
+            audio = np.array(audio[lo : lo + win])
         fut: Future = Future()
         with self._lock:
             if self._closed:

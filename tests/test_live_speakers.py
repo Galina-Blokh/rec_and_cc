@@ -519,3 +519,37 @@ def test_load_grace_is_bounded_for_live_latency():
     lab = SpeakerLabeler(embedder=lambda a: None)
     assert lab.effective_deadline(0.0, 0.5) <= 0.5 + 1.5
     lab.close()
+
+
+def test_failed_load_is_forgotten_once_the_shared_extractor_is_resident(monkeypatch, tmp_path):
+    """Stories: US-33. A load that failed once must not keep labels off after the extractor
+    has loaded elsewhere (e.g. the flush-time diarization)."""
+    model = tmp_path / "model.onnx"
+    model.write_bytes(b"x")
+    monkeypatch.setattr(diarize, "model_path", lambda *a, **k: model)
+    fail = [True]
+    _fake_sherpa(monkeypatch, fail)
+    assert live_speakers._get_extractor() is None
+    assert live_speakers._extractor_failed is not None
+    sentinel = object()
+    monkeypatch.setattr(diarize, "_shared_extractor", sentinel)  # loaded by someone else
+    assert live_speakers._get_extractor() is sentinel
+    assert live_speakers._extractor_failed is None
+
+
+def test_submit_embeds_only_the_central_window():
+    seen = []
+    lab = SpeakerLabeler(embedder=lambda a: seen.append(len(a)) or vec(0))
+    assert lab.submit(np.zeros(12 * SR, np.float32)).result(5) is not None
+    assert seen == [int(diarize.WINDOW_S * SR)]
+    lab.close()
+
+
+def test_job_with_four_segments_and_a_slow_embedder_is_labelled_within_the_bound():
+    """Stories: US-33. Segments are embedded in turn, each with its own budget."""
+    lab = SpeakerLabeler(embedder=lambda a: (time.sleep(0.15), vec(0))[1])
+    t0 = time.monotonic()
+    futs = [lab.submit(long_audio(), deadline=t0 + 2.0) for _ in range(4)]
+    assert all(f is not None and f.result(5) is not None for f in futs)
+    assert time.monotonic() - t0 < EMBED_WAIT_S + live_speakers.LOAD_GRACE_S
+    lab.close()

@@ -127,6 +127,19 @@ def speaker_hex(label: str) -> str:
     return f"#{round(r * 255):02x}{round(g * 255):02x}{round(b * 255):02x}"
 
 
+def tk_label_tag(text, known: set[str], label: str, font: tuple) -> str:
+    """Tk tag for a caption label. "Me" and "Others" use the tags the window configured up
+    front; each "Speaker N" colour gets one ``spk:#rrggbb`` tag, created on first use."""
+    if label in ("Me", "Others"):
+        return label
+    hex_color = speaker_hex(label)
+    tag = "spk:" + hex_color
+    if tag not in known:
+        known.add(tag)
+        text.tag_configure(tag, foreground=hex_color, font=font)
+    return tag
+
+
 def default_frame(
     visible: tuple[float, float, float, float] | None,
 ) -> tuple[float, float, float, float]:

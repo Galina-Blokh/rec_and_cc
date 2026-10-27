@@ -505,7 +505,11 @@ class LiveTranscriber:
             if job.track == Track.OTHERS and self._labeler is not None and not self._cancelled:
                 # never wait here: the pool is shared. _collect attaches what is ready.
                 job.emb_submitted = self.clock()
-                job.emb_deadline = job.emb_submitted + EMBED_WAIT_S
+                # one embedding thread works through the job's segments in turn: each gets
+                # its own EMBED_WAIT_S, but the whole job never waits beyond the hard bound
+                job.emb_deadline = job.emb_submitted + min(
+                    EMBED_WAIT_S * max(1, len(segs)), EMBED_WAIT_S + LOAD_GRACE_S
+                )
                 job.emb_futs = [
                     self._labeler.submit(_slice(audio, job, s), job.emb_deadline) for s in segs
                 ]
@@ -588,6 +592,7 @@ class LiveTranscriber:
             if self._labeler is not None
             else job.emb_deadline
         )
+        deadline = min(deadline, job.emb_submitted + EMBED_WAIT_S + LOAD_GRACE_S)
         remaining = deadline - self.clock()
         if final and remaining > 0:
             futures_wait(pending, timeout=min(remaining, EMBED_WAIT_S + LOAD_GRACE_S))
