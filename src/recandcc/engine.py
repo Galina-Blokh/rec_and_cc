@@ -299,12 +299,12 @@ class Engine:
                 self._wake.wait(max(0.05, float(self.det.poll_interval_s)))
                 self._wake.clear()
         finally:
-            # Close on the thread that polled: per-thread resources (Windows COM) must be
-            # released there. shutdown() closes again from its caller; close() is idempotent.
+            # Per-thread resources (Windows COM) must be released by the thread that polled.
+            # Only that, so shutdown()'s join budget isn't spent on the full close().
             try:
-                self.monitor.close()
+                self.monitor.release_thread()
             except Exception:
-                log.exception("monitor close failed")
+                log.exception("monitor thread release failed")
 
     def _state_locked(self) -> EngineState:
         mode = Mode(self.det.mode)

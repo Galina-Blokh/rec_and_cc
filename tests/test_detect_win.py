@@ -289,6 +289,53 @@ def test_helper_playing_audio_does_not_take_over_the_sticky_key(fakes, mon):
     assert mon._chosen == {}
 
 
+def test_app_replaces_a_helper_that_was_on_the_mic_first(fakes, mon):
+    """Cold start: only the autostarter runs at first. Once ms-teams.exe is up, it owns the
+    key, even though the helper was the sticky choice and stays alive."""
+    teams_on_mic(fakes)
+    fakes.procs = [STARTER]
+    assert [p.bundle_id for p in mon.snapshot()] == ["msteams_autostarter.exe"]
+    fakes.procs = [STARTER, TEAMS]
+    mon._table = None  # the process set changed (in real use: on the next TTL walk)
+    fakes.sessions = [FakeSession(proc("MSTeams_autostarter.exe", 299))]
+    snap = by_name(mon.snapshot())
+    assert snap["ms-teams.exe"].input_active and snap["ms-teams.exe"].pid == 300
+    assert not snap["msteams_autostarter.exe"].input_active
+
+
+def test_unlisted_package_keeps_its_key(fakes, mon, monkeypatch):
+    """A walk that misses the package (failed, exe path unreadable) must not flip the key
+    from ms-teams.exe to the family prefix: the engine would see the call end."""
+    teams_on_mic(fakes)
+    fakes.procs = [TEAMS]
+    assert [p.bundle_id for p in mon.snapshot()] == ["ms-teams.exe"]
+
+    def boom(attrs, ad_value=None):
+        raise RuntimeError("walk failed")
+
+    mon._table = None
+    monkeypatch.setattr(sys.modules["psutil"], "process_iter", boom)
+    assert [(p.pid, p.bundle_id) for p in mon.snapshot()] == [(0, "ms-teams.exe")]  # sticky
+
+
+def test_unlisted_package_without_sticky_is_found_by_name(fakes, mon):
+    teams_on_mic(fakes)
+    fakes.procs = [ns(pid=300, info={"name": "ms-teams.exe", "exe": None})]  # path unreadable
+    assert [(p.pid, p.bundle_id) for p in mon.snapshot()] == [(300, "ms-teams.exe")]
+
+
+def test_no_walk_when_every_mic_user_already_plays_audio(fakes, mon):
+    """A typical call: the app is in a WASAPI session and on the mic, as is our recorder."""
+    fakes.sessions = [FakeSession(proc("Zoom.exe", 101))]
+    fakes.winreg.tree = mic_tree(
+        {}, {"C:#Program Files#Zoom#bin#Zoom.exe": IN_USE, OWN_EXE.replace("\\", "#"): IN_USE}
+    )
+    assert by_name(mon.snapshot()) == {
+        "zoom.exe": AudioProcess(101, "zoom.exe", "Zoom.exe", True, True)
+    }
+    assert fakes.walks == 0
+
+
 @pytest.mark.parametrize("flip", [False, True])
 def test_choice_without_sticky_or_audio_is_deterministic(fakes, mon, flip):
     teams_on_mic(fakes)

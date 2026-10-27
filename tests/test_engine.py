@@ -24,11 +24,14 @@ class FakeMonitor:
     def __init__(self):
         self.procs: list[AudioProcess] = []
         self.closed = False
-        self.threads = {"snapshot": set(), "close": []}
+        self.threads = {"snapshot": set(), "release": [], "close": []}
 
     def snapshot(self):
         self.threads["snapshot"].add(threading.current_thread().name)
         return list(self.procs)
+
+    def release_thread(self):
+        self.threads["release"].append(threading.current_thread().name)
 
     def close(self):
         self.closed = True
@@ -452,7 +455,9 @@ def test_monitor_closed_on_the_engine_thread():
         time.sleep(0.01)
     h.eng.shutdown()
     assert h.mon.threads["snapshot"] == {"engine"}
-    assert h.mon.threads["close"][0] == "engine"  # then once more from shutdown()'s caller
+    assert h.mon.threads["release"] == ["engine"]
+    # The full close() runs on shutdown()'s caller, outside the join budget.
+    assert h.mon.threads["close"] == [threading.current_thread().name]
     h.eng.shutdown()  # a second shutdown is harmless
 
 

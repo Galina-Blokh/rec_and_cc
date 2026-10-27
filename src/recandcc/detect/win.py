@@ -49,6 +49,11 @@ def _alnum(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s.lower())
 
 
+def _named_after(exe: str, family: str) -> bool:
+    """``ms-teams.exe`` is named after package ``MSTeams_8wekyb3d8bbwe``."""
+    return _alnum(exe.rsplit(".", 1)[0]) == _alnum(family.split("_")[0])
+
+
 class WinActivityMonitor(ActivityMonitor):
     def __init__(self) -> None:
         self._tls = threading.local()
@@ -180,17 +185,26 @@ class WinActivityMonitor(ActivityMonitor):
         """Pick one process per package, deterministically and stable across polls: a key
         that flips between polls looks like a new app to the engine and ends the session."""
         cands = sorted(cands)
-        app = _alnum(family.split("_")[0])
+        sticky = self._chosen.get(family)
         pick = (
-            # Sticky first: a helper briefly playing audio must not take over the key.
-            next((c for c in cands if c[0] == self._chosen.get(family)), None)
+            # The exe named after the package is the app itself (a helper seen first must not
+            # keep the key once the app starts).
+            next((c for c in cands if _named_after(c[0], family)), None)
+            # Then sticky: a helper briefly playing audio must not take over the key.
+            or next((c for c in cands if c[0] == sticky), None)
             or next((c for c in cands if c[0] in procs), None)  # has the WASAPI session
-            or next((c for c in cands if _alnum(c[0].rsplit(".", 1)[0]) == app), None)
             or next((c for c in cands if not any(w in c[0] for w in _HELPER_WORDS)), None)
             or cands[0]
         )
         self._chosen[family] = pick[0]
         return pick
+
+    def _resolve_unlisted(self, family: str, by_name: dict[str, int]) -> str | None:
+        """A packaged mic user missing from the walk (failed walk, exe path unreadable):
+        keep last poll's choice, else an exe named after the package. ``None``: unknown."""
+        if sticky := self._chosen.get(family):
+            return sticky
+        return next((n for n in sorted(by_name) if _named_after(n, family)), None)
 
     def snapshot(self) -> list[AudioProcess]:
         self._ensure_com()
@@ -204,13 +218,20 @@ class WinActivityMonitor(ActivityMonitor):
         except Exception:
             log.exception("reading microphone consent store failed")
             mic = []
+        mic = [(exe, full) for exe, full in mic if os.path.normcase(full) != self._own_exe]
         key = frozenset(full.lower() for _, full in mic)
-        by_family, by_name = self._process_table(key) if mic else ({}, {})
+        # Walk only to map a package to its exe or to find a mic-only app's pid; an app that
+        # also plays audio (a typical call) already has its pid from the WASAPI session.
+        walk = any("\\" not in full or exe not in procs for exe, full in mic)
+        by_family, by_name = self._process_table(key) if walk else ({}, {})
         for exe, full in mic:
-            if os.path.normcase(full) == self._own_exe:
-                continue
-            if "\\" not in full and (cands := by_family.get(full.lower())):
-                exe, pid = self._choose(full.lower(), cands, procs)
+            if "\\" not in full:
+                family = full.lower()
+                if cands := by_family.get(family):
+                    exe, pid = self._choose(family, cands, procs)
+                else:
+                    exe = self._resolve_unlisted(family, by_name) or exe
+                    pid = by_name.get(exe, 0)
             else:
                 pid = by_name.get(exe, 0)
             existing = procs.get(exe)
@@ -233,7 +254,7 @@ class WinActivityMonitor(ActivityMonitor):
         self._chosen = {f: e for f, e in self._chosen.items() if f in key}  # off the mic
         return list(procs.values())
 
-    def close(self) -> None:
+    def release_thread(self) -> None:
         if getattr(self._tls, "com", False):
             try:
                 import comtypes  # pyright: ignore[reportMissingImports]
@@ -242,3 +263,6 @@ class WinActivityMonitor(ActivityMonitor):
             except Exception:
                 log.debug("CoUninitialize failed", exc_info=True)
             self._tls.com = False
+
+    def close(self) -> None:
+        self.release_thread()
