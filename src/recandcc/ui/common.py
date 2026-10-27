@@ -35,6 +35,7 @@ from ..config import (
     CONFIG_PATH,
     LOG_DIR,
     Config,
+    ConfigLockTimeout,
     load_config,
     normalize_languages,
     save_keys,
@@ -261,6 +262,9 @@ def grant_permission(kind: str) -> str | None:
         return None
 
 
+DIALOG_TIMEOUT_S = 300  # an abandoned chooser must not keep a flow "open" for ever
+
+
 def osascript(script: str, timeout: float | None = None) -> str:
     """Run AppleScript, return stdout ('' on error/cancel). The script goes in on stdin, not
     argv, so text in it (search results) isn't visible in the process list."""
@@ -277,6 +281,22 @@ def osascript(script: str, timeout: float | None = None) -> str:
 def as_str(text: str) -> str:
     """Quote a Python string as an AppleScript string literal."""
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def chooser_script(labels: list[str], prompt: str, button: str) -> str:
+    """AppleScript for a list chooser; every text is quoted by ``as_str``."""
+    items = ", ".join(map(as_str, labels))
+    return (
+        f'choose from list {{{items}}} with title "RecAndCC" '
+        f"with prompt {as_str(prompt)} OK button name {as_str(button)}"
+    )
+
+
+def name_dialog_script(label: str) -> str:
+    return (
+        f'display dialog {as_str(f"Name for {label}:")} default answer "" '
+        'with title "RecAndCC" buttons {"Cancel", "Save"} default button "Save"'
+    )
 
 
 # ----------------------------------------------------------------------- controller
@@ -667,6 +687,71 @@ class Controller:
             self.events.put(("search", query, hits))
 
         threading.Thread(target=run, daemon=True, name="search").start()
+
+    # --- speaker names (opt-in; worker threads; results arrive as events)
+    @property
+    def speaker_names_enabled(self) -> bool:
+        return self.cfg.transcription.speaker_names
+
+    def speakers_async(self, directory: Path) -> None:
+        """List the session's speakers that have voice data, with their first lines; posts
+        ``("speakers", directory, [(label, lines)])`` (the exception if it failed)."""
+
+        def run() -> None:
+            try:
+                from ..models import SessionInfo
+                from ..transcribe import voices
+
+                # the transcript (maybe cloud-synced) is read outside any lock
+                lines = voices.session_speakers(directory)
+                known = voices.read_session_voices(SessionInfo.load(directory).id)
+                result = [(lbl, ln) for lbl, ln in lines if lbl in known]
+            except Exception as e:  # noqa: BLE001
+                log.error("could not list the speakers: %s", type(e).__name__)
+                result = e
+            self.events.put(("speakers", directory, result))
+
+        threading.Thread(target=run, daemon=True, name="speakers").start()
+
+    def name_speaker_async(self, directory: Path, label: str, name: str) -> None:
+        """Name a speaker through the same function as ``recandcc name-speaker``; posts
+        ``("named", label, name, error | None)``. Names are never logged."""
+
+        def run() -> None:
+            error = None
+            try:
+                if not self.speaker_names_enabled:
+                    error = "Voice profiles are off (transcription.speaker_names)."
+                else:
+                    from ..transcribe import voices
+
+                    voices.name_speaker(Path(directory), label, name)  # holds voices.LOCK
+            except Exception as e:  # noqa: BLE001 - always post an outcome
+                log.error("could not name a speaker: %s", type(e).__name__)
+                # fixed text: the library's messages quote the name, and notices may be logged
+                error = (
+                    "The name could not be saved: it may be reserved, used by another "
+                    "speaker of this session, or the voice data is gone."
+                )
+            self.events.put(("named", label, name, error))
+
+        threading.Thread(target=run, daemon=True, name="name-speaker").start()
+
+    def forget_voices_async(self) -> None:
+        """Delete every voice profile and all stored session voices; posts
+        ``("forgot", count | exception)``."""
+
+        def run() -> None:
+            try:
+                from ..transcribe import voices
+
+                result = voices.forget_all()  # after any naming or finalize in flight
+            except Exception as e:  # noqa: BLE001
+                log.error("could not delete the voices: %s", type(e).__name__)
+                result = e
+            self.events.put(("forgot", result))
+
+        threading.Thread(target=run, daemon=True, name="forget-voices").start()
 
     def export_async(self, transcript: Path | None = None, fmt: str = "both") -> None:
         """Export a session's transcript to DOCX + PDF off the UI thread; posts a ``notice``
@@ -1116,10 +1201,37 @@ class Controller:
                     self._config_mtime = mtime  # our own write: nothing to reload
             except ValueError:  # invalid TOML (mid-edit?): don't overwrite the user's file
                 log.warning("config.toml could not be parsed; %s not saved", ", ".join(keys))
+                self._restore_from_disk(keys)
                 self.post_notice(f"{title} not saved", "config.toml could not be parsed")
+            except ConfigLockTimeout:
+                log.warning("settings not saved: config lock timed out")  # no traceback
+                self._restore_from_disk(keys)
+                self.post_notice("Settings not saved", "config.toml is locked by another process")
             except Exception:
                 log.exception("saving settings failed")
+                self._restore_from_disk(keys)
                 self.post_notice("Settings not saved", "config.toml could not be written")
+
+    def _restore_from_disk(self, keys) -> None:
+        """A failed write leaves config.toml as it was: put the menu's in-memory value of
+        exactly ``keys`` back to what the file says, so the menu doesn't show a change that
+        would silently vanish on restart. Caller holds ``_save_lock``."""
+        try:
+            disk = load_config()
+        except Exception:
+            return  # unreadable file: keep memory, the next successful reload corrects it
+        for key in keys:
+            if key == "transcription.languages":
+                tr, src = self.cfg.transcription, disk.transcription
+                with self._lang_lock:  # both together: save() pairs them
+                    tr._raw_languages = getattr(src, "_raw_languages", None)  # type: ignore[attr-defined]
+                    tr.languages = list(src.languages)
+                continue
+            *path, leaf = key.split(".")
+            dst, ref = self.cfg, disk
+            for name in path:
+                dst, ref = getattr(dst, name), getattr(ref, name)
+            setattr(dst, leaf, getattr(ref, leaf))
 
     def _setting(self, key: str):
         """The TOML value of a dotted config key, as the menu last set it."""
@@ -1180,7 +1292,8 @@ class Controller:
                         self.apply_settings(old)
                         with self._lang_lock:
                             tr._raw_languages = old_raw  # type: ignore[attr-defined]
-                        if isinstance(e, OSError):  # not the folder: the outer handler would say so
+                        if isinstance(e, OSError) and not isinstance(e, ConfigLockTimeout):
+                            # not the folder: the outer handler would say so
                             raise _ConfigWriteError(type(e).__name__, e.errno) from e
                         raise
                     if not edited:
@@ -1196,6 +1309,9 @@ class Controller:
             except ValueError as e:
                 log.warning("settings not saved: %s", type(e).__name__)  # no values in logs
                 self.post_notice("Settings not saved", str(e))
+            except ConfigLockTimeout:
+                log.warning("settings not saved: config lock timed out")
+                self.post_notice("Settings not saved", "config.toml is locked by another process")
             except _ConfigWriteError as e:
                 log.warning("settings not saved: config write %s (errno %s)", *e.args)
                 self.post_notice("Settings not saved", "config.toml could not be written")
