@@ -179,13 +179,15 @@ indicator, battery and consent each time it is turned on.
 `sensitivity.py` maps `outside_sensitivity` / `inside_sensitivity` (0–100, unset = off) to the
 existing thresholds with pure functions (#7). Inside scales `min_active_s`, which `tick()`
 reads every poll. Outside scales `room_speech_s`, widens the window so that speech is at most
-60% of it (every setting stays reachable by a real conversation) and adds a noise-floor
+half of it (every setting stays reachable by a real conversation) and adds a noise-floor
 margin. `RoomMonitor` gets the mapping as its `thresholds` callable and reads it on every VAD
 step, so a preset change applies without reopening the mic and `room.py` doesn't depend on
 `sensitivity.py`. The gate (`room.NoiseFloor`) runs on the `room-vad` worker before the VAD:
-steps near the floor skip Silero. The floor learns only from steps without speech, falls
-3 dB and rises at most 0.5 dB per step, so a long conversation, or a mic opened
-mid-conversation, never turns into "background". Unset keeps every code path as it was.
+steps with nothing above the floor skip Silero. The floor is the 15th percentile of the
+per-32 ms levels of the last 20 s, independent of the VAD: it falls within a few quiet seconds
+and rises only once the room stayed louder for most of the window, so steady babble becomes
+the floor while a conversation's pauses keep it below the voices. It lives on the monitor, so
+it survives sessions and mic reopenings; until 3 s of history exist nothing counts. Unset keeps every code path as it was.
 Not yet: live level meters, caption priority by sensitivity.
 
 ### Two tracks → speaker labels for free

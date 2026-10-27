@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import threading
+import time
 import tomllib
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -155,15 +156,39 @@ class Config:
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
 
     def save(self, path: Path = CONFIG_PATH) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data = asdict(self)
-        data["output_dir"] = str(self.output_dir)
-        for section in ("detection", "transcription"):  # TOML has no null: unset = omitted
-            data[section] = {k: v for k, v in data[section].items() if v is not None}
-        # Atomic: concurrent saves (two quick menu clicks) never leave a torn file.
-        tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        tmp.write_bytes(tomli_w.dumps(data).encode())
-        os.replace(tmp, path)
+        """Write the settings. Serialized (the snapshot is taken under the lock, so the last
+        save writes the current values) and atomic where the OS allows it."""
+        with _SAVE_LOCK:
+            data = asdict(self)
+            data["output_dir"] = str(self.output_dir)
+            for section in ("detection", "transcription"):  # TOML has no null: unset = omitted
+                data[section] = {k: v for k, v in data[section].items() if v is not None}
+            blob = tomli_w.dumps(data).encode()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _write_atomic(path, blob)
+
+
+_SAVE_LOCK = threading.Lock()
+
+
+def _write_atomic(path: Path, blob: bytes) -> None:
+    """Temp file + os.replace, so a crash never leaves a torn file. On Windows the replace
+    fails while another handle has the file open (a reader, antivirus): retry briefly, then
+    write in place rather than lose the setting."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_bytes(blob)
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt < 4:
+                    time.sleep(0.05 * (attempt + 1))
+        log.warning("config: could not replace %s atomically; writing it in place", path.name)
+        path.write_bytes(blob)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _build(cls, data: dict):

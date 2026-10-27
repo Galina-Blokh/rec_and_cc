@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from recandcc.config import Config, DetectionConfig, load_config
-from recandcc.detect.room import WINDOW, NoiseFloor, RoomMonitor, level_db
+from recandcc.detect.room import WINDOW, NoiseFloor, RoomMonitor, window_levels
 from recandcc.models import SAMPLE_RATE
 from recandcc.sensitivity import (
     PRESETS,
@@ -56,9 +56,9 @@ def test_outside_maps_to_speech_and_margin_and_widens_the_window():
     det.outside_sensitivity = 50
     assert room_trigger(det) == pytest.approx((6.0, 15.0, 9.0))
     det.outside_sensitivity = 25
-    assert room_trigger(det) == pytest.approx((12.0, 20.0, 12.0))  # at most 60% of the window
+    assert room_trigger(det) == pytest.approx((12.0, 24.0, 12.0))  # at most half the window
     det.outside_sensitivity = 0
-    assert room_trigger(det) == pytest.approx((24.0, 40.0, 15.0))
+    assert room_trigger(det) == pytest.approx((24.0, 48.0, 15.0))
 
 
 @pytest.mark.parametrize("bad", ["normal", True, float("nan"), [50]])
@@ -82,18 +82,40 @@ def test_concurrent_saves_never_tear_the_file(tmp_path):
     path = tmp_path / "c.toml"
     cfg = Config()
 
+    errors: list[BaseException] = []
+
     def spam(i):
-        for j in range(20):
-            cfg.detection.inside_sensitivity = i * 20 + j
-            cfg.save(path)
+        try:
+            for j in range(20):
+                cfg.detection.inside_sensitivity = i * 20 + j
+                cfg.save(path)
+        except BaseException as e:  # surfaced below: a thread's exception would be lost
+            errors.append(e)
 
     threads = [threading.Thread(target=spam, args=(i,)) for i in range(6)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    assert load_config(path).detection.inside_sensitivity is not None
+    assert errors == []
+    cfg.save(path)  # the last save writes the current values
+    assert load_config(path).detection.inside_sensitivity == cfg.detection.inside_sensitivity
     assert [p.name for p in tmp_path.iterdir()] == ["c.toml"]  # no temp files left
+
+
+def test_save_falls_back_to_writing_in_place_when_replace_is_refused(tmp_path, monkeypatch):
+    import recandcc.config as config_mod
+
+    def refuse(src, dst):
+        raise PermissionError("file in use")
+
+    monkeypatch.setattr(config_mod.os, "replace", refuse)
+    monkeypatch.setattr(config_mod.time, "sleep", lambda s: None)
+    cfg = Config()
+    cfg.detection.inside_sensitivity = 70
+    cfg.save(tmp_path / "c.toml")
+    assert load_config(tmp_path / "c.toml").detection.inside_sensitivity == 70
+    assert [p.name for p in tmp_path.iterdir()] == ["c.toml"]  # temp file cleaned up
 
 
 def test_presets_apply_match_and_persist(tmp_path):
@@ -114,27 +136,43 @@ def test_presets_apply_match_and_persist(tmp_path):
     assert current_preset(cfg.detection) is None  # hand-edited values: no preset ticked
 
 
-def test_noise_floor_learns_fast_down_and_slowly_up():
-    nf = NoiseFloor()
-    assert nf.loud_enough(-90, 9)  # no floor yet: everything counts
-    nf.learn(-40)
-    assert not nf.loud_enough(-35, 9) and nf.loud_enough(-31, 9)
-    nf.learn(-60)
-    assert nf.db == pytest.approx(-43)  # falls 3 dB per step
-    for _ in range(4):
-        nf.learn(0)
-    assert nf.db == pytest.approx(-41)  # rises 0.5 dB per step
-    assert level_db(np.zeros(10, np.float32)) == -120.0
-    assert level_db(np.full(10, 0.1, np.float32)) == pytest.approx(-20.0)
+def test_noise_floor_is_a_low_percentile_of_recent_levels():
+    nf = NoiseFloor(history_s=10, min_s=1)
+    per_s = int(SAMPLE_RATE / WINDOW)
+    assert nf.db is None and not nf.loud(np.array([0.0]), 9).any()  # too little history
+    nf.add(np.full(per_s * 8, -40.0))  # babble most of the time ...
+    nf.add(np.full(per_s * 2, -60.0))  # ... with some quieter moments
+    assert nf.db == pytest.approx(-60.0)  # falls fast: 20% quiet is enough
+    nf.add(np.full(per_s * 7, -40.0))
+    assert nf.db == pytest.approx(-60.0)  # rises slowly: quiet moments still in the history
+    nf.add(np.full(per_s * 2, -40.0))
+    assert nf.db == pytest.approx(-40.0)  # ... until the room stayed louder long enough
+    assert list(nf.loud(np.array([-35.0, -31.0]), 9)) == [False, True]
+    assert window_levels(np.zeros(WINDOW, np.float32))[0] == -120.0
+    assert window_levels(np.full(WINDOW, 0.1, np.float32))[0] == pytest.approx(-20.0)
 
 
 # --- RoomMonitor with an outside sensitivity: synthetic audio, an energy "VAD" ---------------
 SR = SAMPLE_RATE
 
 
-def tone(seconds: float, amp: float) -> np.ndarray:
+def tone(seconds: float, amp: float, wobble: float = 0.0) -> np.ndarray:
     t = np.arange(int(seconds * SR)) / SR
-    return (amp * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+    env = 1 + wobble * np.sin(2 * np.pi * 0.7 * t)
+    return (amp * env * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+
+
+def talk(cycles: int, on: float, off: float, gap) -> np.ndarray:
+    """Turn-taking speech: `on` s of voice, then `off` s of `gap(seconds)`."""
+    return np.concatenate([np.concatenate([tone(on, 0.3), gap(off)]) for _ in range(cycles)])
+
+
+def quiet(seconds: float) -> np.ndarray:
+    return tone(seconds, 0.005)  # below the fake VAD's threshold
+
+
+def babble(seconds: float) -> np.ndarray:
+    return tone(seconds, 0.03, wobble=0.3)  # continuous, and the fake VAD calls it speech
 
 
 class Source:
@@ -165,33 +203,38 @@ def monitor(outside: float, calls: list | None = None):
     return mon, feed
 
 
-def test_cafe_murmur_near_the_floor_does_not_trigger_but_a_conversation_does():
+def test_cafe_babble_never_triggers_nor_retriggers_after_a_session():
     calls: list = []
     mon, feed = monitor(50, calls)  # "Normal": 6 s in 15 s, 9 dB above the floor
-    for _ in range(8):  # murmur the VAD flags half the time, a little above the quiet parts
-        feed(tone(2, 0.008))  # -45 dB, not speech: the floor
-        feed(tone(2, 0.018))  # -38 dB, "speech" but within the margin
-    assert not mon.triggered() and mon.speech_in_window() < 1
-    vad_runs = len(calls)
-    assert vad_runs < 8  # quiet and murmur steps skip the VAD once the floor is known
-    feed(tone(8, 0.3))  # someone talking next to the laptop
+    feed(babble(60))  # the mic opens in a café
+    assert not mon.triggered() and mon.speech_in_window() == 0
+    assert len(calls) < 10  # babble near the floor skips the VAD
+    feed(talk(8, 1.4, 0.6, babble))  # a conversation at the table, over the babble
     assert mon.triggered()
+    tap = mon.session_source()  # a room session records, then ends: history resets
+    tap.start(lambda frames: None)
+    feed(talk(5, 1.4, 0.6, babble))
+    tap.stop()
+    assert not mon.triggered()
+    feed(babble(60))  # the floor survived the session: the café alone doesn't re-trigger
+    assert not mon.triggered() and mon.speech_in_window() == 0
     mon.close()
 
 
 def test_mic_opened_mid_conversation_and_long_talk_keep_counting():
     mon, feed = monitor(50)
-    feed(tone(8, 0.3))  # opened while people talk: no floor yet, speech still counts
+    feed(talk(8, 1.4, 0.6, quiet))  # opened while people talk: the pauses set the floor
     assert mon.triggered()
-    feed(tone(120, 0.3))  # two minutes of continuous talk never becomes "the floor"
-    assert mon.triggered() and mon.speech_in_window() > 14
+    feed(talk(60, 1.4, 0.6, quiet))  # two minutes of conversation never becomes "the floor"
+    assert mon.triggered() and mon.speech_in_window() > 8
     mon.close()
 
 
-@pytest.mark.parametrize(("talk", "pause", "fires"), [(1.4, 0.6, True), (1.0, 1.0, False)])
-def test_lowest_setting_still_triggers_on_a_real_conversation(talk, pause, fires):
-    mon, feed = monitor(0)  # 24 s of speech within 40 s, 15 dB above the floor
-    for _ in range(30):
-        feed(np.concatenate([tone(talk, 0.3), np.zeros(int(pause * SR), np.float32)]))
-    assert mon.triggered() is fires  # ~70% speech triggers, 50% doesn't
+@pytest.mark.parametrize(
+    ("on", "off", "fires"), [(1.4, 0.6, True), (1.2, 0.8, True), (0.8, 1.2, False)]
+)
+def test_lowest_setting_still_triggers_on_a_real_conversation(on, off, fires):
+    mon, feed = monitor(0)  # 24 s of speech within 48 s, 15 dB above the floor
+    feed(talk(30, on, off, quiet))
+    assert mon.triggered() is fires  # 60-70% speech triggers, 40% doesn't
     mon.close()

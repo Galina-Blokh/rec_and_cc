@@ -216,15 +216,15 @@ noisy café.* (#7)
   detection behaves exactly as before: `min_active_s`, `room_speech_s`, no level gate.
 - **Given** a sensitivity 0–100, **then** the threshold is scaled 4× at 0, 1× at 50 and
   0.25× at 100: inside scales `min_active_s`; outside scales `room_speech_s` (the window widens
-  so speech is at most 60% of it, so even 0 triggers on a real conversation) and sets a
+  so speech is at most half of it, so even 0 triggers on a real conversation) and sets a
   15–3 dB margin above the room's noise floor. A non-numeric value counts as unset.
 - **Given** outside favoured (high) and inside low, **when** an app plays briefly and then
   people talk in the room, **then** the short app audio starts nothing and the room starts the
   recording; **given** inside favoured, **then** app audio starts it within a second.
-- **Given** steady background noise (a fan, a café), **then** blocks near the noise floor
-  don't count as speech and don't even run the voice detector; the floor learns only from
-  moments without speech, so a long conversation or a mic opened mid-conversation keeps
-  counting.
+- **Given** steady background noise (a fan, café babble, even if the voice detector calls it
+  speech), **then** it becomes the noise floor (the quietest 15% of the last 20 s, kept across
+  sessions) and neither starts nor, after a room session, restarts a recording; a
+  conversation over it, or one already going when the mic opens, still counts.
 - **Given** the menu "Sensitivity" (Off / Quiet room / Normal / Noisy place), **then** the
   preset is saved to `config.toml` (saves are serialized and atomic) and applies at once.
 - **Not yet:** a settings window with live level meters, a per-source speech score, caption

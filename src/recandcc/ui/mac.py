@@ -113,6 +113,7 @@ class MacApp(rumps.App):
         self.room_item = rumps.MenuItem(ROOM_ITEM, callback=self._toggle_room)
         self.room_item.state = 1 if self.cfg.detection.room_listening else 0
         self.sensitivity_menu = rumps.MenuItem(SENSITIVITY_ITEM)
+        self._sensitivity_shown: str | None = None
         for name in SENSITIVITY_PRESETS:
             self.sensitivity_menu.add(rumps.MenuItem(name, callback=self._set_sensitivity))
         self._render_sensitivity()
@@ -217,6 +218,8 @@ class MacApp(rumps.App):
             self.rec_item.title = rec_title
         self.login_item.state = 1 if autostart.is_enabled() else 0
         self.room_item.state = 1 if self.cfg.detection.room_listening else 0  # hand edits too
+        if self.ctrl.sensitivity_preset() != self._sensitivity_shown:
+            self._render_sensitivity()  # hand edits and config reloads too
         self._render_live(st)
         # close a stale prompt dialog (answered elsewhere, expired, mode changed, ...)
         with self._dialog_lock:
@@ -341,7 +344,7 @@ class MacApp(rumps.App):
         sender.state = 1 if self.cfg.detection.room_listening else 0
 
     def _render_sensitivity(self) -> None:
-        preset = self.ctrl.sensitivity_preset()
+        preset = self._sensitivity_shown = self.ctrl.sensitivity_preset()
         for name, item in self.sensitivity_menu.items():
             item.state = 1 if name == preset else 0
 

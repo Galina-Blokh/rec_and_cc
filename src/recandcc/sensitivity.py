@@ -20,7 +20,7 @@ PRESETS: dict[str, tuple[int | None, int | None]] = {
 MIN_MARGIN_DB, MAX_MARGIN_DB = 3.0, 15.0  # room level above its noise floor, at 100 / 0
 # Speech needed is at most this share of the window (the window widens instead): even a busy
 # conversation leaves pauses, so every setting stays reachable.
-MAX_COVERAGE = 0.6
+MAX_COVERAGE = 0.5
 
 
 def valid(s: object) -> float | None:

@@ -542,10 +542,9 @@ class Controller:
         return f"Idle — {str(st.mode).capitalize()} mode"
 
     def _save_settings(self) -> None:
-        def save():  # serialized: the last save writes the latest settings
+        def save():  # Config.save serializes concurrent saves
             try:
-                with _SAVE_LOCK:
-                    self.cfg.save()
+                self.cfg.save()
             except Exception:
                 log.exception("saving settings failed")
 
@@ -621,7 +620,6 @@ class _LiveAwareQueue:
         self._ctrl._submit(session)
 
 
-_SAVE_LOCK = threading.Lock()
 ROOM_ITEM = "Listen for conversations in the room"
 SENSITIVITY_ITEM = "Sensitivity"
 ROOM_LISTENING_NOTICE = (
