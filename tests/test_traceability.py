@@ -20,6 +20,18 @@ def story_ids() -> list[str]:
     return re.findall(r"^### (US-\d+) ", (REQ / "stories.md").read_text("utf-8"), re.M)
 
 
+def summary_ids() -> list[str]:
+    return re.findall(r"^\| (US-\d+) \|", (REQ / "stories.md").read_text("utf-8"), re.M)
+
+
+def table_lines() -> list[tuple[str, str]]:
+    return [
+        (m[1], m[2])
+        for line in (REQ / "traceability.md").read_text("utf-8").splitlines()
+        if (m := re.match(r"\| (US-\d+) \|[^|]*\|(.*)\|$", line))
+    ]
+
+
 REF = re.compile(r"test_\w+\.py::(\*|test_\w+)")
 
 
@@ -30,12 +42,7 @@ def split_refs(cell: str) -> tuple[list[str], list[str]]:
 
 
 def table_cells() -> dict[str, str]:
-    cells = {}
-    for line in (REQ / "traceability.md").read_text("utf-8").splitlines():
-        m = re.match(r"\| (US-\d+) \|[^|]*\|(.*)\|$", line)
-        if m:
-            cells[m[1]] = m[2]
-    return cells
+    return dict(table_lines())
 
 
 def trace_rows() -> dict[str, list[str]]:
@@ -66,6 +73,9 @@ def test_every_story_is_traced_and_ids_are_unique():
     ids = story_ids()
     assert ids, "no stories found"
     assert len(ids) == len(set(ids))
+    assert summary_ids() == ids, "summary table and story sections differ"
+    traced = [story for story, _ in table_lines()]
+    assert len(traced) == len(set(traced)), "duplicate traceability rows"
     rows = trace_rows()
     assert sorted(rows) == sorted(ids)
     assert all(rows[i] for i in ids)
