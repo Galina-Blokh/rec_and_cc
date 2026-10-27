@@ -14,6 +14,7 @@ It blocks: call it from a worker thread, never from the UI or an audio thread.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import logging
 import os
@@ -117,6 +118,13 @@ def _is_valid(path: Path, model: ModelFile) -> bool:
     return True
 
 
+def _is_contention(e: OSError) -> bool:
+    """True if a non-blocking lock failed because another process holds it."""
+    if sys.platform == "win32":  # msvcrt.locking(LK_NBLCK): EACCES, or EDEADLOCK after retries
+        return e.errno in (errno.EACCES, getattr(errno, "EDEADLOCK", errno.EACCES))
+    return e.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK)
+
+
 class _FileLock:
     """Exclusive advisory lock on a file, shared between processes (the app and a CLI search):
     fcntl on POSIX, msvcrt on Windows (as the single-instance lock in ``cli.py``)."""
@@ -138,8 +146,10 @@ class _FileLock:
                 import fcntl
 
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        except OSError as e:
             f.close()
+            if not _is_contention(e):
+                raise  # not "held by someone else" (bad folder, permissions): fail fast
             return False
         self._f = f
         return True

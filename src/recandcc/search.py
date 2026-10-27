@@ -23,6 +23,7 @@ text is never logged.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -31,7 +32,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -72,6 +73,9 @@ class Hit:
     speaker: str
     language: str
     snippet: str  # matched text, the match marked with [ ]
+    # identity of the segment text (not shown, not compared): two segments of one speaker may
+    # share a start time and must not be merged when the rankings are fused
+    seg: str = field(default="", compare=False, repr=False)
 
     @property
     def transcript(self) -> Path:
@@ -467,7 +471,9 @@ class TranscriptIndex:
                     if r[8] == blobs.get(r[0]):  # a reused rowid holds another segment now
                         found[r[0]] = r
         return [
-            Hit(Path(r[1]), r[2], r[3], float(r[4]), r[5], r[6], _plain_snippet(r[7]))
+            Hit(
+                Path(r[1]), r[2], r[3], float(r[4]), r[5], r[6], _plain_snippet(r[7]), _seg_id(r[7])
+            )
             for i in ids
             if (r := found.get(i)) is not None
         ]
@@ -499,24 +505,31 @@ class TranscriptIndex:
                 match = " ".join('"' + w.replace('"', "") + '"*' for w in words)
                 rows = db.execute(
                     "SELECT f.folder, s.session_id, s.started_at, f.start, f.speaker, "
-                    "f.language, highlight(seg_fts, 0, char(1), char(2)), f.orig FROM seg_fts f "
+                    "f.language, highlight(seg_fts, 0, char(1), char(2)), f.orig, f.text "
+                    "FROM seg_fts f "
                     "JOIN sessions s ON s.folder = f.folder WHERE seg_fts MATCH ? "
                     "ORDER BY bm25(seg_fts), s.started_at DESC, f.start LIMIT ?",
                     (match, limit),
                 ).fetchall()
-                rows = [(*r[:6], _snippet(_restore(r[6], r[7]))) for r in rows]
+                rows = [(*r[:6], _snippet(_restore(r[6], r[7])), _seg_id(r[8])) for r in rows]
             else:
                 folded = [_fold(w) for w in words]
                 where = " AND ".join(["p.norm LIKE ? ESCAPE '\\'"] * len(folded))
                 sql = _LIKE_SQL.format(where=where)  # only constants and placeholders
                 params = (*(f"%{_escape_like(w)}%" for w in folded), limit)
                 rows = db.execute(sql, params).fetchall()
-                rows = [(*r[:6], _snippet(_mark(r[6], folded[0]))) for r in rows]
-        return [Hit(Path(r[0]), r[1], r[2], float(r[3]), r[4], r[5], r[6]) for r in rows]
+                rows = [(*r[:6], _snippet(_mark(r[6], folded[0])), _seg_id(r[6])) for r in rows]
+        return [Hit(Path(r[0]), r[1], r[2], float(r[3]), r[4], r[5], r[6], r[7]) for r in rows]
 
 
-def _key(h: Hit) -> tuple[Path, float, str]:
-    return (h.folder, h.start, h.speaker)  # Me and Others can speak at the same timestamp
+def _seg_id(text: str) -> str:
+    """Identity of a segment's text; ё/е-insensitive, as the full-text index stores it."""
+    return hashlib.blake2b(_yo(text).encode(), digest_size=8).hexdigest()
+
+
+def _key(h: Hit) -> tuple[Path, float, str, str]:
+    # Me and Others can speak at the same timestamp, and so can two segments of one speaker
+    return (h.folder, h.start, h.speaker, h.seg)
 
 
 def fuse(lexical: Sequence[Hit], semantic: Sequence[Hit]) -> list[Hit]:
@@ -534,8 +547,8 @@ def fuse(lexical: Sequence[Hit], semantic: Sequence[Hit]) -> list[Hit]:
 def rrf(rankings: Sequence[Sequence[Hit]]) -> list[Hit]:
     """Reciprocal rank fusion of rankings of hits (one segment = folder + start + speaker).
     The first ranking's copy of a hit is kept (the full-text one has the highlighted snippet)."""
-    score: dict[tuple[Path, float, str], float] = {}
-    first: dict[tuple[Path, float, str], Hit] = {}
+    score: dict[tuple[Path, float, str, str], float] = {}
+    first: dict[tuple[Path, float, str, str], Hit] = {}
     for ranking in rankings:
         for rank, h in enumerate(ranking):
             key = _key(h)

@@ -461,6 +461,17 @@ def test_me_and_others_at_the_same_timestamp_stay_separate():
     assert search.fuse([a], [b]) == [a, b]
 
 
+def test_same_speaker_same_start_segments_stay_separate(tmp_path, out):
+    make_session(out, 1, [seg(1, "the invoice"), seg(1, "invoice again")])
+    idx = make(tmp_path, FakeEmbedder())
+    sync(idx, out)
+    lex = idx._lexical("invoice")
+    sem = idx._semantic("invoice", 5)
+    assert len(lex) == 2 and len({search._key(h) for h in lex}) == 2
+    assert len(search.fuse(lex, sem)) == 2
+    assert len(rrf([lex])) == 2
+
+
 def test_semantic_reads_only_the_winners_text(tmp_path, out):
     make_session(out, 1, [seg(1, "the invoice"), seg(2, "lunch")])
     idx = make(tmp_path, FakeEmbedder())
@@ -1538,6 +1549,38 @@ def test_download_lock_wait_is_bounded_and_not_a_failure(model_dir, monkeypatch)
     assert semantic._last_failure == 0.0  # no 10-minute backoff
     holder.release()
     assert semantic.model_path(_fake_model(data)) == model_dir / "m.onnx"
+
+
+def _fake_msvcrt(monkeypatch, err):
+    import sys
+    import types
+
+    def locking(fd, mode, n):
+        raise err
+
+    mod = types.SimpleNamespace(locking=locking, LK_NBLCK=2, LK_UNLCK=0)
+    monkeypatch.setitem(sys.modules, "msvcrt", mod)
+    monkeypatch.setattr(sys, "platform", "win32")
+
+
+def test_windows_lock_contention_means_held(tmp_path, monkeypatch):
+    import errno
+
+    _fake_msvcrt(monkeypatch, OSError(errno.EACCES, "locked"))
+    assert semantic._FileLock(tmp_path / "l").try_acquire() is False
+
+
+def test_windows_other_lock_errors_fail_fast(model_dir, monkeypatch):
+    import errno
+    import time
+
+    _fake_msvcrt(monkeypatch, OSError(errno.ENOENT, "gone"))
+    monkeypatch.setattr(semantic, "DOWNLOAD_LOCK_WAIT_S", 600)
+    monkeypatch.setattr(semantic, "DOWNLOAD_LOCK_POLL_S", 5)
+    calls = _urlopen(monkeypatch, b"x")
+    t0 = time.monotonic()
+    assert semantic.model_path(_fake_model(b"weights")) is None and calls == []
+    assert time.monotonic() - t0 < 2
 
 
 def test_download_uses_a_per_process_temp_name(model_dir, monkeypatch):
