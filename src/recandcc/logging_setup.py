@@ -18,6 +18,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from .config import LOG_DIR
 
@@ -66,8 +67,14 @@ def set_crash_notifier(notifier: Notifier | None) -> None:
     _notifier = notifier
 
 
-def install_crash_handlers(faults_file: Path | None = FAULTS_FILE) -> None:
-    """Log uncaught exceptions of every thread; native crashes go to `faults_file`."""
+_DEFAULT: Any = object()
+
+
+def install_crash_handlers(faults_file: Path | None = _DEFAULT) -> None:
+    """Log uncaught exceptions of every thread; native crashes go to `faults_file` (default
+    FAULTS_FILE, read at call time; None disables)."""
+    if faults_file is _DEFAULT:
+        faults_file = FAULTS_FILE
     global _installed, _faults_file
     if not _installed:
         sys.excepthook = _excepthook
