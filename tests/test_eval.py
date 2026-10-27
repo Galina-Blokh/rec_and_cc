@@ -600,16 +600,34 @@ def test_hypothesis_txt_is_wer_only_over_the_clip(tmp_path):
     ("files", "msg"),
     [
         ({}, "no c.json or c.txt"),
-        ({"c.json": json.dumps([{"start": 0, "end": 1}])}, "bad hypothesis file"),
+        ({"c.json": json.dumps([{"start": 0, "end": 1}])}, r"segment 0 \(KeyError 'text'\)"),
         ({"c.json": json.dumps([{"start": 2, "end": 1, "text": "a"}])}, "start <= end"),
+        ({"c.json": json.dumps([{"start": 0, "end": 9, "text": "a"}])}, "after the audio"),
         ({"c.json": json.dumps([{"start": 0, "end": 1, "text": "a", "x": 1}])}, "unknown key"),
-        ({"c.json": json.dumps({"segs": []})}, "bad hypothesis file"),
+        ({"c.json": json.dumps({"segs": []})}, r"file \(KeyError 'segments'\)"),
+        ({"c.json": json.dumps({"segments": [], "elapsed_s": -1})}, "elapsed_s"),
+        ({"c.json": '{"segments": [], "elapsed_s": NaN}'}, "elapsed_s"),
+        ({"c.json": "{secret words"}, r"file \(JSONDecodeError\)"),
+        ({"c.json": json.dumps([{"start": "secret words", "end": 1, "text": "a"}])}, "ValueError"),
     ],
 )
-def test_bad_hypothesis_files_name_the_clip(tmp_path, files, msg):
+def test_bad_hypothesis_files_name_the_clip_but_no_values(tmp_path, files, msg):
     clip, hyp = hyp_set(tmp_path, files)
-    with pytest.raises(ValueError, match=msg):
+    with pytest.raises(ValueError, match=msg) as e:
         ev.score_hypothesis(clip, hyp)
+    assert str(e.value).startswith("clip c: ") and "secret" not in str(e.value)
+
+
+def test_hypothesis_json_bom_int_speakers_and_json_before_txt(tmp_path):
+    segs = [
+        {"start": 0, "end": 1, "text": "hello there", "speaker": 0},
+        {"start": 1, "end": 2, "text": "да нет", "speaker": 1},
+    ]
+    files = {"c.json": "﻿" + json.dumps(segs), "c.txt": "something else"}
+    clip, hyp = hyp_set(tmp_path, files)
+    r = ev.score_hypothesis(clip, hyp)
+    assert r["diarization"]["der"] == 0.0 and r["text"]["en"]["edits"] == 0  # .json wins
+    assert "diarization" not in ev.score_hypothesis(clip, hyp, diarize=False)
 
 
 def test_main_scores_hypotheses_without_the_pipeline(tmp_path, monkeypatch, capsys):
@@ -627,9 +645,44 @@ def test_main_scores_hypotheses_without_the_pipeline(tmp_path, monkeypatch, caps
     report = json.loads(out.read_text(encoding="utf-8"))
     assert report["backend"] == "external" and report["language_id"] == "engine's own"
     assert report["summary"]["languages"]["all"]["wer"] == 0.0
-    assert "wall_s" in report and "peak_memory_mb" in report
+    assert report["wall_s"] is None and report["peak_memory_mb"] is None  # the engine's, not ours
     printed = capsys.readouterr().out
     assert "hypotheses hyp [external]" in printed and "language-ID n/a" in printed
+    assert "wall n/a s, peak memory n/a MB" in printed
+    assert "1 clip(s) without a time, not in RTF" in printed
     assert "да" not in out.read_text(encoding="utf-8") + printed  # no text
-    with pytest.raises(SystemExit):  # --hypotheses runs no model
-        ev.main([str(tmp_path), "--hypotheses", str(hyp), "--backend", "cpu"])
+    for flag in (["--backend", "cpu"], ["--model", "small"], ["--live"]):  # no model runs
+        with pytest.raises(SystemExit):
+            ev.main([str(tmp_path), "--hypotheses", str(hyp), *flag])
+
+
+def test_hypothesis_txt_single_language_clip(tmp_path):
+    write_set(tmp_path, {"id": "c", "audio": "c.wav", "utterances": [U]})
+    (tmp_path / "c.txt").write_text("да", encoding="utf-8")
+    (clip,) = ev.load_manifest(tmp_path)
+    assert ev.score_hypothesis(clip, tmp_path)["text"] == {
+        "ru": {"words": 1, "edits": 0, "utts": 1, "lid_ok": 0}
+    }
+
+
+def test_peak_memory_falls_back_to_psutil_then_na(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setitem(sys.modules, "resource", None)  # as on Windows: import fails
+    info = SimpleNamespace(peak_wset=300 * 2**20)
+    proc = SimpleNamespace(memory_info=lambda: info)
+    fake = SimpleNamespace(Process=lambda: proc)
+    monkeypatch.setitem(sys.modules, "psutil", fake)
+    assert ev.peak_memory_mb() == 300.0
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    assert ev.peak_memory_mb() is None
+
+
+def test_mlx_peak_memory(monkeypatch):
+    from types import SimpleNamespace
+
+    fake = SimpleNamespace(get_peak_memory=lambda: 2 * 2**30)
+    monkeypatch.setitem(sys.modules, "mlx.core", fake)
+    assert ev.mlx_peak_mb() == 2048.0
+    monkeypatch.setitem(sys.modules, "mlx.core", None)
+    assert ev.mlx_peak_mb() is None

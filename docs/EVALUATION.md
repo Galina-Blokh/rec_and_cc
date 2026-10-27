@@ -81,7 +81,10 @@ disk is never written. `mlx` fails at once if MLX is not available (not Apple si
 mlx-whisper not installed). `auto` (the default) uses the config's `backend` and `device`.
 The chosen backend is printed and stored in `eval-results.json` as `backend`, with
 `wall_s`, `peak_memory_mb` and, on MLX, `gpu_peak_memory_mb`. Run one backend per process,
-so that the peak memory belongs to that backend alone.
+so that the peak memory belongs to that backend alone. Peak memory is this process's high-water
+mark, so it includes the diarizer (add `--no-diarize` to leave it out). Wall time includes
+model loading and, with `--live`, the live replay, so compare backends' wall times without
+`--live`.
 
 With `--live`, each clip is also replayed through the live transcriber (`LiveTranscriber`,
 the same one that drives captions in the app) after the batch run, on the same models. The
@@ -122,15 +125,23 @@ it loads no models and can't be combined with `--model`, `--backend` or `--live`
 }
 ```
 
-- A bare list of segments works too. `start`, `end` and `text` are required.
+- A bare list of segments works too. `start`, `end` and `text` are required; segments must
+  end within the audio (0.5 s of slack). A UTF-8 BOM is accepted.
 - `language` (optional): language-ID accuracy is scored only if every segment has one; it
   is the engine's own language ID, not RecAndCC's (`language_id` in the results says so).
-- `speaker` (optional): DER is scored only on `others` clips where every segment has one.
-- `elapsed_s` (optional): the engine's wall time for the clip, used for RTF. Measure peak
-  memory outside, e.g. with `/usr/bin/time -l`.
+- `speaker` (optional, string or number): DER is scored only on `others` clips where every
+  segment has one, and not with `--no-diarize`.
+- `elapsed_s` (optional): the engine's wall time for the clip, used for RTF. Clips without
+  it are left out of RTF, with a warning.
 
 `<clip-id>.txt`: plain text, no times. Scored for WER only, over the whole clip: listed
 under the clip's language, or `mixed` for a code-switched clip. Language ID and DER are n/a.
+If both files exist, the `.json` is used.
+
+The report's `wall_s` and `peak_memory_mb` are n/a here: this script's own time and memory
+say nothing about the engine. Measure the engine's run yourself, e.g. with `/usr/bin/time -l`
+(macOS: "maximum resident set size"), and put those numbers in the table below. Error
+messages name the clip and segment, never a value from the file.
 
 ## Backend comparison
 

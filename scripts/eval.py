@@ -353,40 +353,53 @@ def load_hypothesis(clip: Clip, folder: Path) -> tuple[list[Segment] | None, str
             break
     else:
         raise ValueError(f"clip {clip.id}: no {clip.id}.json or {clip.id}.txt in {folder}")
-    raw = path.read_text(encoding="utf-8")
-    if ext == ".txt":
-        return None, raw, {}
-    data = json.loads(raw)
+    n, duration = -1, sf.info(str(clip.audio)).duration
     try:
+        raw = path.read_text(encoding="utf-8-sig")  # tolerate a BOM (common on Windows)
+        if ext == ".txt":
+            return None, raw, {}
+        data = json.loads(raw)
         items = data["segments"] if isinstance(data, dict) else data
         elapsed = data.get("elapsed_s") if isinstance(data, dict) else None
+        if elapsed is not None and not (math.isfinite(float(elapsed)) and float(elapsed) >= 0):
+            raise BadHypothesis("elapsed_s must be a finite number >= 0")
         extras = {"elapsed_s": None if elapsed is None else float(elapsed)}
-        if any(set(i) - HYP_KEYS for i in items):
-            raise KeyError(f"unknown key, expected {sorted(HYP_KEYS)}")
-        segs = [
-            Segment(
+        segs = []
+        for n, i in enumerate(items):  # noqa: B007 - `n` names the segment in errors
+            if unknown := set(i) - HYP_KEYS:
+                raise BadHypothesis(f"unknown key {sorted(unknown)}")
+            s = Segment(
                 start=float(i["start"]),
                 end=float(i["end"]),
                 text=str(i["text"]),
-                speaker=str(i.get("speaker") or ""),
-                language=lang_code(i.get("language") or ""),
+                speaker="" if i.get("speaker") is None else str(i["speaker"]),
+                language=lang_code(str(i.get("language") or "")),
             )
-            for i in items
-        ]
-        for s in segs:
             if not (math.isfinite(s.start) and math.isfinite(s.end) and 0 <= s.start <= s.end):
-                raise ValueError("times must be 0 <= start <= end")
-    except (KeyError, TypeError, ValueError, AttributeError) as e:
-        raise ValueError(f"clip {clip.id}: bad hypothesis file ({e})") from None
+                raise BadHypothesis("times must be 0 <= start <= end")
+            if s.end > duration + 0.5:
+                raise BadHypothesis(f"segment ends after the audio ({duration:.2f} s)")
+            segs.append(s)
+    except (BadHypothesis, KeyError, TypeError, ValueError, AttributeError, UnicodeError) as e:
+        # Never a parser's message: it can quote a value, which may be transcript text.
+        why = str(e) if isinstance(e, BadHypothesis) else type(e).__name__
+        why += f" {e}" if isinstance(e, KeyError) else ""  # the missing key's name
+        where = f"segment {n}" if n >= 0 else "file"
+        raise ValueError(f"clip {clip.id}: bad hypothesis {where} ({why})") from None
     return segs, "", extras
 
 
-def score_hypothesis(clip: Clip, folder: Path) -> dict:
+class BadHypothesis(Exception):
+    """A malformed hypothesis file; the message never holds values from the file."""
+
+
+def score_hypothesis(clip: Clip, folder: Path, diarize: bool = True) -> dict:
     """Score another tool's transcript of `clip` with the same metrics as a pipeline run.
 
     Language ID is scored only when every segment has a language, DER only when every segment
-    of an "others" clip has a speaker; otherwise they are n/a. A ``.txt`` file has no times,
-    so its WER is over the whole clip, under the clip's language (or "mixed")."""
+    of an "others" clip has a speaker (and `diarize`); otherwise they are n/a. A ``.txt``
+    file has no times, so its WER is over the whole clip, under the clip's language (or
+    "mixed")."""
     segs, text, extras = load_hypothesis(clip, folder)
     result: dict = {"id": clip.id, "track": str(clip.track)}
     result["audio_s"], result["elapsed_s"] = sf.info(clip.audio).duration, extras.get("elapsed_s")
@@ -401,7 +414,7 @@ def score_hypothesis(clip: Clip, folder: Path) -> dict:
         return result
     result["text"] = text_scores(clip.utterances, segs)
     result["lid_scored"] = bool(segs) and all(s.language for s in segs)
-    if clip.track is Track.OTHERS and segs and all(s.speaker for s in segs):
+    if diarize and clip.track is Track.OTHERS and segs and all(s.speaker for s in segs):
         ref_turns = [(u.start, u.end, u.speaker) for u in clip.utterances]
         result["diarization"] = der(ref_turns, [(s.start, s.end, s.speaker) for s in segs])
     return result
@@ -480,6 +493,7 @@ def summarize(results: list[dict]) -> dict:
         "clips": len(results),
         "clips_without_der": sum(1 for r in results if r.get("diarization_ok") is False),
         "clips_without_live": sum(1 for r in results if r.get("live_ok") is False),
+        "clips_without_time": len(results) - len(timed),
     }
 
 
@@ -544,11 +558,13 @@ def main(argv: list[str] | None = None) -> int:
     clips = load_manifest(args.root.expanduser())
     if args.hypotheses:
         folder = args.hypotheses.expanduser()
-        results = [score_hypothesis(c, folder) for c in clips]
+        results = [score_hypothesis(c, folder, not args.no_diarize) for c in clips]
         report = {
             "engine": f"hypotheses {folder.name}",
             "backend": "external",
             "language_id": "engine's own",
+            "wall_s": None,  # this script's own time and memory say nothing about the engine
+            "peak_memory_mb": None,
         }
         return write_report(args.json, report, results, t_start)
 
@@ -580,19 +596,20 @@ def main(argv: list[str] | None = None) -> int:
         transcriber.close()
         if diarizer is not None:
             diarizer.close()
-    gpu = bool(getattr(transcriber, "gpu", False))
+    gpu, dev = bool(getattr(transcriber, "gpu", False)), cfg.device
     report = {
         "engine": f"model {cfg.model}",
         "model": cfg.model,
-        "backend": "mlx" if gpu else f"faster-whisper ({cfg.device})",
+        "backend": "mlx" if gpu else "faster-whisper" + ("" if dev == "auto" else f" ({dev})"),
         "gpu_peak_memory_mb": mlx_peak_mb() if gpu else None,
     }
     return write_report(args.json, report, results, t_start)
 
 
 def write_report(path: Path, report: dict, results: list[dict], t_start: float) -> int:
-    report["wall_s"] = round(time.monotonic() - t_start, 2)
-    report["peak_memory_mb"] = peak_memory_mb()
+    if report["backend"] != "external":
+        report["wall_s"] = round(time.monotonic() - t_start, 2)
+        report["peak_memory_mb"] = peak_memory_mb()
     report |= {"summary": summarize(results), "clips": results}
     path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     s = report["summary"]
@@ -600,7 +617,11 @@ def write_report(path: Path, report: dict, results: list[dict], t_start: float) 
     print(f"{head}, RTF {na(s['rtf'])}, DER {na(s['der'])}")
     gpu_mem = report.get("gpu_peak_memory_mb")
     mem = f"peak memory {na(report['peak_memory_mb'])} MB"
-    print(f"  wall {report['wall_s']} s, {mem}" + (f", MLX GPU {gpu_mem} MB" if gpu_mem else ""))
+    print(
+        f"  wall {na(report['wall_s'])} s, {mem}" + (f", MLX GPU {gpu_mem} MB" if gpu_mem else "")
+    )
+    if s["clips_without_time"]:
+        print(f"  warning: {s['clips_without_time']} clip(s) without a time, not in RTF")
     if s["clips_without_der"]:
         print(f"  warning: diarization failed on {s['clips_without_der']} clip(s), not in DER")
     for lang, v in s["languages"].items():
