@@ -15,6 +15,13 @@ embedding in ``seg_vec``, computed outside the write lock right after the FTS up
 is embedded, stored or fused, and results are exactly the full-text ones; vectors left from
 an earlier opt-in are deleted at the next ``sync``.
 
+Repeated queries score an in-process cache of the vector matrix (built lazily by the first
+query once the embed worker is idle; at most ``CACHE_MAX_ROWS`` rows, about 1.5 KB of float32
+per 384-d segment plus its metadata). Every committed change of ``seg_vec`` writes a fresh
+random token into ``vec_version`` in the same transaction and, in this process, drops the
+cache; a query reuses the cache only while the token matches, so writes of another process
+(the CLI) are seen too. Without a fresh cache a query streams the vectors from SQLite.
+
 Every call opens its own connection, so any thread may use an index; writes are serialised
 by a lock (and by SQLite's file lock across processes, e.g. the app and the CLI). Transcript
 text is never logged.
@@ -28,6 +35,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -52,7 +60,8 @@ _MARKS = "\x01\x02"  # highlight marks, shown as [ ]
 SEMANTIC_MIN_SIM = 0.45  # cosine below this is not a semantic match (0.3 matched unrelated lines)
 RRF_K = 60  # reciprocal rank fusion constant
 POOL = 4  # each ranking contributes up to POOL * limit candidates to the fusion
-SCAN_CHUNK = 2048  # vectors scored per fetch: bounded memory, no whole-table matrix
+SCAN_CHUNK = 2048  # vectors scored (or cached) per fetch
+CACHE_MAX_ROWS = 200_000  # vector cache cap: ~300 MB of 384-d float32 plus metadata; above: stream
 EMBED_CHUNK = 64  # segments embedded between two checks of ``busy``
 BUSY_POLL_S = 0.5
 NO_VECTORS = np.zeros((0, 0), dtype=np.float32)  # a session without segments
@@ -80,6 +89,18 @@ class Hit:
     @property
     def transcript(self) -> Path:
         return self.folder / "transcript.md"
+
+
+@dataclass(frozen=True, eq=False)
+class _VecCache:
+    """A snapshot of the stored vectors of one model, consistent with ``token``."""
+
+    token: str
+    model: str
+    matrix: np.ndarray  # (rows, dim) float32, L2-normalised as stored, in rowid order
+    # per row: (folder, session_id, started_at, start, speaker, language, text), kept with the
+    # vector so a hit is never looked up again by rowid (no reuse race)
+    meta: list[tuple[str, str, str, float, str, str, str]]
 
 
 def has_fts5() -> bool:
@@ -113,6 +134,11 @@ class TranscriptIndex:
         self._init_lock = threading.Lock()  # first connection: files + schema
         self._ready = False
         self._fts_secure = True  # FTS5 'secure-delete' (SQLite >= 3.42) is on
+        self._vec_dirty = False  # a vector change awaits its commit (only under ``_lock``)
+        self._cache: _VecCache | None = None
+        self._cache_gen = 0  # bumped after each committed vector change in this process
+        self._cache_lock = threading.Lock()  # guards the two above; held only for assignments
+        self._cache_build = threading.Lock()  # one cache builder at a time (never waited for)
 
     # ------------------------------------------------------------------ storage
     def _connect(self) -> sqlite3.Connection:
@@ -142,7 +168,8 @@ class TranscriptIndex:
 
     def _create(self, db: sqlite3.Connection) -> None:
         if db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
-            for table in ("sessions", "seg_fts", "seg_plain", "seg_vec", "sem_sessions"):
+            tables = ("sessions", "seg_fts", "seg_plain", "seg_vec", "sem_sessions", "vec_version")
+            for table in tables:
                 db.execute(f"DROP TABLE IF EXISTS {table}")
             db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         db.execute(
@@ -175,11 +202,35 @@ class TranscriptIndex:
             "CREATE TABLE IF NOT EXISTS sem_sessions "
             "(folder TEXT PRIMARY KEY, stamp TEXT, model TEXT)"
         )
+        # A random token, replaced by every vector change: a recreated table never repeats one.
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS vec_version (id INTEGER PRIMARY KEY CHECK (id = 0), "
+            "token TEXT)"
+        )
+        db.execute("INSERT OR IGNORE INTO vec_version VALUES (0, ?)", (secrets.token_hex(8),))
         db.commit()
 
     @property
     def _table(self) -> str:
         return "seg_fts" if self.fts else "seg_plain"
+
+    def _bump(self, db: sqlite3.Connection) -> None:
+        """Vectors change in this (uncommitted) transaction: new token, cache dropped at commit."""
+        db.execute("UPDATE vec_version SET token = ? WHERE id = 0", (secrets.token_hex(8),))
+        self._vec_dirty = True
+
+    def _commit(self, db: sqlite3.Connection) -> None:
+        """Commit (under ``_lock``); after a vector change drop the cache only now, so a cache
+        built from the old rows meanwhile is refused at install (generation changed)."""
+        db.commit()
+        if self._vec_dirty:
+            self._vec_dirty = False
+            self._drop_cache()
+
+    def _drop_cache(self) -> None:
+        with self._cache_lock:
+            self._cache_gen += 1
+            self._cache = None
 
     def _purge(self, db: sqlite3.Connection) -> None:
         """After deletes, when FTS5 can't secure-delete: merge the index and rewrite the file
@@ -203,7 +254,7 @@ class TranscriptIndex:
             removed = self._drop(db, str(d))
             if parsed is not None:
                 self._write(db, d, *parsed)
-            db.commit()
+            self._commit(db)
             if removed:
                 self._purge(db)
         self._kick_embed()
@@ -234,7 +285,7 @@ class TranscriptIndex:
             for folder in todo:
                 removed += self._drop(db, folder)
                 self._write(db, Path(folder), found[folder], parsed[folder])
-            db.commit()
+            self._commit(db)
             if removed:
                 self._purge(db)
         self._kick_embed()
@@ -246,7 +297,9 @@ class TranscriptIndex:
         """Remove a session; True if it had segments (so there is text to purge)."""
         db.execute("DELETE FROM sessions WHERE folder = ?", (folder,))
         vec = db.execute("DELETE FROM seg_vec WHERE folder = ?", (folder,))
-        db.execute("DELETE FROM sem_sessions WHERE folder = ?", (folder,))
+        sem = db.execute("DELETE FROM sem_sessions WHERE folder = ?", (folder,))
+        if vec.rowcount > 0 or sem.rowcount > 0:
+            self._bump(db)
         table = self._table  # a constant, never user input
         cur = db.execute(f"DELETE FROM {table} WHERE folder = ?", (folder,))  # noqa: S608
         return cur.rowcount > 0 or vec.rowcount > 0
@@ -271,8 +324,10 @@ class TranscriptIndex:
     # ------------------------------------------------------------------ embeddings
     def set_embedder(self, embedder: Embedder | None) -> None:
         """Switch semantic search on or off (None). Vectors of another model are re-embedded;
-        a running worker notices the swap before it stores anything."""
+        a running worker notices the swap before it stores anything. Off releases the cache."""
         self.embedder = embedder
+        if embedder is None:
+            self._drop_cache()
 
     def _wait_idle(self, embedder: Embedder) -> bool:
         """Pause while ``busy`` (a recording or a prompt); False if the embedder was swapped."""
@@ -337,7 +392,8 @@ class TranscriptIndex:
                 if had:
                     db.execute("DELETE FROM seg_vec")
                     db.execute("DELETE FROM sem_sessions")
-                    db.commit()  # secure_delete overwrites freed pages: no VACUUM in the lock
+                    self._bump(db)
+                    self._commit(db)  # secure_delete overwrites freed pages: no VACUUM in the lock
         except Exception as e:  # noqa: BLE001 - semantic search is optional
             log.error("dropping search vectors failed: %s", type(e).__name__)
 
@@ -402,7 +458,8 @@ class TranscriptIndex:
                         "INSERT OR REPLACE INTO sem_sessions VALUES (?, ?, ?)",
                         (folder, stamp, model),
                     )
-                    db.commit()
+                    self._bump(db)
+                    self._commit(db)
         except Exception as e:  # noqa: BLE001 - semantic search is optional
             log.error("semantic indexing failed: %s", type(e).__name__)
 
@@ -421,6 +478,9 @@ class TranscriptIndex:
         if q is None or not len(q):
             return []
         model, dim, q0 = self._model_id(), q.shape[1], q[0]
+        cache = self._fresh_cache(model, dim)
+        if cache is not None:
+            return _score_cached(cache, q0, limit)
         top_ids = np.zeros(0, dtype=np.int64)
         top_sims = np.zeros(0, dtype=np.float32)
         last = 0
@@ -478,6 +538,80 @@ class TranscriptIndex:
             if (r := found.get(i)) is not None
         ]
 
+    def _vec_token(self) -> str | None:
+        with contextlib.closing(self._connect()) as db:
+            row = db.execute("SELECT token FROM vec_version").fetchone()
+        return row[0] if row else None
+
+    def _fresh_cache(self, model: str, dim: int) -> _VecCache | None:
+        """The cached vectors if still current, else a new cache; None (stream instead) while
+        the embed worker runs (it would invalidate it at once), while another query builds
+        one, above ``CACHE_MAX_ROWS``, or if the vectors changed during the build."""
+        with self._cache_lock:
+            cache, gen = self._cache, self._cache_gen
+        token = self._vec_token()
+        if cache is not None and cache.token == token and cache.model == model:
+            return cache if cache.matrix.shape[1] == dim else None
+        if cache is not None:  # stale (e.g. another process wrote): release it now
+            with self._cache_lock:
+                if self._cache is cache:
+                    self._cache = None
+        with self._embed_guard:
+            if self._embed_thread is not None:
+                return None
+        if token is None or not self._cache_build.acquire(blocking=False):
+            return None
+        try:
+            built = self._build_cache(token, model, dim)
+        finally:
+            self._cache_build.release()
+        if built is None:
+            return None
+        with self._cache_lock:
+            if self._cache_gen != gen:
+                return None  # changed in this process meanwhile: never keep old rows
+            self._cache = built
+        log.debug("search vector cache: %d rows", len(built.meta))
+        return built
+
+    def _build_cache(self, token: str, model: str, dim: int) -> _VecCache | None:
+        """Read the vectors in chunks (no long read lock, so writers aren't held up) and keep
+        them only if the token is unchanged afterwards: no change committed in between."""
+        parts: list[np.ndarray] = []
+        meta: list[tuple[str, str, str, float, str, str, str]] = []
+        pool: dict[str, str] = {}  # one string object per folder, speaker, ...
+        last = 0
+        while True:
+            with contextlib.closing(self._connect()) as db:
+                rows = db.execute(
+                    "SELECT v.rowid, v.vec, v.folder, s.session_id, s.started_at, v.start, "
+                    "v.speaker, v.language, v.text FROM seg_vec v "
+                    "JOIN sem_sessions m ON m.folder = v.folder "
+                    "JOIN sessions s ON s.folder = v.folder "
+                    "WHERE m.model = ? AND v.rowid > ? ORDER BY v.rowid LIMIT ?",
+                    (model, last, SCAN_CHUNK),
+                ).fetchall()
+            if len(meta) + len(rows) > CACHE_MAX_ROWS:
+                return None
+            if rows:
+                last = rows[-1][0]
+                blob = b"".join(r[1] for r in rows)
+                if len(blob) != len(rows) * dim * 4:  # another model's vectors
+                    return None
+                parts.append(np.frombuffer(blob, dtype=np.float32).reshape(len(rows), dim))
+                p = pool.setdefault
+                meta.extend(
+                    (p(r[2], r[2]), p(r[3], r[3]), p(r[4], r[4]), float(r[5]))
+                    + (p(r[6], r[6]), p(r[7], r[7]), r[8])
+                    for r in rows
+                )
+            if len(rows) < SCAN_CHUNK:
+                break
+        if self._vec_token() != token:
+            return None
+        matrix = np.concatenate(parts) if parts else np.zeros((0, dim), dtype=np.float32)
+        return _VecCache(token, model, matrix, meta)
+
     # ------------------------------------------------------------------ queries
     def search(self, query: str, limit: int = 20) -> list[Hit]:
         """Full-text matches (``_lexical``); with an embedder, fused by reciprocal rank with
@@ -520,6 +654,31 @@ class TranscriptIndex:
                 rows = db.execute(sql, params).fetchall()
                 rows = [(*r[:6], _snippet(_mark(r[6], folded[0])), _seg_id(r[6])) for r in rows]
         return [Hit(Path(r[0]), r[1], r[2], float(r[3]), r[4], r[5], r[6], r[7]) for r in rows]
+
+
+def _score_cached(cache: _VecCache, q0: np.ndarray, limit: int) -> list[Hit]:
+    """The streaming scan's ranking over the cached matrix: best first, ties by rowid."""
+    sims = cache.matrix @ q0
+    ids = np.flatnonzero(sims >= SEMANTIC_MIN_SIM)
+    if len(ids) > limit:
+        ids = ids[np.argpartition(-sims[ids], limit - 1)[:limit]]
+    hits = []
+    for i in ids[np.lexsort((ids, -sims[ids]))][:limit]:
+        folder, session_id, started_at, start, speaker, language, text = cache.meta[i]
+        snippet = _plain_snippet(text)
+        hits.append(
+            Hit(
+                Path(folder),
+                session_id,
+                started_at,
+                start,
+                speaker,
+                language,
+                snippet,
+                _seg_id(text),
+            )
+        )
+    return hits
 
 
 def _seg_id(text: str) -> str:

@@ -1388,6 +1388,7 @@ def test_recording_busy_includes_the_transcription_backlog():
 
 
 def test_a_reused_rowid_between_scan_and_materialise_is_not_shown(tmp_path, out, monkeypatch):
+    monkeypatch.setattr(search, "CACHE_MAX_ROWS", 0)  # the streaming path (the cache keeps rows)
     make_session(out, 1, [seg(1, "the invoice is due")])
     idx = TranscriptIndex(tmp_path / "idx" / "s.sqlite3", embedder=FakeEmbedder())
     sync(idx, out)
