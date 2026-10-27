@@ -7,6 +7,8 @@ from collections.abc import Callable
 
 import numpy as np
 
+from ..models import AppTarget
+
 # Receives float32 mono SAMPLE_RATE frames. Called on the capture thread:
 # implementations of the callback must return quickly (just enqueue the data).
 FrameCallback = Callable[[np.ndarray], None]
@@ -22,3 +24,7 @@ class AudioSource(ABC):
     @abstractmethod
     def stop(self) -> None:
         """Stop capturing and release the device. Idempotent."""
+
+    def add_target(self, target: AppTarget) -> bool:
+        """Also record ``target`` (per-app system audio only). False if not supported."""
+        return False

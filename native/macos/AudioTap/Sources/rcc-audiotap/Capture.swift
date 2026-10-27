@@ -1,8 +1,9 @@
 // System audio capture through a Core Audio process tap.
 //
 // How it fits together:
-//   1. A CATapDescription describes *what* to tap: here a global stereo mixdown of every
-//      process's output, minus an exclusion list (ourselves + whatever the caller passes).
+//   1. A CATapDescription describes *what* to tap: a global stereo mixdown of every
+//      process's output minus an exclusion list (ourselves + whatever the caller passes), or,
+//      with an AppTarget, a stereo mixdown of just that app's processes (per-app tap).
 //   2. AudioHardwareCreateProcessTap turns it into a tap audio object.
 //   3. A tap cannot be read directly: it has to be placed inside an aggregate device
 //      (kAudioAggregateDeviceTapListKey). The aggregate shows up with the tap as an *input*
@@ -18,11 +19,41 @@ import Foundation
 /// Output format handed to consumers: what Whisper wants.
 let outputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
 
+/// The app a per-app tap records: explicit PIDs plus every process whose bundle id or name
+/// contains one of `matches` (case-insensitive), the way `detect/` groups an app's helper
+/// processes (browser renderers, Electron helpers) under one pattern.
+struct AppTarget {
+    var pids: [pid_t] = []
+    var matches: [String] = []
+
+    /// The target's current Core Audio process objects (sorted, without `excluded` PIDs).
+    func processObjects(excluding excluded: Set<pid_t>) -> [AudioObjectID] {
+        var result = Set<AudioObjectID>()
+        for pid in pids where !excluded.contains(pid) {
+            if let object = try? processObject(forPID: pid) { result.insert(object) }
+        }
+        let needles = matches.map { $0.lowercased() }.filter { !$0.isEmpty }
+        let all = needles.isEmpty ? [] : (try? readObjectList(AudioObjectID(kAudioObjectSystemObject),
+                                                              kAudioHardwarePropertyProcessObjectList,
+                                                              name: "process object list")) ?? []
+        for object in all {
+            guard let pid = try? readValue(object, kAudioProcessPropertyPID, as: pid_t.self, initial: -1, name: "PID"),
+                  pid > 0, !excluded.contains(pid) else { continue }
+            let bundleID = (try? readString(object, kAudioProcessPropertyBundleID, name: "BundleID")) ?? nil
+            let bundle = (bundleID ?? "").lowercased()
+            let name = displayName(pid: pid, bundleID: bundleID).lowercased()
+            if needles.contains(where: { bundle.contains($0) || name.contains($0) }) { result.insert(object) }
+        }
+        return result.sorted()
+    }
+}
+
 final class SystemAudioCapture {
     /// Called on a private serial queue with each converted chunk (16 kHz mono float32).
     typealias Sink = (UnsafeBufferPointer<Float>) -> Void
 
     private let excludePIDs: [pid_t]
+    private var target: AppTarget?
     private let sink: Sink
     private let queue = DispatchQueue(label: "rcc-audiotap.convert", qos: .userInitiated)
 
@@ -32,9 +63,15 @@ final class SystemAudioCapture {
     private var tapFormat: AVAudioFormat!
     private var converter: AVAudioConverter!
     private var loggedLayout = false
+    /// Per-app tap only: the description the tap was made from and the objects it records.
+    private var appDescription: CATapDescription?
+    private var tappedObjects: [AudioObjectID] = []
 
-    init(excludePIDs: [pid_t], sink: @escaping Sink) {
+    /// `target` nil: global tap. Otherwise a per-app tap, falling back to the global tap when
+    /// the target has no process object yet or the per-app tap can't be created.
+    init(excludePIDs: [pid_t], target: AppTarget? = nil, sink: @escaping Sink) {
         self.excludePIDs = excludePIDs
+        self.target = target
         self.sink = sink
     }
 
@@ -76,6 +113,24 @@ final class SystemAudioCapture {
     // MARK: - Setup steps
 
     private func createTap() throws {
+        if let target {
+            let objects = target.processObjects(excluding: Set(excludePIDs))
+            if objects.isEmpty {
+                logError("per-app tap: no audio process matches \(target.matches) / pids \(target.pids); using the global tap")
+            } else {
+                let description = CATapDescription(stereoMixdownOfProcesses: objects)
+                do {
+                    try makeTap(description)
+                    appDescription = description
+                    tappedObjects = objects
+                    logError("per-app tap on \(objects.count) process object(s) (\(target.matches))")
+                    return
+                } catch {
+                    logError("per-app tap failed (\(error)); using the global tap")
+                }
+            }
+            self.target = nil
+        }
         // Exclusions are expressed as Core Audio *process objects*, not PIDs. A PID that has
         // never used Core Audio has no process object - and produces no audio - so skip it.
         var excluded: [AudioObjectID] = []
@@ -85,7 +140,11 @@ final class SystemAudioCapture {
             }
         }
 
-        let description = CATapDescription(stereoGlobalTapButExcludeProcesses: excluded)
+        try makeTap(CATapDescription(stereoGlobalTapButExcludeProcesses: excluded))
+        logError("global tap (excluding \(excluded.count) process object(s))")
+    }
+
+    private func makeTap(_ description: CATapDescription) throws {
         description.name = "rcc-audiotap"
         description.uuid = UUID()
         // Private: only this process can see the tap. Unmuted: the user keeps hearing the audio.
@@ -102,7 +161,39 @@ final class SystemAudioCapture {
             throw ToolError("Unsupported tap format: \(asbd)")
         }
         tapFormat = format
-        logError("tap format: \(format) (excluding \(excluded.count) process object(s))")
+        logError("tap format: \(format)")
+    }
+
+    // MARK: - Per-app re-targeting (main queue)
+
+    /// Follow the app's process set: helpers that start playing later (a new browser
+    /// renderer, an Electron audio helper) join the tap. An empty set (the app quit) keeps
+    /// the old one, which then just stays silent. No-op for the global tap.
+    func retarget() {
+        guard let target, let description = appDescription, tapID != kAudioObjectUnknown else { return }
+        let objects = target.processObjects(excluding: Set(excludePIDs))
+        guard !objects.isEmpty, objects != tappedObjects else { return }
+        description.processes = objects
+        var address = propertyAddress(kAudioTapPropertyDescription)
+        var ref = description
+        let status = withUnsafeMutablePointer(to: &ref) {
+            AudioObjectSetPropertyData(tapID, &address, 0, nil, UInt32(MemoryLayout<CATapDescription>.size), $0)
+        }
+        if status == noErr {
+            tappedObjects = objects
+            logError("per-app tap now on \(objects.count) process object(s)")
+        } else {
+            description.processes = tappedObjects
+            logError("per-app tap: re-targeting failed: OSStatus \(status) \(fourCC(status))")
+        }
+    }
+
+    /// Add processes to a per-app tap (a call started while a media app was recorded).
+    func addTarget(pids: [pid_t], matches: [String]) {
+        guard target != nil else { return }  // global tap: already records everything
+        target!.pids += pids
+        target!.matches += matches
+        retarget()
     }
 
     private func createAggregateDevice() throws {
@@ -226,7 +317,7 @@ final class SystemAudioCapture {
 
 // MARK: - `rcc-audiotap capture`
 
-func runCapture(excludePIDs: [pid_t]) throws -> Never {
+func runCapture(excludePIDs: [pid_t], target: AppTarget?) throws -> Never {
     // Writes to a closed pipe must return EPIPE instead of killing us, so we can clean up.
     signal(SIGPIPE, SIG_IGN)
 
@@ -253,7 +344,7 @@ func runCapture(excludePIDs: [pid_t]) throws -> Never {
         }
     }
 
-    capture = SystemAudioCapture(excludePIDs: [getpid()] + excludePIDs) { samples in
+    capture = SystemAudioCapture(excludePIDs: [getpid()] + excludePIDs, target: target) { samples in
         let data = Data(buffer: samples)
         writer.sync {
             lastRealAudio = DispatchTime.now().uptimeNanoseconds
@@ -294,5 +385,27 @@ func runCapture(excludePIDs: [pid_t]) throws -> Never {
 
     try capture!.start()
     logError("capturing system audio as float32le mono 16000 Hz on stdout")
-    withExtendedLifetime((sources, filler)) { dispatchMain() }
+
+    // Per-app tap: re-check the app's process set every second, and accept extra targets on
+    // stdin ("pid N" / "match TEXT" lines). EOF on stdin is fine: it just ends the commands.
+    let follow = DispatchSource.makeTimerSource(queue: .main)
+    if target != nil {
+        follow.schedule(deadline: .now() + 1, repeating: 1)
+        follow.setEventHandler { capture?.retarget() }
+        follow.resume()
+        Thread.detachNewThread {
+            while let line = readLine() {
+                let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
+                guard parts.count == 2 else { continue }
+                DispatchQueue.main.async {
+                    switch parts[0] {
+                    case "pid": if let pid = pid_t(parts[1]) { capture?.addTarget(pids: [pid], matches: []) }
+                    case "match": capture?.addTarget(pids: [], matches: [parts[1]])
+                    default: logError("unknown command \(parts[0])")
+                    }
+                }
+            }
+        }
+    }
+    withExtendedLifetime((sources, filler, follow)) { dispatchMain() }
 }
