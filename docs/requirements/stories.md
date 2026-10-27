@@ -29,8 +29,8 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-18 | Runs on Windows | 🟡 untested on Windows hardware (none available; #5 not planned) |
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 language ID checked on a synthetic he/en/ru set; no real Hebrew recordings, ivrit.ai routing not evaluated (#6) |
 | US-20 | Search my transcripts | ✅ search (summaries and export: see US-27, US-25) |
-| US-21 | Speaker names remembered across sessions | 🟡 CLI (#62) and macOS menu (US-26, #76); self-intro hints (#81) and overlap segmentation (#96) shipped (#1) |
-| US-26 | Name speakers and forget voices from the menu | 🟡 macOS menu, first lines instead of an audio sample; Windows tray not yet (#1) |
+| US-21 | Speaker names remembered across sessions | 🟡 CLI (#62), macOS menu and Windows tray (US-26, #76); self-intro hints (#81) and overlap segmentation (#96) shipped (#1) |
+| US-26 | Name speakers and forget voices from the menu | 🟡 macOS menu and Windows tray (tray untested on Windows hardware), first lines instead of an audio sample (#1) |
 | US-31 | Speaker names from the call app's participant list | 🟡 shipped (#80, #1 A.3): opt-in, macOS, one-to-one only |
 | US-35 | Call-app names in a room recording a call joined | 🟡 claimed (#1): fake-tested; older transcripts stay unnamed |
 | US-25 | Export a transcript to DOCX and PDF | 🟡 CLI, macOS menu and Windows tray; templates planned (#4) |
@@ -308,8 +308,10 @@ don't need the command line for it.*
   the forget keeps no voices or call-app names either, even if it is transcribed after it.
 - **Then** dialogs run off the menu thread, disk work on worker threads, and neither names
   nor transcript text are logged at INFO or above.
-- **Not yet:** a short audio sample (the first lines are shown instead), the Windows tray
-  items (#1).
+- **Given** Windows, **then** the tray has the same two items; its dialogs are small tkinter
+  windows on worker threads and time out as Cancel (unit-tested with fake dialogs, not yet
+  checked on Windows hardware).
+- **Not yet:** a short audio sample (the first lines are shown instead) (#1).
 
 ### US-31 Speaker names from the call app's participant list
 *As the owner, I want `Speaker 2` named after the person shown in Zoom/Teams/Meet, so that I

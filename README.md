@@ -142,10 +142,10 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   double-click a match (time, speaker, snippet) to open it.
 - **Recent transcripts → Name speakers…** (only with `speaker_names = true`): pick a session
   and a `Speaker N` (their first lines are shown to help), type a name. Same as
-  `recandcc name-speaker`.
+  `recandcc name-speaker`. On Windows the tray shows small windows for the same steps.
 - **Forget all voices…**: after a confirmation, deletes every voice profile and all saved
   session voices (`recandcc voices delete --all`), including those of sessions still waiting
-  to be transcribed. macOS menu only for now.
+  to be transcribed. Closing the confirmation, or leaving it until it times out, deletes nothing.
 - **Export latest transcript (DOCX + PDF)**: writes `transcript.docx` and `transcript.pdf`
   next to the newest transcript. Same as `recandcc export`. If the session has a
   `summary.md`, the summary and action items come first (their freshness follows the transcript text, start/end/text, not file times, so speaker renames and call-app names keep them; deleting `.summary-source` falls back to the file-time rule, which also applies to sessions summarised before this version). The export renders the summary's
