@@ -1,6 +1,6 @@
 """Integration tests for the macOS native helper (rcc-audiotap). Skipped elsewhere.
 
-Stories: US-01, US-16.
+Stories: US-01, US-08, US-16.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ except HelperNotFoundError:
 
 from recandcc.capture.system_mac import MacSystemAudioSource  # noqa: E402
 from recandcc.detect.mac import MacActivityMonitor  # noqa: E402
+from recandcc.models import AppTarget  # noqa: E402
 
 # Hosted CI runners have no audio output device and can't grant the System Audio Recording
 # permission, so a process tap there never delivers IO. These tests run on real Macs only.
@@ -178,3 +179,121 @@ def test_request_system_audio_does_not_crash():
     )
     assert result.returncode == 0, result.stderr
     assert '"system_audio":"granted"' in result.stdout
+
+
+# --- per-app tap (US-08) ------------------------------------------------------------------
+def _tone(tmp_path, freq, seconds=6.0):
+    import soundfile as sf
+
+    rate = 48_000
+    t = np.arange(int(rate * seconds)) / rate
+    path = tmp_path / f"tone{int(freq)}.wav"
+    sf.write(path, (0.25 * np.sin(2 * np.pi * freq * t)).astype(np.float32), rate)
+    return path
+
+
+def _band_share(audio, freq):
+    """Share of the signal's energy within 50 Hz of ``freq``."""
+    spectrum = np.abs(np.fft.rfft(audio)) ** 2
+    hz = np.fft.rfftfreq(len(audio), 1 / 16_000)
+    return spectrum[np.abs(hz - freq) < 50].sum() / (spectrum.sum() + 1e-12)
+
+
+def _playing(path):
+    """afplay ``path``, returned once Core Audio reports it playing (it has a process object)."""
+    player = _play(path)
+    monitor = MacActivityMonitor(interval=0.2)
+    try:
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            if any(p.pid == player.pid and p.output_active for p in monitor.snapshot()):
+                return player
+            time.sleep(0.1)
+    finally:
+        monitor.close()
+    player.kill()
+    pytest.skip("afplay never started playing")
+
+
+def _record(source, during):
+    chunks: list[np.ndarray] = []
+    source.start(chunks.append)
+    try:
+        time.sleep(0.5)
+        during()
+        time.sleep(1.0)
+    finally:
+        source.stop()
+    return np.concatenate(chunks) if chunks else np.zeros(0, np.float32)
+
+
+def _say():
+    subprocess.run(["say", "A second process that the per app tap must not record."], timeout=30)
+
+
+def _require_system_audio():
+    from recandcc import permissions
+
+    if permissions.status()["system_audio"] != "granted":
+        pytest.skip("System Audio Recording permission not granted to this terminal")
+
+
+@needs_audio_hardware
+def test_per_app_tap_records_only_the_target_app(tmp_path):
+    _require_system_audio()
+    tone = _tone(tmp_path, 1000)
+    results = {}
+    for name, target in (("all", None), ("app", True)):
+        player = _playing(tone)
+        try:
+            app = AppTarget(pids=(player.pid,)) if target else None
+            results[name] = _record(MacSystemAudioSource(target=app), _say)
+        finally:
+            player.kill()
+            player.wait()
+    everything, only_app = results["all"], results["app"]
+    if np.abs(everything).max() < 1e-4:
+        pytest.skip("the global tap got only silence (no permission or no output device)")
+    if _band_share(everything, 1000) > 0.98:
+        pytest.skip("`say` was not audible to the global tap")
+    assert np.abs(only_app).max() > 0.05, "the per-app tap missed afplay"
+    assert _band_share(only_app, 1000) > 0.98, "the per-app tap recorded `say` too"
+
+
+@needs_audio_hardware
+def test_per_app_tap_follows_an_added_target(tmp_path):
+    """add_target (a call joining a media session) extends the running tap to a new process."""
+    _require_system_audio()
+    first = _playing(_tone(tmp_path, 1000, seconds=1.5))
+    source = MacSystemAudioSource(target=AppTarget(pids=(first.pid,)))
+    second = None
+
+    def add_second():
+        nonlocal second
+        first.wait(timeout=10)
+        second = _playing(_tone(tmp_path, 2000, seconds=4.0))
+        assert source.add_target(AppTarget(pids=(second.pid,)))
+        time.sleep(2.5)  # the helper re-checks the process set every second
+
+    try:
+        audio = _record(source, add_second)
+    finally:
+        for player in (first, second):
+            if player is not None:
+                player.kill()
+                player.wait()
+    if np.abs(audio).max() < 1e-4:
+        pytest.skip("the tap got only silence (no permission or no output device)")
+    assert _band_share(audio, 2000) > 0.2, "the added process was not recorded"
+
+
+@needs_audio_hardware
+def test_per_app_tap_without_a_process_falls_back_to_everything():
+    from recandcc.capture import system_mac
+
+    assert system_mac._supports_targets(HELPER, HELPER.stat().st_mtime)
+    _require_system_audio()
+    source = MacSystemAudioSource(target=AppTarget(pids=(999_999,)))  # no such process
+    audio = _record(source, lambda: time.sleep(0.5))
+    assert source.scope == "all" and len(audio) > 8_000
+    assert source.add_target(AppTarget(pids=(1,))) is False

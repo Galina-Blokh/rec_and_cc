@@ -2,6 +2,8 @@
 //
 //   rcc-audiotap monitor [--interval 1.0]       JSON line per interval: processes doing audio I/O
 //   rcc-audiotap capture [--exclude-pid PID]... raw float32le mono 16 kHz system audio on stdout
+//   rcc-audiotap capture --pid PID / --match TEXT ...
+//                                               same, but only the app's processes (per-app tap)
 //   rcc-audiotap permission [--seconds 1.5] [--no-sound]
 //                                               check that system audio capture returns real audio
 //   rcc-audiotap permissions                    JSON: TCC status of microphone / system audio
@@ -16,7 +18,7 @@ import Foundation
 let usage = """
 usage:
   rcc-audiotap monitor [--interval SECONDS]
-  rcc-audiotap capture [--exclude-pid PID ...]
+  rcc-audiotap capture [--exclude-pid PID ...] [--pid PID ...] [--match TEXT ...]
   rcc-audiotap permission [--seconds SECONDS] [--no-sound]
   rcc-audiotap permissions
   rcc-audiotap request microphone|system_audio [--timeout SECONDS]
@@ -58,14 +60,18 @@ do {
 
     case "capture":
         var exclude: [pid_t] = []
+        var target = AppTarget()
         while let flag = args.first {
             args.removeFirst()
             switch flag {
             case "--exclude-pid": exclude.append(value(after: flag) { pid_t($0) })
+            case "--pid": target.pids.append(value(after: flag) { pid_t($0) })
+            case "--match": target.matches.append(value(after: flag) { $0.isEmpty ? nil : $0 })
             default: fail("unknown option \(flag)")
             }
         }
-        try runCapture(excludePIDs: exclude)
+        let perApp = !(target.pids.isEmpty && target.matches.isEmpty)
+        try runCapture(excludePIDs: exclude, target: perApp ? target : nil)
 
     case "permission":
         var seconds = 1.5

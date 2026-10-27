@@ -6,9 +6,12 @@ import logging
 import os
 import subprocess
 import threading
+from functools import cache
+from pathlib import Path
 
 import numpy as np
 
+from ..models import AppTarget
 from ..native import find_helper
 from .base import AudioSource, FrameCallback
 
@@ -19,13 +22,42 @@ BLOCK_SAMPLES = 1600
 BLOCK_BYTES = BLOCK_SAMPLES * 4
 
 
+def _target_args(target: AppTarget) -> list[str]:
+    args: list[str] = []
+    for pid in target.pids:
+        args += ["--pid", str(int(pid))]
+    for text in target.match:
+        if text := " ".join(text.split()):  # one line per stdin command
+            args += ["--match", text]
+    return args
+
+
+@cache
+def _supports_targets(helper: Path, mtime: float) -> bool:
+    """Whether this helper build knows ``capture --pid/--match`` (asked once per build)."""
+    try:
+        out = subprocess.run(  # noqa: S603 - fixed argv: our own bundled helper, no shell
+            [str(helper), "help"], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "--match" in out.stdout
+
+
 class MacSystemAudioSource(AudioSource):
-    """Everything the Mac plays (except this Python process), as float32 mono 16 kHz."""
+    """Everything the Mac plays (except this Python process), or with ``target`` only that
+    app's processes (per-app tap; the helper falls back to everything if it can't), as
+    float32 mono 16 kHz."""
 
     name = "system"
 
-    def __init__(self, exclude_pids: list[int] | None = None) -> None:
+    def __init__(
+        self, exclude_pids: list[int] | None = None, target: AppTarget | None = None
+    ) -> None:
         self._exclude_pids = list(exclude_pids or [])
+        self._target_args = _target_args(target) if target is not None else []
+        # "app" until the helper reports otherwise ("scope: all" on stderr = it fell back).
+        self.scope = "app" if self._target_args else "all"
         self._proc: subprocess.Popen[bytes] | None = None
         self._reader: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -35,13 +67,23 @@ class MacSystemAudioSource(AudioSource):
         with self._lock:
             if self._proc is not None:
                 raise RuntimeError("MacSystemAudioSource already started")
-            cmd = [str(find_helper()), "capture", "--exclude-pid", str(os.getpid())]
+            helper = find_helper()
+            if self._target_args and not _supports_targets(helper, helper.stat().st_mtime):
+                log.warning(
+                    "%s predates per-app capture (rebuild it with native/macos/build.sh); "
+                    "recording all system audio",
+                    helper,
+                )
+                self._target_args, self.scope = [], "all"
+            cmd = [str(helper), "capture", "--exclude-pid", str(os.getpid())]
             for pid in self._exclude_pids:
                 cmd += ["--exclude-pid", str(pid)]
+            cmd += self._target_args
             log.debug("starting %s", cmd)
             self._proc = subprocess.Popen(  # noqa: S603 - fixed argv: our own bundled helper, no shell
                 cmd,
-                stdin=subprocess.DEVNULL,
+                # Per-app tap: stdin carries "pid N" / "match TEXT" lines (add_target).
+                stdin=subprocess.PIPE if self._target_args else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0,
@@ -53,10 +95,28 @@ class MacSystemAudioSource(AudioSource):
                 daemon=True,
             )
             self._stderr_thread = threading.Thread(
-                target=_pump_stderr, args=(self._proc,), name="mac-system-audio-stderr", daemon=True
+                target=self._pump_stderr,
+                args=(self._proc,),
+                name="mac-system-audio-stderr",
+                daemon=True,
             )
             self._reader.start()
             self._stderr_thread.start()
+
+    def add_target(self, target: AppTarget) -> bool:
+        """Extend a running per-app tap to ``target`` too (a call started during media)."""
+        args = _target_args(target)
+        with self._lock:
+            proc = self._proc
+            if proc is None or proc.stdin is None or self.scope != "app":
+                return False
+            lines = "".join(f"{args[i][2:]} {args[i + 1]}\n" for i in range(0, len(args), 2))
+            try:
+                proc.stdin.write(lines.encode())
+                proc.stdin.flush()
+            except (OSError, ValueError):
+                return False
+        return True
 
     def stop(self) -> None:
         with self._lock:
@@ -75,8 +135,9 @@ class MacSystemAudioSource(AudioSource):
         for thread in (reader, err):
             if thread is not None and thread is not threading.current_thread():
                 thread.join(timeout=3)
-        if proc.stdout:
-            proc.stdout.close()
+        for pipe in (proc.stdin, proc.stdout):
+            if pipe:
+                pipe.close()
         if proc.stderr:
             proc.stderr.close()
 
@@ -107,11 +168,13 @@ class MacSystemAudioSource(AudioSource):
         if code not in (None, 0, -15):
             log.error("rcc-audiotap capture exited with code %s", code)
 
-
-def _pump_stderr(proc: subprocess.Popen[bytes]) -> None:
-    """Forward helper diagnostics to logging."""
-    assert proc.stderr is not None  # noqa: S101 - type narrowing: the pipe was requested in Popen
-    for raw in iter(proc.stderr.readline, b""):
-        line = raw.decode(errors="replace").rstrip()
-        if line:
-            log.info("%s", line)
+    def _pump_stderr(self, proc: subprocess.Popen[bytes]) -> None:
+        """Forward helper diagnostics to logging; notice a per-app -> global fallback."""
+        assert proc.stderr is not None  # noqa: S101 - type narrowing: the pipe was requested in Popen
+        for raw in iter(proc.stderr.readline, b""):
+            line = raw.decode(errors="replace").rstrip()
+            if line.endswith("scope: all") and self.scope == "app":
+                self.scope = "all"
+                log.warning("per-app system audio unavailable; recording all system audio")
+            elif line:
+                log.info("%s", line)

@@ -60,6 +60,16 @@ class AudioProcess:
     output_active: bool  # process is playing audio
 
 
+@dataclass(frozen=True)
+class AppTarget:
+    """The app a session records, for a per-app system-audio tap: its processes' pids plus
+    patterns (case-insensitive substrings of bundle id / name) that also catch helper
+    processes it starts later, like the patterns detection groups an app's processes by."""
+
+    match: tuple[str, ...] = ()
+    pids: tuple[int, ...] = ()
+
+
 @dataclass
 class Segment:
     start: float  # seconds from session start

@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 from dataclasses import fields
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -34,7 +35,7 @@ from ..config import CONFIG_PATH, LOG_DIR, Config, load_config
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind, discard_session
 from ..recorder import make_private_dir
-from ..retention import purge_old_audio
+from ..retention import purge_old_audio, purge_transcribed_audio
 
 if TYPE_CHECKING:
     from ..transcribe.live import LiveTranscriber
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 RECENT_COUNT = 10
+SEARCH_LIMIT = 20
 HOTKEY_DEBOUNCE_S = 0.5
 REFRESH_EVERY_S = 10.0
 PERM_KINDS = ("microphone", "system_audio")
@@ -127,6 +129,14 @@ def transcript_label(path: Path) -> str:
     return f"{day} {t} {slug}".strip()
 
 
+def search_hit_label(hit) -> str:
+    """'2026-10-26 14:03 zoom-us · 12:05 Me: …the [budget] for…' for a search.Hit."""
+    t = int(hit.start)
+    when = f"{t // 60:02d}:{t % 60:02d}"
+    text = " ".join(hit.snippet.split())
+    return f"{transcript_label(hit.transcript)} · {when} {hit.speaker}: {text}"
+
+
 def untranscribed_sessions(output_dir: Path) -> list[SessionInfo]:
     """Finished sessions never transcribed (e.g. app quit mid-queue), oldest first."""
     out = []
@@ -198,10 +208,11 @@ def grant_permission(kind: str) -> str | None:
 
 
 def osascript(script: str, timeout: float | None = None) -> str:
-    """Run AppleScript, return stdout ('' on error/cancel)."""
+    """Run AppleScript, return stdout ('' on error/cancel). The script goes in on stdin, not
+    argv, so text in it (search results) isn't visible in the process list."""
     try:
         r = subprocess.run(
-            ["osascript", "-e", script], capture_output=True, text=True, timeout=timeout
+            ["osascript", "-"], input=script, capture_output=True, text=True, timeout=timeout
         )
         return r.stdout.strip()
     except Exception:
@@ -271,6 +282,7 @@ class Controller:
             on_session_start=self._on_session_start,
             on_session_end=self._on_session_end,
         )
+        self._started_at = datetime.now().astimezone()  # older sessions: not diarized now
         if start_threads:
             self.engine.start()
             threading.Thread(target=self._resubmit_unfinished, daemon=True, name="resubmit").start()
@@ -356,6 +368,36 @@ class Controller:
     def _on_transcribed(self, session: SessionInfo, result) -> None:
         self.events.put(("transcribed", session, result))
         self.refresh_async(force=True)
+        if not isinstance(result, Exception):
+            threading.Thread(
+                target=self._index_session, args=(session.directory,), daemon=True, name="search"
+            ).start()
+
+    # --- transcript search (worker threads; results arrive as a "search" event)
+    @staticmethod
+    def _index_session(directory: Path) -> None:
+        try:
+            from ..search import default_index
+
+            default_index().index_session(directory)
+        except Exception:  # noqa: BLE001 - search is optional; never break transcription
+            log.exception("could not update the search index")
+
+    def search_async(self, query: str) -> None:
+        """Search the transcripts off the UI thread; posts ``("search", query, hits)``, with
+        hits the exception if the search failed."""
+
+        def run() -> None:
+            try:
+                from ..search import search_transcripts
+
+                hits = search_transcripts(self.cfg.output_dir, query, SEARCH_LIMIT)
+            except Exception as e:  # noqa: BLE001
+                log.exception("transcript search failed")
+                hits = e
+            self.events.put(("search", query, hits))
+
+        threading.Thread(target=run, daemon=True, name="search").start()
 
     # --- live transcription (engine thread)
     def _on_session_start(self, session: SessionInfo) -> None:
@@ -405,10 +447,13 @@ class Controller:
             self.tq.submit(session, finalize=lambda: live.finish(session))
 
     def _retention_loop(self) -> None:
-        """Delete expired audio at startup and then hourly (audio_retention_days)."""
+        """Delete expired audio at startup and then hourly (audio_retention_days); sync the
+        search index hourly too (half an hour in, clear of the startup sync)."""
         while not getattr(self, "_shut", False):
             self.purge_audio_now()
-            for _ in range(3600):  # sleep 1 h, but notice shutdown promptly
+            for i in range(3600):  # sleep 1 h, but notice shutdown promptly
+                if i == 1800:
+                    self._sync_index()
                 if getattr(self, "_shut", False):
                     return
                 time.sleep(1)
@@ -419,7 +464,20 @@ class Controller:
         except Exception:
             log.exception("audio retention failed")
 
+    def _purge_leftover_audio(self) -> None:
+        """keep_audio = false: delete WAVs left behind by transcribed sessions (e.g. the app
+        quit before a slow diarization finished and dropped them, or the delete failed)."""
+        if self.cfg.transcription.keep_audio:
+            return
+        try:
+            purge_transcribed_audio(self.cfg.output_dir, ended_before=self._started_at)
+        except Exception:
+            log.exception("deleting leftover audio failed")
+
     def _resubmit_unfinished(self) -> None:
+        # Purge first, on this same thread: once a re-queued session is transcribed, its
+        # diarization may still need the WAVs, and the purge must not see it as leftover.
+        self._purge_leftover_audio()
         try:
             for s in untranscribed_sessions(self.cfg.output_dir):
                 log.info("re-queueing untranscribed session %s", s.directory)
@@ -430,6 +488,17 @@ class Controller:
             purge_discarded_sessions(self.cfg.output_dir)
         except Exception:
             log.exception("deleting discarded sessions failed")
+        self._sync_index()
+
+    def _sync_index(self) -> None:
+        """Drop deleted and discarded sessions from the search index (at start, then hourly),
+        so their text doesn't wait for the next search to leave it."""
+        try:
+            from ..search import default_index
+
+            default_index().sync(self.cfg.output_dir)
+        except Exception:  # noqa: BLE001 - search is optional
+            log.exception("could not sync the search index")
 
     # --- periodic refresh (permissions, recent transcripts, config file)
     def refresh_async(self, force: bool = False) -> None:
