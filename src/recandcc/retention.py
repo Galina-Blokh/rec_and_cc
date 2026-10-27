@@ -43,6 +43,23 @@ def _unlink_all(paths, deleted: list[Path]) -> None:
             log.warning("could not delete %s: %s", wav, e)
 
 
+def _track_wavs(session: SessionInfo) -> list[Path]:
+    """The session's track WAVs, only if each is a plain ``*.wav`` file directly inside the
+    session folder: names come from session.json and must never point anywhere else."""
+    out = []
+    for name in session.tracks.values():
+        name = str(name)
+        if not name or Path(name).name != name or "\\" in name or not name.endswith(".wav"):
+            log.warning("session %s: ignoring unexpected track name", session.id)
+            continue
+        path = session.directory / name
+        if path.is_symlink() or path.resolve().parent != session.directory.resolve():
+            log.warning("session %s: ignoring track outside its folder", session.id)
+            continue
+        out.append(path)
+    return out
+
+
 def purge_old_audio(output_dir: Path, days: int, now: datetime | None = None) -> list[Path]:
     """Delete audio of transcribed sessions that ended more than ``days`` days ago.
     Returns the deleted files. ``days <= 0`` disables retention."""
@@ -80,7 +97,7 @@ def purge_transcribed_audio(output_dir: Path, ended_before: datetime | None = No
             ended = ended.astimezone()
         if ended_before is not None and ended >= ended_before:
             continue
-        _unlink_all((session.directory / name for name in session.tracks.values()), deleted)
+        _unlink_all(_track_wavs(session), deleted)
     if deleted:
         log.info("keep_audio = false: deleted %d leftover audio file(s)", len(deleted))
     return deleted

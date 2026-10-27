@@ -401,15 +401,7 @@ class Controller:
             self.tq.submit(session, finalize=lambda: live.finish(session))
 
     def _retention_loop(self) -> None:
-        """Delete expired audio at startup and then hourly (audio_retention_days).
-
-        With keep_audio = false, first delete WAVs left behind by transcribed sessions
-        (e.g. the app quit before a slow diarization finished and dropped them)."""
-        if not self.cfg.transcription.keep_audio:
-            try:
-                purge_transcribed_audio(self.cfg.output_dir, ended_before=self._started_at)
-            except Exception:
-                log.exception("deleting leftover audio failed")
+        """Delete expired audio at startup and then hourly (audio_retention_days)."""
         while not getattr(self, "_shut", False):
             self.purge_audio_now()
             for _ in range(3600):  # sleep 1 h, but notice shutdown promptly
@@ -423,7 +415,20 @@ class Controller:
         except Exception:
             log.exception("audio retention failed")
 
+    def _purge_leftover_audio(self) -> None:
+        """keep_audio = false: delete WAVs left behind by transcribed sessions (e.g. the app
+        quit before a slow diarization finished and dropped them, or the delete failed)."""
+        if self.cfg.transcription.keep_audio:
+            return
+        try:
+            purge_transcribed_audio(self.cfg.output_dir, ended_before=self._started_at)
+        except Exception:
+            log.exception("deleting leftover audio failed")
+
     def _resubmit_unfinished(self) -> None:
+        # Purge first, on this same thread: once a re-queued session is transcribed, its
+        # diarization may still need the WAVs, and the purge must not see it as leftover.
+        self._purge_leftover_audio()
         try:
             for s in untranscribed_sessions(self.cfg.output_dir):
                 log.info("re-queueing untranscribed session %s", s.directory)

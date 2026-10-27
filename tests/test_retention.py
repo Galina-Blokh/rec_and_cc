@@ -113,8 +113,7 @@ def test_controller_purges_leftovers_at_startup_only_without_keep_audio(tmp_path
     cfg = Config(output_dir=tmp_path)
     cfg.transcription.keep_audio = keep_audio
     ctrl = Controller(cfg, monitor=Monitor(), recorder=object(), tq=Q(), start_threads=False)
-    ctrl._shut = True  # run only the startup pass of the retention loop
-    ctrl._retention_loop()
+    ctrl._resubmit_unfinished()  # startup: purge leftovers, then re-queue the rest
 
     assert len(list(done.glob("*.wav"))) == (2 if keep_audio else 0)
     assert len(list(pending.glob("*.wav"))) == 2
@@ -141,3 +140,26 @@ def test_failed_unlink_is_logged_and_retried_on_next_start(tmp_path, monkeypatch
     monkeypatch.setattr(Path, "unlink", real_unlink)  # lock released: next start
     assert [p.name for p in purge_transcribed_audio(tmp_path)] == ["others.wav"]
     assert not list(d.glob("*.wav"))
+
+
+def test_purge_never_leaves_the_session_folder(tmp_path):
+    outside = tmp_path / "precious.wav"
+    outside.write_bytes(b"x")
+    d = make_session(tmp_path, "evil", 1)
+    (d / "notes.txt").write_bytes(b"x")
+    s = SessionInfo.load(d)
+    s.tracks = {Track.ME: "../../precious.wav", Track.OTHERS: str(outside)}
+    s.save()
+    assert purge_transcribed_audio(tmp_path) == []
+    s.tracks = {Track.ME: "notes.txt"}
+    s.save()
+    assert purge_transcribed_audio(tmp_path) == []
+    try:
+        (d / "link.wav").symlink_to(outside)
+    except OSError:
+        pass  # Windows without symlink rights
+    else:
+        s.tracks = {Track.ME: "link.wav"}
+        s.save()
+        assert purge_transcribed_audio(tmp_path) == []
+    assert outside.exists() and (d / "notes.txt").exists()
