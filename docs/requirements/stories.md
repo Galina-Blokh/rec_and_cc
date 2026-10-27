@@ -276,6 +276,11 @@ I don't have to work out who `Speaker 2` was every time.*
   never for `Me`; "I'm sure", "Я думаю", "This is Paris." or "אני מדבר" are not names), with
   `speaker_names` on or off, and
   nothing is renamed, stored or logged until I run `name-speaker`.
+- **Measured (synthetic only, not validated):** a voice named once got its name on 21/21 of
+  its segments in three later `say`-voice sessions; an unnamed voice was wrongly named on
+  5/9 of its segments at threshold 0.6 and 3/9 at the shipped 0.75, which was tuned on the
+  same small set (`tests/test_voice_recall.py`, docs/EVALUATION.md). The ≥ 90% criterion
+  on real speech is still open.
 - **Not yet:** naming from the menu with a voice sample, and an accuracy measurement on real
   speech and overlapping speech (#1, #13). Shipped since: overlap-aware segmentation (#96,
   opt-in until measured on real meetings); names from the call app are under US-31 (#80).
@@ -338,6 +343,10 @@ don't have to name them myself, without the app ever asking for more permission 
   "Transcript" heading (Hebrew right to left); without `summary.md` the files are unchanged.
 - **Then** export needs no network, the files are owner-only and logs never contain the
   transcript text.
+- **Given** the session folder (or a parent) is swapped for a link or junction during the
+  export, **then** nothing is written through it: the folder is pinned once before anything
+  is read, and both files go to that folder or the export is refused (#129). A folder that
+  was already a link when the export started is exported as usual.
 - **Not yet:** the Windows tray entry, custom templates; the PDF needs a system font with
   Latin, Cyrillic and Hebrew (Arial, DejaVu Sans), otherwise only DOCX is produced (#4).
 

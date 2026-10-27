@@ -266,7 +266,7 @@ def test_missing_font_keeps_the_docx_when_both(session, monkeypatch):
 def test_both_formats_share_one_snapshot(session, monkeypatch):
     calls = []
     real = export.load_session
-    monkeypatch.setattr(export, "load_session", lambda f: calls.append(f) or real(f))
+    monkeypatch.setattr(export, "load_session", lambda f, *a: calls.append(f) or real(f, *a))
     export.export_session(session, "both")
     assert len(calls) == 1
 
@@ -309,7 +309,7 @@ def test_concurrent_exports_of_one_session_are_serialised(session):
 
 
 def test_a_pdf_failure_other_than_the_font_keeps_the_docx(session, monkeypatch):
-    def boom(folder, loaded=None, summary=None):
+    def boom(folder, loaded=None, summary=None, **kw):
         raise RuntimeError("Привет, секрет")
 
     monkeypatch.setattr(export, "export_pdf", boom)
@@ -320,6 +320,7 @@ def test_a_pdf_failure_other_than_the_font_keeps_the_docx(session, monkeypatch):
 
 
 def test_replace_is_retried_while_the_file_is_held_open(session, monkeypatch):
+    monkeypatch.setattr(export, "_DIR_FD", False)  # the Windows (path-based) write
     real, calls = export.os.replace, []
 
     def flaky(src, dst):
@@ -377,6 +378,8 @@ def test_controller_export_of_nothing_finished_posts_a_notice(tmp_path):
 
 
 def test_a_held_open_file_gets_a_clear_notice(session, monkeypatch):
+    monkeypatch.setattr(export, "_DIR_FD", False)  # the Windows (path-based) write
+
     def locked(src, dst):
         raise PermissionError("in use")
 
@@ -425,6 +428,7 @@ def test_a_write_error_is_not_reported_as_a_file_in_use(session, monkeypatch):
 
 
 def test_a_failing_cleanup_does_not_hide_the_export_error(session, monkeypatch):
+    monkeypatch.setattr(export, "_DIR_FD", False)  # the Windows (path-based) write
     from pathlib import Path
 
     def locked(src, dst):
@@ -487,6 +491,168 @@ def test_a_session_folder_swapped_for_a_link_is_not_written_through(tmp_path):
     with pytest.raises(export.ExportError, match="link"):
         export._write(link / "x.bin", b"data")
     assert not list(real.iterdir())
+
+
+def test_a_parent_swapped_for_a_link_during_rendering_is_refused(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("symlinks need privileges")
+    day, other = tmp_path / "day", tmp_path / "other"
+    (day / "s").mkdir(parents=True)
+    (other / "s").mkdir(parents=True)
+    with export._pinned(day / "s") as pin:
+        day.rename(tmp_path / "day-old")
+        day.symlink_to(other)  # an ancestor became a link; the session folder itself is not one
+        with pytest.raises(export.ExportError, match="moved"):
+            export._write(day / "s" / "x.bin", b"data", pin)
+    assert not list((other / "s").iterdir())
+    assert not list((tmp_path / "day-old" / "s").iterdir())
+
+
+def test_a_junction_session_folder_is_refused_without_expected(tmp_path, monkeypatch):
+    # runs on every platform: the junction check itself is faked
+    (tmp_path / "s").mkdir()
+    monkeypatch.setattr(export.Path, "is_junction", lambda self: True)
+    with pytest.raises(export.ExportError, match="link"):
+        export._write(tmp_path / "s" / "x.bin", b"data")
+    assert not list((tmp_path / "s").iterdir())
+
+
+def test_write_without_expected_into_a_plain_folder_is_unchanged(tmp_path):
+    out = export._write(tmp_path / "x.bin", b"data")
+    assert out.read_bytes() == b"data"
+    assert [p.name for p in tmp_path.iterdir()] == ["x.bin"]  # no temp left behind
+
+
+def test_a_session_folder_that_was_already_a_link_at_the_start_is_exported(tmp_path):
+    # e.g. a redirected or synced folder: linked before the export began, so it's legitimate
+    if sys.platform == "win32":
+        pytest.skip("symlinks need privileges")
+    real, link = tmp_path / "real", tmp_path / "link"
+    real.mkdir()
+    link.symlink_to(real)
+    with export._pinned(link) as pin:
+        out = export._write(link / "x.bin", b"data", pin)
+    assert (real / "x.bin").read_bytes() == b"data" and out == link / "x.bin"
+    assert [p.name for p in real.iterdir()] == ["x.bin"]
+
+
+def test_the_dir_fd_write_path_is_used_on_posix():
+    # the descriptor-pinned write must really run on macOS and Linux, not silently fall back
+    if sys.platform == "win32":
+        pytest.skip("no dir_fd on Windows: documented residual risk")
+    assert export._DIR_FD
+
+
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="symlinks and dir_fd: POSIX")
+
+
+def _swap_for_link(folder, target, keep_as):
+    folder.rename(keep_as)
+    folder.symlink_to(target)
+
+
+@posix_only
+def test_an_ancestor_swapped_between_resolve_and_stat_is_caught(tmp_path, monkeypatch):
+    # the folder is resolved, then opened (and fstat'ed): a parent swapped in that gap makes
+    # the open follow the new link, so the identity would be the swapped folder's. Resolving
+    # again after the open catches it.
+    day, other = tmp_path / "day", tmp_path / "other"
+    (day / "s").mkdir(parents=True)
+    (other / "s").mkdir(parents=True)
+    real_open = export.os.open
+
+    def swap_then_open(p, *a, **kw):
+        if "dir_fd" not in kw and not (tmp_path / "day-old").exists():
+            _swap_for_link(day, other, tmp_path / "day-old")
+        return real_open(p, *a, **kw)
+
+    monkeypatch.setattr(export.os, "open", swap_then_open)
+    with pytest.raises(export.ExportError, match="moved"):
+        export._pin_folder(day / "s")
+
+
+@posix_only
+def test_a_swap_after_the_pin_cannot_redirect_the_write(tmp_path):
+    # even if the path check were passed, the bytes go through the pinned descriptor
+    (tmp_path / "s").mkdir()
+    (tmp_path / "evil").mkdir()
+    with export._pinned(tmp_path / "s") as pin:
+        _swap_for_link(tmp_path / "s", tmp_path / "evil", tmp_path / "s-moved")
+        assert pin.dfd is not None
+        export._write_in_dir(pin.dfd, "x.bin", ".x.tmp", b"data")
+    assert not list((tmp_path / "evil").iterdir())
+    assert (tmp_path / "s-moved" / "x.bin").read_bytes() == b"data"
+
+
+@posix_only
+def test_a_swap_between_the_read_and_the_write_is_refused(session, tmp_path, monkeypatch):
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    real = export.load_summary
+
+    def read_then_swap(*a, **kw):
+        out = real(*a, **kw)
+        _swap_for_link(session, evil, session.with_name("moved"))
+        return out
+
+    monkeypatch.setattr(export, "load_summary", read_then_swap)
+    with pytest.raises(export.ExportError, match="moved"):
+        export.export_session(session, "docx")
+    assert not list(evil.iterdir())
+    assert not list(session.with_name("moved").glob("transcript.docx"))
+
+
+@posix_only
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_a_swap_between_docx_and_pdf_does_not_redirect_the_pdf(session, tmp_path, monkeypatch):
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    real_docx = export.export_docx
+
+    def docx_then_swap(*a, **kw):
+        out = real_docx(*a, **kw)
+        _swap_for_link(session, evil, session.with_name("moved"))
+        return out
+
+    monkeypatch.setattr(export, "export_docx", docx_then_swap)
+    skipped: list[str] = []
+    out = export.export_session(session, "both", skipped)
+    assert [p.name for p in out] == ["transcript.docx"]
+    assert skipped and "moved" in skipped[0]
+    assert not list(evil.iterdir())
+
+
+@posix_only
+def test_a_write_error_in_the_pinned_folder_is_an_export_error(session, monkeypatch):
+    def failing_replace(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(export.os, "replace", failing_replace)
+    with pytest.raises(export.ExportError, match=r"could not write transcript\.docx \(OSError\)"):
+        export.export_docx(session)
+    assert not list(session.glob(".*.tmp"))  # the temp is removed through the descriptor
+
+
+@posix_only
+def test_a_read_only_pinned_folder_is_an_export_error(session):
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    session.chmod(0o500)
+    try:
+        with pytest.raises(export.ExportError, match="could not write.*PermissionError"):
+            export.export_docx(session)
+    finally:
+        session.chmod(0o700)
+
+
+@posix_only
+def test_a_folder_linked_from_the_start_keeps_its_summary_in_the_export(session, tmp_path):
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    link = tmp_path / "linked"
+    link.symlink_to(session)
+    export.export_session(link, "docx")
+    paras = [p.text for p in Document(str(session / "transcript.docx")).paragraphs]
+    assert "Action items" in paras
 
 
 SUMMARY_MD = (
@@ -576,7 +742,8 @@ def test_a_linked_summary_or_folder_is_refused(session, tmp_path):
     link.symlink_to(session)
     (session / "summary.md").unlink()
     (session / "summary.md").write_text("# Summary\nbody\n", "utf-8")
-    assert export.load_summary(link) == []
+    # a folder that was a link from the start is legitimate (redirected or synced folders)
+    assert export.load_summary(link) == [("h1", "Summary"), ("p", "body")]
 
 
 def test_a_bom_does_not_hide_the_heading(session):
@@ -724,7 +891,9 @@ def test_both_formats_make_the_same_summary_decision(session, monkeypatch, caplo
     monkeypatch.setattr(
         export,
         "export_pdf",
-        lambda f, loaded=None, summary=None: seen.append(summary) or real_pdf(f, loaded, summary),
+        lambda f, loaded=None, summary=None, **kw: (
+            seen.append(summary) or real_pdf(f, loaded, summary, **kw)
+        ),
     )
     export.export_session(session)
     assert seen and seen[0]  # the PDF got the same, non-empty summary as the DOCX
