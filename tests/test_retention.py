@@ -59,7 +59,7 @@ def _symlink(link, target, is_dir=False) -> None:
         pytest.skip("symlinks not available")
 
 
-def test_never_deletes_audio_outside_the_transcripts_folder(tmp_path):
+def test_never_deletes_audio_outside_the_transcripts_folder(tmp_path, caplog):
     root, outside = tmp_path / "out", tmp_path / "elsewhere"
     root.mkdir()
     real = make_session(outside, "real", 10)  # a session folder outside output_dir ...
@@ -69,9 +69,12 @@ def test_never_deletes_audio_outside_the_transcripts_folder(tmp_path):
     victim.write_bytes(b"x")
     (kept / "me.wav").unlink()
     _symlink(kept / "me.wav", victim)  # a WAV that is a link to a file elsewhere
-    deleted = purge_old_audio(root, 7, now=NOW)
+    with caplog.at_level("WARNING", logger="recandcc.retention"):
+        deleted = purge_old_audio(root, 7, now=NOW)
+        purge_old_audio(root, 7, now=NOW)  # the hourly run: no second warning
     assert [p.name for p in deleted] == ["others.wav"]
     assert len(list(real.glob("*.wav"))) == 2 and victim.exists()
+    assert sum("linked from outside" in r.message for r in caplog.records) == 1
 
 
 def test_ignores_unreadable_sessions(tmp_path):

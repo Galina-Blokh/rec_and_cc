@@ -866,10 +866,14 @@ class Controller:
                     return
                 time.sleep(1)
 
-    def purge_audio_now(self) -> list[Path]:
-        """Run ``audio_retention_days`` now; the deleted WAVs (none if it failed)."""
+    def purge_audio_now(self, days: int | None = None) -> list[Path]:
+        """Delete audio older than ``days`` now (None: the current ``audio_retention_days``,
+        for startup and the hourly loop); the deleted WAVs (none if it failed). A menu click
+        passes its own value: memory may already hold a newer, unsaved click."""
+        if days is None:
+            days = self.cfg.transcription.audio_retention_days
         try:
-            return purge_old_audio(self.cfg.output_dir, self.cfg.transcription.audio_retention_days)
+            return purge_old_audio(self.cfg.output_dir, days)
         except Exception:
             log.exception("audio retention failed")
             return []
@@ -1446,7 +1450,7 @@ class Controller:
                 if self.cfg.transcription.audio_retention_days != days:
                     return  # a newer click owns the setting now
                 if saved:
-                    if n := len({wav.parent for wav in self.purge_audio_now() or ()}):
+                    if n := len({wav.parent for wav in self.purge_audio_now(days) or ()}):
                         # count only: a mis-click is visible, no session names or text
                         what = f"{n} session" + ("s" if n != 1 else "")
                         self.post_notice("Delete audio after", f"Deleted audio of {what}")
@@ -1464,7 +1468,10 @@ class Controller:
 
     def _saved_retention(self, fallback: int) -> int:
         """``audio_retention_days`` as config.toml holds it (a plain read: no lock, and no
-        default file is created), or ``fallback`` when there is no readable file."""
+        default file is created), or ``fallback`` when there is no readable file. Edge case:
+        with config.toml unreadable (mid-edit), ``fallback`` (the value before this click)
+        may itself be an earlier click that was never saved; the next readable reload or
+        start corrects it. Nothing is purged for an unsaved click either way."""
         try:
             if CONFIG_PATH.exists():
                 return int(load_config().transcription.audio_retention_days)

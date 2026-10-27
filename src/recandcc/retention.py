@@ -19,6 +19,9 @@ log = logging.getLogger("recandcc.retention")
 # Choices offered in the menu (days; 0 = never delete).
 RETENTION_CHOICES = (0, 1, 7, 30, 90)
 
+# Linked session folders already warned about (hourly purges would repeat it).
+_warned_outside: set[Path] = set()
+
 
 def _transcribed_sessions(output_dir: Path) -> Iterator[tuple[SessionInfo, datetime]]:
     """Finished, transcribed sessions under ``output_dir`` with their (timezone-aware) end
@@ -81,7 +84,9 @@ def purge_old_audio(output_dir: Path, days: int, now: datetime | None = None) ->
         if ended > cutoff:
             continue
         if not session.directory.resolve().is_relative_to(root):
-            log.warning("session %s: ignoring folder outside the transcripts folder", session.id)
+            if session.directory not in _warned_outside:  # once per folder per app run
+                _warned_outside.add(session.directory)
+                log.warning("session %s: skipping a folder linked from outside", session.id)
             continue
         wavs = [w for w in session.directory.glob("*.wav") if not w.is_symlink()]
         _unlink_all(wavs, deleted)

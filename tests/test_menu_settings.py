@@ -340,9 +340,7 @@ def test_missing_config_is_created(tmp_path, monkeypatch):
 def test_retention_choice_saves_its_key_and_purges(tmp_path, monkeypatch):
     ctrl, path = _ctrl(tmp_path, monkeypatch)
     purged: list[int] = []
-    monkeypatch.setattr(
-        ctrl, "purge_audio_now", lambda: purged.append(ctrl.cfg.transcription.audio_retention_days)
-    )
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda days=None: purged.append(days))
     ctrl.set_retention(7)
     assert ctrl.cfg.transcription.audio_retention_days == 7  # in memory at once: the check
     _join("retention-set")
@@ -353,7 +351,7 @@ def test_retention_choice_saves_its_key_and_purges(tmp_path, monkeypatch):
 def test_retention_is_not_purged_when_the_save_fails(tmp_path, monkeypatch):
     ctrl, path = _ctrl(tmp_path, monkeypatch)
     purged: list[int] = []
-    monkeypatch.setattr(ctrl, "purge_audio_now", lambda: purged.append(1))
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda _days=None: purged.append(1))
     path.write_text("[summary\n")  # mid-edit: the choice would revert at the next start
     ctrl.set_retention(1)
     _join("retention-set")
@@ -368,7 +366,7 @@ def test_two_failed_retention_clicks_leave_the_value_on_disk(tmp_path, monkeypat
     ctrl, path = _ctrl(tmp_path, monkeypatch)
     path.write_text(path.read_text() + "[transcription]\naudio_retention_days = 90\n")
     ctrl.cfg.transcription.audio_retention_days = 90
-    monkeypatch.setattr(ctrl, "purge_audio_now", lambda: [])
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda _days=None: [])
     go = threading.Event()
 
     def failing_save(*_keys, **_kw):  # e.g. config.toml not writable; both workers wait
@@ -383,10 +381,36 @@ def test_two_failed_retention_clicks_leave_the_value_on_disk(tmp_path, monkeypat
     assert ctrl.cfg.transcription.audio_retention_days == 90  # what config.toml holds
 
 
+def test_menu_purge_uses_its_own_value_not_a_newer_click(tmp_path, monkeypatch):
+    ctrl, _path = _ctrl(tmp_path, monkeypatch)
+    calls: list[tuple] = []
+    monkeypatch.setattr(common, "purge_old_audio", lambda d, days: calls.append((d, days)) or [])
+    ctrl.cfg.transcription.audio_retention_days = 1  # click B, assigned after A's check
+    ctrl.purge_audio_now(30)  # A's purge
+    assert calls == [(ctrl.cfg.output_dir, 30)]  # A's value, not B's live 1
+    ctrl.purge_audio_now()  # startup / hourly: the current setting
+    assert calls[-1] == (ctrl.cfg.output_dir, 1)
+    asked: list = []
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda days=None: asked.append(days) or [])
+    ctrl.set_retention(30)
+    _join("retention-set")
+    assert asked == [30]  # the worker passes its own value
+
+
+def test_unreadable_config_after_a_failed_save_keeps_the_previous_value(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    ctrl.cfg.transcription.audio_retention_days = 7
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda _days=None: [])
+    path.write_text("[summary\n")  # mid-edit: neither saved nor readable
+    ctrl.set_retention(30)
+    _join("retention-set")
+    assert ctrl.cfg.transcription.audio_retention_days == 7  # the fallback (documented)
+
+
 def test_menu_purge_posts_a_count_only_notice(tmp_path, monkeypatch):
     ctrl, _path = _ctrl(tmp_path, monkeypatch)
     wavs = [tmp_path / "a" / "me.wav", tmp_path / "a" / "others.wav", tmp_path / "b" / "me.wav"]
-    monkeypatch.setattr(ctrl, "purge_audio_now", lambda: wavs)
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda _days=None: wavs)
     ctrl.set_retention(1)
     _join("retention-set")
     events = [ctrl.events.get_nowait() for _ in range(ctrl.events.qsize())]
@@ -396,7 +420,7 @@ def test_menu_purge_posts_a_count_only_notice(tmp_path, monkeypatch):
 def test_superseded_retention_choice_does_not_purge(tmp_path, monkeypatch):
     ctrl, _path = _ctrl(tmp_path, monkeypatch)
     purged: list[int] = []
-    monkeypatch.setattr(ctrl, "purge_audio_now", lambda: purged.append(1))
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda _days=None: purged.append(1))
 
     def slow_save(*_keys, **_kw):  # the user picks Never while "1 day" is being saved
         ctrl.cfg.transcription.audio_retention_days = 0
@@ -410,7 +434,7 @@ def test_superseded_retention_choice_does_not_purge(tmp_path, monkeypatch):
 
 def test_retention_click_survives_a_reload_before_its_save(tmp_path, monkeypatch):
     ctrl, path = _ctrl(tmp_path, monkeypatch)
-    monkeypatch.setattr(ctrl, "purge_audio_now", lambda: None)
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda _days=None: None)
     go, real = threading.Event(), ctrl.write_settings
 
     def blocked_save(*keys, **kw):  # the worker hasn't written yet
@@ -469,7 +493,7 @@ def test_mac_toggles_keep_hand_edits(tmp_path, monkeypatch):
     app = mac.MacApp.__new__(mac.MacApp)
     app.ctrl, app.cfg, app.captions = ctrl, ctrl.cfg, None
     app._render_retention = lambda: None
-    monkeypatch.setattr(ctrl, "purge_audio_now", lambda: None)
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda _days=None: None)
     _fake_autostart(monkeypatch, mac)
     app._toggle_captions(types.SimpleNamespace(state=1))
     _join()
