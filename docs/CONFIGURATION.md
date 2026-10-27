@@ -36,6 +36,12 @@ Changes to `[detection]` are picked up while the app runs. Restart the app after
 | `media_apps` | browsers, QuickTime, VLC, Podcasts, TV | Patterns for media apps |
 | `ignore_apps` | Spotify, Music, system sounds, Siri, Voice Memos | Never trigger |
 | `app_modes` | `{}` | Per-app mode overrides, e.g. `{"us.zoom" = "auto", "com.google.chrome" = "ask"}` |
+| `room_listening` | `false` | **Room listening** (opt-in): keep the microphone open and record a conversation near the computer when no app is doing audio. See [Room listening](#room-listening) |
+| `room_min_speech_s` | `4.0` | Room listening starts a session after this much speech ... |
+| `room_window_s` | `10.0` | ... within this many seconds, so a short remark of your own doesn't start one |
+| `room_preroll_s` | `15.0` | Audio kept from before the trigger and put at the start of the session, so the first sentence isn't lost (at least `room_window_s`) |
+| `room_stop_after_silence_s` | `90.0` | A room session stops after this long without speech |
+| `room_vad_threshold` | `0.5` | Silero VAD speech probability (0–1) that counts as speech; raise it if noise starts sessions |
 
 **Patterns** are case-insensitive substrings matched against the app's bundle id (macOS,
 e.g. `us.zoom.xos`) or process/exe name (Windows, e.g. `zoom.exe`). To find the right
@@ -45,6 +51,15 @@ Classification order: ignore → call → media → unknown. An unknown app usin
 as a call, and an unknown app that only plays audio counts as media. A media app (a browser)
 using the mic is treated as a call (Google Meet). The global `mode = "off"` overrides all
 `app_modes`.
+
+### Room listening
+
+With `room_listening = true` RecAndCC keeps the microphone open and runs Silero VAD on it
+(on its own thread, about 2 ms of CPU per 0.5 s of audio; nothing is transcribed or
+written until a session starts). The audio of the last `room_preroll_s` seconds lives only
+in memory. Once there were `room_min_speech_s` seconds of speech within `room_window_s`
+seconds, a room session starts with that audio at its beginning. While the microphone is
+open, macOS shows the orange microphone indicator.
 
 ## `[transcription]`
 

@@ -95,6 +95,14 @@ class DetectionConfig:
     ignore_apps: list[str] = field(default_factory=lambda: list(DEFAULT_IGNORE_APPS))
     # Per-app override of `mode`, keyed by pattern, e.g. {"us.zoom" = "auto"}.
     app_modes: dict[str, Mode] = field(default_factory=dict)
+    # Room listening (opt-in, off by default): keep the mic open and record a conversation
+    # near the computer when no app is doing audio. See docs/CONFIGURATION.md.
+    room_listening: bool = False
+    room_min_speech_s: float = 4.0  # this much speech ...
+    room_window_s: float = 10.0  # ... within this window starts a room session
+    room_preroll_s: float = 15.0  # audio before the trigger kept in the session
+    room_stop_after_silence_s: float = 90.0  # no speech this long ends a room session
+    room_vad_threshold: float = 0.5  # Silero speech probability that counts as speech
 
 
 @dataclass

@@ -27,6 +27,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-16 | Permissions set up from the app | ✅ |
 | US-17 | Always on, visible state | ✅ |
 | US-18 | Runs on Windows | 🟡 untested on hardware (#5) |
+| US-22 | Record conversations in the room | 🟡 speech monitor only, no sessions yet (#2) |
 
 ---
 
@@ -171,3 +172,19 @@ while I decide.*
 - **Then** WASAPI loopback capture, pycaw detection, a tray icon and registry autostart
   implement the same interfaces; CI runs the fast suite on Windows.
 - **Not yet:** a real-hardware test pass, per-app capture, installer (#5).
+
+### US-22 Record conversations in the room
+*As the owner, I want a conversation next to my laptop (an in-person meeting) recorded
+without pressing anything, like a call, and only when I have turned that on.*
+
+- **Given** a fresh install, **then** room listening is off and the microphone is closed
+  until a session needs it.
+- **Given** room listening is on, **when** nobody speaks, or I make a short remark (less
+  than `room_min_speech_s` of speech within `room_window_s`), **then** nothing is recorded.
+- **Given** room listening is on, **when** people talk for `room_min_speech_s` within
+  `room_window_s`, **then** a room session starts, and its audio begins up to
+  `room_preroll_s` before that, so the first sentence is kept.
+- **When** I pause room listening, **then** the microphone is closed (the orange indicator
+  goes off) until I resume.
+- **Then** speech detection runs on its own thread; the audio thread only copies frames.
+- **Not yet:** the engine doesn't start room sessions yet (#2).
