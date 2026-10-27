@@ -152,3 +152,43 @@ def test_raising_change_unmarks_once_keeping_a_concurrent_click(tmp_path, monkey
     with contextlib.suppress(ValueError):
         ctrl.menu_apply(("live_captions",), change)
     assert ctrl._dirty == {"live_captions": 1}
+
+
+def test_reload_waits_for_a_click_between_its_mark_and_its_set(tmp_path, monkeypatch):
+    """The mark and the in-memory change are one step: a reload that reads the file while
+    the change runs waits on _dirty_lock, then sees the key dirty and keeps the click."""
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    assert ctrl.cfg.live_captions is True
+    in_change, release, loaded = threading.Event(), threading.Event(), threading.Event()
+    real = common.load_config
+
+    def change():
+        ctrl.cfg.live_captions = False
+        in_change.set()
+        assert release.wait(5)
+
+    def load():
+        cfg = real()
+        loaded.set()
+        return cfg
+
+    monkeypatch.setattr(common, "load_config", load)
+    click = threading.Thread(target=lambda: ctrl.menu_apply(("live_captions",), change))
+    click.start()
+    assert in_change.wait(5)
+    path.write_text('live_captions = true\n[detection]\nmode = "off"\n')  # hand edit, same key
+    ctrl._config_mtime = -1.0
+    reload_t = threading.Thread(target=ctrl._maybe_reload_config)
+    reload_t.start()
+    assert loaded.wait(5)
+    reload_t.join(0.3)
+    assert reload_t.is_alive()  # blocked on _dirty_lock until the click's change returns
+    release.set()
+    click.join(5)
+    reload_t.join(5)
+    for t in threading.enumerate():
+        if t.name == "save-config":
+            t.join(5)
+    assert ctrl.cfg.live_captions is False
+    assert load_config(path).live_captions is False
+    assert not ctrl._dirty
