@@ -39,7 +39,6 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-28 | Browse past meetings | 🟡 Windows window untested on Windows hardware (none available) |
 | US-29 | Right-to-left text readable in the Windows captions | 🟡 unit-tested, no hardware check (#6) |
 | US-33 | Live captions name the speakers | 🟡 no accuracy measurement on real speech (#1) |
-
 | US-30 | Change common settings in a window | 🟡 claimed (#3): macOS spike, not on Windows |
 | US-34 | Warn when recordings go to a network volume | 🟡 claimed (#3): detection is fake-tested, no real share or Windows drive checked |
 
