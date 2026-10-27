@@ -276,6 +276,50 @@ def test_package_choice_is_stable_and_sticky(fakes, mon, monkeypatch):
     assert [p.bundle_id for p in mon.snapshot()] == ["starter.exe"]
 
 
+def test_helper_playing_audio_does_not_take_over_the_sticky_key(fakes, mon):
+    teams_on_mic(fakes)
+    fakes.procs = [STARTER, TEAMS]
+    assert [p.bundle_id for p in mon.snapshot()] == ["ms-teams.exe"]
+    fakes.sessions = [FakeSession(proc("msteams_autostarter.exe", 299))]  # helper plays a sound
+    snap = by_name(mon.snapshot())
+    assert snap["ms-teams.exe"].input_active  # the call keeps its key
+    assert not snap["msteams_autostarter.exe"].input_active
+    fakes.winreg.tree = mic_tree({}, {})  # off the mic: the remembered choice is dropped
+    mon.snapshot()
+    assert mon._chosen == {}
+
+
+@pytest.mark.parametrize("flip", [False, True])
+def test_choice_without_sticky_or_audio_is_deterministic(fakes, mon, flip):
+    teams_on_mic(fakes)
+    aaa = ns(pid=290, info={"name": "aaa.exe", "exe": TEAMS_DIR + r"\aaa.exe"})
+    zeta = ns(pid=291, info={"name": "zeta.exe", "exe": TEAMS_DIR + r"\zeta.exe"})
+    order = [aaa, TEAMS] if not flip else [TEAMS, aaa]
+    fakes.procs = order  # the package-name match beats a non-helper that sorts first
+    assert [p.bundle_id for p in mon.snapshot()] == ["ms-teams.exe"]
+    other = win.WinActivityMonitor()
+    other._own_exe = mon._own_exe
+    fakes.procs = [zeta, aaa] if not flip else [aaa, zeta]  # no name match: sorted order
+    assert [p.bundle_id for p in other.snapshot()] == ["aaa.exe"]
+
+
+def test_failed_walk_is_not_cached(fakes, mon, monkeypatch):
+    teams_on_mic(fakes)
+    fakes.procs = [TEAMS]
+    calls = []
+
+    def flaky(attrs, ad_value=None):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("walk failed")  # partway: nothing usable this poll
+        yield from fakes.procs
+
+    monkeypatch.setattr(sys.modules["psutil"], "process_iter", flaky)
+    mon.snapshot()
+    assert [p.bundle_id for p in mon.snapshot()] == ["ms-teams.exe"]  # walked again
+    assert len(calls) == 2
+
+
 def test_process_table_is_cached(fakes, mon, monkeypatch):
     now = [0.0]
     monkeypatch.setattr(win, "time", ns(monotonic=lambda: now[0]))

@@ -170,6 +170,7 @@ class WinActivityMonitor(ActivityMonitor):
                 by_family.setdefault(family, []).append((name or parts[-1], p.pid))
         except Exception:
             log.debug("process lookup failed", exc_info=True)
+            return by_family, by_name  # partial: use it this poll, but don't cache it
         self._table = (key, now, by_family, by_name)
         return by_family, by_name
 
@@ -179,8 +180,9 @@ class WinActivityMonitor(ActivityMonitor):
         cands = sorted(cands)
         app = _alnum(family.split("_")[0])
         pick = (
-            next((c for c in cands if c[0] in procs), None)  # has the WASAPI session
-            or next((c for c in cands if c[0] == self._chosen.get(family)), None)  # sticky
+            # Sticky first: a helper briefly playing audio must not take over the key.
+            next((c for c in cands if c[0] == self._chosen.get(family)), None)
+            or next((c for c in cands if c[0] in procs), None)  # has the WASAPI session
             or next((c for c in cands if _alnum(c[0].rsplit(".", 1)[0]) == app), None)
             or next((c for c in cands if not any(w in c[0] for w in _HELPER_WORDS)), None)
             or cands[0]
@@ -226,6 +228,7 @@ class WinActivityMonitor(ActivityMonitor):
                     input_active=True,
                     output_active=False,
                 )
+        self._chosen = {f: e for f, e in self._chosen.items() if f in key}  # off the mic
         return list(procs.values())
 
     def close(self) -> None:
