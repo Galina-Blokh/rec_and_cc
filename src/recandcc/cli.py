@@ -260,6 +260,24 @@ def cmd_autostart(args) -> int:
     return 0
 
 
+def cmd_search(args) -> int:
+    setup_logging(to_file=False, level=logging.WARNING)
+    cfg = load_config()
+    from .search import search_transcripts
+    from .transcribe.output import fmt_hms
+
+    hits = search_transcripts(cfg.output_dir, args.query, args.limit)
+    if not hits:
+        print(f"No matches for {args.query!r}.")
+        return 1
+    for h in hits:
+        print(
+            f"{h.started_at[:16].replace('T', ' ')}  [{fmt_hms(h.start)}] {h.speaker}: {h.snippet}"
+        )
+        print(f"    {h.transcript}")
+    return 0
+
+
 def cmd_config(args) -> int:
     load_config()  # creates the default file on first run
     print(f"# {CONFIG_PATH}\n")
@@ -292,6 +310,11 @@ def build_parser() -> argparse.ArgumentParser:
     m = sub.add_parser("monitor", help="print live audio activity + how rules classify it")
     m.add_argument("--interval", type=float, default=1.0)
     m.set_defaults(func=cmd_monitor)
+
+    s = sub.add_parser("search", help="search all transcripts (local full-text index)")
+    s.add_argument("query")
+    s.add_argument("--limit", type=int, default=20, help="show at most N matches")
+    s.set_defaults(func=cmd_search)
 
     sub.add_parser("devices", help="list audio devices").set_defaults(func=cmd_devices)
 

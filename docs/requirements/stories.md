@@ -28,6 +28,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-17 | Always on, visible state | ✅ |
 | US-18 | Runs on Windows | 🟡 untested on hardware (#5) |
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 stock model, no Hebrew test set (#6) |
+| US-20 | Search my transcripts | 🟡 search only; summaries, export planned (#4) |
 
 ---
 
@@ -190,3 +191,21 @@ while I decide.*
 - **Not yet:** the Windows (Tk) captions only right-justify Hebrew lines; Tk does no bidi
   reordering, so the label stays left of the Hebrew text and the glyph order is unverified
   on real hardware (#6).
+
+### US-20 Search my transcripts
+*As the owner, I want to find what was said in any past meeting, so that I don't have to
+open transcripts one by one.*
+
+- **Given** transcripts in `output_dir`, **when** I search for words (menu **Search
+  transcripts…** on macOS, or `recandcc search "<words>"`), **then** I get the segments that
+  contain all of them, best match first, each with its session, time in the recording,
+  speaker and a snippet; choosing one opens its transcript.
+- **Given** English or Russian text, **then** matching ignores case and diacritics and
+  matches word prefixes (`бюдж` finds `бюджет`).
+- **Given** 100+ sessions, **then** a search returns in < 200 ms.
+- **When** a transcript is final, **then** it is indexed in the background; a changed
+  transcript is re-indexed and a deleted or discarded session leaves the index.
+- **Then** the index is local and owner-only, outside `output_dir` (never synced), and logs
+  never contain the searched or found text.
+- **Not yet:** summaries and action items with a local LLM, DOCX/PDF export, a notes window,
+  a search window on Windows (#4).
