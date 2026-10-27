@@ -308,8 +308,11 @@ that mapping is logged once at INFO. That 1.5B is a smaller model, weaker than t
 for Hebrew and Russian and for action items. Other models are skipped there. It is much slower
 than on Apple silicon: about 25 tokens a second on an Apple M5 Max CPU. An 826-word meeting took
 about 18 seconds, and a transcript of about 9,000 words (an hour of talk) about 2.5 minutes
-(laptop CPUs may be slower). Offline before the model is downloaded, or on an Intel Mac (ONNX
-Runtime has no wheel for those), the summary is skipped with a notice.
+(laptop CPUs may be slower). Offline before the model is downloaded, the summary is skipped with a notice. Intel Macs aren't
+supported (onnxruntime has no macOS x86_64 wheel). On Apple silicon, a broken or missing mlx-lm
+install falls back to this CPU 1.5B (logged at INFO). The CPU path peaks at about 5 GB of RAM
+while loading and about 3.2 GB while generating (measured on an Apple M-series machine), so 8 GB
+Windows laptops may struggle.
 It waits for
 the speaker labels (a slow diarization delays it), a summary cut short by quitting is redone
 at the next start (a `.summary-pending` marker in the session folder; a `.summary-source` file records a fingerprint of the transcript text the summary was made from), and after
