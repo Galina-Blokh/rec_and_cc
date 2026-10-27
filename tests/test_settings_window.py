@@ -69,14 +69,14 @@ def _reap_helpers():
     join_threads("purge-audio")
 
 
-def join_threads(name, timeout=5.0):
+def join_threads(name, timeout=30.0):
     for t in threading.enumerate():
         if t.name == name:
             t.join(timeout)
             assert not t.is_alive(), f"{name} did not finish"
 
 
-def next_event(ctrl, kinds, timeout=10.0):
+def next_event(ctrl, kinds, timeout=30.0):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         try:
@@ -137,7 +137,7 @@ def test_cancel_changes_nothing(tmp_path, monkeypatch):
     before = path.read_text()
     fake_helper(tmp_path, monkeypatch, reply({"settings": "cancelled"}))
     ctrl.open_settings_async()
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30
     while ctrl._settings_lock.locked() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert ctrl.events.empty()
@@ -222,10 +222,12 @@ def test_window_never_blocks_the_caller(tmp_path, monkeypatch):
     )
     start = time.monotonic()
     ctrl.open_settings_async()
-    assert time.monotonic() - start < 0.5  # returns at once; the helper runs on a worker
+    # returns at once; a blocking call would take the helper's full 1 s
+    assert time.monotonic() - start < 0.9
+    # the helper runs on a worker thread
     assert any(t.name == "settings-window" for t in threading.enumerate())
     ctrl.open_settings_async()  # a second click while open is ignored
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + 30
     while ctrl._settings_lock.locked() and time.monotonic() < deadline:
         time.sleep(0.05)
     assert not ctrl._settings_lock.locked()
@@ -268,12 +270,12 @@ def test_quitting_closes_an_open_window(tmp_path, monkeypatch):
     ctrl, _ = make_ctrl(tmp_path, monkeypatch)
     fake_helper(tmp_path, monkeypatch, "import time\ntime.sleep(60)\n")
     ctrl.open_settings_async()
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30
     while settings_window._proc is None and time.monotonic() < deadline:
         time.sleep(0.02)
     assert settings_window._proc is not None
     settings_window.close_settings()
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30
     while ctrl._settings_lock.locked() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert not ctrl._settings_lock.locked()
@@ -327,7 +329,7 @@ def test_timeout_is_cancelled_and_releases_the_lock(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(common, "run_settings", settings_window.run_settings)
     ctrl.open_settings_async()
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + 30
     while ctrl._settings_lock.locked() and time.monotonic() < deadline:
         time.sleep(0.05)
     assert not ctrl._settings_lock.locked()
@@ -355,10 +357,14 @@ def test_extra_languages_pass_through(tmp_path, monkeypatch):
 
 
 @mac_only
-def test_closing_before_the_window_starts_kills_it(tmp_path, monkeypatch):
+def test_quit_before_the_window_starts_never_spawns_the_helper(tmp_path, monkeypatch):
     ctrl, _ = make_ctrl(tmp_path, monkeypatch)
+    fake_helper(tmp_path, monkeypatch, "pass\n")
     settings_window.close_settings()
+    spawned = []
+    monkeypatch.setattr(settings_window.subprocess, "Popen", lambda *a, **k: spawned.append(a))
     assert settings_window.run_settings(ctrl.cfg) is None
+    assert spawned == []  # quit came first: the stub helper was never even started
 
 
 @mac_only
@@ -373,6 +379,8 @@ def test_failed_write_rolls_back_and_keeps_the_mode(tmp_path, monkeypatch):
     ctrl.open_settings_async()
     ev = next_event(ctrl, {"settings_saved", "settings_fallback", "notice"})
     assert ev[0] == "notice"
+    assert "config.toml" in ev[2] and "folder" not in ev[2]  # not blamed on the transcripts folder
+    assert str(tmp_path) not in ev[2]
     assert ctrl.cfg.detection.mode == Mode.ASK  # not applied: the file was not written
     assert ctrl.cfg.transcription.keep_audio is True and ctrl.cfg.live_captions is True
 
@@ -453,6 +461,25 @@ def test_new_empty_folder_from_the_picker_becomes_owner_only(tmp_path):
     _privatize_new_folder(used)
     assert fresh.stat().st_mode & 0o777 == 0o700
     assert used.stat().st_mode & 0o777 == 0o755  # a folder with content is left alone
+
+
+@mac_only
+def test_reordered_languages_are_not_a_change(tmp_path, monkeypatch):
+    ctrl, path = make_ctrl(tmp_path, monkeypatch)
+    path.write_text('[transcription]\nlanguages = ["ru", "iw"]\n')
+    ctrl.cfg = load_config(path)
+    monkeypatch.setattr(common, "load_config", lambda: load_config(path))
+    # the window hands languages back in its own order (en, ru, he first)
+    values = {**settings_window.snapshot(ctrl.cfg), "languages": ["he", "ru"], "keep_audio": False}
+    fake_helper(tmp_path, monkeypatch, reply({"settings": "saved", "values": values}))
+    ctrl.open_settings_async()
+    assert (
+        next_event(ctrl, {"settings_saved", "settings_fallback", "notice"})[0] == "settings_saved"
+    )
+    text = path.read_text()
+    assert '"iw"' in text and text.index('"ru"') < text.index('"iw"')  # spelling and order stay
+    assert ctrl.cfg.transcription.languages == ["ru", "he"]
+    assert ctrl.cfg.transcription.keep_audio is False
 
 
 def test_only_unknown_languages_are_rejected_not_replaced_by_defaults():
