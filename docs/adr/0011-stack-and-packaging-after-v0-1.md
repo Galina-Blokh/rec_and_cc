@@ -160,9 +160,10 @@ already cached and the network blocked.
    `tests/test_offline.py` pass; the size change is recorded. **Tier 1 done:**
    `[tool.uv] exclude-dependencies = ["torch"]` in pyproject.toml removes torch, sympy,
    networkx, mpmath, jinja2, markupsafe and setuptools (nothing else needs them, per
-   `uv tree --invert`). `.venv` on darwin/arm64: 1.3 GB (1,380,000 KiB) → 773 MB
-   (791,240 KiB), about 575 MiB less. `tests/test_no_torch.py` checks that the MLX path
-   (import, language ID and a real transcription) never imports torch. **Tier 2 (open):** decide on numba/scipy
+   `uv tree --invert`). `.venv` on darwin/arm64 (`du -sk`): 1,380,000 KiB (1.32 GiB) →
+   791,240 KiB (773 MiB), 575 MiB less. `tests/test_no_torch.py` checks that the MLX
+   path (import, language ID and a real transcription) never imports torch.
+   **Tier 2 (open):** decide on numba/scipy
    (patch, vendor or stub `mlx_whisper.timing`, or keep them), and record the choice and its
    size in the packaging ADR from follow-up 3.
 5. **Release pipeline: signed, notarized DMG** (after 3, with #17). AC: one script builds,
