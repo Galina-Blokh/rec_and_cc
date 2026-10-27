@@ -288,7 +288,7 @@ def _mac_statfs(path: Path) -> tuple[str, int, str]:
     return buf.f_fstypename.decode("ascii", "replace"), buf.f_flags, src
 
 
-_LOCAL_FUSE = ("cryptomator", "veracrypt", "gocryptfs", "cryfs", "encfs", "cryptomator-")
+_LOCAL_FUSE = ("cryptomator", "veracrypt", "gocryptfs", "cryfs", "encfs")
 _NET_FUSE_SRC = re.compile(r"^(//|[^/\s]+@[^/\s]+:|[A-Za-z][\w.-]*:)|sshfs|rclone|smbnetfs|s3fs")
 
 
@@ -299,10 +299,14 @@ def _fuse_volume(fstype: str, source: str) -> tuple[bool, str | None]:
     smbnetfs) are a network volume. Anything else is undecided ``(False, None)``: the caller
     falls back to MNT_LOCAL and, when unsure, warns (privacy first)."""
     text = f"{fstype} {source}".lower()
-    if any(name in text for name in _LOCAL_FUSE):
-        return True, None
+    # network first: `me@host:/backups/gocryptfs` is a network share that merely has a vault
+    # name in its path. Vault names count only in the fstype or the source's last component.
     if _NET_FUSE_SRC.search(source) or "sshfs" in text:
         return True, "a network volume"
+    base = re.split(r"[\\/]", source.rstrip("/\\"))[-1].lower()
+    head = re.split(r"[@:/\\]", source)[0].lower()  # "Cryptomator@/path"
+    if any(name in f"{fstype.lower()} {head} {base}" for name in _LOCAL_FUSE):
+        return True, None
     return False, None
 
 

@@ -9,6 +9,7 @@ import threading
 import tomllib
 
 import numpy as np
+import pytest
 
 from recandcc.config import load_config
 from recandcc.models import Mode
@@ -320,3 +321,16 @@ def test_a_raising_toggle_leaves_no_dirty_mark(tmp_path, monkeypatch):
     with contextlib.suppress(ValueError):
         ctrl.toggle_language("he")
     assert not ctrl._dirty
+
+
+def test_failed_save_start_unmarks_exactly_once(tmp_path, monkeypatch):
+    ctrl, _ = _ctrl(tmp_path, monkeypatch, '["en"]')
+    ctrl._dirty["transcription.languages"] = 2  # earlier clicks, saves still pending
+
+    def boom(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", boom)
+    with pytest.raises(RuntimeError):
+        ctrl.toggle_language("he")
+    assert ctrl._dirty["transcription.languages"] == 2  # +1 for this click, -1 once

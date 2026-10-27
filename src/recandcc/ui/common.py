@@ -1128,14 +1128,16 @@ class Controller:
                         langs = normalize_languages(new)
                         tr._raw_languages = new if new != langs else None  # type: ignore[attr-defined]
                         tr.languages = langs  # a new list: other threads never see it half-built
-            if new is not None:
-                self.save_settings(key, title="Languages", marked=True)
         except BaseException:
-            self._mark_dirty((key,), -1)  # the save thread never started: don't leak the mark
+            self._mark_dirty((key,), -1)  # nothing was saved: don't leak the mark
             raise
         if new is None:
             self._mark_dirty((key,), -1)
             self.post_notice("Languages", LANGUAGES_KEEP_ONE)
+            return
+        # outside the try: save_settings unmarks itself if its thread fails to start, and a
+        # second unmark here would drop a concurrent click's mark
+        self.save_settings(key, title="Languages", marked=True)
 
     def toggle_call_app_names(self) -> None:
         """Menu "Use names from the call app" (macOS), from the main thread; never blocks.

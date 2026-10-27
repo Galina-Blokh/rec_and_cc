@@ -106,6 +106,11 @@ def test_fuse_mounts_are_judged_by_their_source():
     # known local vaults do not
     assert nv("/V/x", fuse("macfuse", "Cryptomator@/Users/me/vault")) is None
     assert nv("/V/x", fuse("fuse-t", "gocryptfs")) is None
+    assert nv("/V/x", fuse("fuse-t", "/Users/me/vault.gocryptfs")) is None
+    # a vault name inside a network source's path does not make it local
+    assert nv("/V/x", fuse("fuse-t", "me@host:/backups/gocryptfs")) == "a network volume"
+    assert nv("/V/x", fuse("macfuse", "//nas/cryptomator")) == "a network volume"
+    assert "cryptomator-" not in cs._LOCAL_FUSE
     assert nv("/V/x", fuse("macfuse", "veracrypt")) is None
     assert nv("/V/x", lambda p: ("smbfs", cs._MNT_LOCAL)) == "SMB"
     mounts = "x /mnt/vault fuse.cryptomator rw 0 0\ns:/ /mnt/s fuse.sshfs rw 0 0\n"
