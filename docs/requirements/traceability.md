@@ -38,6 +38,6 @@ Paths are relative to `src/recandcc/`.
 | US-23 | `sensitivity.py`, `detect/room.py`, `engine.py`, `config.py`, `ui/common.py` | `test_sensitivity.py::*`, `test_engine.py::test_sensitivity_unset_keeps_the_plain_thresholds`, `test_engine.py::test_low_inside_sensitivity_delays_app_audio_then_room_speech_starts`, `test_engine.py::test_inside_favoured_app_audio_wins_quickly`, `test_engine.py::test_invalid_inside_sensitivity_does_not_break_ticks` |
 | US-28 | `ui/notes.py`, `ui/common.py`, `ui/mac.py`, `ui/tray.py`, `models.py` | `test_notes.py::*`, `test_ui_tray.py::test_notes_menu_item_and_events_reach_the_notes_window`, `test_ui_tray.py::test_notes_window_actions` |
 | US-32 | `semantic.py`, `search.py`, `config.py`, `ui/common.py`, `cli.py` | `test_semantic.py::*` |
-| US-29 | `ui/bidi.py`, `ui/captions.py`, `ui/tray.py` | `test_bidi.py::*` |
+| US-29 | `ui/bidi.py`, `ui/captions.py`, `ui/tray.py` | `test_bidi.py::*`, `test_bidi_wrap.py::*` |
 | US-30 | `settings_window.py`, `config.py`, `ui/common.py`, `ui/mac.py`, `native/macos/.../Settings.swift` | `test_settings_window.py::*` |
 | US-34 | `cloudsync.py`, `ui/common.py`, `cli.py` | `test_network_volume.py::*` |
