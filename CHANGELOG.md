@@ -31,6 +31,7 @@ All notable changes to RecAndCC are documented here. The format is based on
 - "Open transcripts folder" creates the folder owner-only, like session folders (#32).
 
 ### Added
+- **Settings…** menu item (macOS): a SwiftUI window, `rcc-audiotap settings`, for mode, folder, languages, keep audio, live captions and speaker names (US-30). Rebuild the helper with `./native/macos/build.sh`; an older helper falls back to opening `config.toml`.
 - Per-language model routing, opt-in: `transcription.language_models`, e.g.
   `{ he = "ivrit-ai/whisper-large-v3-turbo-ct2" }`, transcribes Hebrew regions (live and
   final) with the Hebrew-tuned ivrit.ai Whisper, pinned for faster-whisper and MLX, loaded on

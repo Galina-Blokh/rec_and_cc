@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import difflib
 import re
 from collections.abc import Iterable, Sequence
@@ -106,3 +107,158 @@ def merge_tracks(me: list[Segment], others: list[Segment], dedupe: bool = True) 
     if dedupe:
         me = dedupe_echo(me, others)
     return sorted([*me, *others], key=lambda s: (s.start, s.end))
+
+
+# -- splitting a segment where the speaker changes ---------------------------------------------
+
+MIN_RUN_S = 1.0  # a run of one speaker shorter than this ...
+MIN_RUN_WORDS = 3  # ... and with fewer words than this is flicker, absorbed by its neighbours
+
+
+class _TurnIndex:
+    """Diarization turns sorted by start, built once and bisected for every word."""
+
+    def __init__(self, turns: Sequence) -> None:
+        self.turns = turns
+        self.order = sorted(range(len(turns)), key=lambda i: turns[i].start)
+        self.ordered = [turns[i] for i in self.order]
+        self.starts = [t.start for t in self.ordered]
+        self.reach: list[float] = []  # reach[k]: latest end among ordered[: k + 1]
+        for t in self.ordered:
+            self.reach.append(max(self.reach[-1], t.end) if self.reach else t.end)
+        self.first_by_end: dict[float, int] = {}  # earliest index in `turns` per end / start
+        self.first_by_start: dict[float, int] = {}
+        for i, t in enumerate(turns):
+            self.first_by_end.setdefault(t.end, i)
+            self.first_by_start.setdefault(t.start, i)
+
+
+def _word_speakers(words: Sequence[tuple[float, float, str]], index: _TurnIndex) -> list[int]:
+    """Diarized speaker of each word: most overlap, else the turn nearest its middle.
+
+    Turns are sorted once (`index`) and bisected, so a word only looks at the turns around it
+    (ties go to the turn that comes first in the turns, as with a plain scan)."""
+    turns, order, ordered = index.turns, index.order, index.ordered
+    starts, reach = index.starts, index.reach
+    first_by_end, first_by_start = index.first_by_end, index.first_by_start
+    if not turns:
+        return []
+    out = []
+    for ws, we, _ in words:
+        hi = bisect.bisect_left(starts, we)  # turns from `hi` on start at/after the word ends
+        hits: list[int] = []
+        for k in range(hi - 1, -1, -1):
+            if reach[k] <= ws:  # nothing earlier reaches the word
+                break
+            if min(we, ordered[k].end) - max(ws, ordered[k].start) > 0:
+                hits.append(order[k])
+        if hits:
+            overlap: dict[int, float] = {}
+            for i in sorted(hits):  # input order, so ties resolve like a plain scan
+                t = turns[i]
+                o = min(we, t.end) - max(ws, t.start)
+                overlap[t.speaker] = overlap.get(t.speaker, 0.0) + o
+            out.append(max(overlap, key=lambda k: overlap[k]))
+            continue
+        mid = (ws + we) / 2
+        cands = []  # nothing overlaps: the nearest turn ends before the word or starts after it
+        if hi > 0 and reach[hi - 1] > ws:  # zero-length word inside a turn: rare, scan all
+            cands = list(range(len(turns)))
+        elif hi > 0:
+            cands.append(first_by_end[reach[hi - 1]])
+        if hi < len(starts):
+            cands.append(first_by_start[starts[hi]])
+        best = min(cands, key=lambda i: (max(turns[i].start - mid, mid - turns[i].end, 0.0), i))
+        out.append(turns[best].speaker)
+    return out
+
+
+def _runs(
+    words: Sequence[tuple[float, float, str]], who: Sequence[int]
+) -> list[list]:  # [speaker, first, last+1]
+    runs: list[list] = []
+    for i, k in enumerate(who):
+        if runs and runs[-1][0] == k:
+            runs[-1][2] = i + 1
+        else:
+            runs.append([k, i, i + 1])
+    while len(runs) > 1:
+
+        def length(r):
+            return words[r[2] - 1][1] - words[r[1]][0]
+
+        def is_weak(r):
+            return length(r) < MIN_RUN_S and r[2] - r[1] < MIN_RUN_WORDS
+
+        # a weak run is absorbed only into a strong neighbour, never into another weak run
+        # ("Yes." / "No." from two speakers stay apart); each pass removes a run, so it ends
+        absorbable = [
+            r
+            for r in runs
+            if length(r) < MIN_RUN_S
+            and r[2] - r[1] < MIN_RUN_WORDS
+            and any(
+                0 <= n < len(runs) and not is_weak(runs[n])
+                for n in (runs.index(r) - 1, runs.index(r) + 1)
+            )
+        ]
+        if not absorbable:
+            break
+        r = min(absorbable, key=length)
+        i = runs.index(r)
+        nbrs = [j for j in (i - 1, i + 1) if 0 <= j < len(runs) and not is_weak(runs[j])]
+        j = max(nbrs, key=lambda n: length(runs[n]))
+        runs[j][1], runs[j][2] = min(runs[j][1], r[1]), max(runs[j][2], r[2])
+        del runs[i]
+        # coalesce neighbours that now share a speaker
+        for a in range(len(runs) - 2, -1, -1):
+            if runs[a][0] == runs[a + 1][0]:
+                runs[a][2] = runs[a + 1][2]
+                del runs[a + 1]
+    return runs
+
+
+def _join(raw: Sequence[str]) -> str:
+    """Words back to text exactly: faster-whisper words carry their own leading space (none for
+    CJK, sub-word tokens or punctuation), so they are concatenated as they are."""
+    return "".join(raw).strip()
+
+
+def split_on_speaker_change(
+    segments: Sequence[Segment], turns: Sequence, speaker: str = OTHERS
+) -> list[Segment]:
+    """Split each `speaker` ("Others") segment that has word timings wherever the diarized
+    speaker of consecutive words changes, at the word boundary. Runs shorter than MIN_RUN_S and
+    MIN_RUN_WORDS words are absorbed by their neighbours. The pieces keep the language and
+    rebuild the text from the words; segments without words, "Me" segments and segments with
+    one speaker are returned unchanged. `turns`: diarization turns (start, end, speaker)."""
+    if not turns:
+        return list(segments)
+    index = _TurnIndex(turns)
+    out: list[Segment] = []
+    split = False
+    for seg in segments:
+        runs = (
+            _runs(seg.words, _word_speakers(seg.words, index))
+            if seg.speaker == speaker and len(seg.words) > 1
+            else []
+        )
+        if len(runs) < 2:
+            out.append(seg)
+            continue
+        split = True
+        for _, a, b in runs:
+            ws = seg.words[a:b]
+            out.append(
+                Segment(
+                    start=ws[0][0],
+                    end=ws[-1][1],
+                    text=_join([w[2] for w in ws]),
+                    speaker=seg.speaker,
+                    language=seg.language,
+                    words=list(ws),
+                )
+            )
+    if split:  # pieces replaced a segment in place: keep the transcript in time order
+        out.sort(key=lambda s: (s.start, s.end))
+    return out

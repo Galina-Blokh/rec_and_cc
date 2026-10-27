@@ -120,6 +120,11 @@ class DetectionConfig:
     room_preroll_s: float = 15.0  # audio before the trigger kept at the session's start
     room_stop_after_silence_s: float = 90.0  # no speech this long ends a room session
     room_vad_threshold: float = 0.5  # Silero speech probability that counts as speech
+    # Sensitivity 0-100 (higher = less needed to start), unset = the plain thresholds above.
+    # Outside = room/mic (room_speech_s + a noise-floor margin), inside = app audio
+    # (min_active_s). See recandcc.sensitivity and the "Sensitivity" menu presets.
+    outside_sensitivity: float | None = None
+    inside_sensitivity: float | None = None
     call_apps: list[str] = field(default_factory=lambda: list(DEFAULT_CALL_APPS))
     media_apps: list[str] = field(default_factory=lambda: list(DEFAULT_MEDIA_APPS))
     ignore_apps: list[str] = field(default_factory=lambda: list(DEFAULT_IGNORE_APPS))
@@ -151,6 +156,10 @@ class TranscriptionConfig:
     # Split "Others" into "Speaker 1", "Speaker 2", ... in the final transcript (offline
     # speaker diarization). Live captions keep showing "Others".
     diarize: bool = True
+    # Split an "Others" segment at the word where the diarized speaker changes. Opt-in: it needs
+    # word timestamps (extra CPU time), so it applies to batch transcription on the
+    # faster-whisper backend only; not to live sessions or the MLX backend.
+    split_on_speaker_change: bool = False
     # Hints for diarization when you know how many other people are on the call: the number of
     # speakers is picked automatically within [min_speakers, max_speakers]. 0 = no hint.
     min_speakers: int = 0
@@ -162,6 +171,10 @@ class TranscriptionConfig:
     # Remember speakers' voices so that a speaker named once (`recandcc name-speaker`) is named
     # in later sessions. Off by default: voice profiles are biometric data. See voices.py.
     speaker_names: bool = False
+    # macOS, opt-in, only with speaker_names: read the other participants' names from the call
+    # app's visible participant list (Accessibility permission) and use them for `Speaker N`
+    # when that is unambiguous. See participants.py.
+    names_from_call_app: bool = False
     # Transcribe while recording: text appears ~1-2 s after each phrase, and the final
     # transcript is ready right when the session stops (no post-session pass).
     live: bool = True
@@ -218,6 +231,10 @@ class Config:
         raw = getattr(tr, "_raw_languages", None)
         if raw is not None and normalize_languages(raw) == tr.languages:
             data["transcription"]["languages"] = raw
+        # TOML has no null: unset (None) values are omitted. Only these sections have Optional
+        # fields today; add any new section with an Optional field here.
+        for section in ("detection", "transcription"):
+            data[section] = {k: v for k, v in data[section].items() if v is not None}
         path.write_bytes(tomli_w.dumps(data).encode())
 
 
@@ -280,24 +297,51 @@ def normalize_language_models(value) -> dict[str, str]:
 def save_keys(path: Path | None, updates: dict[str, Any]) -> float:
     """Write only the dotted keys in ``updates`` ("transcription.languages": [...]) into
     config.toml, leaving every other key's value exactly as it is on disk (it may have been
-    edited by hand since the app loaded it). Like every save, it drops TOML comments and
-    rewrites the file in tomli_w's key order. ``path=None`` means CONFIG_PATH, read at call
-    time. Returns the new file's mtime. Raises FileNotFoundError if there is no file yet,
-    ValueError if it is not valid TOML or a key's
-    parent is not a table."""
+    edited by hand since the app loaded it). A value of None removes the key (TOML has no
+    null); a table left empty by that is removed too, and removing a key that isn't there
+    changes nothing. Like every save, it drops TOML comments and rewrites the file in
+    tomli_w's key order. ``path=None`` means CONFIG_PATH, read at call time. Returns the new
+    file's mtime. Raises FileNotFoundError if there is no file yet, ValueError if it is not
+    valid TOML or a key's parent is not a table."""
     path = (
         CONFIG_PATH if path is None else path
     ).resolve()  # a symlinked config.toml stays a symlink
     data = tomllib.loads(path.read_text(encoding="utf-8"))
+    changed = False
     for dotted, value in updates.items():
         *parents, leaf = dotted.split(".")
+        if value is None:
+            changed |= _remove_key(data, parents, leaf)
+            continue
         table = data
         for name in parents:
             table = table.setdefault(name, {})
             if not isinstance(table, dict):
                 raise ValueError(f"{name} in {path} is not a table")
         table[leaf] = value
+        changed = True
+    if not changed:  # only absent keys were removed: leave the file as it is
+        return path.stat().st_mtime
     return _write_atomic(path, tomli_w.dumps(data).encode())
+
+
+def _remove_key(data: dict, parents: list[str], leaf: str) -> bool:
+    """Remove ``parents...leaf`` without creating tables; drop tables it leaves empty.
+    Returns whether anything was removed."""
+    chain = [data]
+    for name in parents:
+        table = chain[-1].get(name)
+        if not isinstance(table, dict):
+            return False  # no such table: nothing to remove
+        chain.append(table)
+    if leaf not in chain[-1]:
+        return False
+    del chain[-1][leaf]
+    for i in reversed(range(len(parents))):  # innermost first
+        if chain[i + 1]:
+            break
+        del chain[i][parents[i]]
+    return True
 
 
 def _write_atomic(path: Path, payload: bytes) -> float:
@@ -321,6 +365,67 @@ def save_languages(languages: list, path: Path | None = None) -> None:
     save_keys(path, {"transcription.languages": list(languages)})
 
 
+# Keys the native settings window may change: flat name -> dotted config key.
+SETTINGS_KEYS = {
+    "mode": "detection.mode",
+    "output_dir": "output_dir",
+    "languages": "transcription.languages",
+    "keep_audio": "transcription.keep_audio",
+    "speaker_names": "transcription.speaker_names",
+    "live_captions": "live_captions",
+}
+
+
+def validate_settings(values) -> dict:
+    """Check values sent by the settings window (untrusted JSON) and return them cleaned:
+    ``mode`` as a Mode, ``output_dir`` as an expanded Path, ``languages`` normalised
+    ([] = any language), the rest as bools. Unknown names are ignored. Raises ValueError on a
+    bad value."""
+    if not isinstance(values, dict):
+        raise ValueError("settings must be an object")
+    out: dict = {}
+    for name, value in values.items():
+        if name not in SETTINGS_KEYS:
+            continue
+        if name == "mode":
+            out[name] = Mode(value)
+        elif name == "output_dir":
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("output_dir must be a folder path")
+            out[name] = Path(value).expanduser()
+            if not out[name].is_absolute():
+                raise ValueError("output_dir must be an absolute path")
+        elif name == "languages":
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                raise ValueError("languages must be a list of codes")
+            langs = list(dict.fromkeys(language_code(v) for v in value))  # [] = any language
+            clean = normalize_languages(langs)
+            if len(clean) != len(langs):
+                raise ValueError("languages: unknown language code")
+            out[name] = clean
+        elif isinstance(value, bool):
+            out[name] = value
+        else:
+            raise ValueError(f"{name} must be true or false")
+    return out
+
+
+def save_settings(updates: dict, path: Path | None = None) -> float:
+    """Write validated settings (see validate_settings) into config.toml, keeping every other
+    key as it is on disk (see `save_keys`). Returns the new file's mtime."""
+    return save_keys(
+        path,
+        {
+            SETTINGS_KEYS[name]: (
+                value.value
+                if isinstance(value, Mode)
+                else (str(value) if isinstance(value, Path) else value)
+            )
+            for name, value in updates.items()
+        },
+    )
+
+
 def load_config(path: Path | None = None) -> Config:
     """Load config, creating a default file on first run. Unknown keys are ignored."""
     path = CONFIG_PATH if path is None else path
@@ -332,14 +437,20 @@ def load_config(path: Path | None = None) -> Config:
     det = _build(DetectionConfig, data.pop("detection", {}))
     det.mode = Mode(det.mode)
     det.app_modes = {k: Mode(v) for k, v in det.app_modes.items()}
-    if det.room_speech_s > det.room_window_s:  # could never trigger: say so, and clamp
+    for key in ("outside_sensitivity", "inside_sensitivity"):
+        v = getattr(det, key)
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int | float)):
+            log.warning("config: [detection] %s must be a number 0-100; ignoring it", key)
+            setattr(det, key, None)
+    # Could never trigger: say so. Clamped where it is used (the file keeps the value); with
+    # an outside sensitivity the window widens instead.
+    if det.outside_sensitivity is None and det.room_speech_s > det.room_window_s:
         log.warning(
             "room_speech_s (%s) is longer than room_window_s (%s); using %s",
             det.room_speech_s,
             det.room_window_s,
             det.room_window_s,
         )
-        det.room_speech_s = det.room_window_s
     tr = _build(TranscriptionConfig, data.pop("transcription", {}))
     raw = tr.languages
     tr.languages = normalize_languages(raw)

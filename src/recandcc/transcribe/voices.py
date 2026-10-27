@@ -305,6 +305,39 @@ def write_session_voices(
     _write_private(_session_path(session.id, voices_dir), data)
 
 
+def _names_path(session_id: str, voices_dir: Path | None) -> Path:
+    h = hashlib.sha256(session_id.encode()).hexdigest()[:16]
+    return _dir(voices_dir) / "sessions" / f"{h}.names.json"
+
+
+def write_session_names(
+    session: SessionInfo, names: list[str], voices_dir: Path | None = None
+) -> None:
+    """Keep the participant names a call app showed during `session` in the owner-only store
+    (never in the session folder, which may sync to a cloud). Like the session's voices it is
+    pruned when the folder is deleted and removed by `voices delete --all`."""
+    data = {
+        "version": 1,
+        "session_id": session.id,
+        "directory": str(Path(session.directory).resolve()),
+        "participants": [str(n) for n in names],
+    }
+    _write_private(_names_path(session.id, voices_dir), data)
+
+
+def read_session_names(session_id: str, voices_dir: Path | None = None) -> list[str]:
+    path = _names_path(session_id, voices_dir)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return [str(n) for n in data.get("participants", [])]
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def delete_session_names(session_id: str, voices_dir: Path | None = None) -> None:
+    _names_path(session_id, voices_dir).unlink(missing_ok=True)
+
+
 def read_session_voices(session_id: str, voices_dir: Path | None = None) -> dict[str, dict]:
     """label -> {"centroid": unit vector, "profile": name | None}; {} if none are stored."""
     path = _session_path(session_id, voices_dir)
@@ -391,13 +424,16 @@ __all__ = [
     "check_name",
     "delete_all_profiles",
     "delete_profile",
+    "delete_session_names",
     "delete_session_voices",
     "load_profiles",
     "match_profiles",
     "name_speaker",
     "prune_session_voices",
+    "read_session_names",
     "read_session_voices",
     "save_profile",
     "session_speakers",
+    "write_session_names",
     "write_session_voices",
 ]
