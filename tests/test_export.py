@@ -193,7 +193,8 @@ def _controller(output_dir=None):
 
     ctrl = Controller.__new__(Controller)  # only the export wiring, no runtime
     ctrl.events, ctrl._export_lock = queue.Queue(), threading.Lock()
-    ctrl.cfg = type("C", (), {"output_dir": output_dir})()
+    export_cfg = type("E", (), {"template": ""})()
+    ctrl.cfg = type("C", (), {"output_dir": output_dir, "export": export_cfg})()
     return ctrl
 
 
@@ -201,7 +202,7 @@ def _controller(output_dir=None):
 def test_controller_export_posts_a_notice(session, monkeypatch, fmt):
     seen = []
 
-    def fake(folder, f, skipped):
+    def fake(folder, f, skipped, template=None):
         seen.append(f)
         (folder / "transcript.docx").write_text("x")
         return [folder / "transcript.docx"]
@@ -228,7 +229,7 @@ def test_controller_releases_the_lock_when_the_thread_cannot_start(session, monk
 
 
 def test_controller_export_logs_only_the_error_type(session, monkeypatch, caplog):
-    def boom(*_a):
+    def boom(*_a, **_kw):
         raise RuntimeError("secret words from the call")
 
     monkeypatch.setattr(export, "export_session", boom)
@@ -823,7 +824,7 @@ def test_markdown_variants(session):
         ("bullet", "plus"),
         ("num", "1. one"),
         ("num", "2. two"),
-        ("h2", "Sub"),
+        ("h3", "Sub"),
         ("note", "a_b_c"),
         ("p", "text"),
     ]

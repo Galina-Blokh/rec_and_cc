@@ -353,9 +353,20 @@ def cmd_export(args) -> int:
     setup_logging(to_file=False, level=logging.WARNING)
     from .transcribe.export import ExportError, export_session
 
+    template = ""
+    if CONFIG_PATH.exists():  # export never creates config.toml
+        try:
+            template = load_config().export.template
+        except Exception as e:  # noqa: BLE001 - a broken config must not stop an export
+            print(
+                f"Ignoring export.template: can't read config.toml ({type(e).__name__})",
+                file=sys.stderr,
+            )
     try:
         skipped: list[str] = []
-        paths = export_session(Path(args.session_dir).expanduser(), args.format, skipped)
+        paths = export_session(
+            Path(args.session_dir).expanduser(), args.format, skipped, template=template
+        )
     except ExportError as e:
         print(f"Can't export: {e}", file=sys.stderr)
         return 1

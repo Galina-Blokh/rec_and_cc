@@ -281,6 +281,13 @@ class SearchConfig:
 
 
 @dataclass
+class ExportConfig:
+    # Optional local TOML file that sets the DOCX/PDF title, sections, headings and a
+    # header/footer line (see transcribe/export_template.py). "" = the default layout.
+    template: str = ""
+
+
+@dataclass
 class Config:
     output_dir: Path = field(default_factory=lambda: DEFAULT_OUTPUT_DIR)
     autostart: bool = False
@@ -292,6 +299,7 @@ class Config:
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
     summary: SummaryConfig = field(default_factory=SummaryConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
+    export: ExportConfig = field(default_factory=ExportConfig)
 
     def save(self, path: Path | None = None) -> None:
         # Resolve first: os.replace on a symlinked config.toml (dotfiles) would swap the link
@@ -691,8 +699,13 @@ def load_config(path: Path | None = None, *, migrate: bool = False) -> Config:
     )
     _migrate_summary_model(summary, path, persist=migrate)
     search = _build(SearchConfig, data.pop("search", {}))
+    export = _build(ExportConfig, data.pop("export", {}))
+    if not isinstance(export.template, str):
+        log.warning("export.template must be a path string; ignoring it")
+        export.template = ""
     cfg = _build(Config, data)
     cfg.search = search
+    cfg.export = export
     cfg.output_dir = Path(cfg.output_dir).expanduser()
     cfg.detection, cfg.transcription, cfg.summary = det, tr, summary
     return cfg

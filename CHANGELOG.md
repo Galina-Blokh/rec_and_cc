@@ -7,6 +7,8 @@ All notable changes to RecAndCC are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Custom DOCX/PDF export templates (`[export] template`): title format, section order and
+  headings, header/footer line, from a local TOML file; unchanged without one (US-25, #4). `###` headings in `summary.md` now parse as their own level (`h3`) so they no longer start the action items.
 - Windows tray: "Recent transcripts → Name speakers…" (with `speaker_names = true`) and
   "Forget all voices…" (confirmed), the same Controller calls as the macOS menu (#1).
 - Opt-in semantic transcript search (`[search] semantic = true`): a pinned, checksum-verified

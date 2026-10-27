@@ -31,7 +31,7 @@ Paths are relative to `src/recandcc/`.
 | US-26 | `ui/common.py`, `ui/present.py`, `ui/mac.py`, `ui/tray.py`, `ui/sample.py`, `transcribe/voices.py` | `test_voices_menu.py::*`, `test_tray_voices.py::*`, `test_speaker_sample.py::*` |
 | US-20 | `search.py`, `ui/common.py`, `ui/present.py`, `ui/mac.py`, `ui/tray.py`, `cli.py` | `test_search.py::*`, `test_search_latency.py::*`, `test_ui_present.py::test_search_hit_row_and_notices`, `test_ui_present.py::test_search_open_target_falls_back_to_the_folder`, `test_ui_tray.py::*` |
 | US-21 | `transcribe/voices.py`, `transcribe/intro_hints.py`, `transcribe/diarize.py`, `cli.py` | `test_voices.py::*`, `test_intro_hints.py::*`, `test_voice_recall.py::*` |
-| US-25 | `transcribe/export.py`, `ui/common.py`, `ui/mac.py`, `ui/tray.py`, `cli.py` | `test_export.py::*`, `test_ui_tray.py::test_export_item_runs_the_controller_export` |
+| US-25 | `transcribe/export.py`, `transcribe/export_template.py`, `config.py`, `ui/common.py`, `ui/mac.py`, `ui/tray.py`, `cli.py` | `test_export.py::*`, `test_export_template.py::*`, `test_ui_tray.py::test_export_item_runs_the_controller_export` |
 | US-27 | `transcribe/summary.py`, `transcribe/revisions.py`, `transcribe/gpu.py`, `config.py`, `ui/common.py`, `cli.py` | `test_summary.py::*`, `test_summary_timing.py::*` |
 | US-35 | `models.py`, `transcribe/engine.py`, `transcribe/output.py`, `transcribe/callnames.py` | `test_call_names_tracks.py::*` |
 | US-31 | `participants.py`, `transcribe/callnames.py`, `transcribe/voices.py`, `transcribe/engine.py`, `engine.py`, `recorder.py`, `config.py`, `ui/common.py`, `ui/mac.py`, `cli.py`, `native/macos/AudioTap/Sources/rcc-audiotap/Accessibility.swift` | `test_call_app_names.py::*`, `test_call_names_tracks.py::*` |

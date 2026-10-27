@@ -13,7 +13,7 @@ checksum-verified, on the transcription worker. `live` applies from the next ses
 A menu change (or `recandcc autostart on/off`) writes only its own key, so other hand edits in
 the file are kept; like any save, it drops comments and rewrites the keys in a fixed order.
 These hand edits are picked up while the app runs (a few seconds after you save the file):
-`[detection]`, `[summary]`, `output_dir`, `hotkey`, `live_captions`, and in `[transcription]`
+`[detection]`, `[summary]`, `[export]`, `output_dir`, `hotkey`, `live_captions`, and in `[transcription]`
 `languages`, `keep_audio`, `audio_retention_days` and `speaker_names`. Restart the app after
 changing any other `[transcription]` key (models, device, ...). Reload and menu saves never
 interleave, so a menu change made at the same moment is not lost. Saves take a lock file next
@@ -114,6 +114,30 @@ post-session pass.
 | `accept_qwen_research_licence` | `false` | Must be the TOML boolean `true` (a string such as `"true"` or a number doesn't count: the app says so in a notice). `true` keeps `model = "mlx-community/Qwen2.5-3B-Instruct-4bit"` (non-commercial use only). With `false`, that model is read as the old default, which earlier versions wrote into every `config.toml`, and the current default is used instead: the switch is written to `config.toml` (only the `model` line is rewritten, so comments and layout stay) and, with summaries on, shown once as a notice. To keep the 3B afterwards, set `model` back to `"mlx-community/Qwen2.5-3B-Instruct-4bit"` and this key to `true`. Exception: while the 3B (its pinned commit) is already downloaded and the new default isn't, the 3B is kept, so offline summaries keep working and nothing is downloaded by surprise. Nothing downloads the new default in that case, so the 3B stays until you set `model` to the 1.5B (the Settings window has no summary-model choice); with summaries on, the app says so once ("Keeping the cached Qwen2.5 3B summary model, which is non-commercial; …", remembered by a `.summary-3b-kept-noticed` file next to `config.toml`). The switch is saved and noticed by the app at startup; CLI commands apply it in memory only. A hand edit of `[summary]` is picked up by the running app's config reload, with the same in-memory switch (only the next start saves it and shows the notice). After the switch, its cached copy (~1.7 GB, `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-3B-Instruct-4bit`) can then be deleted |
 | `max_tokens` | `400` | Longest generated answer (the summary, the action list, each chunk's notes) |
 | `language_models` | `{}` | Per-language summary model: `{ he = "mlx-community/Qwen3.5-4B-MLX-4bit" }` summarises a meeting whose main language (the most speech time, overlapping speech counted once; it also sets the summary's language) is Hebrew with that model, all others with `model`. `{}` = `model` for every language. A model must be pinned in `revisions.py` or a local path (otherwise the entry is ignored with a warning), unless `transcription.allow_unpinned_models` is on. If the listed model can't be downloaded or loaded (offline before its download, or an mlx-lm too old for it), that summary falls back to `model`, with a log line. Recommended for Hebrew, which the default Qwen2.5 model summarises badly: `mlx-community/Qwen3.5-4B-MLX-4bit` (Qwen3.5 4B, Apache-2.0; ~3.0 GB download, which includes vision weights mlx-lm doesn't load; ~2.9-3.4 GB peak RAM while it runs). It runs with thinking off. It is pinned like the default and downloaded once, on the first meeting that needs it; only one summary model is loaded at a time, and it is freed after each summary. Keys are Whisper language codes (`iw` = `he`). An entry with an unknown language code or an empty or non-string model name is dropped, with a WARNING log line (`ignoring unknown language 'xx' in summary.language_models`, `ignoring summary.language_models.he: not a model name`); a value that isn't a table is ignored whole (`summary.language_models must be a table; ignoring it`) |
+
+## `[export]`
+
+| Key | Default | Description |
+|---|---|---|
+| `template` | `""` | Path to a local TOML file that restyles the DOCX/PDF export (`recandcc export`, **Export latest transcript**). Empty: the default layout, unchanged. The value is a path you choose (absolute, `~` or `..` are fine, a relative one is taken from the config folder); it is read as a local TOML file and never executed. A missing, oversized (> 64 KB) or invalid file logs one warning (no transcript text) and the default layout is used. Read at each export |
+
+Template keys, all optional:
+
+```toml
+title    = "Meeting {date} {time} ({duration})"   # default "Transcript {date} {time}"
+header   = "Confidential"                         # extra line under the title and meta line
+footer   = "{app}: {speakers}"                    # extra last line
+sections = ["action_items", "summary", "transcript"]   # parts and their order; omit one to drop it; must not be empty
+[headings]                                        # replace the headings of a part
+summary      = "Overview"
+action_items = "To do"
+transcript   = "Full text"
+```
+
+Placeholders apply to `title`, `header` and `footer` only (not to `[headings]`) and are a plain `{name}` substitution (no attribute access, no formatting, no code):
+`{date}` (2026-10-26), `{time}` (14:03), `{duration}` (hh:mm:ss), `{title}` (the default
+title), `{app}`, `{speakers}`, `{languages}`. Unknown names stay as written. If `sections` leaves out `transcript`, the export has no transcript (a summary-only file is a valid choice; one INFO line says so); an empty `sections` is invalid and the default layout is used. `summary` and
+`action_items` come from `summary.md` (US-27); the "generated by" note follows the last of them.
 
 ## `[search]`
 
