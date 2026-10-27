@@ -452,3 +452,36 @@ def test_a_long_meeting_exports(tmp_path):
     assert len(Document(str(export.export_docx(tmp_path))).paragraphs) > 600
     if have_font():
         assert export.export_pdf(tmp_path).read_bytes().startswith(b"%PDF")
+
+
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_a_wrapped_rtl_paragraph_keeps_its_line_order(tmp_path):
+    from pypdf import PdfReader
+
+    words = [f"מילה{chr(0x5D0 + i % 26)}{chr(0x5D0 + i // 26)}" for i in range(60)]
+    (tmp_path / "transcript.json").write_text(
+        json.dumps(
+            {
+                "segments": [
+                    {
+                        "start": 0,
+                        "end": 1,
+                        "text": " ".join(words),
+                        "speaker": "Me",
+                        "language": "he",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        "utf-8",
+    )
+    text = PdfReader(str(export.export_pdf(tmp_path))).pages[0].extract_text()
+    lines = [ln for ln in text.splitlines() if "מילה" in ln or "הלימ" in ln]
+    assert len(lines) > 1  # it wrapped
+
+    def line_of(word):
+        return next(i for i, ln in enumerate(lines) if word in ln or word[::-1] in ln)
+
+    assert line_of(words[0]) < line_of(words[-1])
+    assert [line_of(w) for w in words] == sorted(line_of(w) for w in words)

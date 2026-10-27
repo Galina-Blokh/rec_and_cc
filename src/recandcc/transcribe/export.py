@@ -133,6 +133,8 @@ def _sweep_stale_temps(folder: Path) -> None:
     """Remove export temp files (never the transcript's own ``.transcript.md.tmp`` etc.) that
     a crashed export left behind: ``.transcript.docx.<pid>.<tid>.tmp`` / ``.pdf``, untouched
     for an hour (so another process's export in flight is left alone)."""
+    # No cross-process lock is needed: only temps untouched for an hour are removed, and an
+    # export in flight (here or in another process) writes its temp within seconds.
     now = time.time()
     for name in (DOCX_NAME, PDF_NAME):
         for stale in Path(folder).glob(f".{name}.*.tmp"):
@@ -192,6 +194,11 @@ def export_docx(folder: Path, loaded=None) -> Path:
     return _write(Path(folder) / DOCX_NAME, buf.getvalue())
 
 
+# Latin (with an accent), Cyrillic (with ё), Hebrew letters, niqqud, gershayim and geresh,
+# and common punctuation: a font with only a few glyphs of each script is not enough.
+_PROBE = "aZé\u0416\u0451\u044f\u05d0\u05ea\u05b7\u05f3\u05f4—…«»“”"
+
+
 def _covers_scripts(path: Path) -> bool:
     """True if the font has glyphs for Latin, Cyrillic and Hebrew (fontTools comes with fpdf2)."""
     try:
@@ -199,7 +206,7 @@ def _covers_scripts(path: Path) -> bool:
 
         with TTFont(str(path), lazy=True, fontNumber=0) as f:
             cmap = f.getBestCmap() or {}
-        return all(ord(c) in cmap for c in "a\u0416\u05d0")
+        return all(ord(c) in cmap for c in _PROBE)
     except Exception:  # noqa: BLE001 - an unreadable font is just not a candidate
         return False
 
