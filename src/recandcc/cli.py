@@ -37,17 +37,28 @@ class _SingleInstance:
             if sys.platform == "win32":
                 import msvcrt
 
+                # msvcrt locks from the current position, which "a+" puts at EOF:
+                # lock byte 0 so every instance contends for the same byte.
+                self._f.seek(0)
                 msvcrt.locking(self._f.fileno(), msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
 
                 fcntl.flock(self._f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        except OSError:  # another instance holds the lock
+            self._f.close()
+            self._f = None
             return False
-        self._f.seek(0)
-        self._f.truncate()
-        self._f.write(str(os.getpid()))
-        self._f.flush()
+        try:
+            self._f.seek(0)
+            self._f.truncate()
+            self._f.write(str(os.getpid()))
+            self._f.flush()
+        except OSError:  # lock won but the PID write failed (e.g. disk full)
+            log.warning("could not write the PID to %s", self.path, exc_info=True)
+            self._f.close()
+            self._f = None
+            raise
         return True
 
 
@@ -314,7 +325,7 @@ def cmd_export(args) -> int:
 
 
 def cmd_config(args) -> int:
-    from .cloudsync import cloud_sync_provider, warning_text
+    from .cloudsync import cloud_sync_provider, network_volume, network_warning_text, warning_text
 
     cfg = load_config()  # creates the default file on first run
     print(f"# {CONFIG_PATH}\n")
@@ -323,6 +334,9 @@ def cmd_config(args) -> int:
     provider = cloud_sync_provider(cfg.output_dir)
     if provider:
         print(f"# WARNING: {warning_text(cfg.output_dir, provider)}")
+    kind = network_volume(cfg.output_dir)
+    if kind:
+        print(f"# WARNING: {network_warning_text(cfg.output_dir, kind)}")
     return 0
 
 
