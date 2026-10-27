@@ -22,6 +22,8 @@ COM must be initialised on each thread that calls into pycaw; we do it lazily pe
 
 from __future__ import annotations
 
+# The `pyright: ignore`s below mark Windows-only APIs: comtypes/pycaw are installed, and winreg
+# is typed, only on Windows, while type checking runs on Linux and macOS.
 import logging
 import ntpath
 import os
@@ -47,14 +49,14 @@ class WinActivityMonitor(ActivityMonitor):
     def _ensure_com(self) -> None:
         if getattr(self._tls, "com", False):
             return
-        import comtypes
+        import comtypes  # pyright: ignore[reportMissingImports]
 
         comtypes.CoInitialize()
         self._tls.com = True
 
     # ---- output -------------------------------------------------------------
     def _output_sessions(self) -> dict[str, AudioProcess]:
-        from pycaw.pycaw import AudioUtilities
+        from pycaw.pycaw import AudioUtilities  # pyright: ignore[reportMissingImports]
 
         out: dict[str, AudioProcess] = {}
         for s in AudioUtilities.GetAllSessions():
@@ -88,29 +90,29 @@ class WinActivityMonitor(ActivityMonitor):
 
         def in_use(key) -> bool:
             try:
-                stop, _ = winreg.QueryValueEx(key, "LastUsedTimeStop")
-                start, _ = winreg.QueryValueEx(key, "LastUsedTimeStart")
+                stop, _ = winreg.QueryValueEx(key, "LastUsedTimeStop")  # pyright: ignore[reportAttributeAccessIssue]
+                start, _ = winreg.QueryValueEx(key, "LastUsedTimeStart")  # pyright: ignore[reportAttributeAccessIssue]
             except OSError:
                 return False
             return stop == 0 and start != 0
 
         def walk(path: str, packaged: bool):
             try:
-                root = winreg.OpenKey(winreg.HKEY_CURRENT_USER, path)
+                root = winreg.OpenKey(winreg.HKEY_CURRENT_USER, path)  # pyright: ignore[reportAttributeAccessIssue]
             except OSError:
                 return
             with root:
                 i = 0
                 while True:
                     try:
-                        sub = winreg.EnumKey(root, i)
+                        sub = winreg.EnumKey(root, i)  # pyright: ignore[reportAttributeAccessIssue]
                     except OSError:
                         break
                     i += 1
                     if sub == "NonPackaged":
                         continue
                     try:
-                        with winreg.OpenKey(root, sub) as k:
+                        with winreg.OpenKey(root, sub) as k:  # pyright: ignore[reportAttributeAccessIssue]
                             if not in_use(k):
                                 continue
                     except OSError:
@@ -127,7 +129,7 @@ class WinActivityMonitor(ActivityMonitor):
 
     def _pid_for_exe(self, exe_lower: str) -> int:
         try:
-            import psutil  # pycaw dependency
+            import psutil  # pycaw dependency  # pyright: ignore[reportMissingModuleSource]
 
             for p in psutil.process_iter(["name"]):
                 if (p.info.get("name") or "").lower() == exe_lower:
@@ -173,7 +175,7 @@ class WinActivityMonitor(ActivityMonitor):
     def close(self) -> None:
         if getattr(self._tls, "com", False):
             try:
-                import comtypes
+                import comtypes  # pyright: ignore[reportMissingImports]
 
                 comtypes.CoUninitialize()
             except Exception:
