@@ -47,8 +47,8 @@ across platforms.
 | `transcribe/_align_np.py` | Pure-numpy word-alignment kernels (DTW, median filter) for the MLX path, replacing mlx-whisper's numba/scipy ones (wired in a follow-up) |
 | `transcribe/diarize.py` | Offline speaker diarization of the `Others` track (speaker embeddings + clustering) and `Others` → `Speaker N` relabelling of the final transcript; one-time, checksum-verified model download |
 | `hotkey.py` | Global start/stop shortcut: parses `hotkey`, runs `rcc-audiotap hotkey` (macOS) or `RegisterHotKey` (Windows) |
+| `cloudsync.py` | Is `output_dir` synced to iCloud / OneDrive / File Provider, or on a network volume (`statfs` / `GetDriveTypeW` / UNC)? Local checks only; the controller warns once per folder |
 | `participants.py` | Opt-in sampler of the call app's participant list via `rcc-audiotap participants` (macOS Accessibility) |
-| `cloudsync.py` | Is `output_dir` synced to iCloud / OneDrive / File Provider? Local path checks only; the controller warns once per folder |
 | `permissions.py` | Query, request and open settings for mic and system-audio permissions |
 | `native.py` | Locates the native helper binary (`rcc-audiotap`) |
 | `settings_window.py` | Native settings window: runs `rcc-audiotap settings` with a JSON snapshot and saves the values it returns through `config` validation |
