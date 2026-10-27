@@ -19,6 +19,7 @@ import logging
 import threading
 import time
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -38,6 +39,10 @@ BATCH = 32
 DIM = 384
 RETRY_AFTER_S = 600.0  # after a failed download, don't try again for this long
 DOWNLOAD_TIMEOUT_S = 30.0
+LOAD_ATTEMPTS = 3  # a fresh file may be held for a moment (antivirus on Windows)
+LOAD_RETRY_PAUSE_S = 0.5
+LOAD_RETRY_AFTER_S = 60.0  # after a load that kept failing softly, don't try again for this long
+_SOFT_MARKERS = ("being used by another process", "sharing violation", "access is denied")
 
 
 @dataclass(frozen=True)
@@ -63,8 +68,10 @@ TOKENIZER = ModelFile(
 
 
 class Embedder(Protocol):
-    """Optional extras: ``model_id`` (vectors of another model are re-embedded) and
-    ``ready()`` (True once ``embed`` won't block on a download or a model load)."""
+    """Optional extras: ``model_id`` (vectors of another model are re-embedded),
+    ``ready()`` (True once ``embed`` won't block on a model load) and ``prepare(wait)``
+    (download and load the model from the embed worker; ``wait`` pauses while the app is busy
+    and returns False to give up). ``embed`` itself never starts a download."""
 
     def embed(self, texts: list[str]) -> np.ndarray | None: ...
 
@@ -93,9 +100,17 @@ def _is_valid(path: Path, model: ModelFile) -> bool:
     return True
 
 
-def model_path(model: ModelFile, download: bool = True) -> Path | None:
+class _Abandoned(Exception):
+    """The caller's ``wait`` said stop (a recording started and the setting was switched off)."""
+
+
+def model_path(
+    model: ModelFile, download: bool = True, wait: Callable[[], bool] | None = None
+) -> Path | None:
     """Local path of `model`, downloading (and verifying) it once if needed. None if it is not
-    on disk and can't be downloaded now. A model on disk is used without any network access."""
+    on disk and can't be downloaded now. A model on disk is used without any network access.
+    ``wait`` is called before every block of a download: it blocks while the app is busy
+    (a recording) and returns False to abandon the download (the ``.part`` file is deleted)."""
     global _last_failure
     path = MODELS_DIR / model.name
     if _is_valid(path, model):
@@ -108,7 +123,9 @@ def model_path(model: ModelFile, download: bool = True) -> Path | None:
         if _last_failure and time.monotonic() - _last_failure < RETRY_AFTER_S:
             return None
         try:
-            _download(model, path)
+            _download(model, path, wait)
+        except _Abandoned:
+            return None  # not a failure: no backoff
         except Exception as e:  # noqa: BLE001 - offline, proxy, disk full, bad checksum ...
             _last_failure = time.monotonic()
             log.warning("semantic search unavailable: can't download %s (%s)", model.name, e)
@@ -116,7 +133,7 @@ def model_path(model: ModelFile, download: bool = True) -> Path | None:
     return path
 
 
-def _download(model: ModelFile, path: Path) -> None:
+def _download(model: ModelFile, path: Path, wait: Callable[[], bool] | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.part")
     log.info("downloading search model %s (%.0f MB, once)", model.name, model.size / 1e6)
@@ -130,6 +147,8 @@ def _download(model: ModelFile, path: Path) -> None:
         ):
             written = 0
             while block := r.read(1 << 20):
+                if wait is not None and not wait():
+                    raise _Abandoned
                 written += len(block)
                 if written > model.size:  # a bad or hostile server must not fill the disk
                     raise ValueError(f"download larger than the expected {model.size} bytes")
@@ -145,62 +164,134 @@ def _download(model: ModelFile, path: Path) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def _is_soft(e: Exception) -> bool:
+    """A failure that says nothing about the files: locked, permissions, sharing."""
+    if isinstance(e, OSError):
+        return True
+    msg = str(e).lower()
+    return any(m in msg for m in _SOFT_MARKERS)
+
+
 class OnnxEmbedder:
     """The sentence model on the CPU. Loaded on first use; thread-safe.
 
-    ``_lock`` guards loading (which may wait for a download); ``_compute`` serialises the
-    tokenizer and the ONNX session, so concurrent ``embed`` calls never overlap in them, while
-    a query never waits for a download that another thread is running."""
+    Locks, in the only order they are ever nested: ``_load_lock`` (one load or download at a
+    time; held across the slow work, taken by ``prepare`` and, non-blocking, by ``embed``)
+    -> ``_compute`` (the tokenizer and the ONNX session) -> ``_lock`` (state: ``_loaded``,
+    ``_gen``, ``_broken``; held for a few assignments, never across a call). ``close`` takes
+    only ``_lock``, so it never waits for a load, a download or an embed: it bumps ``_gen``,
+    and a load that started before it drops its result instead of publishing it."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._compute = threading.Lock()
+        self._load_lock = threading.Lock()
         self._loaded: tuple[Any, Any] | None = None
-        self._broken = False  # verified files that the runtime can't load: don't retry per search
+        self._gen = 0  # bumped by close(): cancels loads and downloads in flight
+        self._broken = False  # verified files the runtime can't load: don't retry per search
+        self._retry_at = 0.0  # soft load failure (locked file ...): no new attempt before this
 
     model_id = MODEL.name
 
     def ready(self) -> bool:
-        """True once the model is loaded: ``embed`` then doesn't wait for a download."""
+        """True once the model is loaded: ``embed`` then doesn't wait for anything."""
         return self._loaded is not None
 
     def close(self) -> None:
-        """Drop the session and tokenizer (~120 MB); the next ``embed`` reloads them."""
-        with self._compute, self._lock:
-            self._loaded = None
-
-    def _load(self) -> tuple[Any, Any] | None:
+        """Drop the session and tokenizer (~120 MB), cancel a load or download in flight and
+        forget past failures; the next ``prepare`` / ``embed`` starts afresh. Never blocks."""
         with self._lock:
-            if self._loaded is None:
-                if self._broken:
-                    return None
-                m, t = model_path(MODEL), model_path(TOKENIZER)
-                if m is None or t is None:
-                    return None
-                import onnxruntime as ort  # lazy: only when semantic search is on
-                from tokenizers import Tokenizer
+            self._gen += 1
+            self._loaded = None
+            self._broken = False
+            self._retry_at = 0.0
 
-                try:
-                    tok = Tokenizer.from_file(str(t))
-                    tok.enable_truncation(MAX_TOKENS)
-                    tok.enable_padding()
-                    opts = ort.SessionOptions()
-                    opts.intra_op_num_threads = 2  # background work: leave cores to transcription
-                    self._loaded = (ort.InferenceSession(str(m), opts), tok)
-                except Exception as e:  # noqa: BLE001 - unreadable model files
-                    global _last_failure
-                    _last_failure = time.monotonic()  # the download backoff applies
-                    log.warning("search model failed to load (%s)", e)
-                    for f in (m, t):
-                        if f in _verified:
-                            self._broken = True  # intact files: the runtime is the problem
-                        else:
-                            f.unlink(missing_ok=True)  # so a later attempt downloads it again
-                    return None
+    def prepare(self, wait: Callable[[], bool] | None = None) -> bool:
+        """Download (if needed), verify and load the model; True once ready. Run from the embed
+        worker. ``wait`` is polled between the steps and while downloading: it blocks while the
+        app is busy and returns False to give up (a switched-off setting)."""
+        if self._loaded is not None:
+            return True
+        with self._load_lock:
+            if self._loaded is not None:
+                return True
+            if self._blocked():
+                return False
+            gen = self._gen
+            paths: list[Path] = []
+            for m in (MODEL, TOKENIZER):
+                if self._cancelled(gen) or (wait is not None and not wait()):
+                    return False
+                p = model_path(m, wait=lambda: self._cancelled(gen) is False and _ok(wait))
+                if p is None:
+                    return False
+                paths.append(p)
+            if self._cancelled(gen) or (wait is not None and not wait()):
+                return False
+            return self._build(paths[0], paths[1], gen)
+
+    def _cancelled(self, gen: int) -> bool:
+        return self._gen != gen
+
+    def _blocked(self) -> bool:
+        with self._lock:
+            return self._broken or time.monotonic() < self._retry_at
+
+    def _load_cached(self) -> tuple[Any, Any] | None:
+        """Load from files already on disk (never downloads, never waits for another load)."""
+        if not self._load_lock.acquire(blocking=False):
+            return None
+        try:
+            if self._loaded is None and not self._blocked():
+                gen = self._gen
+                m, t = model_path(MODEL, download=False), model_path(TOKENIZER, download=False)
+                if m is not None and t is not None:
+                    self._build(m, t, gen)
             return self._loaded
+        finally:
+            self._load_lock.release()
+
+    def _build(self, m: Path, t: Path, gen: int) -> bool:
+        global _last_failure
+        import onnxruntime as ort  # lazy: only when semantic search is on
+        from tokenizers import Tokenizer
+
+        for attempt in range(LOAD_ATTEMPTS):
+            try:
+                tok = Tokenizer.from_file(str(t))
+                tok.enable_truncation(MAX_TOKENS)
+                tok.enable_padding()
+                opts = ort.SessionOptions()
+                opts.intra_op_num_threads = 2  # background work: leave cores to transcription
+                loaded = (ort.InferenceSession(str(m), opts), tok)
+            except Exception as e:  # noqa: BLE001 - unreadable model files
+                if _is_soft(e):
+                    if attempt + 1 < LOAD_ATTEMPTS and not self._cancelled(gen):
+                        time.sleep(LOAD_RETRY_PAUSE_S)
+                        continue
+                    log.warning("search model can't be opened now (%s); retrying later", e)
+                    with self._lock:
+                        self._retry_at = time.monotonic() + LOAD_RETRY_AFTER_S
+                    return False
+                log.warning("search model failed to load (%s)", e)
+                _last_failure = time.monotonic()  # the download backoff applies
+                for f in (m, t):
+                    if f in _verified:
+                        with self._lock:
+                            self._broken = True  # intact files: the runtime is the problem
+                    else:
+                        f.unlink(missing_ok=True)  # so a later attempt downloads it again
+                return False
+            with self._lock:
+                if self._gen != gen:
+                    return False  # closed meanwhile: drop it
+                self._loaded = loaded
+            return True
+        return False
 
     def embed(self, texts: list[str]) -> np.ndarray | None:
-        loaded = self._load()
+        """Embeddings, or None if the model isn't loaded and can't be loaded from disk now."""
+        loaded = self._loaded or self._load_cached()
         if loaded is None:
             return None
         with self._compute:
@@ -225,6 +316,10 @@ class OnnxEmbedder:
 
 _default: OnnxEmbedder | None = None
 _default_lock = threading.Lock()
+
+
+def _ok(wait: Callable[[], bool] | None) -> bool:
+    return wait is None or wait()
 
 
 def default_embedder() -> OnnxEmbedder:

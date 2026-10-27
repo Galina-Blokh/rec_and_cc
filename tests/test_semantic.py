@@ -543,7 +543,7 @@ def test_model_that_fails_to_load_is_deleted_for_a_fresh_download(tmp_path, monk
     for m in (semantic.MODEL, semantic.TOKENIZER):
         files[m.name] = tmp_path / m.name
         files[m.name].write_bytes(b"junk")
-    monkeypatch.setattr(semantic, "model_path", lambda m, download=True: files[m.name])
+    monkeypatch.setattr(semantic, "model_path", lambda m, download=True, **k: files[m.name])
 
     def boom(*a, **k):
         raise RuntimeError("invalid protobuf")
@@ -594,7 +594,7 @@ def test_load_failure_of_verified_files_does_not_redownload(tmp_path, monkeypatc
         f.write_bytes(b"junk")
     calls = []
 
-    def model_path(m, download=True):
+    def model_path(m, download=True, **k):
         calls.append(m.name)
         return files[m.name]
 
@@ -627,7 +627,7 @@ def test_unverified_files_that_fail_to_load_are_deleted_and_back_off(tmp_path, m
     files = {m.name: tmp_path / m.name for m in (semantic.MODEL, semantic.TOKENIZER)}
     for f in files.values():
         f.write_bytes(b"junk")
-    monkeypatch.setattr(semantic, "model_path", lambda m, download=True: files[m.name])
+    monkeypatch.setattr(semantic, "model_path", lambda m, download=True, **k: files[m.name])
     monkeypatch.setattr(semantic, "_verified", set())
     monkeypatch.setattr(semantic, "_last_failure", 0.0)
     monkeypatch.setattr(
@@ -702,7 +702,7 @@ def _fake_onnx(monkeypatch, tmp_path, tracker):
     for m in (semantic.MODEL, semantic.TOKENIZER):
         files[m.name] = tmp_path / m.name
         files[m.name].write_bytes(b"x")
-    monkeypatch.setattr(semantic, "model_path", lambda m, download=True: files[m.name])
+    monkeypatch.setattr(semantic, "model_path", lambda m, download=True, **k: files[m.name])
 
     class Enc:
         ids = [1, 2, 3]
@@ -820,10 +820,110 @@ def test_embedding_pauses_while_busy_and_resumes(tmp_path, out):
 def test_a_long_session_is_embedded_in_chunks_that_each_wait_for_idle(tmp_path, out, monkeypatch):
     monkeypatch.setattr(search, "EMBED_CHUNK", 2)
     make_session(out, 1, [seg(i, f"invoice {i}") for i in range(5)])
+    state = {"busy": False}
     emb = FakeEmbedder()
-    idx = make(tmp_path, emb)
-    sync(idx, out)
+    first_chunk = threading.Event()
+    real = emb.embed
+
+    def embed(texts):
+        result = real(texts)
+        if len(emb.calls) == 1:
+            state["busy"] = True  # a recording starts right after the first chunk
+            first_chunk.set()
+        return result
+
+    emb.embed = embed
+    idx = TranscriptIndex(tmp_path / "idx" / "s.sqlite3", embedder=emb, busy=lambda: state["busy"])
+    idx.busy_poll_s = 0.01
+    idx.sync(out)
+    assert first_chunk.wait(10)
+    time.sleep(0.3)
+    assert [len(c) for c in emb.calls] == [2]  # paused mid-session: no more calls while busy
+    assert vector_rows(idx) == 0
+    state["busy"] = False
+    assert idx.wait_embedded(30)
     assert [len(c) for c in emb.calls] == [2, 2, 1] and vector_rows(idx) == 5
+
+
+class PrepEmbedder(FakeEmbedder):
+    """Has the optional ``prepare`` hook (download + load) that the worker drives."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.loaded, self.prepared = False, 0
+
+    def ready(self):
+        return self.loaded
+
+    def prepare(self, wait=None):
+        self.prepared += 1
+        if wait is not None and not wait():
+            return False
+        self.loaded = True
+        return True
+
+
+def test_first_download_and_load_never_start_while_busy(tmp_path, out):
+    make_session(out, 1, [seg(1, "the invoice")])
+    emb = PrepEmbedder()
+    state = {"busy": True}
+    idx = TranscriptIndex(tmp_path / "idx" / "s.sqlite3", embedder=emb, busy=lambda: state["busy"])
+    idx.busy_poll_s = 0.01
+    idx.sync(out)
+    time.sleep(0.3)
+    assert emb.prepared == 0 and emb.calls == []  # a recording is running
+    state["busy"] = False
+    assert idx.wait_embedded(30)
+    assert emb.prepared == 1 and vector_rows(idx) == 1
+
+
+def test_switching_off_cancels_a_waiting_prepare(tmp_path, out):
+    make_session(out, 1, [seg(1, "the invoice")])
+    emb = PrepEmbedder()
+    idx = TranscriptIndex(tmp_path / "idx" / "s.sqlite3", embedder=emb, busy=lambda: True)
+    idx.busy_poll_s = 0.01
+    idx.sync(out)
+    idx.set_embedder(None)  # does not block on the paused worker
+    assert idx.wait_embedded(10) and emb.prepared == 0 and vector_rows(idx) == 0
+
+
+def test_download_pauses_while_busy_and_resumes(model_dir, monkeypatch):
+    data = b"w" * (3 << 20)
+    _urlopen(monkeypatch, data)
+    busy, polls, paused_at = threading.Event(), [0], []
+    busy.set()
+
+    def wait():
+        polls[0] += 1
+        if polls[0] == 2:  # a recording starts between two blocks
+            paused_at.append(time.monotonic())
+            time.sleep(0.2)
+        return True
+
+    path = semantic.model_path(_fake_model(data), wait=wait)
+    assert path is not None and path.read_bytes() == data and polls[0] >= 3
+    assert paused_at
+
+
+def test_download_abandoned_midway_leaves_no_part_and_no_backoff(model_dir, monkeypatch):
+    data = b"w" * (3 << 20)
+    _urlopen(monkeypatch, data)
+    polls = [0]
+
+    def wait():
+        polls[0] += 1
+        return polls[0] < 2  # give up after the first block
+
+    assert semantic.model_path(_fake_model(data), wait=wait) is None
+    assert list(model_dir.iterdir()) == [] and semantic._last_failure == 0.0
+    assert semantic.model_path(_fake_model(data)) is not None  # next time it just downloads
+
+
+def test_embed_never_downloads_but_prepare_does(model_dir, monkeypatch):
+    calls = _urlopen(monkeypatch, None)
+    emb = semantic.OnnxEmbedder()
+    assert emb.embed(["hello"]) is None and calls == []
+    assert emb.prepare() is False and len(calls) == 1  # prepare tried (offline: failed)
 
 
 # --------------------------------------------------------------------------- scale / budget
@@ -931,3 +1031,116 @@ def test_semantic_search_transcripts_100_sessions_stays_in_budget(out, monkeypat
 
     t = _best_of(5, run)
     assert t < SEMANTIC_BUDGET_S
+
+
+# --------------------------------------------------------------------------- locks, failures
+def _loaded_embedder(monkeypatch, tmp_path):
+    import contextlib
+
+    _fake_onnx(monkeypatch, tmp_path, lambda name: contextlib.nullcontext())
+    monkeypatch.setattr(semantic, "_verified", set())
+    monkeypatch.setattr(semantic, "_last_failure", 0.0)
+    return semantic.OnnxEmbedder()
+
+
+def test_close_during_a_slow_load_deadlocks_nothing_and_later_calls_work(tmp_path, monkeypatch):
+    emb = _loaded_embedder(monkeypatch, tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    real = sys.modules["onnxruntime"].InferenceSession
+
+    def slow(path, opts):
+        entered.set()
+        assert release.wait(10)
+        return real(path, opts)
+
+    sys.modules["onnxruntime"].InferenceSession = staticmethod(slow)
+    result = []
+    loader = threading.Thread(target=lambda: result.append(emb.prepare()), daemon=True)
+    loader.start()
+    assert entered.wait(10)
+    closer = threading.Thread(target=emb.close, daemon=True)
+    closer.start()
+    closer.join(5)
+    assert not closer.is_alive()  # close() didn't wait for the load
+    monkeypatch.setattr(semantic, "_default", emb)
+    search.default_index(True)
+    # the path that used to hold search._default_lock across close()
+    searcher = threading.Thread(target=lambda: search.default_index(False), daemon=True)
+    searcher.start()
+    searcher.join(5)
+    assert not searcher.is_alive()
+    release.set()
+    loader.join(10)
+    assert not loader.is_alive() and result == [False]  # cancelled: nothing published
+    assert not emb.ready()
+    sys.modules["onnxruntime"].InferenceSession = staticmethod(real)
+    assert emb.prepare() is True and emb.ready()  # later calls work
+    assert emb.embed(["a"]).shape == (1, semantic.DIM)
+
+
+def test_close_while_embedding_and_loading_concurrently_never_deadlocks(tmp_path, monkeypatch):
+    emb = _loaded_embedder(monkeypatch, tmp_path)
+    stop = threading.Event()
+
+    def churn(fn):
+        while not stop.is_set():
+            fn()
+
+    workers = [
+        threading.Thread(target=churn, args=(f,), daemon=True)
+        for f in (lambda: emb.embed(["a"]), emb.prepare, emb.close, emb.close)
+    ]
+    for w in workers:
+        w.start()
+    time.sleep(0.5)
+    stop.set()
+    for w in workers:
+        w.join(10)
+        assert not w.is_alive()
+
+
+def _failing_session(monkeypatch, exc, times):
+    real = sys.modules["onnxruntime"].InferenceSession
+    state = {"n": 0}
+
+    def session(path, opts):
+        state["n"] += 1
+        if state["n"] <= times:
+            raise exc
+        return real(path, opts)
+
+    sys.modules["onnxruntime"].InferenceSession = staticmethod(session)
+    return state
+
+
+def test_a_locked_model_file_is_a_soft_failure_that_retries(tmp_path, monkeypatch):
+    emb = _loaded_embedder(monkeypatch, tmp_path)
+    monkeypatch.setattr(semantic, "LOAD_RETRY_PAUSE_S", 0.0)
+    files = [tmp_path / m.name for m in (semantic.MODEL, semantic.TOKENIZER)]
+    semantic._verified.update(files)  # intact files, as after a real download
+    state = _failing_session(monkeypatch, PermissionError("held by Defender"), 100)
+    assert emb.embed(["a"]) is None
+    assert state["n"] == semantic.LOAD_ATTEMPTS  # quick retries right away
+    assert not emb._broken and all(f.exists() for f in files)  # never "broken for the process"
+    assert emb.embed(["a"]) is None and state["n"] == semantic.LOAD_ATTEMPTS  # backoff holds
+    emb._retry_at = 0.0  # backoff over; the lock is gone
+    state["n"] = 100  # now succeeds
+    assert emb.embed(["a"]) is not None and emb.ready()
+
+
+def test_a_lock_that_clears_during_the_quick_retries_loads(tmp_path, monkeypatch):
+    emb = _loaded_embedder(monkeypatch, tmp_path)
+    monkeypatch.setattr(semantic, "LOAD_RETRY_PAUSE_S", 0.0)
+    state = _failing_session(monkeypatch, OSError("sharing violation"), 2)
+    assert emb.prepare() is True and state["n"] == 3 and emb.ready()
+
+
+def test_a_permanently_invalid_model_is_broken_until_close(tmp_path, monkeypatch):
+    emb = _loaded_embedder(monkeypatch, tmp_path)
+    semantic._verified.update(tmp_path / m.name for m in (semantic.MODEL, semantic.TOKENIZER))
+    state = _failing_session(monkeypatch, RuntimeError("invalid protobuf"), 1)
+    assert emb.embed(["a"]) is None and emb._broken and state["n"] == 1
+    assert emb.embed(["a"]) is None and state["n"] == 1  # not retried per search
+    emb.close()
+    assert not emb._broken
+    assert emb.embed(["a"]) is not None and emb.ready()  # switching semantic off and on retries

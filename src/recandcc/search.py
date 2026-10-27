@@ -314,14 +314,13 @@ class TranscriptIndex:
     def wait_embedded(self, timeout: float = 30.0) -> bool:
         """Block until the embedding worker is idle (tests, CLI); False on timeout."""
         deadline = time.monotonic() + timeout
-        while (t := self._embed_thread) is not None:
-            try:
-                t.join(max(0.0, deadline - time.monotonic()))
-            except RuntimeError:  # never started
-                return True
-            if time.monotonic() >= deadline and self._embed_thread is not None:
+        while True:
+            with self._embed_guard:
+                if self._embed_thread is None:
+                    return True
+            if time.monotonic() >= deadline:
                 return False
-        return True
+            time.sleep(0.005)  # polling: a thread can't be joined before it has started
 
     def _forget_vectors(self) -> None:
         """Semantic search is off: delete every vector (the full-text index stays)."""
@@ -354,13 +353,20 @@ class TranscriptIndex:
                     "OR v.model IS NOT ?",
                     (model,),
                 ).fetchall()
-            loaded = getattr(embedder, "ready", lambda: True)()
-            if (todo or not loaded) and not self._wait_idle(embedder):
+            ready = getattr(embedder, "ready", None)
+            if (todo or (ready is not None and not ready())) and not self._wait_idle(embedder):
                 return
+            if ready is not None and not ready():
+                # Load (download first, if needed) here, on the worker: it starts only while
+                # idle and pauses or gives up when a recording starts or the setting is
+                # switched off. ``embed`` on the search path never downloads.
+                prepare = getattr(embedder, "prepare", None)
+                if prepare is not None:
+                    if not prepare(lambda: self._wait_idle(embedder)):
+                        return  # unavailable now: retry at the next sync
+                elif not todo:
+                    embedder.embed([])
             if not todo:
-                ready = getattr(embedder, "ready", None)
-                if ready is not None and not ready():
-                    embedder.embed([])  # load (or download) the model so search can use it
                 return
             for folder, stamp in todo:
                 if not self._wait_idle(embedder):
@@ -612,6 +618,7 @@ def default_index(
     pauses background embedding while it is true (a recording). Turning semantic off also
     unloads the model."""
     global _default
+    close = False
     with _default_lock:
         if _default is None or _default.path != INDEX_PATH:
             _default = TranscriptIndex()
@@ -621,14 +628,17 @@ def default_index(
         if not semantic:
             if _default.embedder is not None:
                 _default.set_embedder(None)
-                from .semantic import close_default_embedder
-
-                close_default_embedder()
+                close = True
         elif _default.embedder is None:
             from .semantic import default_embedder
 
             _default.set_embedder(default_embedder())
-        return _default
+        index = _default
+    if close:  # outside the lock: closing must never be able to wedge every search
+        from .semantic import close_default_embedder
+
+        close_default_embedder()
+    return index
 
 
 def search_transcripts(

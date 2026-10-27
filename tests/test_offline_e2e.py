@@ -393,10 +393,15 @@ def _session_with_semantic_search(tmp_path):
     )
     session_dir, evs = run_session(ctrl, sources, live_wait=0.0)
     assert evs[-1][1].transcribed
+    deadline = time.monotonic() + 10
     for th in threading.enumerate():  # the Controller indexes on its own "search" thread
         if th.name == "search":
-            th.join(10)
-    index = search.default_index(True)  # the Controller indexed the session; embedding is async
+            while th.ident is None and time.monotonic() < deadline:
+                time.sleep(0.005)  # created but not started yet: joining it would raise
+            if th.ident is not None:
+                th.join(max(0.0, deadline - time.monotonic()))
+    index = search.default_index(True)
+    index.sync(tmp_path / "out")  # incremental: a no-op if the thread indexed it already
     assert index.wait_embedded(30)
     return index
 
