@@ -172,7 +172,7 @@ def test_importing_the_app_does_not_load_export_libraries():
         "import sys, recandcc, recandcc.cli, recandcc.transcribe.export;"
         "sys.exit(any(m in sys.modules for m in ('docx', 'fpdf')))"
     )
-    assert subprocess.run([sys.executable, "-c", code], check=False).returncode == 0
+    assert subprocess.run([sys.executable, "-c", code], check=False, timeout=60).returncode == 0
 
 
 def _controller():
@@ -376,3 +376,20 @@ def test_a_held_open_file_gets_a_clear_notice(session, monkeypatch):
     monkeypatch.setattr(export.time, "sleep", lambda _s: None)
     with pytest.raises(export.ExportError, match="open in another app"):
         export.export_docx(session)
+
+
+def test_controller_export_of_a_list_uses_the_newest_finished_session(tmp_path, monkeypatch):
+    live = tmp_path / "2026-10-27" / "090000_zoom"
+    done = tmp_path / "2026-10-26" / "140312_zoom"
+    for d in (live, done):
+        d.mkdir(parents=True)
+        (d / "transcript.md").write_text("x")
+    (done / "transcript.json").write_text("{}")
+    calls = []
+    monkeypatch.setattr(
+        export, "export_session", lambda f, fmt, sk: calls.append(f) or [f / "transcript.docx"]
+    )
+    ctrl = _controller()
+    ctrl.export_async([live / "transcript.md", done / "transcript.md"])
+    assert ctrl.events.get(timeout=10)[2].startswith("Saved transcript.docx")
+    assert calls == [done]
