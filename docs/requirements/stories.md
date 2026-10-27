@@ -32,6 +32,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
 | US-26 | Name speakers and forget voices from the menu | 🟡 macOS menu, first lines instead of an audio sample; Windows tray not yet (#1) |
 | US-31 | Speaker names from the call app's participant list | 🟡 claimed (#1 A.3): opt-in, macOS, one-to-one only |
+| US-35 | Call-app names in a room recording a call joined | 🟡 claimed (#1): fake-tested; older transcripts stay unnamed |
 | US-25 | Export a transcript to DOCX and PDF | 🟡 CLI and macOS menu; Windows tray, templates planned (#4) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
 | US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
@@ -322,6 +323,25 @@ don't have to name them myself, without the app ever asking for more permission 
   voices store (and a transcript they were used in).
 - **Not yet:** matching several speakers to several names (needs active-speaker highlighting),
   self-introductions (A.4), tested layouts for each app version (see ARCHITECTURE).
+
+### US-35 Call-app names in a room recording a call joined
+*As the owner, I want the remote speaker of a call that joined a room recording named after the
+call app's participant, like in any other call, without ever being renamed myself.*
+
+- **Given** a room recording that a call upgraded (both tracks diarized), **when** the
+  transcript is written, **then** every speaker label records the track it came from
+  (`"track": "me"` or `"others"` on its segments in `transcript.json`), and naming a speaker
+  later keeps it.
+- **Given** `names_from_call_app` and `speaker_names` are on, **when** the call app's names are
+  applied, **then** only labels from the call's (system audio) track are counted and can be
+  named, under the US-31 rules (as many names as call-side speakers, voice-matched speakers
+  match names, one `Speaker N` and one name left, a disagreeing self-introduction wins).
+  People in the room, including the owner numbered `Speaker N`, are never named or counted.
+- **Given** a transcript written before labels carried their track, or a label whose track is
+  unknown or mixed, **then** nothing is assigned and the kept names are deleted (fail closed).
+- **Then** the rename checks the label's track again under `NAMING_LOCK`, a "forget all" since
+  the session began names nobody, and names appear nowhere in logs at INFO or above.
+- **Not yet:** a lone remote speaker keeps `Others`, which is never named (as in US-31).
 
 ### US-25 Export a transcript to DOCX and PDF
 *As the owner, I want a transcript as a Word or PDF file, so that I can share or print it.*

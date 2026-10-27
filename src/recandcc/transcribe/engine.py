@@ -21,6 +21,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -870,6 +871,13 @@ class Transcriber:
                 out, labels = label_speakers(
                     out, track_turns or [], SPEAKERS[track], names=names, reserved=taken
                 )
+                # Remember the track of each label (labels never repeat across tracks): call-app
+                # names may only go to the call's side, never to a numbered owner on "Me".
+                mine = {*labels.values(), SPEAKERS[track]}
+                out = [
+                    replace(s, track=str(track)) if not s.track and s.speaker in mine else s
+                    for s in out
+                ]
                 # A lone speaker in a room session keeps "Me", which is never renamed: no voice.
                 speakers |= {
                     lbl: centroids[k] for k, lbl in labels.items() if k in centroids and lbl != ME

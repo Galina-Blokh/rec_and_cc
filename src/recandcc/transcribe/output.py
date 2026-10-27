@@ -125,10 +125,12 @@ def format_json(session: SessionInfo, segments: list[Segment], duration: float, 
 
 def _segment_json(s: Segment) -> dict:
     """Segment fields for JSON: never the in-memory word timings (no deep copy of them), and
-    `overlap` only where diarization found overlapped speech."""
+    `overlap` only where diarization found overlapped speech, `track` only where it is known."""
     data = {f.name: getattr(s, f.name) for f in fields(s) if f.name != "words"}
     if not s.overlap:
         del data["overlap"]
+    if not s.track:
+        del data["track"]
     return data
 
 
