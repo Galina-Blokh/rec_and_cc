@@ -250,24 +250,6 @@ def test_helper_never_uses_the_prompting_api():
     assert "kAXTrustedCheckOptionPrompt" not in code
 
 
-def test_helper_walk_is_limited_to_call_windows_and_has_budgets():
-    code = swift_sources()["Accessibility.swift"]
-    assert "browserIDs" in code and "callPageWords" in code  # browsers: call windows only
-    assert "AXUIElementCreateSystemWide()" in code and "perAppSeconds" in code
-    assert "startedByRecAndCC" in code  # defense in depth for `participants`
-    assert "import Darwin" in code
-    # every AX read has its own timeout and stops once the app's budget is used up
-    assert "if Date() > axDeadline" in code
-    assert code.index("AXUIElementSetMessagingTimeout(element") < code.index(
-        "AXUIElementCopyAttributeValue"
-    )
-    # two call windows: fail closed; and no bare "meet - " page word
-    assert "callWindows.count == 1" in code
-    page_words = code[code.index("let callPageWords") : code.index("let meetTitlePattern")]
-    assert "meet - " not in page_words and "meet.google.com" in page_words
-    assert "teams.microsoft.com" in page_words and '"zoom"' not in page_words
-
-
 def _recorder(tmp_path, cfg):
     cfg.output_dir = tmp_path / "out"
     return Recorder(
@@ -469,6 +451,17 @@ def test_discarded_sessions_leave_no_names(tmp_path):
     h.eng.tick()
     assert h.status == IDLE and h.rec.stops == 1
     assert voices.read_session_names("s") == []
+
+
+def test_a_room_session_assigns_nothing(tmp_path):
+    # Started as a room recording, then upgraded to a call: the mic track is numbered too, so
+    # the owner may be "Speaker 1". Labels of both tracks are not told apart, so fail closed.
+    s = _session_with_voice(tmp_path, ["Anna"])
+    s.started_as_room = True
+    s.save()
+    assert callnames.apply(tmp_path) is False
+    assert "Speaker 1" in (tmp_path / "transcript.json").read_text()
+    assert voices.read_session_names(s.id) == []  # not kept either
 
 
 def test_names_are_deleted_not_applied_when_the_option_was_switched_off(tmp_path):

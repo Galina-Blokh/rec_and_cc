@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 INTERVAL_S = 15.0
 FIRST_SAMPLE_S = 3.0  # the panel is usually opened a little after the call starts
 HELPER_TIMEOUT_S = 8.0
-STOP_JOIN_S = 5.0  # hard cap; a killed helper ends at once
+STOP_JOIN_S = 1.0  # hard cap: stop() runs on the engine thread; a killed helper ends at once
 MAX_NAMES = 60
 MAX_NAME_LEN = 60
 ACCESSIBILITY_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
@@ -189,7 +189,7 @@ class ParticipantSampler:
             proc = self._proc
         if proc is not None:
             with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-                proc.wait(timeout=2.0)  # reaped: no helper outlives the session
+                proc.wait(timeout=0.5)  # reaped: no helper outlives the session
         if self._thread.is_alive() and self._thread is not threading.current_thread():
             self._thread.join(timeout=STOP_JOIN_S)
         with self._lock:

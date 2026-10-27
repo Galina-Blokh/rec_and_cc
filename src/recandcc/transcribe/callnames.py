@@ -113,6 +113,13 @@ def apply(directory: Path) -> bool:
     names = voices.read_session_names(session.id)
     if not names:
         return False
+    if session.started_as_room:
+        # Fail closed: a room session also numbers the mic track, so with two people at the
+        # laptop the owner would be "Speaker N" and could be renamed after a call participant.
+        # Only the system-audio track's labels belong to the call; they aren't recorded per
+        # track yet.
+        forget(session.id)
+        return False
     labels = [lbl for lbl, _ in voices.session_speakers(directory)]
     for label, name in plan(labels, names).items():
         hint = transcript_hints(directory).get(label)
