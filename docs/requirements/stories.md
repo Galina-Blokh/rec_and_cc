@@ -31,6 +31,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-20 | Search my transcripts | 🟡 search only; summaries, export planned (#4) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
+| US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
 | US-28 | Browse past meetings | 🟡 Windows window untested on hardware (#5) |
 | US-29 | Right-to-left text readable in the Windows captions | 🟡 unit-tested, no hardware check (#6) |
 | US-33 | Live captions name the speakers | 🟡 no accuracy measurement on real speech (#1) |
@@ -140,6 +141,11 @@ while I decide.*
   with noisy audio, **then** the number of speakers is estimated per session instead of fixed
   by a threshold, within `min_speakers` / `max_speakers` if set, and an hour still
   diarizes in seconds.
+- **Given** `diarize_overlap = true` and a speaker change without a pause, or two speakers
+  at once, **then** the turn
+  boundary follows the change (segmentation model), overlapped speech gets the dominant
+  speaker, and that segment has `"overlap": true` in `transcript.json` (only there); without
+  the segmentation model (off, offline or broken), fixed ~2 s windows as before.
 
 ### US-13 Readable transcripts in private folders
 - **Then** each session is saved under `<output_dir>/<date>/<time>_<app>/` with
@@ -152,7 +158,7 @@ while I decide.*
 - **Given** the models are on disk, **when** all network access is blocked, **then** a
   session records and transcribes end to end.
 - **Then** models download once: every offered Whisper model (`tiny` to `large-v3-turbo`,
-  both backends) pinned to an exact revision, the speaker model verified by SHA-256 (a bad
+  both backends) pinned to an exact revision, the speaker and segmentation models verified by SHA-256 (a bad
   checksum is rejected). A custom repo without a pin is refused unless
   `allow_unpinned_models = true`.
 - **Then** RecAndCC uploads nothing itself. The default output folder may still be synced
@@ -209,7 +215,8 @@ while I decide.*
   background at a pinned revision, and en/ru regions by the default model; **given** it
   can't be loaded, **then** Hebrew falls back to the default model with a log warning and a
   one-time notice, and the load is retried after 5 minutes.
-- **Not yet:** a Hebrew evaluation set and WER (#6).
+- **Not yet:** a Hebrew evaluation set and WER (#6); `tests/test_hebrew_integration.py`
+  covers he/en/ru switching, RTL outputs and a two-speaker dialogue on synthetic `say` audio.
 - **Not yet:** the Windows (Tk) captions only right-justify Hebrew lines; Tk does no bidi
   reordering, so the label stays left of the Hebrew text and the glyph order is unverified
   on real hardware (#6).
@@ -284,6 +291,39 @@ its transcript, so that I know what was decided and who does what without reread
 - **Given** a 1-hour en/ru meeting on an M-series Mac, **then** the summary is ready within
   ~1–2 min, offline.
 - **Not yet:** Windows/CPU backend (llama.cpp), a quality evaluation on real meetings (#4).
+
+### US-22 Room listening (opt-in)
+*As the owner, I want a conversation next to the laptop (an in-person meeting) recorded
+without pressing anything, like a call, and only when I have turned that on.* (#2, with #58)
+
+- **Given** a fresh install (`room_listening = false`), **then** the microphone is never
+  opened while nothing records.
+- **Given** room listening is on and nothing records, **when** nobody speaks or I make a
+  short remark (less than `room_speech_s` of speech within `room_window_s`), **then**
+  nothing is recorded; **when** people talk for `room_speech_s` (6 s) within
+  `room_window_s` (15 s), **then** a `room` session starts (Auto), or starts and asks whether
+  to keep it (Ask).
+- **Then** the session's audio begins up to `room_preroll_s` (15 s) before the trigger, so
+  the first sentence is kept, with no gap or overlap, and the other track stays aligned.
+- **Then** the mic is never opened twice: a room session records the monitor's own stream,
+  and the monitor's mic is closed before any other session opens one.
+- **Given** an app is doing audio or another app uses the mic (even one I switched off,
+  stopped or that is ignored), **then** room speech starts nothing, the room mic is closed
+  while the other app uses it, and nothing it heard reaches a later room session; a call
+  that starts during a room session turns it into that call's session, without a second
+  session, and an excluded app starting during a room session (or turning room listening
+  off) stops it.
+- **Given** a room session, **then** it stops after `room_stop_after_silence_s` (90 s)
+  without speech; after a manual stop or a discard it doesn't restart until the room was
+  quiet for `stop_after_inactive_s`.
+- **Given** a room session, **then** the final transcript numbers the speakers on the mic
+  track (`Speaker 1`, `Speaker 2`, …).
+- **Given** the menu item "Listen for conversations in the room", **then** it switches the
+  setting (saved) and closes or reopens the mic; turning it on explains the always-on mic
+  indicator, the battery cost and consent, and warns if mic access is denied.
+- **Then** speech detection runs on its own thread (the audio thread only copies frames);
+  nothing about the room audio is logged beyond on/off states, and nothing leaves the device.
+- **Not yet:** verified with the screen locked; idle CPU and battery impact measured.
 
 ### US-28 Browse past meetings
 *As the owner, I want to see my past meetings in one place and open, rename or delete them,

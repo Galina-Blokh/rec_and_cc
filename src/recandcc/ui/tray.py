@@ -40,6 +40,7 @@ from .common import (
     PERM_LABELS,
     PERM_TITLES,
     PROMPT_BUTTONS,
+    ROOM_ITEM,
     Controller,
     keep_prompt_text,
     open_output_folder,
@@ -536,6 +537,11 @@ class TrayApp:
                 checked=lambda _i: bool(self.cfg.live_captions),
             ),
             Item(
+                ROOM_ITEM,
+                lambda: self.ctrl.set_room_listening(not self.cfg.detection.room_listening),
+                checked=lambda _i: bool(self.cfg.detection.room_listening),
+            ),
+            Item(
                 "Open live transcript",
                 self._open_live,
                 enabled=lambda _i: bool(self._live_dir),
@@ -560,10 +566,7 @@ class TrayApp:
 
     def _toggle_captions(self) -> None:
         self.cfg.live_captions = not self.cfg.live_captions
-        try:
-            self.cfg.save()
-        except Exception:
-            log.exception("saving settings failed")
+        self.ctrl.save_settings("live_captions")
         if not self.cfg.live_captions:
             self.captions.post("hide")
         elif self._live_id is not None:
@@ -586,7 +589,7 @@ class TrayApp:
             else:
                 autostart.enable()
                 self.cfg.autostart = True
-            self.cfg.save()
+            self.ctrl.save_settings("autostart")
         except Exception:
             log.exception("autostart toggle failed")
 
