@@ -214,7 +214,20 @@ model = "large-v3-turbo"     # tiny | base | small | medium | large-v3 | large-v
 languages = ["en", "ru"]     # auto-detect among these, e.g. ["en", "ru", "he"] ([] = any)
 keep_audio = true            # false = delete WAVs after transcription (~115 MB per track-hour)
 live = true                  # transcribe while recording (false = after the session stops)
+
+[summary]
+enabled = false              # true = summary.md with action items after each meeting (local LLM)
 ```
+
+### Meeting summaries (opt-in)
+
+With `[summary] enabled = true` (Apple silicon), each finished transcript also gets a
+`summary.md` in its folder: a few sentences about the meeting and an **Action items** list
+(who does what, by when), written in the meeting's main language (English, Russian or
+Hebrew). A small local model (Qwen2.5 3B, 4-bit, ~1.7 GB) does it in the background after
+the transcript is final, and waits while you are recording, so captions are never slowed; it is downloaded once, pinned to an exact version, and nothing is
+sent anywhere. It is a draft: check names and dates against the transcript. On Windows, or
+offline before the model is downloaded, the summary is skipped with a notice.
 
 ## Command line
 
@@ -226,6 +239,7 @@ repo):
 | `recandcc run` | Start the menu-bar app (what RecAndCC.app runs) |
 | `recandcc record --seconds 60 [--no-mic]` | Record now without the UI; prints the text live as it is spoken, then the transcript path |
 | `recandcc transcribe <session_dir>` | (Re-)transcribe a recorded session |
+| `recandcc summarize <session_dir>` | Write the session's `summary.md` (summary + action items) with the local model |
 | `recandcc monitor` | Live view of which apps do audio and how the rules classify them. Use it to tune the app lists |
 | `recandcc search "<words>" [--limit N]` | Search all transcripts; prints each match's date, time in the recording, speaker, the text and the transcript path |
 | `recandcc devices` | List audio devices |
@@ -258,7 +272,7 @@ repo):
 ### Where your data lives
 
 Audio and transcripts never leave your computer. The only network access is the one-time
-model download: Whisper from Hugging Face, pinned to exact repo commits
+model download: Whisper (and, with summaries on, the summary model) from Hugging Face, pinned to exact repo commits
 ([`revisions.py`](src/recandcc/transcribe/revisions.py); unpinned custom repos are refused
 unless you opt in), and the 28 MB speaker model from the
 sherpa-onnx GitHub releases, verified by its SHA-256. After that the app works fully offline:
@@ -266,7 +280,7 @@ models load from disk without contacting anything (tested with all network acces
 
 | What | macOS | Windows |
 |---|---|---|
-| Recordings (`*.wav`), transcripts (`transcript.md/.json/.srt`), `session.json` | `~/Documents/Transcribes/` (or your `output_dir`) | `Documents\Transcribes\` |
+| Recordings (`*.wav`), transcripts (`transcript.md/.json/.srt`), summaries (`summary.md`), `session.json` | `~/Documents/Transcribes/` (or your `output_dir`) | `Documents\Transcribes\` |
 | Settings (`config.toml`) | `~/Library/Application Support/RecAndCC/` | `%LOCALAPPDATA%\RecAndCC\` |
 | Search index (`search.sqlite3`: a copy of the transcript text, owner-only) | `~/Library/Application Support/RecAndCC/` | `%LOCALAPPDATA%\RecAndCC\` |
 | Logs (events, app names, file paths) | `~/Library/Logs/RecAndCC/` | `%LOCALAPPDATA%\RecAndCC\Logs\` |
@@ -274,11 +288,18 @@ models load from disk without contacting anything (tested with all network acces
 | Each session's speaker voices (only with `speaker_names = true`) | `…/RecAndCC/voices/sessions/` | `%LOCALAPPDATA%\RecAndCC\voices\sessions\` |
 | Speaker-diarization model | `~/Library/Caches/RecAndCC/models/` | `%LOCALAPPDATA%\RecAndCC\Cache\models\` |
 | Whisper models (shared Hugging Face cache) | `~/.cache/huggingface/hub/models--*whisper*` | `%USERPROFILE%\.cache\huggingface\hub\` |
+| Summary model (only with summaries on) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-3B-Instruct-4bit` | not used |
 | Launch at login | `~/Library/LaunchAgents/com.gblokh.recandcc.plist` | registry `HKCU\…\CurrentVersion\Run\RecAndCC` |
 
 The folders RecAndCC creates for recordings (the transcripts folder, each day and each
-session) are readable only by you (`0700` on macOS). A transcripts folder that already
-existed keeps its permissions; tighten it with `chmod 700 ~/Documents/Transcribes`.
+session) are readable only by you: `0700` on macOS; on Windows an access list with only your
+account and SYSTEM, set when the folder is created and not inherited from its parent. A
+transcripts folder that already existed keeps its permissions; tighten it with
+`chmod 700 ~/Documents/Transcribes`. On Windows, the simplest fix is to let RecAndCC create a
+new folder (point `output_dir` at a path that doesn't exist yet); `icacls <folder>` shows who
+has access. Access lists need an NTFS drive: on a FAT/exFAT USB stick or some network
+shares anyone with access to the drive can read the recordings (RecAndCC warns you once per drive), so keep `output_dir` on a
+local NTFS drive.
 `~/Documents` may be synced by iCloud Drive ("Desktop & Documents Folders") on macOS, and
 `Documents` by OneDrive folder backup on Windows. RecAndCC checks `output_dir` locally (no network)
 while it runs: if it lies in iCloud Drive (including "Desktop & Documents"),

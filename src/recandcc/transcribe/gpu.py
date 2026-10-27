@@ -4,7 +4,9 @@ On an M-series Mac one Whisper pass on the GPU takes ~0.12 s (large-v3-turbo) ve
 on the CPU, which is what keeps live captions close to the speech. MLX isn't safe to drive
 from several threads at once, so every GPU call goes through one dedicated thread; callers on
 the CPU worker pool (VAD, language ID with the small CPU model, bookkeeping) just wait for
-their result, so CPU and GPU work overlap.
+their result, so CPU and GPU work overlap. ``MLX_LOCK`` serialises those calls with the
+other MLX user, the local summary model (summary.py), which holds it for a prompt prefill
+and then once per token.
 """
 
 from __future__ import annotations
@@ -14,9 +16,10 @@ import importlib.util
 import logging
 import platform
 import sys
+import threading
 import time
 import types
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, cast
@@ -28,6 +31,9 @@ from .merge import language_confidence
 from .revisions import check_download_allowed, revision
 
 log = logging.getLogger("recandcc.transcribe")
+
+# Held around every MLX call, so Whisper and the summary model never run on the GPU at once.
+MLX_LOCK = threading.Lock()
 
 # faster-whisper model names -> MLX conversions on Hugging Face.
 MLX_REPOS = {
@@ -44,7 +50,9 @@ def mlx_repo(model: str) -> str:
     return MLX_REPOS.get(model, f"mlx-community/whisper-{model}-mlx")
 
 
-def local_model_path(repo: str, allow_unpinned: bool = False) -> str:
+def local_model_path(
+    repo: str, allow_unpinned: bool = False, on_download: Callable[[], None] | None = None
+) -> str:
     """Local snapshot path of ``repo``, downloading it only if it isn't on disk yet.
 
     Passing the local path to mlx_whisper (instead of the repo id) means loading never
@@ -64,6 +72,8 @@ def local_model_path(repo: str, allow_unpinned: bool = False) -> str:
         # download it, or finish the interrupted download (a pinned one, or an opted-in one).
         check_download_allowed(repo, rev, allow_unpinned)
         log.info("model %s not on disk yet; downloading it once", repo)
+        if on_download is not None:
+            on_download()
     except Exception:
         # A snapshot that is present but unreadable or corrupt must not go online: surface it.
         log.warning(
@@ -152,7 +162,8 @@ class MlxWhisper:
         def _load():
             t0 = time.monotonic()
             self.repo = local_model_path(self.repo, self.allow_unpinned)
-            self._model = self._get_model()
+            with MLX_LOCK:
+                self._model = self._get_model()
             log.info("loaded MLX whisper %s on the GPU in %.1fs", self.repo, time.monotonic() - t0)
 
         self._thread.submit(_load).result()
@@ -161,13 +172,14 @@ class MlxWhisper:
         """(start, end, text) per segment, relative to the start of ``audio``."""
 
         def run():
-            result = import_mlx_whisper().transcribe(
-                np.ascontiguousarray(audio, dtype=np.float32),
-                path_or_hf_repo=self.repo,
-                language=language,
-                condition_on_previous_text=False,
-                verbose=None,
-            )
+            with MLX_LOCK:
+                result = import_mlx_whisper().transcribe(
+                    np.ascontiguousarray(audio, dtype=np.float32),
+                    path_or_hf_repo=self.repo,
+                    language=language,
+                    condition_on_previous_text=False,
+                    verbose=None,
+                )
             segments = cast(list[dict[str, Any]], result["segments"])  # untyped in mlx_whisper
             return [(s["start"], s["end"], s["text"]) for s in segments]
 
@@ -187,14 +199,15 @@ class MlxWhisper:
                 pad_or_trim,
             )
 
-            model = self._model or self._get_model()
-            mel = log_mel_spectrogram(
-                np.ascontiguousarray(audio, dtype=np.float32),
-                n_mels=model.dims.n_mels,
-                padding=N_SAMPLES,
-            )
-            segment = pad_or_trim(mel, N_FRAMES, axis=-2).astype(mx.float16)
-            _, probs = model.detect_language(segment)
+            with MLX_LOCK:
+                model = self._model or self._get_model()
+                mel = log_mel_spectrogram(
+                    np.ascontiguousarray(audio, dtype=np.float32),
+                    n_mels=model.dims.n_mels,
+                    padding=N_SAMPLES,
+                )
+                segment = pad_or_trim(mel, N_FRAMES, axis=-2).astype(mx.float16)
+                _, probs = model.detect_language(segment)
             return list(probs.items())
 
         return language_confidence(self._thread.submit(run).result(), allowed)
