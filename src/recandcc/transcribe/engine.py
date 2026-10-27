@@ -498,23 +498,24 @@ class Transcriber:
     def _labelled(
         self, session: SessionInfo, segments: list[Segment], turns: list[Turn] | None
     ) -> list[Segment]:
-        if not turns:
-            return segments
-        centroids = getattr(turns, "centroids", {}) if self.cfg.speaker_names else {}
+        centroids = getattr(turns, "centroids", {}) if turns and self.cfg.speaker_names else {}
         names: dict[int, str] = {}
         if centroids:
             try:
                 names = voices.match_profiles(centroids, voices.load_profiles())
             except Exception:  # noqa: BLE001 - names are optional; numbers still work
                 log.exception("session %s: could not match voice profiles", session.id)
-        out, labels = label_speakers(segments, turns, names=names)
-        if centroids and labels and Path(session.directory).exists():
-            try:  # opt-in only: lets `recandcc name-speaker` name them later
-                voices.write_session_speakers(
-                    Path(session.directory), {lbl: centroids[k] for k, lbl in labels.items()}
-                )
-            except OSError:
-                log.exception("session %s: could not save speaker voices", session.id)
+        out, labels = label_speakers(segments, turns or [], names=names)
+        try:  # opt-in only, in the private voices folder: lets `name-speaker` name them later
+            if centroids and labels and Path(session.directory).exists():
+                speakers = {lbl: centroids[k] for k, lbl in labels.items() if k in centroids}
+                voices.write_session_voices(session.id, speakers)
+            else:  # never leave voices of an older transcript of this session behind
+                voices.delete_session_voices(session.id)
+        except OSError:
+            log.exception("session %s: could not update speaker voices", session.id)
+        if not turns:
+            return segments
         log.info(  # counts only: names are personal data
             "session %s: %d other speaker(s), %d recognized by voice",
             session.id,

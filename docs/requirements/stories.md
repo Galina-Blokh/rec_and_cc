@@ -180,7 +180,8 @@ I don't have to work out who `Speaker 2` was every time.*
 - **Given** `speaker_names = false` (default), **then** no voice data is stored anywhere
   (voice profiles are biometric data).
 - **Given** `speaker_names = true`, **when** a final transcript is diarized, **then**
-  `speakers.json` beside it keeps each speaker's voice centroid, and
+  each speaker's voice centroid is kept in the owner-only app-data `voices/` folder (never
+  in `output_dir`), and
   `recandcc speakers <session>` lists the speakers with their first lines.
 - **When** I run `recandcc name-speaker <session> "Speaker 2" "Anna"`, **then** that
   session's `transcript.md`, `.srt` and `.json` say `Anna`, and Anna's voice profile is saved
@@ -191,6 +192,6 @@ I don't have to work out who `Speaker 2` was every time.*
   is labelled `Anna`; otherwise `Speaker N`. Each name is used once per session; `Me` is
   never relabelled.
 - **Then** `recandcc voices list`, `voices delete <name>` and `voices delete --all` show and
-  delete the profiles.
+  delete the profiles (`--all` also deletes every session's voices).
 - **Not yet:** naming from the menu with a voice sample, names from the call app, overlap
   handling and an accuracy measurement on real speech (#1, #13).

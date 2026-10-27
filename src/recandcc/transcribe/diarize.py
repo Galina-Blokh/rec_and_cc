@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import bisect
 import hashlib
+import itertools
 import logging
 import os
 import threading
@@ -284,12 +285,14 @@ def label_speakers(
         return segments, {}
     if len(ids) == 1 and not ids & names.keys():
         return segments, {ids.pop(): speaker}
+    taken = {n.casefold() for n in names.values()}
+    numbers = (f"Speaker {n}" for n in itertools.count(1))
+    free = (label for label in numbers if label.casefold() not in taken)  # no duplicate labels
     labels: dict[int, str] = {}
     for idx in sorted(picks, key=lambda i: (segments[i].start, segments[i].end, i)):
         k = picks[idx]
         if k not in labels:
-            numbered = sum(1 for j in labels if j not in names)
-            labels[k] = names.get(k) or f"Speaker {numbered + 1}"
+            labels[k] = names[k] if k in names else next(free)
     out = [
         replace(seg, speaker=labels[picks[i]]) if i in picks else seg
         for i, seg in enumerate(segments)

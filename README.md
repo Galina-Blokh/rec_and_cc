@@ -252,7 +252,7 @@ models load from disk without contacting anything (tested with all network acces
 | Settings (`config.toml`) | `~/Library/Application Support/RecAndCC/` | `%LOCALAPPDATA%\RecAndCC\` |
 | Logs (events, app names, file paths) | `~/Library/Logs/RecAndCC/` | `%LOCALAPPDATA%\RecAndCC\Logs\` |
 | Voice profiles (only with `speaker_names = true`; biometric data, owner-only) | `~/Library/Application Support/RecAndCC/voices/` | `%LOCALAPPDATA%\RecAndCC\voices\` |
-| Per-session speaker voices (`speakers.json`, only with `speaker_names = true`) | beside each transcript | beside each transcript |
+| Each session's speaker voices (only with `speaker_names = true`) | `…/RecAndCC/voices/sessions/` | `%LOCALAPPDATA%\RecAndCC\voices\sessions\` |
 | Speaker-diarization model | `~/Library/Caches/RecAndCC/models/` | `%LOCALAPPDATA%\RecAndCC\Cache\models\` |
 | Whisper models (shared Hugging Face cache) | `~/.cache/huggingface/hub/models--*whisper*` | `%USERPROFILE%\.cache\huggingface\hub\` |
 | Launch at login | `~/Library/LaunchAgents/com.gblokh.recandcc.plist` | registry `HKCU\…\CurrentVersion\Run\RecAndCC` |
@@ -278,7 +278,7 @@ macOS:
 
 ```bash
 rm -rf ~/Documents/Transcribes                    # recordings + transcripts (or your output_dir)
-uv run recandcc voices delete --all               # voice profiles only (also removed below)
+uv run recandcc voices delete --all               # voice data only (also removed below)
 rm -rf ~/Library/Application\ Support/RecAndCC    # settings + voice profiles
 rm -rf ~/Library/Logs/RecAndCC                    # logs
 rm -rf ~/Library/Caches/RecAndCC                  # speaker model

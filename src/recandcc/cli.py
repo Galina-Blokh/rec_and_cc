@@ -270,12 +270,13 @@ def cmd_config(args) -> int:
 
 # ---------------------------------------------------------------------- speaker names
 def cmd_speakers(args) -> int:
+    from .models import SessionInfo
     from .transcribe import voices
 
     directory = Path(args.session_dir).expanduser()
     try:
         speakers = voices.session_speakers(directory)
-        known = voices.read_session_speakers(directory)
+        known = voices.read_session_voices(SessionInfo.load(directory).id)
     except (OSError, ValueError) as e:
         print(f"Can't read the transcript: {e}", file=sys.stderr)
         return 1
@@ -312,7 +313,8 @@ def cmd_voices(args) -> int:
             print(f"{p.name}  ({p.count} session(s), updated {p.updated_at})")
         print(f"{len(profiles)} voice profile(s) in {voices.VOICES_DIR}")
     elif args.all:
-        print(f"Deleted {voices.delete_all_profiles()} voice profile(s).")
+        n = voices.delete_all_profiles()
+        print(f"Deleted {n} voice profile(s) and all saved session voices.")
     elif not args.name:
         print("Name the profile to delete, or use --all.", file=sys.stderr)
         return 1
