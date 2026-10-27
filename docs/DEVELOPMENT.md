@@ -121,7 +121,7 @@ Dependabot (`.github/dependabot.yml`) proposes weekly updates.
 
 **Coverage.** Every `pytest` run prints a coverage report (`pytest-cov`, configured in
 `pyproject.toml`). CI fails the fast suite below the floor (`--cov-fail-under=70` in
-`ci.yml`); local runs of a single file or `-m slow` only report. The AppKit/pystray shells
+`ci.yml`); local runs only report, so a full local run can pass below the floor. The AppKit/pystray shells
 (`ui/mac.py`, `ui/tray.py`, `ui/captions_mac.py`, `ui/toast_mac.py`) and `cli.py` are not
 counted; keep their logic in `ui/common.py` / `ui/captions.py` so it's testable. Raise the
 floor when you add tests; never lower it to get a PR green. Check it locally with
