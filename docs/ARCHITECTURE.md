@@ -312,7 +312,10 @@ loads tuned alignment heads, so every head of the decoder's last half is used (4
 320 on large-v3); `capped_heads` keeps at most 64 (last layer first, evenly spaced) to bound
 that cost. This differs from upstream, and its accuracy on large models (large-v3, ivrit) is
 unmeasured; turbo's 40 heads are unaffected. If the word pass raises on a chunk, that chunk
-is transcribed again without words (a warning with no text), so it stays whole. The version is read from `mlx_whisper/_version.py` (a frozen bundle has no
+is transcribed again without words (a warning with no text), so it stays whole; the failed
+lazy faster-whisper generator is closed first. After two such failures in a session the rest
+of it runs without words (one more warning). The alignment stays under `MLX_LOCK`: it runs
+inside `mlx_whisper.transcribe`, and releasing the lock mid-call would be riskier. The version is read from `mlx_whisper/_version.py` (a frozen bundle has no
 dist-info), and a test pins the SHA-256 of upstream `timing.py` so an upgrade forces a review.
 
 **Speaker names (opt-in, `speaker_names`, `voices.py`).** Diarization also returns each

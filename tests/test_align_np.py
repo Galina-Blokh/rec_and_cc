@@ -22,6 +22,7 @@ import pytest
 from numpy.lib.stride_tricks import sliding_window_view
 
 from recandcc.transcribe._align_np import dtw, median_filter
+from recandcc.transcribe.mlx_timing import MAX_ALIGNMENT_HEADS
 
 log = logging.getLogger(__name__)
 
@@ -133,6 +134,18 @@ def test_dtw_matches_upstream_port(n: int, m: int) -> None:
         assert_valid_path(got, n, m)
 
 
+@pytest.mark.slow
+def test_dtw_matches_upstream_port_at_whisper_scale() -> None:
+    """Exact equality at a real window's shape (120 tokens x 1500 frames); slow, since the
+    Python reference walks every cell."""
+    rng = np.random.default_rng(120_1500)
+    for x in (
+        rng.standard_normal((120, 1500)).astype(np.float32),
+        rng.integers(0, 3, (120, 1500)).astype(np.float32),
+    ):
+        np.testing.assert_array_equal(dtw(x), ref_dtw(x))
+
+
 def test_dtw_with_nan_and_inf_from_a_constant_column() -> None:
     rng = np.random.default_rng(3)
     w = rng.standard_normal((4, 20, 60)).astype(np.float32)
@@ -167,7 +180,9 @@ def test_matches_golden_vectors_from_the_real_upstream_kernels() -> None:
 # test_search_latency.py). Each check warms up once and times the median of a few runs.
 CI_HEADROOM = 3.0
 DTW_BUDGET_S = 0.5  # measured ~15 ms for 150x1500 on an M-series Mac
-MEDIAN_BUDGET_S = 2.0  # measured ~0.19 s for 20x150x1500, width 7
+# Per head count, for heads x 150 x 1500, width 7. 64 = mlx_timing.MAX_ALIGNMENT_HEADS, the
+# most the MLX word pass ever filters (measured ~0.25 s for 20 and ~0.80 s for 64).
+MEDIAN_BUDGET_S = {20: 2.0, MAX_ALIGNMENT_HEADS: 2.4}
 
 
 def _factor() -> float:
@@ -202,27 +217,26 @@ def test_dtw_is_fast_enough() -> None:
     assert elapsed < DTW_BUDGET_S * _factor()
 
 
-def test_median_filter_speed_and_memory_at_a_whisper_shape() -> None:
-    heads, tokens, frames, width = 20, 150, 1500, 7
+@pytest.mark.parametrize("heads", [20, MAX_ALIGNMENT_HEADS])
+def test_median_filter_speed_and_memory_at_a_whisper_shape(heads: int) -> None:
+    tokens, frames, width = 150, 1500, 7
     x = np.random.default_rng(5).standard_normal((heads, tokens, frames)).astype(np.float32)
     elapsed = _median_time(lambda: median_filter(x, width), runs=3)
     log.info("median_filter %dx%dx%d: median %.3f s", heads, tokens, frames, elapsed)
-    assert elapsed < MEDIAN_BUDGET_S * _factor()
+    assert elapsed < MEDIAN_BUDGET_S[heads] * _factor()
     # Temporaries beyond the output stay bounded by one head's windows, so collapsing the
     # per-head loop (about heads x as much) is caught.
     limit = 4 * tokens * frames * width * x.itemsize  # 4x one head's windows
     peak = _peak_bytes(lambda: median_filter(x, width))
+    log.info("median_filter peak %.1f MB, limit %.1f MB + output", peak / 1e6, limit / 1e6)
+    assert peak - x.nbytes < limit
+    if heads != 20:
+        return  # the canary below needs all heads' windows at once (~400 MB at 64)
     # Canary: all heads at once, as a collapsed loop would do. Proves tracemalloc sees numpy
     # buffers here, so the guard above can fail.
     padded = np.pad(x, ((0, 0), (0, 0), (width // 2, width // 2)), mode="reflect")
     canary = _peak_bytes(lambda: np.median(sliding_window_view(padded, width, axis=-1), axis=-1))
-    log.info(
-        "median_filter peak %.1f MB, all-heads canary %.1f MB, limit %.1f MB + output",
-        peak / 1e6,
-        canary / 1e6,
-        limit / 1e6,
-    )
-    assert peak - x.nbytes < limit
+    log.info("all-heads canary %.1f MB", canary / 1e6)
     assert canary - x.nbytes > 3 * limit
 
 

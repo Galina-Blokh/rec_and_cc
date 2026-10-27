@@ -480,10 +480,50 @@ def test_a_failing_word_pass_keeps_the_session_and_the_chunk_whole(tmp_path, mon
     monkeypatch.setattr(t, "_word_tracks", lambda _s: (eng.Track.OTHERS,))
     with caplog.at_level(logging.DEBUG, "recandcc.transcribe"):
         segs = t.transcribe_session(s)
-    t.close()
     others = [x for x in segs if x.speaker == "Others"]
     assert others and all(x.text == "secret words" and x.words == [] for x in others)
-    assert True in model.calls and False in model.calls
-    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("word timestamps failed" in r.getMessage() for r in warnings)
-    assert not any("secret" in r.getMessage() for r in warnings)
+    assert len([c for c in model.calls if c]) == 2 < len(others)  # breaker after 2 failures
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert sum("kept without words" in m for m in warnings) == 2
+    assert sum("off for the rest of this session" in m for m in warnings) == 1
+    assert not any("secret" in m for m in warnings)
+    # a new session starts with words on again
+    model.calls.clear()
+    t2_segs = t.transcribe_session(s)
+    t.close()
+    assert t2_segs and len([c for c in model.calls if c]) == 2
+
+
+def test_failed_lazy_word_pass_is_closed_before_the_retry():
+    """faster-whisper yields segments lazily: a failure mid-iteration must close that
+    generator before the same model transcribes the chunk again without words."""
+    events = []
+
+    class Lazy:
+        def __init__(self, fail):
+            self.fail = fail
+
+        def __iter__(self):
+            ws = [_W(0.0, 0.5, " a")] if self.fail else []
+            yield types.SimpleNamespace(start=0.0, end=0.5, text=" a", words=ws)
+            if self.fail:
+                raise IndexError("boom")
+            yield types.SimpleNamespace(start=0.5, end=1.0, text=" b", words=[])
+
+        def close(self):
+            events.append(("close", self.fail))
+
+    class Model(_Model):
+        def transcribe(self, audio, **kw):
+            events.append(("transcribe", kw["word_timestamps"]))
+            return Lazy(kw["word_timestamps"]), None
+
+    t = _transcriber(Model())
+    out = t.transcribe_audio(np.zeros(SAMPLE_RATE, np.float32), 0.0, "Others", "en", words=True)
+    assert events == [
+        ("transcribe", True),
+        ("close", True),
+        ("transcribe", False),
+        ("close", False),
+    ]
+    assert [x.text for x in out] == ["a", "b"] and all(x.words == [] for x in out)
