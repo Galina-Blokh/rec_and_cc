@@ -150,6 +150,9 @@ watch the Windows number in CI.
 
 ## Useful commands while developing
 
+The user-facing `recandcc` subcommands are documented in the README's
+[Command line](../README.md#command-line) section; the list below is developer-only.
+
 ```bash
 uv run recandcc monitor                       # watch detection/classification live
 uv run recandcc record --seconds 10 --no-mic  # end-to-end check of capture + transcription
