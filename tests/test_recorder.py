@@ -13,7 +13,7 @@ import soundfile as sf
 from recandcc.capture.base import AudioSource
 from recandcc.capture.mic import StreamResampler
 from recandcc.config import Config
-from recandcc.models import SAMPLE_RATE, SessionInfo, Track, TriggerKind
+from recandcc.models import SAMPLE_RATE, AppTarget, SessionInfo, Track, TriggerKind
 from recandcc.recorder import Recorder, dbfs, make_private_dir, should_record_mic, slugify
 
 
@@ -366,3 +366,82 @@ def test_make_private_dir_stops_at_a_missing_root(monkeypatch, tmp_path):
     monkeypatch.setattr(Path, "is_dir", lambda self: False)
     with pytest.raises(FileNotFoundError):
         make_private_dir(tmp_path / "out")
+
+
+# --- per-app system audio (US-08) --------------------------------------------------------
+ZOOM_TARGET = AppTarget(("us.zoom",), (10, 11))
+
+
+class TargetSource(FakeSource):
+    def __init__(self, target=None):
+        super().__init__(sine(1))
+        self.target, self.added = target, []
+        self.scope = "app" if target else "all"
+
+    def add_target(self, target):
+        self.added.append(target)
+        return True
+
+
+def _target_recorder(cfg, fail_per_app=False):
+    made = []
+
+    def sysf(*args):
+        if args and fail_per_app:
+            raise RuntimeError("old helper")
+        made.append(TargetSource(*args))
+        return made[-1]
+
+    mic = lambda: FakeSource(sine(1))  # noqa: E731
+    return Recorder(cfg, mic_factory=mic, system_factory=sysf, min_session_s=0.5), made
+
+
+@pytest.mark.parametrize(
+    ("scope", "target", "expected"),
+    [
+        ("app", ZOOM_TARGET, ZOOM_TARGET),
+        ("all", ZOOM_TARGET, None),  # the default: everything the Mac plays
+        ("app", None, None),  # manual session: no app to follow
+        ("app", AppTarget(), None),  # no processes, no pattern
+    ],
+)
+def test_system_source_gets_the_target_only_in_app_scope(cfg, scope, target, expected):
+    cfg.detection.system_audio_scope = scope
+    rec, made = _target_recorder(cfg)
+    rec.start(TriggerKind.CALL, "zoom.us", target=target)
+    made[0].done.wait(5)
+    s = rec.stop()
+    assert [m.target for m in made] == [expected]
+    # The session records what was actually captured: the source's effective scope.
+    assert s.metrics["recording"]["system_audio_scope"] == ("app" if expected else "all")
+
+
+def test_per_app_source_failure_falls_back_to_all_system_audio(cfg):
+    cfg.detection.system_audio_scope = "app"
+    rec, made = _target_recorder(cfg, fail_per_app=True)
+    s = rec.start(TriggerKind.CALL, "zoom.us", target=ZOOM_TARGET)
+    assert [m.target for m in made] == [None] and Track.OTHERS in s.tracks
+    rec.stop()
+
+
+def test_upgrade_extends_a_per_app_tap_to_the_call_app(cfg):
+    cfg.detection.system_audio_scope = "app"
+    rec, made = _target_recorder(cfg)
+    rec.start(TriggerKind.MEDIA, "Google Chrome", target=AppTarget(("com.google.chrome",)))
+    assert rec.upgrade_to_call("zoom.us", target=ZOOM_TARGET) is True
+    rec.stop()
+    assert made[0].added == [ZOOM_TARGET]
+
+
+def test_facetime_uses_the_global_tap_and_upgrades_add_its_daemon(cfg):
+    """FaceTime's call audio comes from avconferenced, not FaceTime.app."""
+    cfg.detection.system_audio_scope = "app"
+    facetime = AppTarget(("com.apple.facetime",), (30,))
+    rec, made = _target_recorder(cfg)
+    rec.start(TriggerKind.CALL, "FaceTime", target=facetime)
+    rec.stop()
+    assert made[0].target is None
+    rec.start(TriggerKind.MEDIA, "Google Chrome", target=AppTarget(("com.google.chrome",)))
+    rec.upgrade_to_call("FaceTime", target=facetime)
+    rec.stop()
+    assert made[1].added == [AppTarget(("com.apple.facetime", "avconferenced"), (30,))]

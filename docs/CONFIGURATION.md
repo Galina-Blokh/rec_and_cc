@@ -12,7 +12,7 @@ Changes to `[detection]` are picked up while the app runs. Restart the app after
 
 | Key | Default | Description |
 |---|---|---|
-| `output_dir` | `~/Documents/Transcribes` | Where sessions are saved (`<date>/<time>_<app>/`) |
+| `output_dir` | `~/Documents/Transcribes` | Where sessions are saved (`<date>/<time>_<app>/`). If it is in a known cloud-synced folder (iCloud Drive incl. "Desktop & Documents", `~/Library/CloudStorage`, `~/Dropbox`, `~/Google Drive`, `~/OneDrive*`, `~/Box`; case-insensitive, also through symlinks; Windows: OneDrive, `%USERPROFILE%\Dropbox`, also through junctions; see README → Privacy), the app warns once per folder (log + notification; `recandcc config` too): recordings would be uploaded. Pick a local folder, e.g. `~/Transcribes`, to keep them on this device |
 | `autostart` | `false` | Informational; use **menu → Launch at login** or `recandcc autostart on` |
 | `hotkey` | `"<ctrl>+<alt>+r"` (⌃⌥R) | Global start/stop shortcut (toggle; stops any recording). Modifiers `<cmd>`, `<shift>`, `<alt>`/`<option>`, `<ctrl>` (`<win>` = Windows key) + one key: `a`–`z`, `0`–`9`, `f1`–`f12`, `space`. Keys other than F1–F12 need a modifier. On Windows `<cmd>` means Ctrl. `""` disables it. Applied live when the file changes |
 | `live_captions` | `true` | Show the floating captions window while recording (needs `transcription.live`) |
@@ -32,6 +32,7 @@ Changes to `[detection]` are picked up while the app runs. Restart the app after
 | `ask_timeout_s` | `30.0` | The "Keep it?" pop-up closes after this |
 | `ask_timeout_action` | `"record"` | What an unanswered pop-up means: `record` keeps the recording (nothing is lost if you're away), `ignore` discards it. In Ask mode recording always starts right away; the pop-up only decides whether to keep it |
 | `record_mic` | `"calls"` | `always` · `calls` (calls and manual recordings only) · `never` |
+| `system_audio_scope` | `"all"` | What the `Others` track records. `all`: everything the Mac plays. `app` (macOS): only the app that triggered the session, including helper processes it starts later; a call joining a video session adds the call app. Manual sessions, apps with no audio process yet, an outdated `bin/rcc-audiotap` and FaceTime (its calls play through the `avconferenced` daemon) record `all`, with a warning in the log; `session.json` notes the scope actually used ([ADR 0012](adr/0012-per-app-system-audio-tap.md)) |
 | `call_apps` | Zoom, Teams, FaceTime, Slack, Discord, Telegram, WhatsApp, Skype, Webex | Patterns for call apps |
 | `media_apps` | browsers, QuickTime, VLC, Podcasts, TV | Patterns for media apps |
 | `ignore_apps` | Spotify, Music, system sounds, Siri, Voice Memos | Never trigger |
