@@ -2,7 +2,7 @@
 events reaching the Tk search window, and that window's submit/open hooks. pystray and
 Pillow are stubbed; the Tk widgets themselves are checked by hand on Windows.
 
-Stories: US-20.
+Stories: US-20, US-28.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import queue
 import sys
 import threading
 import types
+from datetime import datetime
 
 import pytest
 
@@ -103,3 +104,44 @@ def test_search_window_stops_queueing_when_tk_fails(tray, monkeypatch):
     assert win.failed
     win.post("ask")
     assert win._q.qsize() == 1  # nothing queued after the failure
+
+
+def test_notes_menu_item_and_events_reach_the_notes_window(tray):
+    app = _app(tray)
+    calls: list[str] = []
+    app.ctrl.notes_async = lambda: calls.append("scan")
+    app.notes = FakeWindow()
+    actions = {i[0]: i[1] for i in app._menu() if i and isinstance(i[0], str)}
+    actions["Meeting notes…"]()
+    assert calls == ["scan"]
+    app.ctrl.events.put(("notes", []))
+    app._drain()
+    assert app.notes.posted == [("notes", [])]
+
+
+def test_notes_window_actions(tray, tmp_path, monkeypatch):
+    from recandcc.ui.notes import Note
+
+    done = threading.Event()
+    opened, asked, acted = [], [], []
+    ctrl = types.SimpleNamespace(note_action_async=lambda *a: acted.append(a))
+    monkeypatch.setattr(tray, "open_path", lambda p: (opened.append(p), done.set()))
+    win = tray.TkNotes(ctrl)
+    win.notes = [Note(tmp_path, "zoom.us", datetime(2026, 10, 26), 60.0, True)]
+    answers = {"rename": "Budget", "delete": False}
+
+    def ask(kind, note):
+        asked.append(kind)
+        return answers[kind]
+
+    win.act(3, "Rename…", ask)  # no such row: nothing
+    win.act(0, "Open summary", ask)  # no summary.md: nothing
+    win.act(0, "Rename…", ask)
+    win.act(0, "Delete…", ask)  # not confirmed
+    answers["delete"] = True
+    win.act(0, "Delete…", ask)
+    win.act(0, "Reveal folder", ask)
+    assert done.wait(5)
+    assert asked == ["rename", "delete", "delete"]
+    assert acted == [(tmp_path, "rename", "Budget"), (tmp_path, "delete")]
+    assert opened == [tmp_path]
