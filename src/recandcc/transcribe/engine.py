@@ -27,7 +27,7 @@ import numpy as np
 
 from ..config import TranscriptionConfig
 from ..metrics import log_session_metrics, rounded
-from ..models import SAMPLE_RATE, Segment, SessionInfo, Track
+from ..models import SAMPLE_RATE, Segment, SessionInfo, Track, TriggerKind
 from . import voices
 from .chunking import Chunk, find_speech, load_track, merge_labelled, slice_chunk
 from .diarize import Diarizer, Turn, label_speakers
@@ -50,6 +50,15 @@ SPEAKERS = {Track.ME: ME, Track.OTHERS: OTHERS}
 # which is refused by config, is not retried).
 ROUTE_RETRY_S = 300.0
 LANGUAGE_NAMES = {"he": "Hebrew", "en": "English", "ru": "Russian"}  # for notices
+
+
+def diarized_track(session: SessionInfo) -> Track:
+    """The track whose speakers get numbered: "Others", except in a room session (also one
+    a call upgraded later), where everyone in the room is on the mic ("Me")."""
+    room = session.trigger_kind == TriggerKind.ROOM or session.started_as_room
+    return Track.ME if room else Track.OTHERS
+
+
 LANGUAGE_ID_MODEL = "base"  # small multilingual model used only for per-region language ID
 MIN_LANGUAGE_CONFIDENCE = 0.75  # below this a chunk's language is re-checked with the main model
 # How long writing the final transcript waits for speaker diarization. If it takes longer, the
@@ -539,11 +548,11 @@ class Transcriber:
     # -- final transcript + speaker diarization ----------------------------------------------
 
     def start_diarization(self, session: SessionInfo) -> Future | None:
-        """Start diarizing the session's "Others" track in the background (CPU threads).
-        None if disabled (cfg.diarize) or there is no others track on disk."""
+        """Start diarizing the session's ``diarized_track`` in the background (CPU threads).
+        None if disabled (cfg.diarize) or that track is not on disk."""
         if not self.cfg.diarize:
             return None
-        name = session.tracks.get(Track.OTHERS)
+        name = session.tracks.get(diarized_track(session))
         path = Path(session.directory) / name if name else None
         if path is None or not path.exists():
             return None
@@ -657,10 +666,14 @@ class Transcriber:
                 names = voices.match_profiles(centroids, voices.load_profiles())
             except Exception:  # noqa: BLE001 - names are optional; numbers still work
                 log.exception("session %s: could not match voice profiles", session.id)
-        out, labels = label_speakers(segments, turns or [], names=names)
+        speaker = SPEAKERS[diarized_track(session)]  # "Me" in a room session
+        out, labels = label_speakers(segments, turns or [], speaker, names=names)
         try:  # opt-in only, in the private voices folder: lets `name-speaker` name them later
-            if centroids and labels and Path(session.directory).exists():
-                speakers = {lbl: centroids[k] for k, lbl in labels.items() if k in centroids}
+            # A lone speaker in a room session keeps "Me", which is never renamed: no voice.
+            speakers = {
+                lbl: centroids[k] for k, lbl in labels.items() if k in centroids and lbl != ME
+            }
+            if speakers and Path(session.directory).exists():
                 voices.write_session_voices(session, speakers)
             else:  # never leave voices of an older transcript of this session behind
                 voices.delete_session_voices(session.id)
