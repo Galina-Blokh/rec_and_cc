@@ -300,11 +300,15 @@ before that, and older settings files hold it the same way, so it is replaced by
 (saved to `config.toml`, with a one-time notice) unless you also set
 `accept_qwen_research_licence = true` under `[summary]` (after a switch, set `model` back to the
 3B as well; only that line is rewritten, so comments stay). If the 3B is already downloaded and
-the new default isn't, it is kept for now, so offline summaries keep working. On Windows (and Linux) there is no MLX, so the CPU runs a pinned, checksum-verified int4 ONNX build of
-the Qwen2.5 1.5B through onnxruntime-genai (~1.8 GB, downloaded once). The default 4B and the old
-1.5B both map to it, because the 4B has no CPU build; other models are skipped there. It is much
-slower than on Apple silicon (about 10 minutes for an hour-long meeting on a fast CPU). Offline
-before the model is downloaded, or on an Intel Mac, the summary is skipped with a notice. It waits for
+the new default isn't, it is kept for now, so offline summaries keep working. On Windows (and
+Linux) there is no MLX, so the CPU runs a pinned, checksum-verified int4 ONNX build of the Qwen2.5
+1.5B Instruct through onnxruntime-genai (~1.8 GB, downloaded once). The default 4B and the old 1.5B
+both map to it, because the 4B has no CPU build; that mapping is logged once at INFO. That 1.5B is
+a smaller model, weaker than the 4B, especially for Hebrew and Russian and for action items. Other
+models are skipped there. It is much slower than on Apple silicon: about 10 minutes for an
+hour-long meeting, measured on an Apple M-series CPU (Windows laptops may be slower). Offline
+before the model is downloaded, or on an Intel Mac, the summary is skipped with a notice.
+It waits for
 the speaker labels (a slow diarization delays it), a summary cut short by quitting is redone
 at the next start (a `.summary-pending` marker in the session folder; a `.summary-source` file records a fingerprint of the transcript text the summary was made from), and after
 `recandcc name-speaker` the app redoes an existing `summary.md` with the new name once idle. Renaming a speaker in the menu, or call-app names, keeps the existing summary, whose text may still mention the old label. Old summaries are not given a fingerprint afterwards: one computed now could describe a transcript that already differs from what the summary was made from.
