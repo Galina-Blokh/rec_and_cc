@@ -24,7 +24,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import cache
 from pathlib import Path
 
@@ -334,7 +334,7 @@ def should_record_mic(policy: str, kind: TriggerKind) -> bool:
         return True
     if policy == "never":
         return False
-    return kind in (TriggerKind.CALL, TriggerKind.MANUAL)
+    return kind in (TriggerKind.CALL, TriggerKind.MANUAL, TriggerKind.ROOM)
 
 
 class _TrackWriter:
@@ -343,6 +343,7 @@ class _TrackWriter:
         self.path = path
         self.source = source
         self.recorder = recorder
+        self.replay_s = REPLAY_SECONDS  # longer for a room mic: listeners get its pre-roll
         self.q: queue.Queue[np.ndarray | None] = queue.Queue()
         self.frames_written = 0
         self.frames_received = 0  # updated on the capture thread; ahead of frames_written
@@ -374,7 +375,7 @@ class _TrackWriter:
             self.frames_received += block.size
             self._recent.append((start, block))
             self._recent_frames += block.size
-            while self._recent_frames - self._recent[0][1].size >= REPLAY_SECONDS * SAMPLE_RATE:
+            while self._recent_frames - self._recent[0][1].size >= self.replay_s * SAMPLE_RATE:
                 self._recent_frames -= self._recent.popleft()[1].size
             for cb in self._listeners:
                 self._call(cb, start, block)
@@ -574,9 +575,12 @@ class Recorder:
         app: str | None = None,
         record_mic: bool | None = None,
         target: AppTarget | None = None,
+        mic_source: SourceFactory | None = None,
     ) -> SessionInfo:
         """Start a session. ``record_mic`` overrides the config policy when not None.
-        ``target``: the triggering app, recorded alone with ``system_audio_scope = "app"``."""
+        ``target``: the triggering app, recorded alone with ``system_audio_scope = "app"``.
+        ``mic_source`` replaces the mic factory (room listening: a source that replays its
+        pre-roll first); it opens first and the other tracks start padded to its length."""
         with self._op_lock:
             if self._session is not None:
                 raise RuntimeError("already recording")
@@ -584,7 +588,12 @@ class Recorder:
             self._privacy_issue = None
             sid, directory, privacy_issue = self._make_dir(now, app, kind)
             session = SessionInfo(
-                id=sid, directory=directory, started_at=now, trigger_kind=kind, trigger_app=app
+                id=sid,
+                directory=directory,
+                started_at=now,
+                trigger_kind=kind,
+                trigger_app=app,
+                started_as_room=kind == TriggerKind.ROOM,
             )
             want_mic = (
                 should_record_mic(self.cfg.detection.record_mic, kind)
@@ -603,17 +612,30 @@ class Recorder:
                 (Track.OTHERS, lambda: self._system_source(per_app))
             ]
             if want_mic:
-                plan.append((Track.ME, self.mic_factory))
+                plan.append((Track.ME, mic_source or self.mic_factory))
+            if mic_source is not None:
+                plan.reverse()
 
             writers: list[_TrackWriter] = []
+            preroll = 0  # frames the room mic replayed from before the trigger
             for track, factory in plan:
-                w = self._open_track(session, track, factory)
+                room_mic = mic_source is not None and track == Track.ME
+                # Live transcription attaches after start(): it must still get the whole pre-roll.
+                det = self.cfg.detection
+                replay = max(det.room_preroll_s, det.room_window_s) + 5 if mic_source else 0.0
+                w = self._open_track(
+                    session, track, factory, pad_frames=preroll, replay_s=replay, preroll=room_mic
+                )
                 if w is not None:
                     writers.append(w)
+                    if room_mic:  # replayed synchronously by start(): the others start padded
+                        preroll = w._padding
 
             if not writers:
                 shutil.rmtree(directory, ignore_errors=True)
                 raise RuntimeError("no audio source could be started")
+            if preroll:  # the tracks begin with the replayed pre-roll
+                session.started_at = now - timedelta(seconds=preroll / SAMPLE_RATE)
             self._privacy_issue = privacy_issue  # reported by privacy_notice()
             self._started_mono = self.clock()
             with self._lvl_lock:
@@ -630,20 +652,34 @@ class Recorder:
             return session
 
     def _open_track(
-        self, session: SessionInfo, track: Track, factory: SourceFactory, pad_frames: int = 0
+        self,
+        session: SessionInfo,
+        track: Track,
+        factory: SourceFactory,
+        pad_frames: int = 0,
+        replay_s: float = 0.0,
+        preroll: bool = False,
     ) -> _TrackWriter | None:
-        """Create and start one track; None (logged) if its source can't be started."""
+        """Create and start one track; None (logged) if its source can't be started.
+        ``preroll``: the source replays earlier audio inside ``start()``; those frames are not
+        backlog (the writer just hasn't caught up with audio it got all at once)."""
         path = session.directory / TRACK_FILES[track]
         try:
             src = factory()
             w = _TrackWriter(track, path, src, self)
+            if replay_s:
+                w.replay_s = max(w.replay_s, replay_s)
         except Exception:
             log.exception("could not create %s source", track)
             return None
         if pad_frames:
             w.pad_silence(pad_frames)
+        if preroll:
+            w._padding = 1 << 62  # no backlog accounting while start() replays
         try:
             src.start(w.on_frames)
+            if preroll:
+                w._padding = w.frames_received  # counted once the writer is past the replay
         except Exception:
             log.exception("could not start %s source", track)
             w.finish()
@@ -660,13 +696,13 @@ class Recorder:
             self._sampler = participants.start_sampler(self.cfg, target)
 
     def upgrade_to_call(self, app: str | None, target: AppTarget | None = None) -> bool:
-        """Turn a running media session into a call session (a call started while e.g. a
-        video was playing): adds the mic track if the policy wants it for calls. The mic
+        """Turn a running media or room session into a call session (a call started while e.g.
+        a video was playing): adds the mic track if the policy wants it for calls. The mic
         track starts with silence up to "now" so it stays aligned with the other tracks.
         A per-app Others track is extended to the call app ``target`` (both apps recorded)."""
         with self._op_lock:
             session = self._session
-            if session is None or session.trigger_kind != TriggerKind.MEDIA:
+            if session is None or session.trigger_kind not in (TriggerKind.MEDIA, TriggerKind.ROOM):
                 return False
             session.trigger_kind = TriggerKind.CALL
             session.trigger_app = app or session.trigger_app

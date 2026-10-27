@@ -109,6 +109,14 @@ class DetectionConfig:
     # triggered the session (macOS; falls back to "all" for manual sessions, when the app has
     # no audio process yet, and on Windows).
     system_audio_scope: str = "all"
+    # Room listening (opt-in): while idle, keep the mic open and start a "room" session when
+    # people talk near the laptop: room_speech_s of speech within room_window_s.
+    room_listening: bool = False
+    room_speech_s: float = 6.0
+    room_window_s: float = 15.0
+    room_preroll_s: float = 15.0  # audio before the trigger kept at the session's start
+    room_stop_after_silence_s: float = 90.0  # no speech this long ends a room session
+    room_vad_threshold: float = 0.5  # Silero speech probability that counts as speech
     call_apps: list[str] = field(default_factory=lambda: list(DEFAULT_CALL_APPS))
     media_apps: list[str] = field(default_factory=lambda: list(DEFAULT_MEDIA_APPS))
     ignore_apps: list[str] = field(default_factory=lambda: list(DEFAULT_IGNORE_APPS))
@@ -284,6 +292,14 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     det = _build(DetectionConfig, data.pop("detection", {}))
     det.mode = Mode(det.mode)
     det.app_modes = {k: Mode(v) for k, v in det.app_modes.items()}
+    if det.room_speech_s > det.room_window_s:  # could never trigger: say so, and clamp
+        log.warning(
+            "room_speech_s (%s) is longer than room_window_s (%s); using %s",
+            det.room_speech_s,
+            det.room_window_s,
+            det.room_window_s,
+        )
+        det.room_speech_s = det.room_window_s
     tr = _build(TranscriptionConfig, data.pop("transcription", {}))
     raw = tr.languages
     tr.languages = normalize_languages(raw)

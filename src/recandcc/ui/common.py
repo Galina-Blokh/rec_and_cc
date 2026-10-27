@@ -287,6 +287,8 @@ class Controller:
         self.tq = tq
         self._live = None  # LiveTranscriber of the session being recorded (engine thread)
         self._live_done: dict[str, LiveTranscriber] = {}  # session id -> flushed LiveTranscriber
+        from ..detect.room import RoomMonitor
+
         # Session folders from start until their transcription is done (or they are dropped):
         # Meeting notes won't rename or delete them meanwhile. Guarded by self._lock.
         self._in_flight: set[Path] = set()
@@ -302,9 +304,12 @@ class Controller:
             permission_status=permission_status,
             on_session_start=self._on_session_start,
             on_session_end=self._on_session_end,
+            room_monitor=RoomMonitor(cfg.detection),  # mic only if room_listening
         )
         self._started_at = datetime.now().astimezone()  # older sessions: not diarized now
         if start_threads:
+            if cfg.detection.room_listening:  # the mic opens right away: say so at every start
+                self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
             self.engine.start()
             threading.Thread(target=self._resubmit_unfinished, daemon=True, name="resubmit").start()
             threading.Thread(target=self._retention_loop, daemon=True, name="retention").start()
@@ -701,8 +706,11 @@ class Controller:
                 log.exception("config.toml is invalid; keeping current settings")
                 self.post_notice("Settings not applied", "config.toml could not be parsed")
                 return
+        was_listening = self.cfg.detection.room_listening
         for f in fields(new.detection):
             setattr(self.cfg.detection, f.name, getattr(new.detection, f.name))
+        if self.cfg.detection.room_listening and not was_listening:  # turned on by hand
+            self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
         self.cfg.output_dir = new.output_dir
         tr, new_tr = self.cfg.transcription, new.transcription
         with self._lang_lock:  # both together: save() pairs them
@@ -869,6 +877,25 @@ class Controller:
             return f"Waiting for answer: record {st.app}?"
         return f"Idle — {str(st.mode).capitalize()} mode"
 
+    def set_room_listening(self, on: bool) -> None:
+        """Menu toggle: the engine opens or closes the room mic (and stops a room session) on
+        its next tick. Turning it on explains the always-on mic indicator and the consent
+        question. Saves in place, like the other toggles, so quick toggles can't race."""
+        with self._save_lock:  # never interleaves with a reload of config.toml
+            self.cfg.detection.room_listening = bool(on)
+            try:
+                self.cfg.save()
+                self._config_mtime = self._mtime()  # our own write: nothing to reload
+            except Exception:
+                log.exception("saving settings failed")
+        if on:
+            self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
+            if self.permissions.get("microphone") == "denied":
+                self.post_notice(
+                    "Room listening can't hear anything",
+                    "RecAndCC has no microphone access — grant it in the Permissions menu.",
+                )
+
     def toggle_recording(self) -> None:
         if self.engine.state.status == RECORDING:
             self.engine.stop()
@@ -917,12 +944,23 @@ class _LiveAwareQueue:
         self._ctrl._submit(session)
 
 
+ROOM_ITEM = "Listen for conversations in the room"
+ROOM_LISTENING_NOTICE = (
+    "While idle, the microphone stays on (orange dot) to notice conversations near the "
+    "laptop, also while the screen is locked, which costs some battery; nothing leaves the "
+    "device. Recording people may need their consent: tell them."
+)
+
+
 def keep_prompt_text(app: str, kind: TriggerKind, timeout_action: str) -> str:
     """Body of the ask-mode dialog. Recording has already started when it is shown."""
     what = "a call" if kind == TriggerKind.CALL else "audio"
+    where = "near the laptop" if kind == TriggerKind.ROOM else f"in {app}"
+    if kind == TriggerKind.ROOM:
+        what = "a conversation"
     default = "kept" if timeout_action != "ignore" else "discarded"
     return (
-        f"RecAndCC is recording {what} in {app}.\n\n"
+        f"RecAndCC is recording {what} {where}.\n\n"
         f"Keep the recording and transcribe it?\n(If you don't answer, it will be {default}.)"
     )
 
@@ -933,6 +971,8 @@ PROMPT_BUTTONS = (("Discard", "ignore"), ("Always", "always"), ("Keep", "record"
 
 __all__ = [
     "PROMPT_BUTTONS",
+    "ROOM_ITEM",
+    "ROOM_LISTENING_NOTICE",
     "keep_prompt_text",
     "Controller",
     "IDLE",

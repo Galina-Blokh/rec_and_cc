@@ -31,6 +31,7 @@ from . import notes as notes_ui
 from .common import (
     PERM_KINDS,
     PERM_TITLES,
+    ROOM_ITEM,
     Controller,
     as_str,
     keep_prompt_text,
@@ -126,6 +127,8 @@ class MacApp(rumps.App):
         self._render_languages()
         self.captions_item = rumps.MenuItem("Show live captions", callback=self._toggle_captions)
         self.captions_item.state = check(self.cfg.live_captions)
+        self.room_item = rumps.MenuItem(ROOM_ITEM, callback=self._toggle_room)
+        self.room_item.state = check(self.cfg.detection.room_listening)
         self.live_open_item = rumps.MenuItem("Open live transcript")
         self.call_names_item = rumps.MenuItem(
             "Use names from the call app", callback=self._toggle_call_names
@@ -138,6 +141,7 @@ class MacApp(rumps.App):
             self.mode_menu,
             self.rec_item,
             self.captions_item,
+            self.room_item,
             self.live_open_item,
             None,
             rumps.MenuItem("Open transcripts folder", callback=self._open_folder),
@@ -232,6 +236,7 @@ class MacApp(rumps.App):
         if self.rec_item.title != rec_title:
             self.rec_item.title = rec_title
         self.login_item.state = check(autostart.is_enabled())
+        self.room_item.state = check(self.cfg.detection.room_listening)  # hand edits too
         self._render_languages()
         self.call_names_item.state = check(self.cfg.transcription.names_from_call_app)
         self._render_live(st)
@@ -391,6 +396,10 @@ class MacApp(rumps.App):
                 self.captions.reveal()
         else:
             self.captions.hide()
+
+    def _toggle_room(self, sender) -> None:
+        self.ctrl.set_room_listening(not self.cfg.detection.room_listening)
+        sender.state = check(self.cfg.detection.room_listening)
 
     def _open_live(self, _sender) -> None:
         if not self._live_dir:
