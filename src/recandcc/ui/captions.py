@@ -53,6 +53,9 @@ class CaptionLine:
         return "right" if self.rtl else "left"
 
 
+MIN_WRAP_PX = 100  # narrower than this means the widget has no real size yet
+
+
 def speaker_label(speaker: str) -> str:
     return (speaker or "").strip() or "?"
 
@@ -73,6 +76,7 @@ def tk_parts(
     line: CaptionLine,
     max_width: float | None = None,
     measure: Callable[[str], float] = len,
+    label_measure: Callable[[str], float] | None = None,
 ) -> list[tuple[str, bool]]:
     """What the Tk window inserts for one line, as ``(text, is_label)`` pieces, left to right.
 
@@ -89,11 +93,29 @@ def tk_parts(
     label = "  " + line.label
     if max_width is None:
         return [(visual_rtl(line.text), False), (label, True)]
-    chunks = wrap_logical(line.text, max(1.0, max_width - measure(label)), measure)
+    chunks = wrap_logical(
+        line.text, max(1.0, max_width - (label_measure or measure)(label)), measure
+    )
     parts: list[tuple[str, bool]] = [(visual_rtl(chunks[0]), False), (label, True)]
     for chunk in chunks[1:]:
         parts += [("\n", False), (visual_rtl(chunk), False)]
     return parts
+
+
+def text_area_width(
+    widget_width: float, padx: float, border: float, highlight: float, rmargin: float
+) -> float | None:
+    """Pixels a Tk Text line can use: the widget minus padding, border, highlight ring and the
+    RTL tag's right margin. None while the widget is not mapped yet (width ~1)."""
+    width = widget_width - 2 * (padx + border + highlight) - rmargin
+    return width if width >= MIN_WRAP_PX else None
+
+
+def geometry_width(geometry: str) -> int:
+    """Width from a Tk geometry string (``'760x190+10+20'``); 0 if it has none."""
+    head = geometry.split("+", 1)[0].split("-", 1)[0]
+    w, _, _ = head.partition("x")
+    return int(w) if w.isdigit() else 0
 
 
 def fmt_mmss(seconds: float) -> str:

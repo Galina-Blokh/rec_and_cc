@@ -5,6 +5,8 @@ Stories: US-29.
 
 from __future__ import annotations
 
+import unicodedata
+
 from recandcc.ui.bidi import visual_rtl, wrap_logical
 from recandcc.ui.captions import CaptionLine, tk_parts
 
@@ -56,3 +58,44 @@ def test_measure_callable_and_no_control_chars():
     assert lines[0] == f"{W}"
     parts = tk_parts(_line(f"{W}‏ {W} ⁧{W}⁩ {W} {W}"), 14)
     assert all(not any(ord(c) in range(0x200B, 0x2070) for c in p) for p, _ in parts)
+
+
+def test_text_area_width_uses_real_padding_and_margins():
+    from recandcc.ui.captions import text_area_width
+
+    assert text_area_width(760, 10, 0, 0, 10) == 730
+    assert text_area_width(760, 10, 2, 1, 10) == 724
+    assert text_area_width(1, 10, 0, 0, 10) is None  # unmapped widget
+
+
+def test_whitespace_collapses_and_marks_drop():
+    assert wrap_logical(f"{W}‏   {W}\n{W}", 100) == [f"{W}\u200f {W} {W}"]
+
+
+def test_geometry_width_fallback_for_a_withdrawn_window():
+    from recandcc.ui.captions import geometry_width
+
+    assert geometry_width("760x190+100+200") == 760
+    assert geometry_width("640x480") == 640
+    assert geometry_width("1x1+0+0") == 1
+    assert geometry_width("") == 0
+
+
+def test_hard_split_keeps_nikud_with_its_letter():
+    word = "שָׁ" * 6  # three marks per letter-ish; marks must not start a line
+    lines = wrap_logical(word, 4)
+    assert "".join(lines) == word
+    assert all(not unicodedata.combining(x[0]) for x in lines)
+
+
+def test_brackets_mirror_per_wrapped_line():
+    parts = tk_parts(_line(f"({W} {W}) {W} {W}"), 14)
+    shown = [p for p, lab in parts if not lab and p != "\n"]
+    assert any(")" in x or "(" in x for x in shown)
+    assert all(not any(ord(c) < 32 for c in x) for x in shown)
+
+
+def test_label_measured_with_its_own_font():
+    parts = tk_parts(_line(SENT), 40, len, lambda s: len(s) * 5)
+    assert sum(1 for p, _ in parts if p == "\n") >= 1
+    assert parts[1] == ("  Others", True)

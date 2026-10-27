@@ -105,8 +105,11 @@ def wrap_logical(text: str, max_width: float, measure: Callable[[str], float] = 
 
     Breaks only at whitespace, so numbers and English words stay whole; a single word wider
     than the limit is hard-split by characters as a last resort. ``measure`` is e.g. Tk's
-    ``font.measure``; the default counts characters. Wrap *before* ``visual_rtl``: reordering
-    a long line first and letting the widget wrap it puts the logical end on the first line.
+    ``font.measure``; the default counts characters. Runs of whitespace collapse to one space
+    (captions are single-spaced, see ``clean_text``); an LRM/RLM glued to a word stays with it
+    and ``visual_rtl`` drops it. A hard split never separates a combining mark (nikud) from its
+    base letter. Wrap *before* ``visual_rtl``: reordering a long line first and letting the
+    widget wrap it puts the logical end on the first line.
     """
     lines: list[str] = []
     cur = ""
@@ -119,9 +122,16 @@ def wrap_logical(text: str, max_width: float, measure: Callable[[str], float] = 
             lines.append(cur)
             cur = ""
         while measure(word) > max_width and len(word) > 1:
-            k = len(word) - 1
-            while k > 1 and measure(word[:k]) > max_width:
-                k -= 1
+            lo, hi = 1, len(word) - 1  # largest prefix that fits, by bisection
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if measure(word[:mid]) <= max_width:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            k = lo
+            while k < len(word) and unicodedata.combining(word[k]):
+                k += 1  # keep marks with their base (may overshoot by the mark only)
             lines.append(word[:k])
             word = word[k:]
         cur = word
