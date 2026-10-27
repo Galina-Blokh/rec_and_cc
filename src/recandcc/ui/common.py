@@ -35,6 +35,7 @@ from ..config import (
     CONFIG_PATH,
     LOG_DIR,
     Config,
+    ConfigLockTimeout,
     load_config,
     normalize_languages,
     save_keys,
@@ -58,6 +59,12 @@ if TYPE_CHECKING:
     from ..transcribe.live import LiveTranscriber
 
 log = logging.getLogger(__name__)
+
+
+class _ConfigWriteError(Exception):
+    """Writing config.toml failed (args: exception name, errno); no path in the message."""
+
+
 CFG_HOTKEY = object()  # apply_hotkey(): use cfg.hotkey
 
 RECENT_COUNT = 10
@@ -1093,11 +1100,38 @@ class Controller:
                 return True
             except ValueError:  # invalid TOML (mid-edit?): don't overwrite the user's file
                 log.warning("config.toml could not be parsed; %s not saved", ", ".join(keys))
+                self._restore_from_disk(keys)
                 self.post_notice(f"{title} not saved", "config.toml could not be parsed")
+            except ConfigLockTimeout:
+                log.warning("settings not saved: config lock timed out")  # no traceback
+                self._restore_from_disk(keys)
+                self.post_notice("Settings not saved", "config.toml is locked by another process")
             except Exception:
                 log.exception("saving settings failed")
+                self._restore_from_disk(keys)
                 self.post_notice("Settings not saved", "config.toml could not be written")
             return False
+
+    def _restore_from_disk(self, keys) -> None:
+        """A failed write leaves config.toml as it was: put the menu's in-memory value of
+        exactly ``keys`` back to what the file says, so the menu doesn't show a change that
+        would silently vanish on restart. Caller holds ``_save_lock``."""
+        try:
+            disk = load_config()
+        except Exception:
+            return  # unreadable file: keep memory, the next successful reload corrects it
+        for key in keys:
+            if key == "transcription.languages":
+                tr, src = self.cfg.transcription, disk.transcription
+                with self._lang_lock:  # both together: save() pairs them
+                    tr._raw_languages = getattr(src, "_raw_languages", None)  # type: ignore[attr-defined]
+                    tr.languages = list(src.languages)
+                continue
+            *path, leaf = key.split(".")
+            dst, ref = self.cfg, disk
+            for name in path:
+                dst, ref = getattr(dst, name), getattr(ref, name)
+            setattr(dst, leaf, getattr(ref, leaf))
 
     def _setting(self, key: str):
         """The TOML value of a dotted config key, as the menu last set it."""
@@ -1154,10 +1188,13 @@ class Controller:
                                 raise
                             self.cfg.save(CONFIG_PATH)  # no file yet: write a fresh one
                             mtime = save_settings(updates, CONFIG_PATH)
-                    except Exception:
+                    except Exception as e:
                         self.apply_settings(old)
                         with self._lang_lock:
                             tr._raw_languages = old_raw  # type: ignore[attr-defined]
+                        if isinstance(e, OSError) and not isinstance(e, ConfigLockTimeout):
+                            # not the folder: the outer handler would say so
+                            raise _ConfigWriteError(type(e).__name__, e.errno) from e
                         raise
                     if not edited:
                         self._config_mtime = mtime  # our own write: nothing to reload
@@ -1172,6 +1209,12 @@ class Controller:
             except ValueError as e:
                 log.warning("settings not saved: %s", type(e).__name__)  # no values in logs
                 self.post_notice("Settings not saved", str(e))
+            except ConfigLockTimeout:
+                log.warning("settings not saved: config lock timed out")
+                self.post_notice("Settings not saved", "config.toml is locked by another process")
+            except _ConfigWriteError as e:
+                log.warning("settings not saved: config write %s (errno %s)", *e.args)
+                self.post_notice("Settings not saved", "config.toml could not be written")
             except OSError as e:
                 log.warning("settings not saved: %s (errno %s)", type(e).__name__, e.errno)
                 self.post_notice("Settings not saved", "the transcripts folder can't be created")

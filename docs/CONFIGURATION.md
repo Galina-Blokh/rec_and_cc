@@ -12,7 +12,7 @@ These hand edits are picked up while the app runs (a few seconds after you save 
 `[detection]`, `[summary]`, `output_dir`, `hotkey`, `live_captions`, and in `[transcription]`
 `languages`, `keep_audio`, `audio_retention_days` and `speaker_names`. Restart the app after
 changing any other `[transcription]` key (models, device, ...). Reload and menu saves never
-interleave, so a menu change made at the same moment is not lost.
+interleave, so a menu change made at the same moment is not lost. Saves take a lock file next to config.toml (shared with the CLI) and give up after 10 s if another process holds it ("Settings not saved").
 
 ## Top level
 
