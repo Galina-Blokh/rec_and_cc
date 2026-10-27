@@ -2,11 +2,13 @@
 //
 // The helper never touches config.toml. Python writes a JSON snapshot of the current values
 // (--config), this window edits them, and one JSON line goes to stdout when it closes:
-//   {"settings":"saved","values":{mode,output_dir,languages,keep_audio,live_captions,
-//                                 speaker_names}}   Save was pressed
+//   {"settings":"saved","values":{mode,output_dir,languages,keep_audio,live,live_captions,
+//                                 speaker_names,model}}   Save was pressed
 //   {"settings":"cancelled"}                          Cancel / window closed
 // Python validates the values (config.validate_settings) and writes the TOML, so config
 // validation lives in one place. The window shows settings only, no transcript or audio.
+// The model picker offers the snapshot's `models` (the names Python pins); Python rejects
+// anything else.
 //
 // The process runs with a regular activation policy while the window is open (so it can take
 // keyboard focus and shows a Dock icon) and exits when it closes. No TCC permission is used.
@@ -27,7 +29,10 @@ struct SettingsModel {
     var languages: Set<String> = []
     var otherLanguages: [String] = []
     var keepAudio = true
+    var live = true
     var liveCaptions = true
+    var model = ""
+    var models: [String] = []
     var speakerNames = false
     var hotkey = ""
 
@@ -39,7 +44,11 @@ struct SettingsModel {
         languages = Set(all.filter { known.contains($0) })
         otherLanguages = all.filter { !known.contains($0) }
         keepAudio = json["keep_audio"] as? Bool ?? keepAudio
+        live = json["live"] as? Bool ?? live
         liveCaptions = json["live_captions"] as? Bool ?? liveCaptions
+        model = json["model"] as? String ?? ""
+        models = json["models"] as? [String] ?? []
+        if !model.isEmpty && !models.contains(model) { models.append(model) }  // custom: kept
         speakerNames = json["speaker_names"] as? Bool ?? speakerNames
         hotkey = json["hotkey"] as? String ?? ""
     }
@@ -50,7 +59,8 @@ struct SettingsModel {
         let picked = settingsLanguages.map { $0.code }.filter { languages.contains($0) }
         return [
             "mode": mode, "output_dir": outputDir, "languages": picked + otherLanguages,
-            "keep_audio": keepAudio, "live_captions": liveCaptions, "speaker_names": speakerNames,
+            "keep_audio": keepAudio, "live": live, "live_captions": liveCaptions,
+            "speaker_names": speakerNames, "model": model,
         ]
     }
 }
@@ -91,7 +101,17 @@ struct SettingsView: View {
                 }
             }
             Toggle("Keep audio after transcribing", isOn: $store.model.keepAudio)
-            Toggle("Show live captions", isOn: $store.model.liveCaptions)
+            Toggle("Transcribe live while recording", isOn: $store.model.live)
+            Toggle("Show live captions window (needs live transcription)",
+                   isOn: $store.model.liveCaptions)
+            if !model.models.isEmpty {
+                HStack {
+                    Picker("Whisper model", selection: $store.model.model) {
+                        ForEach(model.models, id: \.self) { Text($0).tag($0) }
+                    }
+                    Text("(next app start)").font(.caption).foregroundStyle(.tertiary)
+                }
+            }
             Toggle("Remember speakers' voices (stored on this Mac)", isOn: $store.model.speakerNames)
             HStack {
                 Text("Shortcut")

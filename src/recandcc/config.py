@@ -10,7 +10,7 @@ import sys
 import tempfile
 import time
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
@@ -465,15 +465,17 @@ SETTINGS_KEYS = {
     "languages": "transcription.languages",
     "keep_audio": "transcription.keep_audio",
     "speaker_names": "transcription.speaker_names",
+    "live": "transcription.live",
     "live_captions": "live_captions",
+    "model": "transcription.model",
 }
 
 
-def validate_settings(values) -> dict:
+def validate_settings(values, models: Collection[str] = ()) -> dict:
     """Check values sent by the settings window (untrusted JSON) and return them cleaned:
     ``mode`` as a Mode, ``output_dir`` as an expanded Path, ``languages`` normalised
-    ([] = any language), the rest as bools. Unknown names are ignored. Raises ValueError on a
-    bad value."""
+    ([] = any language), ``model`` one of ``models`` (the pinned names the app offers), the
+    rest as bools. Unknown names are ignored. Raises ValueError on a bad value."""
     if not isinstance(values, dict):
         raise ValueError("settings must be an object")
     out: dict = {}
@@ -496,6 +498,10 @@ def validate_settings(values) -> dict:
             if any(c not in WHISPER_LANGUAGES for c in langs) or len(clean) != len(langs):
                 raise ValueError("languages: unknown language code")
             out[name] = clean
+        elif name == "model":
+            if not isinstance(value, str) or value not in models:
+                raise ValueError("model: not one of the offered models")
+            out[name] = value
         elif isinstance(value, bool):
             out[name] = value
         else:

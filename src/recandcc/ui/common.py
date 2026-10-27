@@ -51,6 +51,7 @@ from ..sensitivity import apply_preset, current_preset, room_trigger
 from ..settings_window import (
     SettingsUnavailable,
     close_settings,
+    offered_models,
     raise_settings,
     run_settings,
 )
@@ -314,6 +315,9 @@ def _privatize_new_folder(path: Path) -> None:
 
 # transcription keys a hand edit applies live (models and device need a restart)
 RELOADED_TRANSCRIPTION_KEYS = ("keep_audio", "audio_retention_days", "speaker_names")
+MODEL_CHANGE_NOTICE = (
+    "Applies after RecAndCC restarts; a model not on disk yet is downloaded once then."
+)
 
 
 class Controller:
@@ -1257,7 +1261,7 @@ class Controller:
                 raw = run_settings(self.cfg)
                 if not raw:  # cancelled, closed, or nothing changed
                     return
-                updates = validate_settings(raw)
+                updates = validate_settings(raw, offered_models())
                 if "output_dir" in updates:
                     _privatize_new_folder(updates["output_dir"])
                     make_private_dir(updates["output_dir"])
@@ -1273,6 +1277,8 @@ class Controller:
                         "keep_audio": tr.keep_audio,
                         "speaker_names": tr.speaker_names,
                         "languages": list(tr.languages),
+                        "live": tr.live,
+                        "model": getattr(tr, "_pending_model", None),
                     }
                     old = {k: v for k, v in old.items() if k in fields}
                     old_raw = getattr(tr, "_raw_languages", None)
@@ -1300,6 +1306,8 @@ class Controller:
                         self.apply_settings({"mode": updates["mode"]})
                 if "output_dir" in updates:
                     self.refresh_async(force=True)  # cloud-sync warning for the new folder
+                if "model" in updates:  # the loaded model is kept until the app restarts
+                    self.post_notice("Model saved", MODEL_CHANGE_NOTICE)
                 self.events.put(("settings_saved", updates))
             except SettingsUnavailable as e:
                 log.info("native settings unavailable: %s", e)
@@ -1335,6 +1343,10 @@ class Controller:
             tr.keep_audio = updates["keep_audio"]
         if "speaker_names" in updates:
             tr.speaker_names = updates["speaker_names"]
+        if "live" in updates:  # read at each session start
+            tr.live = updates["live"]
+        if "model" in updates:  # written to config.toml; loaded at the next app start
+            tr._pending_model = updates["model"]  # type: ignore[attr-defined]
         if "languages" in updates:
             with self._lang_lock:
                 tr._raw_languages = None  # type: ignore[attr-defined]

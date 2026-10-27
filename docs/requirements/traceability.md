@@ -39,5 +39,5 @@ Paths are relative to `src/recandcc/`.
 | US-28 | `ui/notes.py`, `ui/common.py`, `ui/mac.py`, `ui/tray.py`, `models.py` | `test_notes.py::*`, `test_ui_tray.py::test_notes_menu_item_and_events_reach_the_notes_window`, `test_ui_tray.py::test_notes_window_actions` |
 | US-32 | `semantic.py`, `search.py`, `config.py`, `ui/common.py`, `cli.py` | `test_semantic.py::*` |
 | US-29 | `ui/bidi.py`, `ui/captions.py`, `ui/tray.py` | `test_bidi.py::*` |
-| US-30 | `settings_window.py`, `config.py`, `ui/common.py`, `ui/mac.py`, `native/macos/.../Settings.swift` | `test_settings_window.py::*` |
+| US-30 | `settings_window.py`, `config.py`, `ui/common.py`, `ui/mac.py`, `transcribe/revisions.py` (`OFFERED_MODELS`), `native/macos/.../Settings.swift` | `test_settings_window.py::*` |
 | US-34 | `cloudsync.py`, `ui/common.py`, `cli.py` | `test_network_volume.py::*` |
