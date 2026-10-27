@@ -1127,9 +1127,9 @@ class Controller:
             from ..search import default_index
 
             with self._sync_index_lock:  # read the setting inside: the last runner sees the latest
-                default_index(self.cfg.search.semantic, self._recording_busy).sync(
-                    self.cfg.output_dir
-                )
+                idx = default_index(self.cfg.search.semantic, self._recording_busy)
+                idx.sync(self.cfg.output_dir)
+                idx.release_idle_cache()  # hourly, off the main thread: free an unused cache
         except Exception:  # noqa: BLE001 - search is optional
             log.exception("could not sync the search index")
 
