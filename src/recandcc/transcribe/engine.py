@@ -32,7 +32,7 @@ from ..models import SAMPLE_RATE, Segment, SessionInfo, Track, TriggerKind
 from . import voices
 from .chunking import Chunk, find_speech, load_track, merge_labelled, slice_chunk
 from .diarize import Diarizer, Turn, label_speakers, model_path
-from .gpu import MlxWhisper, hf_cache_folder, use_gpu
+from .gpu import MlxWhisper, hf_cache_folder, mlx_word_timestamps, use_gpu
 from .merge import (
     ME,
     OTHERS,
@@ -486,11 +486,15 @@ class Transcriber:
         ``offset`` + position in the piece, clipped to ``max_end``. Blocking; call it from a
         pool worker (see ``submit``) to run pieces in parallel. ``language`` picks the model
         (cfg.language_models); ``wait_for_model=False`` uses the main model while that one is
-        still loading (live). ``words``: keep word timings in ``Segment.words`` (faster-whisper
-        only; never requested from MLX, whose word timestamps need numba and scipy)."""
+        still loading (live). ``words``: keep word timings in ``Segment.words`` (on MLX only
+        when ``mlx_word_timestamps()``: mlx-whisper 0.4.3 with our numpy aligner)."""
         model = self._model_for(language, wait_for_model)
+        pieces: list[tuple[float, float, str, list[tuple[float, float, str]]]]
         if isinstance(model, MlxWhisper):
-            pieces = [(a, b, t, []) for a, b, t in model.transcribe(audio, language)]
+            if words and mlx_word_timestamps():
+                pieces = model.transcribe(audio, language, words=True)
+            else:
+                pieces = [(a, b, t, []) for a, b, t in model.transcribe(audio, language)]
         else:
             segments, _ = model.transcribe(
                 audio,
@@ -500,7 +504,15 @@ class Transcriber:
                 condition_on_previous_text=False,
                 word_timestamps=words,
             )
-            pieces = [(s.start, s.end, s.text, getattr(s, "words", None) or []) for s in segments]
+            pieces = [
+                (
+                    s.start,
+                    s.end,
+                    s.text,
+                    [(w.start, w.end, w.word) for w in getattr(s, "words", None) or []],
+                )
+                for s in segments
+            ]
         end_cap = max_end if max_end is not None else offset + len(audio) / SAMPLE_RATE
         out = []
         for start, end, raw, ws in pieces:
@@ -514,13 +526,9 @@ class Transcriber:
                         speaker=speaker,
                         language=language,
                         words=[
-                            (
-                                round(offset + w.start, 3),
-                                round(min(offset + w.end, end_cap), 3),
-                                w.word,
-                            )
-                            for w in ws
-                            if offset + w.start < end_cap
+                            (round(offset + a, 3), round(min(offset + b, end_cap), 3), w)
+                            for a, b, w in ws
+                            if offset + a < end_cap
                         ],
                     )
                 )

@@ -252,14 +252,20 @@ disk, nothing touches the network (tested with all network access blocked).
 
 **Word-level split.** Whisper segments can span a speaker change. Opt-in
 (`split_on_speaker_change = false` by default, like `diarize_overlap`: word timing costs CPU
-time and is unmeasured). On the batch path (`live = false`, CLI, re-queue) the faster-whisper
-backend runs with word timestamps (requested only for the diarized tracks, decided once per
-session in `_word_tracks` with a single model-on-disk check; never for live phrases, whose
-latency matters, and never on MLX: its word timing needs numba and scipy, see
-ADR 0011), `merge.split_on_speaker_change` cuts a segment at the word boundary where the
+time and is unmeasured). On the batch path (`live = false`, CLI, re-queue) Whisper runs with
+word timestamps (requested only for the diarized tracks, decided once per session in
+`_word_tracks` with a single model-on-disk check; never for live phrases, whose latency
+matters), `merge.split_on_speaker_change` cuts a segment at the word boundary where the
 turn-dominant speaker changes, before `label_speakers`. Runs under 1 s and under 3 words are
 absorbed by neighbours; text is rebuilt from the words; segments without words and `Me` are
 untouched. Words live in `Segment.words` (memory only, not in `transcript.json`).
+On MLX, upstream `mlx_whisper/timing.py` needs numba and scipy, which are excluded (ADR 0011),
+so `transcribe/mlx_timing.py` is a copy of its `find_alignment` / `add_word_timestamps`
+(mlx-whisper 0.4.3; MIT, © 2022 OpenAI Whisper, © 2023 Apple mlx-examples, licence in the
+file header) on the numpy kernels in `_align_np.py`. `gpu.import_mlx_whisper` registers it
+as `mlx_whisper.timing`; for any other mlx-whisper version it registers a stub instead, logs
+one warning and MLX segments keep no words. The alignment runs inside `mlx_whisper.transcribe`
+on the GPU thread under `MLX_LOCK`.
 
 **Speaker names (opt-in, `speaker_names`, `voices.py`).** Diarization also returns each
 speaker's centroid (unit mean of its window embeddings). With the option on, the final pass

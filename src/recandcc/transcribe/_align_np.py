@@ -3,7 +3,7 @@
 Reimplements ``median_filter``, ``backtrace``, ``dtw_cpu`` and ``dtw`` from mlx-whisper's
 ``mlx_whisper/timing.py`` (algorithm from OpenAI Whisper / mlx-examples, MIT licence), which
 use ``scipy.signal.medfilt`` and numba. RecAndCC excludes numba and scipy (ADR 0011), so these
-give the same results with numpy only. Wired into word timestamps in a follow-up.
+give the same results with numpy only. Used by ``mlx_timing`` for MLX word timestamps.
 """
 
 from __future__ import annotations

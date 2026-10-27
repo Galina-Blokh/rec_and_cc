@@ -9,6 +9,7 @@ import json
 import types
 
 import numpy as np
+import pytest
 from test_transcribe import make_session
 
 from recandcc.config import TranscriptionConfig
@@ -178,19 +179,28 @@ def test_faster_whisper_words_are_requested_and_offset():
     assert model.calls[1]["word_timestamps"] is False
 
 
-def test_mlx_path_never_requests_word_timestamps():
+@pytest.mark.parametrize("aligner", [False, True])
+def test_mlx_requests_words_only_when_the_numpy_aligner_is_available(monkeypatch, aligner):
     class FakeMlx(eng.MlxWhisper):
         def __init__(self):
             self.calls = []
 
-        def transcribe(self, audio, language, **kw):
-            self.calls.append(kw)
-            return [(0.0, 1.0, "a b")]
+        def transcribe(self, audio, language, words=False):
+            self.calls.append(words)
+            if words:
+                return [(0.0, 1.0, " a b", [(0.0, 0.5, " a"), (0.5, 1.5, " b")])]
+            return [(0.0, 1.0, " a b")]
 
+    monkeypatch.setattr(eng, "mlx_word_timestamps", lambda: aligner)
     model = FakeMlx()
     t = _transcriber(model)
-    out = t.transcribe_audio(np.zeros(SAMPLE_RATE, np.float32), 0.0, "Others", "en", words=True)
-    assert model.calls == [{}] and out[0].words == []
+    audio = np.zeros(SAMPLE_RATE, np.float32)
+    out = t.transcribe_audio(audio, 10.0, "Others", "en", words=True)
+    assert model.calls == [aligner]
+    # session time, the word's own leading space, clamped to the chunk end
+    assert out[0].words == ([(10.0, 10.5, " a"), (10.5, 11.0, " b")] if aligner else [])
+    t.transcribe_audio(audio, 0.0, "Me", "en")
+    assert model.calls[-1] is False
 
 
 def test_word_times_are_clamped_to_the_chunk_end():

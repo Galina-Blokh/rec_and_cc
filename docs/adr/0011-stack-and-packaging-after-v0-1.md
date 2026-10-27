@@ -213,6 +213,8 @@ already cached and the network blocked.
    214 MiB less (llvmlite 129 MB, scipy 70 MB, numba 13 MB). `tests/test_no_torch.py` checks
    that none of the four is installed or loaded on the MLX path. The packaging ADR from
    follow-up 3 starts from this trimmed environment.
+   *Later (#1 B.3):* for mlx-whisper 0.4.3 the stub is replaced by `transcribe/mlx_timing.py`,
+   a numpy port of the word aligner, so MLX gets word timestamps without numba or scipy.
 5. **Release pipeline: signed, notarized DMG** (after 3, with #17). AC: one script builds,
    signs, notarizes and staples from a tag; secrets come from the keychain/CI secrets, never
    the repo; the checksum is published with the release.
