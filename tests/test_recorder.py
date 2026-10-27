@@ -571,3 +571,34 @@ def test_frames_after_the_sentinel_are_counted_as_dropped(cfg, stalled_disk):
     assert w.finish() is False
     w.on_frames(np.ones(1600, dtype=np.float32))  # a straggler from the stopping source
     assert w.dropped_frames == 1600 and w.frames_received == 3200
+
+
+def test_a_stuck_session_is_marked_still_writing_and_reports_dropped_audio(cfg, stalled_disk):
+    from recandcc.models import still_writing
+
+    sig = sine(3)
+    rec, src = make(cfg, sig)
+    rec.start(TriggerKind.MEDIA, "Music")
+    assert src["sys"].done.wait(5)
+    w = rec._writers[0]
+    out = rec.stop()
+    assert out is not None and w.abandoned
+    assert still_writing(out.directory)  # not final: the queue won't transcribe it yet
+    assert out.metrics["recording"]["writer_dropped_s"] == {"others": 2.5}
+    assert rec.dropped_tracks() == [Track.OTHERS]
+    stalled_disk.set()
+    deadline = time.monotonic() + 5
+    while still_writing(out.directory) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not still_writing(out.directory)  # the writer closed the WAV: marker gone
+    assert len(sf.read(out.directory / "others.wav")[0]) == len(sig)
+
+
+def test_a_normal_session_is_final_at_once_and_drops_nothing(cfg):
+    rec, src = make(cfg, sine(2), min_session_s=0)
+    rec.start(TriggerKind.MEDIA, "Music")
+    assert src["sys"].done.wait(5)
+    out = rec.stop()
+    assert out is not None and not (out.directory / SessionInfo.WRITING_MARKER).exists()
+    assert out.metrics["recording"]["writer_dropped_s"] == {"others": 0.0}
+    assert rec.dropped_tracks() == []

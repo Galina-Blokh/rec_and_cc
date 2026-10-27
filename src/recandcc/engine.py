@@ -781,6 +781,22 @@ class Engine:
                 "missing. Check the Permissions menu.",
             )
 
+    def _check_dropped_audio(self) -> None:
+        """Once per stopped session: say that a stalled disk cost audio (written as silence)."""
+        dropped = getattr(self.recorder, "dropped_tracks", None)
+        try:
+            tracks = list(dropped()) if dropped is not None else []
+        except Exception:
+            return
+        if tracks:
+            names = {"others": "system audio", "me": "microphone"}
+            what = " and ".join(names.get(str(t), str(t)) for t in tracks)
+            self._notice(
+                "Some audio was not recorded",
+                f"The disk was too slow, so parts of the {what} track are silent. "
+                "Check the recordings folder's drive.",
+            )
+
     def _do_start(self, kind: TriggerKind, app: str | None, target: AppTarget | None) -> None:
         room, mic_source = self.room, None
         if room is not None and room.running:
@@ -881,6 +897,7 @@ class Engine:
             self._session_end(None, False)
             return
         self._check_silent_tracks()
+        self._check_dropped_audio()
         self._session_end(session, session is not None)
         if session is None:
             return

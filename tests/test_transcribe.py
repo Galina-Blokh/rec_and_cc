@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -554,3 +555,40 @@ def test_queue_repeated_shutdown_without_wait_keeps_the_stop_marker(tmp_path):
     q._thread.join(5)
     assert stub.order == ["a"] and q.pending() == 0
     assert not q._thread.is_alive()
+
+
+def test_queue_waits_for_a_writer_still_finishing_the_audio(monkeypatch, tmp_path):
+    from recandcc.models import clear_writing, mark_writing
+    from recandcc.transcribe import queue as qmod
+
+    monkeypatch.setattr(qmod, "WRITING_WAIT_S", 0.05)
+    monkeypatch.setattr(qmod, "WRITING_POLL_S", 0.01)
+    (tmp_path / "w").mkdir()
+    (tmp_path / "stale").mkdir()
+    (tmp_path / "stale" / SessionInfo.WRITING_MARKER).write_text("an earlier run")
+    mark_writing(tmp_path / "w")
+    stub, done = StubTranscriber(), threading.Event()
+    q = TranscriptionQueue(stub, on_done=lambda s, r: s.id == "w" and done.set())
+    q.submit(_s("w", tmp_path / "w"))
+    q.submit(_s("a", tmp_path))
+    q.submit(_s("stale", tmp_path / "stale"))  # its writer is gone: final as it gets
+    time.sleep(0.3)
+    assert stub.order == ["a", "stale"] and q.pending() == 1  # partial audio: not yet
+    clear_writing(tmp_path / "w")  # the disk recovered, the WAV is final
+    assert done.wait(5)
+    assert stub.order == ["a", "stale", "w"]
+    q.shutdown(wait=True)
+
+
+def test_queue_shutdown_leaves_a_still_writing_session_for_the_next_start(monkeypatch, tmp_path):
+    from recandcc.models import mark_writing
+    from recandcc.transcribe import queue as qmod
+
+    monkeypatch.setattr(qmod, "WRITING_WAIT_S", 0.05)
+    monkeypatch.setattr(qmod, "WRITING_POLL_S", 0.01)
+    mark_writing(tmp_path)
+    stub = StubTranscriber()
+    q = TranscriptionQueue(stub)
+    q.submit(_s("w", tmp_path))
+    q.shutdown(wait=True)  # returns: the job is dropped, not retried forever
+    assert stub.order == [] and q.pending() == 0

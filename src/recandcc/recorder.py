@@ -35,7 +35,15 @@ import soundfile as sf
 
 from .capture.base import AudioSource
 from .config import Config
-from .models import SAMPLE_RATE, AppTarget, SessionInfo, Track, TriggerKind
+from .models import (
+    SAMPLE_RATE,
+    AppTarget,
+    SessionInfo,
+    Track,
+    TriggerKind,
+    clear_writing,
+    mark_writing,
+)
 
 log = logging.getLogger(__name__)
 
@@ -559,6 +567,7 @@ class Recorder:
         self._last_sound = 0.0
         # Peak |sample| per track of the most recently stopped session (incl. discarded).
         self.last_peaks: dict[Track, float] = {}
+        self.last_dropped: dict[Track, float] = {}  # seconds of audio lost per track
         self._listeners: tuple[FrameListener, ...] = ()
         self._sampler = None  # participants.ParticipantSampler, only for opted-in call sessions
 
@@ -612,6 +621,10 @@ class Recorder:
         """Tracks of the last stopped session that were digital silence the whole time
         (typically a missing microphone / system-audio permission)."""
         return [t for t, p in self.last_peaks.items() if p <= DIGITAL_SILENCE]
+
+    def dropped_tracks(self) -> list[Track]:
+        """Tracks of the last stopped session that lost audio to a stalled disk."""
+        return [t for t, s in self.last_dropped.items() if s > 0]
 
     def levels(self) -> dict[Track, float]:
         return {w.track: w.level_dbfs for w in list(self._writers)}
@@ -863,6 +876,23 @@ class Recorder:
             if self._sampler is sampler:  # cleared only now: no second helper can overlap
                 self._sampler = None
 
+    @staticmethod
+    def _finalize_later(directory: Path, stuck: list[_TrackWriter]) -> None:
+        """Mark the session as still being written until its stuck writers close their WAVs,
+        so it isn't transcribed from partial audio (the transcription queue waits for it)."""
+        try:
+            mark_writing(directory)  # before session.json gets ended_at
+        except OSError as e:
+            log.warning("could not mark a session as still writing (%s)", type(e).__name__)
+            return
+
+        def wait() -> None:
+            for w in stuck:
+                w.thread.join()
+            clear_writing(directory)
+
+        threading.Thread(target=wait, name="writer-finalize", daemon=True).start()
+
     def _stop(self) -> SessionInfo | None:
         with self._op_lock:
             session, writers = self._session, self._writers
@@ -875,8 +905,11 @@ class Recorder:
                     log.exception("stopping %s source failed", w.track)
             for w in writers:
                 w.finish()
+            if stuck := [w for w in writers if w.abandoned]:
+                self._finalize_later(session.directory, stuck)
             self._session, self._writers, self._listeners = None, [], ()
             self.last_peaks = {w.track: w.peak for w in writers}
+            self.last_dropped = {w.track: w.dropped_frames / SAMPLE_RATE for w in writers}
             session.ended_at = datetime.now().astimezone()
 
             # A writer still stuck on the disk (abandoned) finishes its whole timeline later.
@@ -901,6 +934,9 @@ class Recorder:
                     # Can exceed WRITER_BACKLOG_S: it includes dropped spans.
                     "writer_backlog_max_s": {
                         str(w.track): round(w.backlog_max / SAMPLE_RATE, 3) for w in writers
+                    },
+                    "writer_dropped_s": {  # audio lost to a stalled disk, written as silence
+                        str(w.track): round(w.dropped_frames / SAMPLE_RATE, 3) for w in writers
                     },
                 },
             )

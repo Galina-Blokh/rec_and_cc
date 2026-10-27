@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from collections.abc import Callable
 
-from ..models import Segment, SessionInfo
+from ..models import Segment, SessionInfo, still_writing
 from . import voices
 from .engine import Transcriber
 
@@ -17,6 +18,10 @@ DoneCallback = Callable[[SessionInfo, list[Segment] | Exception], None]
 # A job that produces the final transcript some other way (live transcription's finish()).
 Finalizer = Callable[[], list[Segment]]
 _STOP = object()
+# How long a job waits for a writer still finishing the session's WAVs (stalled disk) before
+# it goes to the back of the queue; it is never transcribed from partial audio.
+WRITING_WAIT_S = 10.0
+WRITING_POLL_S = 0.2
 
 
 class TranscriptionQueue:
@@ -86,6 +91,16 @@ class TranscriptionQueue:
             if item is _STOP:
                 return
             session, finalize = item
+            if not self._audio_final(session):
+                with self._lock:  # like submit(): never queued behind the stop marker
+                    if not self._closed:
+                        self._q.put(item)  # retried after the rest of the queue
+                        continue
+                    self._busy -= 1
+                log.warning(
+                    "session %s: audio still being written; queued at next start", session.id
+                )
+                continue
             result: list[Segment] | Exception
             try:
                 result = self._process(session, finalize)
@@ -100,6 +115,16 @@ class TranscriptionQueue:
                     self.on_done(session, result)
                 except Exception:  # noqa: BLE001
                     log.exception("on_done callback failed")
+
+    @staticmethod
+    def _audio_final(session: SessionInfo) -> bool:
+        """Wait (bounded, on this thread) while a stuck writer still finishes the WAVs."""
+        deadline = time.monotonic() + WRITING_WAIT_S
+        while still_writing(session.directory):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(WRITING_POLL_S)
+        return True
 
     def _process(self, session: SessionInfo, finalize: Finalizer | None) -> list[Segment]:
         if finalize is not None:

@@ -10,6 +10,7 @@ import shutil
 import threading
 import time
 import unicodedata
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -131,6 +132,9 @@ class SessionInfo:
     FILENAME = "session.json"
     # Present in a folder the user discarded: never transcribe or list it (discard_session).
     DISCARD_MARKER = ".discarded"
+    # Present while a writer that stop() gave up waiting for still finishes a WAV (stalled
+    # disk): the audio isn't final, so it isn't transcribed yet (``still_writing``).
+    WRITING_MARKER = ".writing"
 
     def update_metrics(self, stage: str, values: dict) -> None:
         """Merge `values` into ``metrics[stage]`` (thread-safe; not saved until ``save``)."""
@@ -209,6 +213,31 @@ def _replace_json(target: Path, text: str) -> None:
     finally:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
+
+
+# Written into WRITING_MARKER: a marker left by an earlier run (quit or crash before the disk
+# recovered) has another token, and that writer is gone, so the audio is as final as it gets.
+_RUN_TOKEN = uuid.uuid4().hex
+
+
+def mark_writing(directory: Path) -> None:
+    """A writer of this session is still finishing its WAV in the background."""
+    (Path(directory) / SessionInfo.WRITING_MARKER).write_text(_RUN_TOKEN, encoding="utf-8")
+
+
+def clear_writing(directory: Path) -> None:
+    """Every writer of this session closed its WAV. Never raises."""
+    with contextlib.suppress(OSError):
+        (Path(directory) / SessionInfo.WRITING_MARKER).unlink(missing_ok=True)
+
+
+def still_writing(directory: Path) -> bool:
+    """True while a writer of this run is still finishing the session's audio."""
+    try:
+        text = (Path(directory) / SessionInfo.WRITING_MARKER).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return text.strip() == _RUN_TOKEN
 
 
 def mark_discarded(directory: Path) -> None:

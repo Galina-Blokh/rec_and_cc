@@ -50,6 +50,7 @@ class FakeRecorder:
         self.silence = 0.0
         self.fail = False
         self.silent = []
+        self.dropped = []
         self.targets = []
 
     def start(self, kind, app=None, target=None):
@@ -85,6 +86,9 @@ class FakeRecorder:
 
     def silent_tracks(self):
         return self.silent
+
+    def dropped_tracks(self):
+        return self.dropped
 
     def privacy_notice(self):
         notice, self.privacy = getattr(self, "privacy", None), None
@@ -594,6 +598,24 @@ def test_silent_track_warning_only_without_permission():
     h.mon.procs = []
     h.run(10)
     assert "Recording was completely silent" in h.notices
+
+
+def test_dropped_audio_gives_one_notice_per_session():
+    h = Harness(Mode.AUTO)
+    h.eng.start_manual()
+    h.eng.tick()
+    h.eng.stop()
+    h.eng.tick()
+    assert h.notices == []  # nothing dropped: unchanged
+    assert len(h.q.submitted) == 1
+    h.rec.dropped = [Track.ME, Track.OTHERS]
+    h.eng.start_manual()
+    h.eng.tick()
+    h.eng.stop()
+    h.eng.tick()
+    h.run(5)
+    assert h.notices == ["Some audio was not recorded"]
+    assert len(h.q.submitted) == 2  # still transcribed
 
 
 # --- session start/end callbacks (live transcription) -----------------------------------
