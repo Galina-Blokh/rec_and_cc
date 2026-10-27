@@ -320,6 +320,7 @@ def test_a_pdf_failure_other_than_the_font_keeps_the_docx(session, monkeypatch):
 
 
 def test_replace_is_retried_while_the_file_is_held_open(session, monkeypatch):
+    monkeypatch.setattr(export, "_DIR_FD", False)  # the Windows (path-based) write
     real, calls = export.os.replace, []
 
     def flaky(src, dst):
@@ -377,6 +378,8 @@ def test_controller_export_of_nothing_finished_posts_a_notice(tmp_path):
 
 
 def test_a_held_open_file_gets_a_clear_notice(session, monkeypatch):
+    monkeypatch.setattr(export, "_DIR_FD", False)  # the Windows (path-based) write
+
     def locked(src, dst):
         raise PermissionError("in use")
 
@@ -425,6 +428,7 @@ def test_a_write_error_is_not_reported_as_a_file_in_use(session, monkeypatch):
 
 
 def test_a_failing_cleanup_does_not_hide_the_export_error(session, monkeypatch):
+    monkeypatch.setattr(export, "_DIR_FD", False)  # the Windows (path-based) write
     from pathlib import Path
 
     def locked(src, dst):
@@ -531,10 +535,39 @@ def test_a_session_folder_that_was_already_a_link_at_the_start_is_exported(tmp_p
     assert [p.name for p in real.iterdir()] == ["x.bin"]
 
 
+def test_the_dir_fd_write_path_is_used_on_posix():
+    # the descriptor-pinned write must really run on macOS and Linux, not silently fall back
+    if sys.platform == "win32":
+        pytest.skip("no dir_fd on Windows: documented residual risk")
+    assert export._DIR_FD
+
+
+def test_a_parent_swapped_after_the_check_is_caught_by_the_folder_identity(tmp_path, monkeypatch):
+    # O_NOFOLLOW guards only the last path part; the device+inode check catches a parent swap
+    if sys.platform == "win32":
+        pytest.skip("no dir_fd on Windows: documented residual risk")
+    day, other = tmp_path / "day", tmp_path / "other"
+    (day / "s").mkdir(parents=True)
+    (other / "s").mkdir(parents=True)
+    expected = (day / "s").resolve()
+    real_open = export.os.open
+
+    def swap_parent_then_open(p, *a, **kw):
+        if export.Path(p) == expected and "dir_fd" not in kw:
+            day.rename(tmp_path / "day-old")
+            day.symlink_to(other)  # same path now leads into other/s
+        return real_open(p, *a, **kw)
+
+    monkeypatch.setattr(export.os, "open", swap_parent_then_open)
+    with pytest.raises(export.ExportError, match="moved"):
+        export._write(day / "s" / "x.bin", b"data", expected)
+    assert not list((other / "s").iterdir())
+
+
 def test_a_swap_after_the_check_cannot_redirect_the_write(tmp_path, monkeypatch):
     # POSIX: the checked folder is pinned by a descriptor, so a swap after the check is harmless
-    if not export._DIR_FD:
-        pytest.skip("no dir_fd support (Windows): documented residual risk")
+    if sys.platform == "win32":
+        pytest.skip("no dir_fd on Windows: documented residual risk")
     (tmp_path / "s").mkdir()
     (tmp_path / "evil").mkdir()
     expected = (tmp_path / "s").resolve()

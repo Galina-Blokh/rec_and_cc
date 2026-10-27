@@ -201,7 +201,8 @@ def _create_exclusive(tmp: Path) -> int:
 
 
 # POSIX can pin the checked folder with a directory descriptor; Windows can't (residual risk).
-_DIR_FD = os.open in os.supports_dir_fd and os.replace in os.supports_dir_fd
+# CPython lists os.rename (not os.replace) in supports_dir_fd; both use renameat.
+_DIR_FD = all(f in os.supports_dir_fd for f in (os.open, os.rename, os.unlink))
 
 
 def _write(path: Path, data: bytes, expected: Path | None = None) -> Path:
@@ -226,7 +227,11 @@ def _write(path: Path, data: bytes, expected: Path | None = None) -> Path:
         raise ExportError("The session folder moved during the export; not writing through it")
     tmp_name = f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
     if expected is not None and _DIR_FD:
-        _write_in_dir(expected, path.name, tmp_name, data)
+        try:
+            st = os.stat(expected)  # identity of the folder that passed the check
+        except OSError as e:
+            raise ExportError(f"could not write {path.name} ({type(e).__name__})") from None
+        _write_in_dir(expected, path.name, tmp_name, data, (st.st_dev, st.st_ino))
         return path
     tmp = parent / tmp_name
     try:
@@ -251,15 +256,22 @@ def _write(path: Path, data: bytes, expected: Path | None = None) -> Path:
             tmp.unlink(missing_ok=True)
 
 
-def _write_in_dir(directory: Path, name: str, tmp_name: str, data: bytes) -> None:
+def _write_in_dir(
+    directory: Path, name: str, tmp_name: str, data: bytes, ident: tuple[int, int]
+) -> None:
     """POSIX: create, write and rename inside the already-checked folder through one
-    directory descriptor (no path lookups after the check)."""
+    directory descriptor (no path lookups after the check). O_NOFOLLOW guards only the last
+    path part, so the opened folder must also be the very one that was checked (same device
+    and inode): a parent swapped for a link in between is refused."""
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
         dfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | nofollow)
     except OSError as e:
         raise ExportError(f"could not write {name} ({type(e).__name__})") from None
     try:
+        st = os.fstat(dfd)
+        if (st.st_dev, st.st_ino) != ident:
+            raise ExportError("The session folder moved during the export; not writing through it")
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp_name, dir_fd=dfd)
         try:
