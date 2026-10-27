@@ -427,7 +427,7 @@ class Controller:
                 from ..models import SessionInfo
                 from ..transcribe import voices
 
-                with voices.LOCK:  # not between a naming's voice and transcript rewrites
+                with voices.NAMING_LOCK:  # not between a naming's voice and transcript rewrites
                     known = voices.read_session_voices(SessionInfo.load(directory).id)
                     result = [
                         (lbl, ln) for lbl, ln in voices.session_speakers(directory) if lbl in known

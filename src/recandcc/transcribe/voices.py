@@ -89,6 +89,9 @@ def check_name(name: str) -> str:
 # "Forget all voices" can't interleave with a naming or a diarization. `delete_all_profiles`
 # also bumps the generation: a write that began before it (`since=`) is dropped.
 LOCK = threading.RLock()
+# Held by name_speaker for its whole run, before LOCK; "forget all" never takes it, so a slow
+# transcript folder (cloud sync) can't stall a forget or the diarizer's voice writes.
+NAMING_LOCK = threading.Lock()
 _forgets = 0
 
 
@@ -368,12 +371,15 @@ def session_speakers(directory: Path, lines: int = 2) -> list[tuple[str, list[st
     return list(out.items())
 
 
-@_locked
 def name_speaker(directory: Path, label: str, name: str, voices_dir: Path | None = None) -> Profile:
     """Save `label`'s voice of the session in `directory` as `name` and rewrite its transcript
     files with the name. Labels and names compare case-insensitively. Raises ValueError when
     that is not possible."""
-    directory, name = Path(directory), check_name(name)
+    with NAMING_LOCK:  # one renaming at a time: each rewrites the whole transcript
+        return _name_speaker(Path(directory), label, check_name(name), voices_dir)
+
+
+def _name_speaker(directory: Path, label: str, name: str, voices_dir: Path | None) -> Profile:
     session = SessionInfo.load(directory)
     data = json.loads((directory / JSON_NAME).read_text(encoding="utf-8"))
     segments = [Segment(**s) for s in data["segments"]]
@@ -385,33 +391,34 @@ def name_speaker(directory: Path, label: str, name: str, voices_dir: Path | None
         raise ValueError(f'"{ME}" is your microphone track and is never renamed')
     if any(_key(s.speaker) == _key(name) and s.speaker != label for s in segments):
         raise ValueError(f"{name!r} is already another speaker of this session")
-    stored = read_session_voices(session.id, voices_dir)
-    folded_as = {k: _key(v["profile"] or "") for k, v in stored.items()}
-    # `name`: its voice was renamed already, but rewriting the transcript failed last time
-    found = [k for k in stored if _key(k) == _key(label)] or [
-        k for k in stored if _key(k) == _key(name) == folded_as[k]
-    ]
-    if not found:
-        raise ValueError(
-            f"no voice data for {label!r} (speaker_names was off when this session was "
-            "transcribed, or its voices were deleted)"
+    with LOCK:  # the voice store only; the transcript is rewritten outside it
+        stored = read_session_voices(session.id, voices_dir)
+        folded_as = {k: _key(v["profile"] or "") for k, v in stored.items()}
+        # `name`: its voice was renamed already, but rewriting the transcript failed last time
+        found = [k for k in stored if _key(k) == _key(label)] or [
+            k for k in stored if _key(k) == _key(name) == folded_as[k]
+        ]
+        if not found:
+            raise ValueError(
+                f"no voice data for {label!r} (speaker_names was off when this session was "
+                "transcribed, or its voices were deleted)"
+            )
+        entry, previous = stored[found[0]], folded_as[found[0]]
+        known = {_key(p.name): p for p in load_profiles(voices_dir)}
+        voices = {name if k == found[0] else k: v for k, v in stored.items()}
+        # Mark this session as folded into `name` first: a failure below can then leave the
+        # profile one session short, but never count this session twice.
+        write_session_voices(
+            session,
+            {lbl: v["centroid"] for lbl, v in voices.items()},
+            {lbl: v["profile"] for lbl, v in voices.items() if v["profile"]} | {name: name},
+            voices_dir,
         )
-    entry, previous = stored[found[0]], folded_as[found[0]]
-    known = {_key(p.name): p for p in load_profiles(voices_dir)}
-    voices = {name if k == found[0] else k: v for k, v in stored.items()}
-    # Mark this session as folded into `name` first: a failure below can then leave the
-    # profile one session short, but never count this session twice.
-    write_session_voices(
-        session,
-        {lbl: v["centroid"] for lbl, v in voices.items()},
-        {lbl: v["profile"] for lbl, v in voices.items() if v["profile"]} | {name: name},
-        voices_dir,
-    )
-    profile = known.get(_key(name))
-    if previous != _key(name) or profile is None:
-        if previous and previous != _key(name) and previous in known:
-            _fold(known[previous].name, entry["centroid"], -1, voices_dir)  # Anna -> Bob
-        profile = save_profile(name, entry["centroid"], voices_dir)
+        profile = known.get(_key(name))
+        if previous != _key(name) or profile is None:
+            if previous and previous != _key(name) and previous in known:
+                _fold(known[previous].name, entry["centroid"], -1, voices_dir)  # Anna -> Bob
+            profile = save_profile(name, entry["centroid"], voices_dir)
     if label != name:
         segments = [replace(s, speaker=name) if s.speaker == label else s for s in segments]
         write_outputs(session, segments, data["duration"], data["model"])
@@ -420,7 +427,9 @@ def name_speaker(directory: Path, label: str, name: str, voices_dir: Path | None
 
 
 __all__ = [
+    "LOCK",
     "MATCH_MARGIN",
+    "NAMING_LOCK",
     "MATCH_SIMILARITY",
     "VOICES_DIR",
     "Profile",

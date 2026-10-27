@@ -10,6 +10,7 @@ import logging
 import queue
 import time
 
+from test_transcribe import make_session
 from test_voices import ANNA, BOB, CARL, _final
 
 from recandcc.config import Config, TranscriptionConfig
@@ -192,3 +193,20 @@ def test_atomic_write_survives_concurrent_writers_and_a_busy_file(tmp_path, monk
     monkeypatch.setattr(Path, "replace", busy)
     atomic_write(target, "after retries")
     assert target.read_text(encoding="utf-8") == "after retries" and len(calls) == 3
+
+
+def test_names_from_deleted_profiles_are_not_matched_after_a_forget(tmp_path, monkeypatch):
+    from test_voices import SEGS, TURNS
+
+    from recandcc.transcribe.engine import Transcriber
+
+    _final(tmp_path, monkeypatch, speaker_names=True)
+    t = Transcriber(TranscriptionConfig(model="fake", speaker_names=True))
+    stale = voices.forget_generation()
+    voices.delete_all_profiles()
+    voices.save_profile("Anna", ANNA)  # a profile that appeared after the forget
+    session = make_session(tmp_path)
+    out = t._labelled(session, list(SEGS), TURNS, stale)
+    assert "Anna" not in {s.speaker for s in out}  # the stale run gets no names
+    out = t._labelled(session, list(SEGS), TURNS, voices.forget_generation())
+    assert "Anna" in {s.speaker for s in out}

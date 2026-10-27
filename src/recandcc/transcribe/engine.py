@@ -515,7 +515,9 @@ class Transcriber:
         names: dict[int, str] = {}
         if centroids:
             try:
-                names = voices.match_profiles(centroids, voices.load_profiles())
+                with voices.LOCK:  # check and load together: a forget can't land between
+                    if gen is None or gen == voices.forget_generation():
+                        names = voices.match_profiles(centroids, voices.load_profiles())
             except Exception:  # noqa: BLE001 - names are optional; numbers still work
                 log.exception("session %s: could not match voice profiles", session.id)
         out, labels = label_speakers(segments, turns or [], names=names)
