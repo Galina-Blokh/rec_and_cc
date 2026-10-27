@@ -69,6 +69,7 @@ SCAN_CHUNK = 2048  # vectors scored (or cached) per fetch
 # 7-tuple, a float, the list slot and the segment text; folder/speaker strings are pooled), so
 # ~190 MB at the cap for an always-resident menu-bar app. Above it queries stream (as before).
 CACHE_MAX_ROWS = 100_000
+CACHE_IDLE_S = 15 * 60  # an unused cache is released after this long (rebuilt by the next query)
 EMBED_CHUNK = 64  # segments embedded between two checks of ``busy``
 BUSY_POLL_S = 0.5
 NO_VECTORS = np.zeros((0, 0), dtype=np.float32)  # a session without segments
@@ -143,6 +144,7 @@ class TranscriptIndex:
         self._fts_secure = True  # FTS5 'secure-delete' (SQLite >= 3.42) is on
         self._vec_dirty = False  # a vector change awaits its commit (only under ``_lock``)
         self._cache: _VecCache | None = None
+        self._cache_used = 0.0  # ``_now()`` of the last hit or install
         self._cache_gen = 0  # bumped after each committed vector change in this process
         self._cache_lock = threading.Lock()  # guards the two above; held only for assignments
         self._cache_build = threading.Lock()  # one cache builder at a time (never waited for)
@@ -243,6 +245,19 @@ class TranscriptIndex:
         if self._vec_dirty:
             self._vec_dirty = False
             self._drop_cache()
+
+    def release_idle_cache(self, now: float | None = None) -> bool:
+        """Free the vector cache if no query used it for ``CACHE_IDLE_S``: the app is always
+        on, and a rarely used cache would hold up to ~190 MB for nothing. The generation bump
+        makes a build in flight discard its result; the next query rebuilds lazily."""
+        now = _now() if now is None else now
+        with self._cache_lock:
+            if self._cache is None or now - self._cache_used < CACHE_IDLE_S:
+                return False
+            self._cache = None
+            self._cache_gen += 1
+        log.debug("search vector cache released (idle)")
+        return True
 
     def _drop_cache(self) -> None:
         with self._cache_lock:
@@ -571,6 +586,8 @@ class TranscriptIndex:
             cache, gen, no_cache = self._cache, self._cache_gen, self._no_cache
         token = self._vec_token()
         if cache is not None and cache.token == token and cache.model == model:
+            with self._cache_lock:
+                self._cache_used = _now()
             return cache if cache.matrix.shape[1] == dim else None
         if cache is not None:  # stale (e.g. another process wrote): release it now
             with self._cache_lock:
@@ -598,6 +615,7 @@ class TranscriptIndex:
             if self._cache_gen != gen:
                 return None  # changed in this process meanwhile: never keep old rows
             self._cache = built
+            self._cache_used = _now()
         log.debug("search vector cache: %d rows", len(built.meta))
         return built
 
@@ -689,6 +707,10 @@ class TranscriptIndex:
                 rows = db.execute(sql, params).fetchall()
                 rows = [(*r[:6], _snippet(_mark(r[6], folded[0])), _seg_id(r[6])) for r in rows]
         return [Hit(Path(r[0]), r[1], r[2], float(r[3]), r[4], r[5], r[6], r[7]) for r in rows]
+
+
+def _now() -> float:
+    return time.monotonic()
 
 
 def _score_cached(cache: _VecCache, q0: np.ndarray, limit: int) -> list[Hit]:

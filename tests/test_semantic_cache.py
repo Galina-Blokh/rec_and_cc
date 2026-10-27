@@ -306,3 +306,35 @@ def test_concurrent_search_and_embedding_never_return_wrong_rows(tmp_path, out):
         assert final == idx.search("payment")  # identical to the streaming scan
     finally:
         search.CACHE_MAX_ROWS = search_cap
+
+
+def test_an_idle_cache_is_released_and_rebuilt(tmp_path, out, monkeypatch):
+    make_session(out, 1, [seg(1, "Please send the invoice"), seg(9, "Lunch at noon")])
+    idx = make(tmp_path, FakeEmbedder())
+    sync(idx, out)
+    clock = [1000.0]
+    monkeypatch.setattr(search, "_now", lambda: clock[0])
+    loads = count_vector_loads(idx)
+    first = idx.search("payment")
+    assert first and len(loads) == 1
+    clock[0] += search.CACHE_IDLE_S - 1  # used recently: kept
+    assert idx.release_idle_cache() is False
+    assert idx.search("payment") == first and len(loads) == 1  # a hit renews the timestamp
+    clock[0] += search.CACHE_IDLE_S - 1
+    assert idx.release_idle_cache() is False
+    clock[0] += 2
+    assert idx.release_idle_cache() is True and idx._cache is None
+    assert idx.release_idle_cache() is False  # nothing left to release
+    assert idx.search("payment") == first and len(loads) == 2  # rebuilt lazily, same answer
+
+
+def test_a_speaker_rename_refreshes_the_cached_metadata(tmp_path, out):
+    d = make_session(out, 1, [seg(1, "the invoice", speaker="Speaker 1")])
+    idx = make(tmp_path, FakeEmbedder())
+    sync(idx, out)
+    assert [h.speaker for h in idx.search("payment")] == ["Speaker 1"]
+    rewrite(d, "Speaker 1", "Alice")  # what naming a speaker does to transcript.json
+    sync(idx, out)
+    hits = idx.search("payment")
+    assert [h.speaker for h in hits] == ["Alice"]
+    assert [h.speaker for h in idx.search("invoice")] == ["Alice"]
