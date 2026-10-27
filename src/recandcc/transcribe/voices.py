@@ -172,6 +172,9 @@ def _file_lock(voices_dir: Path | None = None):
                 # POSIX: closing the file releases the flock
 
 
+store_lock = _file_lock  # for callers that must act on the store atomically
+
+
 def profiles_if_current(since: int | None, voices_dir: Path | None = None) -> list[Profile]:
     """The profiles, or none when all voices were deleted since generation `since`."""
     with _file_lock(voices_dir):
@@ -539,6 +542,7 @@ def _name_speaker(directory: Path, label: str, name: str, voices_dir: Path | Non
 __all__ = [
     "LOCK",
     "forget_generation",
+    "store_lock",
     "has_user_names",
     "profiles_if_current",
     "MATCH_MARGIN",

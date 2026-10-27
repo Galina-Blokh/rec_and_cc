@@ -671,7 +671,8 @@ class Transcriber:
                 self._write(session, segments, duration)
             self._prune_voices()
         else:
-            self._write(session, segments, duration)
+            with voices.NAMING_LOCK:
+                self._write(session, segments, duration)
         self._drop_audio(session)
         return segments
 
@@ -733,40 +734,42 @@ class Transcriber:
         by_track = turns if isinstance(turns, dict) else {diarized_tracks(session)[0]: turns}
         out, n_labels, n_named = list(segments), 0, 0
         speakers: dict[str, np.ndarray] = {}
-        for track, track_turns in by_track.items():
-            centroids = getattr(track_turns, "centroids", {}) if self.cfg.speaker_names else {}
-            names: dict[int, str] = {}
-            if track_turns and centroids:
-                try:
-                    known = voices.profiles_if_current(gen)  # none after a forget since `gen`
-                    names = voices.match_profiles(centroids, known)
-                except Exception:  # noqa: BLE001 - names are optional; numbers still work
-                    log.exception("session %s: could not match voice profiles", session.id)
-            taken = {s.speaker for s in out} - {ME, OTHERS}
-            # One person, one name: a profile already given on an earlier track numbers this
-            # track's cluster instead (and its stored voice can't overwrite the first one).
-            folded = {t.casefold() for t in taken}
-            names = {k: n for k, n in names.items() if n.casefold() not in folded}
-            if names and gen is not None and gen != voices.forget_generation():
-                names = {}  # all voices were deleted meanwhile: no remembered names in the text
-            out, labels = label_speakers(
-                out, track_turns or [], SPEAKERS[track], names=names, reserved=taken
-            )
-            # A lone speaker in a room session keeps "Me", which is never renamed: no voice.
-            speakers |= {
-                lbl: centroids[k] for k, lbl in labels.items() if k in centroids and lbl != ME
-            }
-            n_labels += len(labels)
-            n_named += len(names.keys() & labels.keys())
-        try:  # opt-in only, in the private voices folder: lets `name-speaker` name them later
-            if speakers and Path(session.directory).exists():
-                voices.write_session_voices(session, speakers, since=gen)
-            elif gen is None or gen == voices.forget_generation():
-                # never leave voices of an older transcript of this session behind (but not
-                # those stored after a forget that this run began before)
-                voices.delete_session_voices(session.id)
-        except OSError:
-            log.exception("session %s: could not update speaker voices", session.id)
+        # Names, the generation check and the voice writes are one step against a forget
+        with voices.store_lock():
+            for track, track_turns in by_track.items():
+                centroids = getattr(track_turns, "centroids", {}) if self.cfg.speaker_names else {}
+                names: dict[int, str] = {}
+                if track_turns and centroids:
+                    try:
+                        known = voices.profiles_if_current(gen)  # none after a forget since `gen`
+                        names = voices.match_profiles(centroids, known)
+                    except Exception:  # noqa: BLE001 - names are optional; numbers still work
+                        log.exception("session %s: could not match voice profiles", session.id)
+                taken = {s.speaker for s in out} - {ME, OTHERS}
+                # One person, one name: a profile already given on an earlier track numbers this
+                # track's cluster instead (and its stored voice can't overwrite the first one).
+                folded = {t.casefold() for t in taken}
+                names = {k: n for k, n in names.items() if n.casefold() not in folded}
+                if names and gen is not None and gen != voices.forget_generation():
+                    names = {}  # all voices were deleted meanwhile: no remembered names in the text
+                out, labels = label_speakers(
+                    out, track_turns or [], SPEAKERS[track], names=names, reserved=taken
+                )
+                # A lone speaker in a room session keeps "Me", which is never renamed: no voice.
+                speakers |= {
+                    lbl: centroids[k] for k, lbl in labels.items() if k in centroids and lbl != ME
+                }
+                n_labels += len(labels)
+                n_named += len(names.keys() & labels.keys())
+            try:  # opt-in only, in the private voices folder: lets `name-speaker` name them later
+                if speakers and Path(session.directory).exists():
+                    voices.write_session_voices(session, speakers, since=gen)
+                elif gen is None or gen == voices.forget_generation():
+                    # never leave voices of an older transcript of this session behind (but not
+                    # those stored after a forget that this run began before)
+                    voices.delete_session_voices(session.id)
+            except OSError:
+                log.exception("session %s: could not update speaker voices", session.id)
         if not any(by_track.values()):
             return segments
         log.info(  # counts only: names are personal data
