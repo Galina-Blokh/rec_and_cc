@@ -7,9 +7,14 @@ Stories: US-12.
 from __future__ import annotations
 
 import logging
+import math
+import os
+import statistics
 import subprocess
 import sys
 import time
+import tracemalloc
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -155,13 +160,63 @@ def test_matches_golden_vectors_from_the_real_upstream_kernels() -> None:
         np.testing.assert_array_equal(dtw(golden[f"dtw_in_{k}"]), golden[f"dtw_out_{k}"])
 
 
+# Speed budgets: generous on macOS/Linux, times WINDOWS_HEADROOM on slower, noisier Windows
+# runners; RCC_ALIGN_FACTOR overrides the factor for any other slow runner (as in
+# test_search_latency.py). Each check warms up once and times the median of a few runs.
+WINDOWS_HEADROOM = 3.0
+DTW_BUDGET_S = 0.5  # measured ~16 ms for 150x1500 on an M-series Mac
+MEDIAN_BUDGET_S = 0.6  # ~3x the measured ~0.2 s for 20x150x1500, width 7
+
+
+def _factor() -> float:
+    default = WINDOWS_HEADROOM if sys.platform == "win32" else 1.0
+    env = os.environ.get("RCC_ALIGN_FACTOR")
+    if not env:
+        return default
+    try:
+        value = float(env)
+    except ValueError:
+        value = 0.0
+    if not (value > 0 and math.isfinite(value)):
+        log.warning("ignoring invalid RCC_ALIGN_FACTOR; using %s", default)
+        return default
+    return value
+
+
+def _median_time(fn: Callable[[], object], runs: int) -> float:
+    fn()  # warm-up
+    times = []
+    for _ in range(runs):
+        start = time.perf_counter()
+        fn()
+        times.append(time.perf_counter() - start)
+    return statistics.median(times)
+
+
 def test_dtw_is_fast_enough() -> None:
     x = np.random.default_rng(4).standard_normal((150, 1500)).astype(np.float32)
-    start = time.perf_counter()
-    dtw(x)
-    elapsed = time.perf_counter() - start
-    log.info("dtw 150x1500: %.3f s", elapsed)
-    assert elapsed < 0.5
+    elapsed = _median_time(lambda: dtw(x), runs=5)
+    log.info("dtw 150x1500: median %.3f s", elapsed)
+    assert elapsed < DTW_BUDGET_S * _factor()
+
+
+def test_median_filter_speed_and_memory_at_a_whisper_shape() -> None:
+    heads, tokens, frames, width = 20, 150, 1500, 7
+    x = np.random.default_rng(5).standard_normal((heads, tokens, frames)).astype(np.float32)
+    elapsed = _median_time(lambda: median_filter(x, width), runs=3)
+    log.info("median_filter %dx%dx%d: median %.3f s", heads, tokens, frames, elapsed)
+    assert elapsed < MEDIAN_BUDGET_S * _factor()
+    # Temporaries beyond the output stay bounded by one head's windows, so collapsing the
+    # per-head loop (about heads x as much) is caught.
+    one_head_windows = tokens * frames * width * x.itemsize
+    tracemalloc.start()
+    try:
+        median_filter(x, width)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    log.info("median_filter peak %.1f MB", peak / 1e6)
+    assert peak - x.nbytes < 4 * one_head_windows
 
 
 def test_numba_and_scipy_are_never_imported() -> None:
