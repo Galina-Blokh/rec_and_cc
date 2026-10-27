@@ -500,10 +500,9 @@ class TrayApp:
             rows = language_menu(self.cfg.transcription.languages)
             return [language_item(*row) for row in rows]
 
-        def retention_item(days: int, title: str, on: bool):
-            return Item(
-                title, lambda: self.ctrl.set_retention(days), checked=lambda _i: on, radio=True
-            )
+        def retention_item(days: int | None, title: str, on: bool):
+            action = None if days is None else lambda: self._set_retention(days)
+            return Item(title, action, checked=lambda _i: on, radio=True, enabled=days is not None)
 
         def retention():  # rebuilt on each update_menu(): the check follows the setting
             rows = retention_menu(self.cfg.transcription.audio_retention_days)
@@ -593,6 +592,10 @@ class TrayApp:
     def _open_folder(self) -> None:
         if err := open_output_folder(self.cfg.output_dir):
             self._notify("Can't open transcripts folder", err)
+
+    def _set_retention(self, days: int) -> None:
+        self.ctrl.set_retention(days)
+        self.icon.update_menu()  # Win32 caches the native menu: move the radio check now
 
     def _toggle_captions(self) -> None:
         self.cfg.live_captions = not self.cfg.live_captions

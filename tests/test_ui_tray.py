@@ -180,6 +180,8 @@ def test_retention_submenu_saves_the_choice_and_moves_the_check(tray):
         app.cfg.transcription.audio_retention_days = days
 
     app.ctrl.set_retention = set_retention
+    refreshed: list[int] = []
+    app.icon = types.SimpleNamespace(update_menu=lambda: refreshed.append(1))
     submenu = {i[0]: i[1] for i in app._menu() if i and isinstance(i[0], str)}
 
     def rows():
@@ -193,4 +195,9 @@ def test_retention_submenu_saves_the_choice_and_moves_the_check(tray):
     assert all(i.kw["radio"] for i in rows().values())
     rows()["30 days"][1]()
     assert saved == [30]
+    assert refreshed == [1]  # the cached Win32 menu is rebuilt at once
     assert checked() == ["30 days"]
+    app.cfg.transcription.audio_retention_days = 5  # set by hand in config.toml
+    extra = rows()["5 days (from settings)"]
+    assert extra[1] is None and extra.kw["enabled"] is False
+    assert checked() == ["5 days (from settings)"]

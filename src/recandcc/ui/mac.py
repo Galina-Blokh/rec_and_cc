@@ -26,7 +26,6 @@ from .. import autostart
 from ..config import CONFIG_PATH
 from ..engine import RECORDING
 from ..models import Mode, TriggerKind
-from ..retention import RETENTION_CHOICES
 from . import notes as notes_ui
 from .common import (
     PERM_KINDS,
@@ -58,7 +57,7 @@ from .present import (
     prompt_dialog_script,
     prompt_notice,
     record_item_title,
-    retention_label,
+    retention_menu,
     search_notice,
     search_open_target,
     transcribed_notice,
@@ -119,11 +118,7 @@ class MacApp(rumps.App):
         )
         self.login_item = rumps.MenuItem("Launch at login", callback=self._toggle_login)
         self.retention_menu = rumps.MenuItem("Delete audio after")
-        for days in RETENTION_CHOICES:
-            item = rumps.MenuItem(retention_label(days), callback=self._set_retention)
-            # ad-hoc attribute on rumps.MenuItem, read back by the menu callback
-            item.retention_days = days  # pyright: ignore[reportAttributeAccessIssue]
-            self.retention_menu.add(item)
+        self._retention_sig: list | None = None
         self._render_retention()
         self.lang_menu = rumps.MenuItem("Languages")
         self._lang_sig: list | None = None
@@ -379,9 +374,20 @@ class MacApp(rumps.App):
         sender.state = 1 if autostart.is_enabled() else 0
 
     def _render_retention(self) -> None:
-        days = self.cfg.transcription.audio_retention_days
-        for item in self.retention_menu.values():
-            item.state = check(getattr(item, "retention_days", None) == days)
+        """(Re)build "Delete audio after" when the setting changed (menu or config.toml)."""
+        rows = retention_menu(self.cfg.transcription.audio_retention_days)
+        if rows == self._retention_sig:
+            return
+        if self._retention_sig is not None:
+            self.retention_menu.clear()
+        self._retention_sig = rows
+        for days, title, on in rows:
+            # rumps greys out an item without a callback: the "(from settings)" row
+            item = rumps.MenuItem(title, callback=None if days is None else self._set_retention)
+            # ad-hoc attribute on rumps.MenuItem, read back by the menu callback
+            item.retention_days = days  # pyright: ignore[reportAttributeAccessIssue]
+            item.state = check(on)
+            self.retention_menu.add(item)
 
     def _render_languages(self) -> None:
         """(Re)build the Languages submenu when the setting changed (menu or config.toml)."""

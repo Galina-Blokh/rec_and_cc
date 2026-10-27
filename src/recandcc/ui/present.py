@@ -56,9 +56,16 @@ def retention_label(days: int) -> str:
     return f"{days} day" + ("s" if days > 1 else "")
 
 
-def retention_menu(current: int) -> list[tuple[int, str, bool]]:
-    """Rows of the "Delete audio after" submenu as (days, title, checked)."""
-    return [(days, retention_label(days), days == current) for days in RETENTION_CHOICES]
+def retention_menu(current: int) -> list[tuple[int | None, str, bool]]:
+    """Rows of the "Delete audio after" submenu as (days, title, checked). A value set in
+    config.toml that the menu doesn't offer gets one checked, disabled row (days None), as in
+    the Languages submenu, so the current setting is never invisible."""
+    rows: list[tuple[int | None, str, bool]] = [
+        (days, retention_label(days), days == current) for days in RETENTION_CHOICES
+    ]
+    if current not in RETENTION_CHOICES:
+        rows.append((None, f"{retention_label(current)} (from settings)", True))
+    return rows
 
 
 def language_menu(languages: list[str]) -> list[tuple[str | None, str, bool]]:
