@@ -328,6 +328,9 @@ def test_main_wires_config_and_writes_scores_only(tmp_path, monkeypatch, capsys)
             seen["closed"] = True
 
     class Di(FakeDiarizer):
+        def __init__(self, segmentation=False):
+            seen["segmentation"] = segmentation
+
         def diarize(self, audio):
             seen["warmed"] = True
 
@@ -342,13 +345,15 @@ def test_main_wires_config_and_writes_scores_only(tmp_path, monkeypatch, capsys)
     assert ev.main([str(tmp_path), "--model", "small", "--live", "--json", str(out)]) == 0
     c = seen["cfg"]
     assert c.model == "small" and c.keep_audio is True and c.diarize is False
-    assert seen["warmed"] and seen["closed"]
+    assert seen["warmed"] and seen["closed"] and seen["segmentation"] is False
     report = json.loads(out.read_text(encoding="utf-8"))
     assert report["summary"]["languages"]["ru"]["wer"] == 0.0
     assert report["summary"]["live"]["p90_s"] == 0.95
     printed = capsys.readouterr().out
     assert "live all: p50 0.75 s, p90 0.95 s, max 1.0 s (2 segments)" in printed
     assert "live c: p50 0.75 s" in printed
+    assert ev.main([str(tmp_path), "--diarize-overlap", "--json", str(tmp_path / "o.json")]) == 0
+    assert seen["segmentation"] is True
     assert "да" not in out.read_text(encoding="utf-8") + printed  # no text
 
 
