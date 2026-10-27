@@ -8,6 +8,7 @@ from __future__ import annotations
 import io
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -17,10 +18,12 @@ from recandcc.models import AppTarget
 
 
 class FakeProc:
+    stderr_text = b""
+
     def __init__(self, cmd, stdin, **_kw):
         self.cmd, self.stdin_mode = cmd, stdin
         self.stdin = io.BytesIO() if stdin == subprocess.PIPE else None
-        self.stdout, self.stderr = io.BytesIO(), io.BytesIO()
+        self.stdout, self.stderr = io.BytesIO(), io.BytesIO(self.stderr_text)
         self.sent = b""
 
     def poll(self):
@@ -41,7 +44,8 @@ def procs(monkeypatch):
             stdin.close = lambda: setattr(made[-1], "sent", stdin.getvalue())
         return made[-1]
 
-    monkeypatch.setattr(system_mac, "find_helper", lambda: "rcc-audiotap")
+    monkeypatch.setattr(system_mac, "find_helper", lambda: Path(__file__))
+    monkeypatch.setattr(system_mac, "_supports_targets", lambda helper, mtime: True)
     monkeypatch.setattr(system_mac.subprocess, "Popen", popen)
     return made
 
@@ -82,3 +86,33 @@ def test_factory_passes_the_target_on_macos(procs, monkeypatch):
     source.start(lambda frames: None)
     assert "--pid" in procs[0].cmd
     source.stop()
+
+
+def test_outdated_helper_records_all_system_audio(procs, monkeypatch, caplog):
+    """An old bin/rcc-audiotap exits on --pid: probe first, and use the global tap instead."""
+    monkeypatch.setattr(system_mac, "_supports_targets", lambda helper, mtime: False)
+    source = MacSystemAudioSource(target=AppTarget(("us.zoom",), (10,)))
+    source.start(lambda frames: None)
+    assert "--pid" not in procs[0].cmd and "--match" not in procs[0].cmd
+    assert source.scope == "all" and source.add_target(AppTarget(pids=(1,))) is False
+    assert "predates per-app capture" in caplog.text
+    source.stop()
+
+
+def test_helper_fallback_to_the_global_tap_is_noticed(procs, monkeypatch, caplog):
+    monkeypatch.setattr(FakeProc, "stderr_text", b"rcc-audiotap: scope: all\n")
+    source = MacSystemAudioSource(target=AppTarget(("us.zoom",)))
+    assert source.scope == "app"
+    source.start(lambda frames: None)
+    source.stop()  # joins the stderr reader
+    assert source.scope == "all"
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell script as a fake helper")
+def test_support_probe_reads_the_helpers_usage(tmp_path):
+    for name, usage in (("new", "capture [--pid PID ...] [--match TEXT ...]"), ("old", "capture")):
+        helper = tmp_path / name
+        helper.write_text(f"#!/bin/sh\necho '{usage}'\n", encoding="utf-8")
+        helper.chmod(0o755)
+        assert system_mac._supports_targets(helper, 0.0) is (name == "new")

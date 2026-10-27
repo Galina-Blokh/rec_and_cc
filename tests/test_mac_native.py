@@ -285,3 +285,15 @@ def test_per_app_tap_follows_an_added_target(tmp_path):
     if np.abs(audio).max() < 1e-4:
         pytest.skip("the tap got only silence (no permission or no output device)")
     assert _band_share(audio, 2000) > 0.2, "the added process was not recorded"
+
+
+@needs_audio_hardware
+def test_per_app_tap_without_a_process_falls_back_to_everything():
+    from recandcc.capture import system_mac
+
+    assert system_mac._supports_targets(HELPER, HELPER.stat().st_mtime)
+    _require_system_audio()
+    source = MacSystemAudioSource(target=AppTarget(pids=(999_999,)))  # no such process
+    audio = _record(source, lambda: time.sleep(0.5))
+    assert source.scope == "all" and len(audio) > 8_000
+    assert source.add_target(AppTarget(pids=(1,))) is False
