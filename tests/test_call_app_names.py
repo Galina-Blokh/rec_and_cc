@@ -661,7 +661,9 @@ def test_a_forget_between_reading_and_writing_the_voices_keeps_none(tmp_path, mo
 
     monkeypatch.setattr(voices, "read_session_voices", read_then_forget)
     callnames.apply(tmp_path)
-    monkeypatch.undo()
+    # restore only this stub (never monkeypatch.undo(): it would also drop the private voices
+    # folder and read the user's real one)
+    monkeypatch.setattr(voices, "read_session_voices", real)
     assert voices.read_session_voices(s.id) == {}
     assert voices.read_session_names(s.id) == []
 
