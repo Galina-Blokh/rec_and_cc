@@ -100,6 +100,11 @@ while I decide.*
 - **Then** the mic is labelled `Me` and system audio `Others`, as separate WAV tracks.
 - **Given** the mic picks up the speakers, **then** echoed `Others` speech is not shown again
   as `Me`, live or in the final transcript.
+- **Given** `system_audio_scope = "app"` on macOS, **when** an app triggers a session,
+  **then** `Others` records only that app's processes (also helpers that start later), and a
+  call joining a media session adds the call app. Manual sessions, FaceTime, an app without
+  an audio process, an outdated helper or a failing per-app tap record all system audio
+  instead, and session.json records which scope was used.
 
 ### US-09 English and Russian detected automatically
 - **Given** `languages = ["en", "ru"]`, **then** each speech region gets its own language,
