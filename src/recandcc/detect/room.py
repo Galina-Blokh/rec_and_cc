@@ -119,6 +119,9 @@ class NoiseFloor:
                 return False
             floor = float(np.percentile(np.fromiter(self._levels, float), FLOOR_PERCENTILE))
             quiet = float(np.percentile(np.fromiter(self._recent, float), SHIFT_PERCENTILE))
+            # Trade-off (accepted): a long stretch of continuous talk in a quiet room can look
+            # like a louder place too. The trigger still works (the talk has already counted),
+            # but for a few seconds after a shift soft speech counts as background.
             if quiet <= floor + margin_db / 2:
                 return False
             self._levels.clear()

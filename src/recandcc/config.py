@@ -190,8 +190,11 @@ class Config:
             # Keep the user's own spelling of `languages` ("iw", unknown codes) unless the list
             # was changed since loading: load_config only normalises the in-memory copy.
             tr = self.transcription
-            raw = getattr(tr, "_raw_languages", None)
-            if raw is not None and normalize_languages(raw) == tr.languages:
+            with LANG_LOCK:  # the pair, as the menu set it (lock order: CONFIG_LOCK first)
+                raw = getattr(tr, "_raw_languages", None)
+                langs = list(tr.languages)
+            data["transcription"]["languages"] = langs
+            if raw is not None and normalize_languages(raw) == langs:
                 data["transcription"]["languages"] = raw
             for section in ("detection", "transcription"):  # TOML has no null: unset = omitted
                 data[section] = {k: v for k, v in data[section].items() if v is not None}
@@ -204,6 +207,8 @@ class Config:
 # Held while saving and while applying a reload, so neither sees the other half-done.
 # Re-entrant: load_config() saves the defaults on first run.
 CONFIG_LOCK = threading.RLock()
+# transcription.languages + its raw spelling change together (menu, reload, save).
+LANG_LOCK = threading.Lock()
 _own_writes: dict[str, tuple[str, int]] = {}  # path -> signature of what our last save wrote
 
 

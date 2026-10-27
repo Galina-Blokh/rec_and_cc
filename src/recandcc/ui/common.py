@@ -34,6 +34,7 @@ from ..cloudsync import cloud_sync_provider, warning_text
 from ..config import (
     CONFIG_LOCK,
     CONFIG_PATH,
+    LANG_LOCK,
     LOG_DIR,
     Config,
     file_signature,
@@ -47,7 +48,7 @@ from ..models import Mode, SessionInfo, TriggerKind, discard_session
 from ..recorder import make_private_dir
 from ..retention import purge_old_audio, purge_transcribed_audio
 from ..sensitivity import PRESETS as SENSITIVITY_PRESETS
-from ..sensitivity import apply_preset, current_preset, room_trigger
+from ..sensitivity import SENSITIVITY_KEYS, apply_preset, current_preset, room_trigger
 
 if TYPE_CHECKING:
     from ..transcribe.live import LiveTranscriber
@@ -257,7 +258,7 @@ class Controller:
         self._refreshing = False
         self._last_refresh = 0.0
         self._config_sig = file_signature(CONFIG_PATH)
-        self._lang_lock = threading.Lock()  # transcription.languages + its raw spelling
+        self._lang_lock = LANG_LOCK  # transcription.languages + its raw spelling
         self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
         # global shortcut
         self._hotkey_lock = threading.Lock()
@@ -698,14 +699,36 @@ class Controller:
             return f"Waiting for answer: record {st.app}?"
         return f"Idle — {str(st.mode).capitalize()} mode"
 
-    def _save_settings(self) -> None:
-        def save():  # Config.save serializes concurrent saves
-            try:
-                self.cfg.save()
-            except Exception:
-                log.exception("saving settings failed")
+    def _save_settings(self, keep: tuple[str, ...] = ()) -> None:
+        """Save the settings on a worker thread (the UI thread never waits on CONFIG_LOCK).
+        Under the lock: a hand edit not yet reloaded is applied first, keeping the in-memory
+        `keep` detection fields (what the menu just set); a config.toml that doesn't parse
+        is left alone."""
+        threading.Thread(
+            target=self._save_settings_now, args=(keep,), daemon=True, name="settings-save"
+        ).start()
 
-        threading.Thread(target=save, daemon=True, name="settings-save").start()
+    def _save_settings_now(self, keep: tuple[str, ...] = ()) -> None:
+        det = self.cfg.detection
+        try:
+            with CONFIG_LOCK:
+                sig = file_signature(CONFIG_PATH)
+                if sig is not None and sig != self._config_sig and not written_by_us(CONFIG_PATH):
+                    try:
+                        load_config(CONFIG_PATH)
+                    except Exception:  # being edited by hand: don't overwrite it
+                        log.warning("config.toml could not be parsed; settings not saved")
+                        self.post_notice("Settings not saved", "config.toml could not be parsed")
+                        return
+                    mine = {k: getattr(det, k) for k in keep}
+                    self._maybe_reload_config()
+                    for k, v in mine.items():
+                        setattr(det, k, v)
+                self.cfg.save(CONFIG_PATH)
+                self._config_sig = file_signature(CONFIG_PATH)
+        except Exception:
+            log.exception("saving settings failed")
+            self.post_notice("Settings not saved", "config.toml could not be written")
 
     def set_room_listening(self, on: bool) -> None:
         """Menu toggle: the engine opens or closes the room mic (and stops a room session) on
@@ -726,11 +749,10 @@ class Controller:
 
     def set_sensitivity(self, preset: str) -> None:
         """Sensitivity menu (any thread): apply a preset from ``sensitivity.PRESETS``. The
-        engine picks the new thresholds up on its next tick. A hand edit not yet reloaded
-        is applied first, so saving the preset doesn't overwrite it."""
-        self._maybe_reload_config()
-        apply_preset(self.cfg.detection, preset)
-        self._save_settings()
+        engine picks the new thresholds up on its next tick. The save worker applies a hand
+        edit not yet reloaded first, so saving the preset doesn't overwrite it."""
+        apply_preset(self.cfg.detection, preset, lock=False)  # in memory; UI never blocks
+        self._save_settings(keep=SENSITIVITY_KEYS)
 
     def sensitivity_preset(self) -> str | None:
         return current_preset(self.cfg.detection)

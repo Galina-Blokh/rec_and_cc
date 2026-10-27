@@ -187,15 +187,42 @@ def test_reload_notices_a_same_size_edit_within_one_mtime_tick(tmp_path, monkeyp
     assert cfg.detection.outside_sensitivity == 75
 
 
-def test_a_preset_click_keeps_a_hand_edit_made_just_before(tmp_path, monkeypatch):
+def _deferred_saves(ctrl, monkeypatch) -> list:
+    """Hold the save worker's runs so a test can edit the file before it saves."""
+    pending: list = []
+    monkeypatch.setattr(ctrl, "_save_settings", lambda keep=(): pending.append(keep))
+    return pending
+
+
+def test_a_preset_click_keeps_a_hand_edit_made_around_it(tmp_path, monkeypatch):
     ctrl, cfg, path = _controller(tmp_path, monkeypatch)
     cfg.save(path)
     ctrl._maybe_reload_config()
+    pending = _deferred_saves(ctrl, monkeypatch)
     path.write_text(path.read_text().replace("min_active_s = 3.0", "min_active_s = 5.0"))
-    monkeypatch.setattr(ctrl, "_save_settings", lambda: cfg.save(path))
     ctrl.set_sensitivity("Noisy place")  # before the periodic reload saw the edit
+    assert current_preset(cfg.detection) == "Noisy place"  # in memory at once
+    text = path.read_text().replace("stop_after_inactive_s = 20.0", "stop_after_inactive_s = 9.0")
+    path.write_text(text)  # another edit lands between the click and its save
+    ctrl._save_settings_now(*pending)
     det = load_config(path).detection
-    assert det.min_active_s == 5.0 and (det.outside_sensitivity, det.inside_sensitivity) == (25, 50)
+    assert det.min_active_s == 5.0 and det.stop_after_inactive_s == 9.0  # both edits kept
+    assert (det.outside_sensitivity, det.inside_sensitivity) == (25, 50)  # and the preset
+    assert cfg.detection.min_active_s == 5.0 and current_preset(cfg.detection) == "Noisy place"
+
+
+def test_a_preset_click_never_overwrites_a_broken_hand_edit(tmp_path, monkeypatch):
+    ctrl, cfg, path = _controller(tmp_path, monkeypatch)
+    cfg.save(path)
+    ctrl._maybe_reload_config()
+    pending = _deferred_saves(ctrl, monkeypatch)
+    path.write_text("[detection\nmin_active_s = 5\n")  # mid-edit
+    ctrl.set_sensitivity("Normal")
+    ctrl._save_settings_now(*pending)
+    assert path.read_text() == "[detection\nmin_active_s = 5\n"
+    assert ("notice", "Settings not saved", "config.toml could not be parsed") in [
+        ctrl.events.get_nowait() for _ in range(ctrl.events.qsize())
+    ]
 
 
 def test_reload_ignores_an_empty_or_broken_file(tmp_path, monkeypatch):

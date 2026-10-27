@@ -61,6 +61,14 @@ def current_preset(det: DetectionConfig) -> str | None:
     return next((name for name, vals in PRESETS.items() if vals == now), None)
 
 
-def apply_preset(det: DetectionConfig, name: str) -> None:
+SENSITIVITY_KEYS = ("outside_sensitivity", "inside_sensitivity")
+
+
+def apply_preset(det: DetectionConfig, name: str, *, lock: bool = True) -> None:
+    """Set both sensitivities. lock=False for the UI thread, which must never wait on a save
+    (each attribute write is atomic; the save worker re-reads them under CONFIG_LOCK)."""
+    if not lock:
+        det.outside_sensitivity, det.inside_sensitivity = PRESETS[name]
+        return
     with CONFIG_LOCK:  # never between a reload's or a save's reads
         det.outside_sensitivity, det.inside_sensitivity = PRESETS[name]
