@@ -150,7 +150,8 @@ class MacApp(rumps.App):
             self.login_item,
             self.lang_menu,
             self.retention_menu,
-            rumps.MenuItem("Edit settings", callback=lambda _: open_path(CONFIG_PATH, True)),
+            rumps.MenuItem("Settings…", callback=lambda _: self.ctrl.open_settings_async()),
+            rumps.MenuItem("Edit config.toml", callback=lambda _: open_path(CONFIG_PATH, True)),
             rumps.MenuItem("Reveal logs", callback=lambda _: reveal_logs()),
             None,
             rumps.MenuItem("Quit RecAndCC", callback=self._quit),
@@ -209,6 +210,14 @@ class MacApp(rumps.App):
                     self._live_id = None
                     if self.captions is not None:
                         self.captions.end()
+            elif kind == "settings_saved":
+                self.captions_item.state = check(self.cfg.live_captions)
+                if "live_captions" in ev[1]:
+                    self._apply_captions()
+                self._notify("Settings saved", "Applied")
+            elif kind == "settings_fallback":
+                self._notify("Settings window unavailable", "Opening config.toml instead")
+                open_path(CONFIG_PATH, True)
             elif kind == "search":
                 self._show_hits(ev[1], ev[2])
             elif kind == "notes":
@@ -361,6 +370,10 @@ class MacApp(rumps.App):
         self.cfg.live_captions = not self.cfg.live_captions
         sender.state = 1 if self.cfg.live_captions else 0
         self.ctrl.save_settings("live_captions")
+        self._apply_captions()
+
+    def _apply_captions(self) -> None:
+        """Show or hide the captions panel to match ``cfg.live_captions`` (main thread)."""
         if self.captions is None:
             return
         if self.cfg.live_captions:

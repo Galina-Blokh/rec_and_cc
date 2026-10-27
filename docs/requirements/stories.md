@@ -35,6 +35,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
 | US-28 | Browse past meetings | 🟡 Windows window untested on hardware (#5) |
 | US-29 | Right-to-left text readable in the Windows captions | 🟡 unit-tested, no hardware check (#6) |
+| US-30 | Change common settings in a window | 🟡 claimed (#3): macOS spike, not on Windows |
 
 ---
 
@@ -382,3 +383,21 @@ correctly, even though Tk does no bidi.*
   captions and the transcript files are unchanged.
 - **Not yet:** a visual check on Windows hardware (#6); long RTL lines that wrap are reordered
   as one line, so the wrap point may read oddly.
+
+### US-30 Change common settings in a window
+*As the owner, I want a settings window with the options I change most, so that I don't have
+to edit `config.toml` by hand.*
+
+- **Given** macOS and a helper that has the `settings` subcommand, **when** I choose
+  **Settings…** in the menu, **then** a window shows mode (off/ask/auto), transcripts folder,
+  languages (English, Russian, Hebrew), keep audio, live captions, speaker names and the
+  shortcut (read-only), without blocking the menu bar.
+- **When** I press Save, **then** the values are validated by the app and written to
+  `config.toml` (other keys are kept) and applied at once; **when** I cancel or close the
+  window, **then** nothing changes.
+- **Given** invalid values, **then** nothing is written and a notice says so.
+- **Given** a missing or older helper, **then** the app says so and opens `config.toml`
+  instead.
+- **Then** the window shows no transcript or audio content, uses no network and asks for no
+  new permission.
+- **Not yet:** Windows, the other keys (detection tuning, hotkey editing), a two-way protocol.

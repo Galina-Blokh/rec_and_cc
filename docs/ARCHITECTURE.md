@@ -64,6 +64,7 @@ The app is built around one rule: **real-time audio threads never block**. Every
 | `rcc-audiotap capture` (process) | Core Audio IO proc → copy → conversion queue → stdout; silence-filler timer | pipe (raw f32le) |
 | `rcc-audiotap monitor` (process) | Polls Core Audio process list | pipe (JSON lines) |
 | `rcc-audiotap hotkey` (process) | Carbon `RegisterEventHotKey` + AppKit run loop; one line per press; exits on stdin EOF | pipe (JSON lines) |
+| `rcc-audiotap settings` (process) | SwiftUI window in an `NSApplication` with a regular activation policy; started by the menu on a worker thread, one JSON line on close | JSON snapshot file in, stdout line out |
 | hotkey reader | Reads the helper (restart with backoff) / Windows: `GetMessage` loop for `WM_HOTKEY`; calls `Controller.hotkey_pressed()` (debounced 0.5 s → `start_manual`/`stop` commands + `notice` event) | engine commands, event queue |
 | capture reader (per source) | Reads the pipe / PortAudio callback → `on_frames` (+ frame listeners, which only enqueue) | `queue.Queue` |
 | WAV writer (per track) | Writes PCM_16 WAV, so disk I/O never stalls capture | owns its file |
@@ -135,6 +136,23 @@ precedence over the focused app's own shortcut. The helper matches the physical 
 shortcut doesn't depend on the keyboard layout (en/ru). Its stdin is a pipe from Python and
 EOF ends it, so it never outlives the app. The Windows backend uses `RegisterHotKey`
 (`MOD_NOREPEAT`) on a thread with a `GetMessage` loop.
+
+### Settings window: a helper subcommand, validation stays in Python
+`rcc-audiotap settings --config <snapshot.json>` shows a small SwiftUI window (mode, output
+folder, languages, keep audio, live captions, speaker names; the hotkey is shown read-only).
+`--config` is a JSON snapshot that Python writes to a private temp file, **not** `config.toml`:
+Swift would need a TOML parser, and an unvalidated second writer. On close the helper prints
+one line, `{"settings":"saved","values":{...}}` or `{"settings":"cancelled"}`. Python
+(`settings_window.py`) runs it on a worker thread (`Controller.open_settings_async`, one
+window at a time), checks the values with `config.validate_settings`, writes them with
+`config.save_settings` (other keys kept; comments are not, as with every other write) and posts a `settings_saved` event;
+the UI thread then applies them (`Controller.apply_settings`). A helper without the
+subcommand exits 2 with no JSON, and a missing helper raises, both leading to a
+`settings_fallback` event: a notice and `config.toml` opened in the editor. The window is
+a separate process, so the main thread never waits on it. Effort: about 170 Swift and 170
+Python lines; the protocol is one-shot, not the two-way JSON-lines channel of
+[ADR 0011](adr/0011-stack-and-packaging-after-v0-1.md). The window is a regular-policy app
+(Dock icon while open) and needs no permission. Windows is unchanged.
 
 ### Detection = who is doing audio I/O, not "is there sound"
 Core Audio reports per process whether input or output is running

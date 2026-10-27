@@ -151,7 +151,10 @@ Menu items:
 - **Delete audio after**: Never / 1 / 7 / 30 / 90 days. Audio of transcribed recordings is
   deleted after that many days; transcripts are always kept. Any number of days can be set as
   `audio_retention_days` in the settings.
-- **Edit settings**: opens `config.toml` (changes to detection settings, `hotkey` and
+- **Settings…** (needs the rebuilt helper, `./native/macos/build.sh`): a window for mode,
+  transcripts folder, languages, keep audio, live captions and speaker names. Saved values
+  apply at once. Without it, the app opens `config.toml` instead.
+- **Edit config.toml**: opens `config.toml` (changes to detection settings, `hotkey` and
   `languages` apply live).
 - **Quit RecAndCC**
 

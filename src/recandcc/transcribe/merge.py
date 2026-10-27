@@ -115,24 +115,34 @@ MIN_RUN_S = 1.0  # a run of one speaker shorter than this ...
 MIN_RUN_WORDS = 3  # ... and with fewer words than this is flicker, absorbed by its neighbours
 
 
-def _word_speakers(words: Sequence[tuple[float, float, str]], turns: Sequence) -> list[int]:
+class _TurnIndex:
+    """Diarization turns sorted by start, built once and bisected for every word."""
+
+    def __init__(self, turns: Sequence) -> None:
+        self.turns = turns
+        self.order = sorted(range(len(turns)), key=lambda i: turns[i].start)
+        self.ordered = [turns[i] for i in self.order]
+        self.starts = [t.start for t in self.ordered]
+        self.reach: list[float] = []  # reach[k]: latest end among ordered[: k + 1]
+        for t in self.ordered:
+            self.reach.append(max(self.reach[-1], t.end) if self.reach else t.end)
+        self.first_by_end: dict[float, int] = {}  # earliest index in `turns` per end / start
+        self.first_by_start: dict[float, int] = {}
+        for i, t in enumerate(turns):
+            self.first_by_end.setdefault(t.end, i)
+            self.first_by_start.setdefault(t.start, i)
+
+
+def _word_speakers(words: Sequence[tuple[float, float, str]], index: _TurnIndex) -> list[int]:
     """Diarized speaker of each word: most overlap, else the turn nearest its middle.
 
-    Turns are sorted once and bisected, so a word only looks at the turns around it (ties go to
-    the turn that comes first in `turns`, as with a plain scan)."""
+    Turns are sorted once (`index`) and bisected, so a word only looks at the turns around it
+    (ties go to the turn that comes first in the turns, as with a plain scan)."""
+    turns, order, ordered = index.turns, index.order, index.ordered
+    starts, reach = index.starts, index.reach
+    first_by_end, first_by_start = index.first_by_end, index.first_by_start
     if not turns:
         return []
-    order = sorted(range(len(turns)), key=lambda i: turns[i].start)
-    ordered = [turns[i] for i in order]
-    starts = [t.start for t in ordered]
-    reach: list[float] = []  # reach[k]: latest end among ordered[: k + 1]
-    for t in ordered:
-        reach.append(max(reach[-1], t.end) if reach else t.end)
-    first_by_end: dict[float, int] = {}  # earliest index in `turns` per end / start value
-    first_by_start: dict[float, int] = {}
-    for i, t in enumerate(turns):
-        first_by_end.setdefault(t.end, i)
-        first_by_start.setdefault(t.start, i)
     out = []
     for ws, we, _ in words:
         hi = bisect.bisect_left(starts, we)  # turns from `hi` on start at/after the word ends
@@ -224,16 +234,19 @@ def split_on_speaker_change(
     one speaker are returned unchanged. `turns`: diarization turns (start, end, speaker)."""
     if not turns:
         return list(segments)
+    index = _TurnIndex(turns)
     out: list[Segment] = []
+    split = False
     for seg in segments:
         runs = (
-            _runs(seg.words, _word_speakers(seg.words, turns))
+            _runs(seg.words, _word_speakers(seg.words, index))
             if seg.speaker == speaker and len(seg.words) > 1
             else []
         )
         if len(runs) < 2:
             out.append(seg)
             continue
+        split = True
         for _, a, b in runs:
             ws = seg.words[a:b]
             out.append(
@@ -246,4 +259,6 @@ def split_on_speaker_change(
                     words=list(ws),
                 )
             )
+    if split:  # pieces replaced a segment in place: keep the transcript in time order
+        out.sort(key=lambda s: (s.start, s.end))
     return out

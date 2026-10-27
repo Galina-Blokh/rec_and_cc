@@ -394,24 +394,50 @@ def _random_case(rng, n_turns, n_words):
 def test_word_speakers_match_the_naive_scan_on_random_input():
     import random
 
-    from recandcc.transcribe.merge import _word_speakers
+    from recandcc.transcribe.merge import _TurnIndex, _word_speakers
 
     rng = random.Random(1234)  # noqa: S311
     for _ in range(200):
         ws, turns = _random_case(rng, rng.randrange(1, 15), rng.randrange(1, 40))
-        assert _word_speakers(ws, turns) == _naive(ws, turns)
+        assert _word_speakers(ws, _TurnIndex(turns)) == _naive(ws, turns)
 
 
-def test_word_speakers_scale_to_an_hour_long_call():
+def test_split_scales_to_an_hour_long_call():
+    """Production shape: ~1,500 segments of 5-20 words against ~1,500 turns.
+    Stories: US-12."""
     import random
     import time
 
-    from recandcc.transcribe.merge import _word_speakers
-
     rng = random.Random(7)  # noqa: S311
-    turns = [Turn(i * 3.0, i * 3.0 + 2.8, rng.randrange(3)) for i in range(1200)]  # 1 h
-    ws = [(i * 0.36, i * 0.36 + 0.3, " w") for i in range(10_000)]
+    turns = [Turn(i * 2.4, i * 2.4 + 2.3, rng.randrange(3)) for i in range(1500)]
+    segs, t = [], 0.0
+    for _ in range(1500):
+        ws = []
+        for _ in range(rng.randrange(5, 21)):
+            ws.append((t, t + 0.2, " w"))
+            t += 0.24
+        segs.append(seg(ws))
+        t += 0.1
     t0 = time.perf_counter()
-    got = _word_speakers(ws, turns)
-    assert time.perf_counter() - t0 < 1.0
-    assert len(got) == len(ws)
+    out = split_on_speaker_change(segs, turns)
+    assert time.perf_counter() - t0 < 2.0
+    assert len(out) >= len(segs)
+    assert [(s.start, s.end) for s in out] == sorted((s.start, s.end) for s in out)
+
+
+def test_split_pieces_keep_the_transcript_in_time_order(tmp_path):
+    """Others 0-10 s split at 5 s plus Me 3-4 s: Me sits between the pieces, in every output.
+    Stories: US-12."""
+    ws = [(i * 1.0, i * 1.0 + 1.0, f" w{i}") for i in range(10)]
+    others = seg(ws)
+    me = Segment(3.0, 4.0, "hello", "Me", "en")
+    turns = [Turn(0, 5, 0), Turn(5, 10, 1)]
+    sess = make_session(tmp_path)
+    t = eng.Transcriber(
+        TranscriptionConfig(model="fake", speaker_names=False, split_on_speaker_change=True)
+    )
+    out = t._labelled(sess, [others, me], turns)
+    assert [s.speaker for s in out] == ["Speaker 1", "Me", "Speaker 2"]
+    assert [s.start for s in out] == [0.0, 3.0, 5.0]
+    md = format_markdown(sess, out, 10.0)
+    assert md.index("w0 w1") < md.index("hello") < md.index("w5 w6")
