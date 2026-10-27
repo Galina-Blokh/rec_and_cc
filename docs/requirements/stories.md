@@ -258,6 +258,7 @@ I don't have to work out who `Speaker 2` was every time.*
   transcript text.
 - **Not yet:** the Windows tray entry, custom templates; the PDF needs a system font with
   Latin, Cyrillic and Hebrew (Arial, DejaVu Sans), otherwise only DOCX is produced (#4).
+
 ### US-27 Meeting summaries and action items
 *As the owner, I want a short summary and the action items of each meeting written next to
 its transcript, so that I know what was decided and who does what without rereading it.*
