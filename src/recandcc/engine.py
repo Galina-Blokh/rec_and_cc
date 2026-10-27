@@ -236,6 +236,7 @@ class Engine:
         self.run_in_background = run_in_background or _run_daemon
         self._save_config = save_config if save_config is not None else cfg.save
         self.own_pids = set(own_pids) if own_pids is not None else {os.getpid()}
+        self._own_pids_lock = threading.Lock()  # writers only: own_pids is copy-on-write
 
         self._lock = threading.Lock()
         self._first_seen: dict[str, float] = {}
@@ -300,6 +301,13 @@ class Engine:
         except Exception:
             log.exception("monitor close failed")
         self._notify()
+
+    def set_own_pid(self, pid: int, own: bool) -> None:
+        """Count `pid` (a helper we started, e.g. the speaker-sample player) as our own
+        process, which never triggers a recording, or stop counting it. Any thread: the set
+        is replaced, never changed in place, so the engine thread reads a stable copy."""
+        with self._own_pids_lock:
+            self.own_pids = self.own_pids | {pid} if own else self.own_pids - {pid}
 
     def start_manual(self) -> None:
         self._command(("start_manual",))

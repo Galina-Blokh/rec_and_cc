@@ -191,6 +191,8 @@ def test_dialog_plays_the_sample_and_comes_back_with_the_typed_text(tmp_path):
 class FakeProc:
     """Plays until killed (``block``) or at once."""
 
+    pid = 1234
+
     def __init__(self, args, block: bool = False, **_kw):
         self.args = args
         self.thread = threading.current_thread()
@@ -345,3 +347,42 @@ def test_stale_sample_folders_are_swept_at_start(tmp_path):
     other.mkdir()
     sample.SamplePlayer(root=tmp_path).close()
     assert not old.exists() and other.exists()
+
+
+def test_the_playing_sample_is_our_own_process_for_detection(tmp_path):
+    from test_engine import Harness
+
+    from recandcc.models import AudioProcess, Mode
+
+    h = Harness(Mode.AUTO, ignore_apps=[])  # the user removed afplay from ignore_apps
+    afplay = AudioProcess(
+        pid=4321, bundle_id="", name="afplay", input_active=False, output_active=True
+    )
+    h.mon.procs = [afplay]
+
+    d = _session(tmp_path, [(0, 6, "Speaker 1")])
+    clip = sample.find_clip(d, "Speaker 1")
+    assert clip is not None
+    release = threading.Event()
+
+    class Proc(FakeProc):
+        pid = 4321
+
+        def wait(self, timeout=None):
+            if not release.wait(5 if timeout is None else timeout):
+                raise subprocess.TimeoutExpired(self.args, timeout or 5)
+            return 0
+
+    player = sample.SamplePlayer(
+        popen=lambda a, **k: Proc(a), own_pid=h.eng.set_own_pid, root=tmp_path
+    )
+    t = _start(player, clip)
+    _wait_for(lambda: 4321 in h.eng.own_pids)
+    h.run(10)
+    assert h.rec.starts == []  # never recorded while the sample plays
+    release.set()
+    t.join(5)
+    assert 4321 not in h.eng.own_pids and 999 in h.eng.own_pids  # unregistered after
+    h.run(10)
+    assert h.rec.starts  # the same pid is an ordinary app again
+    player.close()

@@ -97,7 +97,10 @@ class MacApp(rumps.App):
         self._recent_sig: tuple = ()
         self._naming_open = False  # a speaker chooser/name dialog is up
         self._naming_lock = threading.Lock()
-        self._sampler = sample.SamplePlayer(allowed=lambda: self.ctrl.sample_allowed)
+        self._sampler = sample.SamplePlayer(
+            allowed=lambda: self.ctrl.sample_allowed,
+            own_pid=lambda pid, own: self.ctrl.engine.set_own_pid(pid, own),
+        )
         # live captions (main thread only)
         self.captions = CaptionsPanel() if CaptionsPanel is not None else None
         self._live_id: str | None = None  # session currently being captioned

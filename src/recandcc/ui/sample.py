@@ -143,7 +143,9 @@ class SamplePlayer:
     ``popen`` is injectable for tests; ``allowed()`` is checked before playing (False while
     a session records: system capture would record the sample). Starting a sample stops
     the one playing; each clip is deleted after playback; ``close`` kills the player and
-    removes the private temp folder (also at exit). Old folders are swept at start."""
+    removes the private temp folder (also at exit). Old folders are swept at start.
+    While afplay plays, its pid is ``own_pid(pid, True)``: the engine never treats it as
+    an app playing audio (``ignore_apps`` can be edited), then ``own_pid(pid, False)``."""
 
     def __init__(
         self,
@@ -151,10 +153,12 @@ class SamplePlayer:
         command: Sequence[str] = (AFPLAY,),
         allowed: Callable[[], bool] = lambda: True,
         root: Path | None = None,
+        own_pid: Callable[[int, bool], None] = lambda _pid, _own: None,
     ) -> None:
         self._popen = popen
         self._command = list(command)
         self._allowed = allowed
+        self._own_pid = own_pid  # (pid, True/False): detection ignores it while it plays
         self._root = root
         self._lock = threading.Lock()  # covers stop-old, cut and register-new
         self._dir: Path | None = None
@@ -175,6 +179,7 @@ class SamplePlayer:
 
     def _run(self, clip: Clip) -> None:
         path: Path | None = None
+        pid: int | None = None
         try:
             with self._lock:
                 self._kill()  # one sample at a time: the newest wins
@@ -190,6 +195,8 @@ class SamplePlayer:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
+                pid = proc.pid
+                self._own_pid(pid, True)
             self._watch(proc)
             log.debug("played a speaker sample of %.1f s", clip.end - clip.start)
         except Exception as e:  # noqa: BLE001 - a missing sample is never fatal
@@ -197,6 +204,9 @@ class SamplePlayer:
                 "speaker sample of %.1f s failed: %s", clip.end - clip.start, type(e).__name__
             )
         finally:
+            if pid is not None:
+                with contextlib.suppress(Exception):
+                    self._own_pid(pid, False)
             if path is not None:
                 path.unlink(missing_ok=True)
 
