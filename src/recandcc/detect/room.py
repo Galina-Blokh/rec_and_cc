@@ -270,6 +270,9 @@ class RoomMonitor:
         with self._lock:
             if stream == self._stream:
                 self._source, src = src, None
+                # The stall window runs from when the open finished, not from when it began:
+                # start() can block for a long time (permission prompt, Bluetooth input).
+                self._last_frame_clock = self.clock()
         if src is not None:  # closed meanwhile
             self._stop_source(src)
             return False

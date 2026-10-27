@@ -30,7 +30,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from .. import hotkey as hotkey_mod
-from ..cloudsync import cloud_sync_provider, network_volume, network_warning_text, warning_text
+from ..cloudsync import (
+    PROBE_FAILED,
+    cloud_sync_provider,
+    network_volume,
+    network_warning_text,
+    warning_text,
+)
 from ..config import (
     CONFIG_PATH,
     LOG_DIR,
@@ -71,6 +77,24 @@ RECENT_COUNT = 10
 SEARCH_LIMIT = 20
 HOTKEY_DEBOUNCE_S = 0.5
 NET_PROBE_WAIT_S = 2.0  # how long a refresh waits for the network-volume probe
+# Menu settings whose effect already happened outside config.toml when their save fails: the
+# login item was changed, the captions panel shown/hidden, Off stopped a recording, the room
+# mic closed, call-app participant sampling stopped. Putting the old value back would undo the
+# click only on paper (autostart, captions) or, worse, resume recording, reopen the mic or read
+# participant names the user just turned off. They keep the new value and stay "unsaved"
+# (``Controller._unsaved``): a config reload skips them and each refresh retries the save
+# until it succeeds.
+NO_ROLLBACK_KEYS = frozenset(
+    {
+        "autostart",
+        "live_captions",
+        "detection.mode",
+        "detection.app_modes",
+        "detection.room_listening",
+        "transcription.names_from_call_app",
+    }
+)
+UNSAVED_NOTE = "The change stays in effect and is saved as soon as config.toml can be written."
 NET_PROBE_RETRY_S = 300.0  # after a hung or failed probe
 REFRESH_EVERY_S = 10.0
 PERM_KINDS = ("microphone", "system_audio")
@@ -313,6 +337,9 @@ def _privatize_new_folder(path: Path) -> None:
 
 
 # transcription keys a hand edit applies live (models and device need a restart)
+RETENTION_KEY = "transcription.audio_retention_days"
+# Settings-window fields that are NO_ROLLBACK_KEYS: a successful window save writes them.
+WINDOW_KEYS = {"live_captions": "live_captions", "mode": "detection.mode"}
 RELOADED_TRANSCRIPTION_KEYS = ("keep_audio", "audio_retention_days", "speaker_names")
 
 
@@ -340,8 +367,12 @@ class Controller:
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
         self._save_lock = threading.Lock()  # menu writes to config.toml
-        self._dirty_lock = threading.Lock()  # guards _dirty (a leaf lock: nothing nested)
+        # guards _dirty; also spans the reload's snapshot+apply (only _lang_lock nests)
+        self._dirty_lock = threading.Lock()
         self._dirty: dict[str, int] = {}  # dotted key -> menu saves not yet written
+        # NO_ROLLBACK_KEYS whose save failed: memory differs from config.toml until a save of
+        # the key succeeds (retried on every refresh); a reload never overwrites them.
+        self._unsaved: set[str] = set()  # guarded by _dirty_lock
         self._settings_lock = threading.Lock()  # one settings window at a time
         self._lang_lock = threading.Lock()  # transcription.languages + its raw spelling
         self._summaries = None  # SummaryQueue, created on the first summary
@@ -867,10 +898,15 @@ class Controller:
                 time.sleep(1)
 
     def purge_audio_now(self, days: int | None = None) -> list[Path]:
-        """Delete audio older than ``days`` now (None: the current ``audio_retention_days``,
-        for startup and the hourly loop); the deleted WAVs (none if it failed). A menu click
-        passes its own value: memory may already hold a newer, unsaved click."""
+        """Delete audio older than ``days`` now; the deleted WAVs (none if it failed or was
+        skipped). A menu click passes its own saved value: memory may already hold a newer,
+        unsaved click. Without ``days`` (startup, the hourly loop) use the in-memory retention,
+        but not while a menu save of it is pending: a value that may never be saved must not
+        delete audio (the save's own purge, or the next hourly run, follows)."""
         if days is None:
+            with self._dirty_lock:
+                if RETENTION_KEY in self._dirty:
+                    return []
             days = self.cfg.transcription.audio_retention_days
         try:
             return purge_old_audio(self.cfg.output_dir, days)
@@ -940,6 +976,7 @@ class Controller:
                 self._perm, self._recent = perm, recent
             if self.engine.state.status == IDLE:  # e.g. marked stale by `name-speaker`
                 self._resubmit_summaries()
+            self._retry_unsaved()  # last: it may wait on the config lock
         finally:
             with self._lock:
                 self._refreshing = False
@@ -976,7 +1013,11 @@ class Controller:
             with self._lock:
                 self._net_retry[out] = time.monotonic() + NET_PROBE_RETRY_S
             return
-        if kind is None:
+        if kind is PROBE_FAILED:  # errored, not "local": back off like a hung probe
+            with self._lock:
+                self._net_retry[out] = time.monotonic() + NET_PROBE_RETRY_S
+            return
+        if not isinstance(kind, str):
             return
         with self._lock:
             if out in self._net_warned:
@@ -1036,23 +1077,26 @@ class Controller:
             # "file read" and "memory updated", so it can't write half-applied values. A field
             # a menu click changed meanwhile keeps the click (its queued save writes it).
             was_listening = self.cfg.detection.room_listening
-            now = self._reloadable(self.cfg)
+            # _dirty_lock spans snapshot and apply: a click marks + sets under it too, so it
+            # lands either before the snapshot (seen) or after the apply (kept), never between.
             with self._dirty_lock:
-                dirty = set(self._dirty)  # changed in the menu, save not written yet
-            for key, value in self._reloadable(new).items():
-                if now[key] != before[key] or self._dotted(key) in dirty:
-                    continue
-                owner, name = key
-                if owner == "languages":
-                    tr = self.cfg.transcription
-                    with self._lang_lock:  # both together: save() pairs them
-                        if (getattr(tr, "_raw_languages", None), tr.languages) == before[key]:
-                            tr._raw_languages = value[0]  # type: ignore[attr-defined]
-                            tr.languages = value[1]
-                else:
-                    if key == ("top", "hotkey") and value != now[key]:
-                        hotkey_changed = True
-                    setattr(self._reload_target(owner), name, value)
+                now = self._reloadable(self.cfg)
+                # changed in the menu, save not written yet (or failed: _unsaved)
+                dirty = set(self._dirty) | self._unsaved
+                for key, value in self._reloadable(new).items():
+                    if now[key] != before[key] or self._dotted(key) in dirty:
+                        continue
+                    owner, name = key
+                    if owner == "languages":
+                        tr = self.cfg.transcription
+                        with self._lang_lock:  # both together: save() pairs them
+                            if (getattr(tr, "_raw_languages", None), tr.languages) == before[key]:
+                                tr._raw_languages = value[0]  # type: ignore[attr-defined]
+                                tr.languages = value[1]
+                    else:
+                        if key == ("top", "hotkey") and value != now[key]:
+                            hotkey_changed = True
+                        setattr(self._reload_target(owner), name, value)
             if self.cfg.detection.room_listening and not was_listening:  # turned on by hand
                 self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
         if hotkey_changed:  # re-registering the listener may block: outside the lock
@@ -1086,6 +1130,18 @@ class Controller:
             return "transcription.languages"
         return name if owner == "top" else f"{owner}.{name}"
 
+    def _retry_unsaved(self) -> None:
+        """Save again the no-rollback keys whose save failed (refresh thread), quietly: the
+        failed save already told the user. Memory and config.toml agree once it succeeds."""
+        with self._dirty_lock:
+            keys = sorted(self._unsaved)
+        if keys:
+            self.write_settings(*keys, quiet=True)
+
+    def _unpin(self, keys) -> None:
+        with self._dirty_lock:
+            self._unsaved.difference_update(keys)
+
     def _mark_dirty(self, keys, delta: int) -> None:
         with self._dirty_lock:
             for k in keys:
@@ -1111,16 +1167,25 @@ class Controller:
         from .present import LANGUAGES_KEEP_ONE, toggle_languages
 
         tr = self.cfg.transcription
-        with self._lang_lock:
-            new = toggle_languages(tr.languages, getattr(tr, "_raw_languages", None), code)
+        key = "transcription.languages"
+        try:
+            # mark + set together under _dirty_lock (a leaf lock; only _lang_lock nests in it)
+            with self._dirty_lock:
+                self._dirty[key] = self._dirty.get(key, 0) + 1
+                with self._lang_lock:
+                    new = toggle_languages(tr.languages, getattr(tr, "_raw_languages", None), code)
+                    if new is not None:
+                        langs = normalize_languages(new)
+                        tr._raw_languages = new if new != langs else None  # type: ignore[attr-defined]
+                        tr.languages = langs  # a new list: other threads never see it half-built
             if new is not None:
-                langs = normalize_languages(new)
-                tr._raw_languages = new if new != langs else None  # type: ignore[attr-defined]
-                tr.languages = langs  # a new list: other threads never see it half-built
+                self.save_settings(key, title="Languages", marked=True)
+        except BaseException:
+            self._mark_dirty((key,), -1)  # the save thread never started: don't leak the mark
+            raise
         if new is None:
+            self._mark_dirty((key,), -1)
             self.post_notice("Languages", LANGUAGES_KEEP_ONE)
-            return
-        self.save_settings("transcription.languages", title="Languages")
 
     def toggle_call_app_names(self) -> None:
         """Menu "Use names from the call app" (macOS), from the main thread; never blocks.
@@ -1161,36 +1226,48 @@ class Controller:
         self.cfg.transcription.names_from_call_app = on
         self.save_settings("transcription.names_from_call_app", title="Names from the call app")
 
-    def save_settings(self, *keys: str, title: str = "Settings") -> None:
+    def save_settings(self, *keys: str, title: str = "Settings", marked: bool = False) -> None:
         """Save the in-memory value of each dotted key ("live_captions",
         "transcription.audio_retention_days") to config.toml on a worker thread. Menu
-        callbacks use this instead of ``cfg.save()``, which would overwrite hand edits."""
-        kw = {"title": title}
-        self._mark_dirty(keys, 1)  # a config reload before the write must not undo the change
+        callbacks use this instead of ``cfg.save()``, which would overwrite hand edits.
+        ``marked``: the caller already marked ``keys`` dirty (before changing memory)."""
+        if not marked:
+            self._mark_dirty(keys, 1)  # a config reload before the write must not undo the change
 
         def run() -> None:
             try:
-                self.write_settings(*keys, **kw)
+                self._write_settings(*keys, title=title)
             finally:
-                self._mark_dirty(keys, -1)
+                self._mark_dirty(keys, -1)  # one mark per pending save (see _restore_from_disk)
 
         t = threading.Thread(target=run, name="save-config")
         t.daemon = True
-        t.start()
+        try:
+            t.start()
+        except BaseException:
+            self._mark_dirty(keys, -1)  # run() will never unmark
+            raise
 
-    def write_settings(self, *keys: str, title: str = "Settings") -> bool:
+    def write_settings(
+        self, *keys: str, title: str = "Settings", quiet: bool = False
+    ) -> dict | None:
         """Blocking save of ``keys`` (see ``_write_settings``); marks them as pending so a
-        config reload meanwhile keeps the in-memory value. True when config.toml was written."""
+        config reload meanwhile keeps the in-memory value. Returns the values written, or
+        None if the save failed."""
         self._mark_dirty(keys, 1)
         try:
-            return self._write_settings(*keys, title=title)
+            return self._write_settings(*keys, title=title, quiet=quiet)
         finally:
             self._mark_dirty(keys, -1)
 
-    def _write_settings(self, *keys: str, title: str = "Settings") -> bool:
+    def _write_settings(
+        self, *keys: str, title: str = "Settings", quiet: bool = False
+    ) -> dict | None:
         """Blocking part of ``save_settings``: a read-modify-write of only ``keys``, so a hand
         edit made since the last reload is kept (and picked up by the next refresh). The values
-        are read under ``_save_lock``: of two quick menu saves, the last one wins."""
+        are read under ``_save_lock``: of two quick menu saves, the last one wins. Returns the
+        values written, or None on failure (``quiet``: no notice, for the retry of unsaved
+        keys)."""
         with self._save_lock:
             values = {key: self._setting(key) for key in keys}
             edited = self._mtime() != self._config_mtime  # changed on disk, not reloaded yet
@@ -1204,36 +1281,72 @@ class Controller:
                     mtime = self._mtime()
                 if not edited:
                     self._config_mtime = mtime  # our own write: nothing to reload
-                return True
             except ValueError:  # invalid TOML (mid-edit?): don't overwrite the user's file
                 log.warning("config.toml could not be parsed; %s not saved", ", ".join(keys))
-                self._restore_from_disk(keys)
-                self.post_notice(f"{title} not saved", "config.toml could not be parsed")
+                self._save_failed(
+                    values, f"{title} not saved", "config.toml could not be parsed", quiet
+                )
             except ConfigLockTimeout:
                 log.warning("settings not saved: config lock timed out")  # no traceback
-                self._restore_from_disk(keys)
-                self.post_notice("Settings not saved", "config.toml is locked by another process")
+                reason = "config.toml is locked by another process"
+                self._save_failed(values, "Settings not saved", reason, quiet)
             except Exception:
-                log.exception("saving settings failed")
-                self._restore_from_disk(keys)
-                self.post_notice("Settings not saved", "config.toml could not be written")
-            return False
+                if quiet:
+                    log.warning("saving settings failed again")
+                else:
+                    log.exception("saving settings failed")
+                self._save_failed(
+                    values, "Settings not saved", "config.toml could not be written", quiet
+                )
+            else:
+                self._unpin(values)
+                if quiet:
+                    log.info("unsaved settings saved: %s", ", ".join(keys))
+                return values
+        return None
 
-    def _restore_from_disk(self, keys) -> None:
-        """A failed write leaves config.toml as it was: put the menu's in-memory value of
-        exactly ``keys`` back to what the file says, so the menu doesn't show a change that
-        would silently vanish on restart. Caller holds ``_save_lock``."""
+    def _save_failed(self, tried: dict, heading: str, reason: str, quiet: bool) -> None:
+        """A save of ``tried`` failed (caller holds ``_save_lock``): roll back what can be
+        rolled back; keep the rest pinned as unsaved, retried by each refresh."""
+        self._restore_from_disk(tried)
+        pinned = set(tried) & NO_ROLLBACK_KEYS
+        with self._dirty_lock:
+            self._unsaved |= pinned
+        if not quiet:
+            self.post_notice(heading, f"{reason}. {UNSAVED_NOTE}" if pinned else reason)
+
+    def _restore_from_disk(self, tried: dict) -> None:
+        """A failed write leaves config.toml as it was: put the menu's in-memory value of each
+        key in ``tried`` ({dotted key: value this save tried to write}) back to what the file
+        says, so the menu doesn't show a change that would silently vanish on restart. The
+        menu re-reads cfg on every tick (macOS ``_render``, tray rebuild), so it follows.
+
+        A key is left alone when a newer click owns it: memory no longer holds the value this
+        save tried to write, or another save of the key is still pending (each pending save
+        holds one ``_dirty`` mark; this one holds its own). That save writes the newer value,
+        or restores it if it fails too. Keys in ``NO_ROLLBACK_KEYS`` are never restored.
+        Caller holds ``_save_lock``."""
+        if not set(tried) - NO_ROLLBACK_KEYS:
+            return
         try:
-            disk = load_config()
+            disk = load_config()  # first: the checks below then sit right before the writes
         except Exception:
             return  # unreadable file: keep memory, the next successful reload corrects it
+        with self._dirty_lock:  # a leaf lock: read the counts, nothing nested
+            pending = {k: self._dirty.get(k, 0) for k in tried}
+        keys = [k for k in tried if k not in NO_ROLLBACK_KEYS and pending[k] <= 1]
         for key in keys:
             if key == "transcription.languages":
                 tr, src = self.cfg.transcription, disk.transcription
-                with self._lang_lock:  # both together: save() pairs them
+                with self._lang_lock:  # check and write together: toggle_language takes it too
+                    raw = getattr(tr, "_raw_languages", None)
+                    if (list(raw) if raw is not None else list(tr.languages)) != tried[key]:
+                        continue  # a newer click owns it
                     tr._raw_languages = getattr(src, "_raw_languages", None)  # type: ignore[attr-defined]
                     tr.languages = list(src.languages)
                 continue
+            if self._setting(key) != tried[key]:  # checked right before the write
+                continue  # a newer click owns it
             *path, leaf = key.split(".")
             dst, ref = self.cfg, disk
             for name in path:
@@ -1305,6 +1418,7 @@ class Controller:
                         raise
                     if not edited:
                         self._config_mtime = mtime  # our own write: nothing to reload
+                    self._unpin(WINDOW_KEYS[k] for k in updates if k in WINDOW_KEYS)
                     if "mode" in updates:
                         self.apply_settings({"mode": updates["mode"]})
                 if "output_dir" in updates:
@@ -1432,54 +1546,36 @@ class Controller:
 
     def set_retention(self, days: int) -> None:
         """ "Delete audio after" menu (both shells): apply ``days`` in memory at once (the menu
-        check reads it), then save only this key and purge expired audio on a worker. Audio
-        is deleted only once the choice is saved (a failed save restores the value config.toml
-        holds, which the next start would use) and only if it is still the current choice (a
-        quick second click supersedes this one)."""
-        days, key = int(days), "transcription.audio_retention_days"
-        self._mark_dirty((key,), 1)  # a config reload before the write must not undo the click
-        previous = self.cfg.transcription.audio_retention_days
+        check reads it), then save only this key and purge expired audio on a worker, with
+        this click's value. Audio is deleted only once the choice is saved and only if it is
+        still the current choice (a quick second click supersedes this one). A failed save is
+        rolled back by ``_restore_from_disk`` alone (this save holds the key's only pending
+        mark, as ``save_settings`` does); this method only asks the menus to re-render."""
+        days = int(days)
+        self._mark_dirty((RETENTION_KEY,), 1)  # a reload before the write must keep the click
         self.cfg.transcription.audio_retention_days = days
 
         def apply() -> None:
             try:
-                saved = self.write_settings(key, title="Delete audio after")
+                saved = self._write_settings(RETENTION_KEY, title="Delete audio after")
             finally:
-                self._mark_dirty((key,), -1)
+                self._mark_dirty((RETENTION_KEY,), -1)
+            if saved is None:  # rolled back (or kept for a newer click): the shells re-render
+                self.events.put(("retention_changed",))  # on the UI thread (cached tray menu)
+                return
             with self._retention_lock:  # serialises menu purges; the check sees the latest
                 if self.cfg.transcription.audio_retention_days != days:
                     return  # a newer click owns the setting now
-                if saved:
-                    if n := len({wav.parent for wav in self.purge_audio_now(days) or ()}):
-                        # count only: a mis-click is visible, no session names or text
-                        what = f"{n} session" + ("s" if n != 1 else "")
-                        self.post_notice("Delete audio after", f"Deleted audio of {what}")
-                    return
-                # not in config.toml: show what the next start will use; the shells re-render
-                # the submenu on the UI thread (the tray's native menu is cached)
-                self.cfg.transcription.audio_retention_days = self._saved_retention(previous)
-            self.events.put(("retention_changed",))
+                if n := len({wav.parent for wav in self.purge_audio_now(days) or ()}):
+                    # count only: a mis-click is visible, no session names or text
+                    what = f"{n} session" + ("s" if n != 1 else "")
+                    self.post_notice("Delete audio after", f"Deleted audio of {what}")
 
         try:
             threading.Thread(target=apply, daemon=True, name="retention-set").start()
-        except Exception:
-            self._mark_dirty((key,), -1)
+        except BaseException:
+            self._mark_dirty((RETENTION_KEY,), -1)  # apply() will never unmark
             raise
-
-    def _saved_retention(self, fallback: int) -> int:
-        """``audio_retention_days`` as config.toml holds it (a plain read: no lock, and no
-        default file is created), or ``fallback`` when there is no readable file. Edge case:
-        with config.toml unreadable (mid-edit), ``fallback`` (the value before this click)
-        may itself be an earlier click that was never saved; the next readable reload or
-        start corrects it. Nothing is purged for an unsaved click either way."""
-        try:
-            if CONFIG_PATH.exists():
-                return int(load_config().transcription.audio_retention_days)
-        except Exception as e:  # mid-edit TOML, unreadable file
-            log.warning(
-                "config.toml unreadable (%s); keeping the previous retention", type(e).__name__
-            )
-        return fallback
 
     def sensitivity_preset(self) -> str | None:
         return current_preset(self.cfg.detection)
