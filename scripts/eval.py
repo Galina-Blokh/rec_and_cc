@@ -16,6 +16,9 @@ speaker turns come from the real diarizer. Reported per language and overall:
   no collar, best one-to-one speaker mapping.
 - speed: transcription real-time factor (total time / total audio) and diarization
   seconds per clip.
+- live caption latency (``--live``): the clip is replayed through ``LiveTranscriber`` as
+  capture feeds it (100 ms blocks, each arriving when its audio ends); per emitted segment,
+  seconds from the arrival of the block holding its end to its emission. p50 / p90 / max.
 
 Runs offline once the models are on disk. Prints scores only, never transcript text.
 """
@@ -31,6 +34,8 @@ import tempfile
 import time
 import unicodedata
 from collections import defaultdict
+from concurrent.futures import FIRST_COMPLETED, Future
+from concurrent.futures import wait as futures_wait
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +46,7 @@ import soundfile as sf
 from recandcc.models import SAMPLE_RATE, Segment, SessionInfo, Track, TriggerKind
 
 FRAME_S = 0.01
+BLOCK = SAMPLE_RATE // 10  # capture delivers ~100 ms blocks
 
 
 @dataclass(frozen=True)
@@ -235,8 +241,75 @@ def der(ref: list[tuple[float, float, str]], hyp: list[tuple[float, float, str]]
     }
 
 
+# -------------------------------------------------------------------------- live latency
+class ReplayClock:
+    """Seconds since the replay started, as the live transcriber would see them in real time.
+
+    While a region is being transcribed the replay runs in real time (the model's speed is what
+    is measured). While nothing is in flight, waiting changes nothing, so it is skipped.
+    """
+
+    def __init__(self) -> None:
+        self.t0, self.skipped = time.monotonic(), 0.0
+
+    def __call__(self) -> float:
+        return time.monotonic() - self.t0 + self.skipped
+
+    def wait(self, seconds: float, pending: list[Future]) -> None:
+        if pending:  # like the live worker: wake up early when a region is done
+            futures_wait(pending, timeout=seconds, return_when=FIRST_COMPLETED)
+        else:
+            self.skipped += seconds
+
+
+def arrival(end: float, samples: int) -> float:
+    """When the capture block holding time `end` reaches the live transcriber."""
+    block = math.ceil(round(end * SAMPLE_RATE) / BLOCK) * BLOCK
+    return min(block, samples) / SAMPLE_RATE
+
+
+def replay_live(
+    audio: np.ndarray, track: Track, transcriber, session: SessionInfo, clock=None
+) -> list[float]:
+    """Replay `audio` through a LiveTranscriber; per emitted segment, its caption latency (s)."""
+    from recandcc.transcribe.live import LiveTranscriber, live_vad
+
+    transcriber.ensure_loaded()  # the app loads the models before the session starts
+    live_vad(np.zeros(SAMPLE_RATE, dtype=np.float32))  # ... and has the VAD warm
+    clock = clock or ReplayClock()
+    emitted: list[tuple[float, float]] = []  # (segment end, emitted at)
+
+    def on_segments(segs: list[Segment]) -> None:
+        emitted.extend((s.end, clock()) for s in segs)
+
+    live = LiveTranscriber(transcriber, session, on_segments, clock=clock, start=False)
+    pos, n = 0, len(audio)
+    while pos < n:  # one iteration per live worker step, driven here instead of its thread
+        now = clock() * SAMPLE_RATE
+        upto = n if now >= n else int(now) // BLOCK * BLOCK
+        for i in range(pos, upto, BLOCK):
+            live.feed(track, i, audio[i : min(i + BLOCK, upto)])
+        pos = max(pos, upto)
+        live._step(False)
+        jobs = [j.future for tb in live._tracks.values() for j in tb.jobs if j.future]
+        clock.wait(live.step_s, [f for f in jobs if not f.done()])
+    live._step(True)  # recording stopped: the tail is transcribed and emitted
+    return [round(t - arrival(end, n), 3) for end, t in emitted]
+
+
+def latency_summary(latencies: list[float]) -> dict:
+    out: dict = {"segments": len(latencies)}
+    if latencies:
+        a = np.asarray(latencies, dtype=float)
+        for k, q in (("p50_s", 50), ("p90_s", 90), ("max_s", 100)):
+            out[k] = round(float(np.percentile(a, q)), 3)
+    return out
+
+
 # ----------------------------------------------------------------------------- pipeline
-def run_clip(clip: Clip, transcriber, diarizer, root: Path | None = None) -> dict:
+def run_clip(
+    clip: Clip, transcriber, diarizer, root: Path | None = None, live: bool = False
+) -> dict:
     """Transcribe (and for "others", diarize) a temporary copy of the clip."""
     with tempfile.TemporaryDirectory(prefix="clip-", dir=root) as tmp:
         session = SessionInfo(
@@ -261,6 +334,11 @@ def run_clip(clip: Clip, transcriber, diarizer, root: Path | None = None) -> dic
         result["text"] = text_scores(clip.utterances, segs)
         m = session.metrics.get("transcription", {})
         result["audio_s"], result["elapsed_s"] = m.get("audio_s"), m.get("elapsed_s")
+        if live:
+            from recandcc.transcribe.chunking import load_track
+
+            lat = replay_live(load_track(clip.audio), clip.track, transcriber, session)
+            result["live"] = {**latency_summary(lat), "latencies_s": lat}
     return result
 
 
@@ -283,15 +361,23 @@ def summarize(results: list[dict]) -> dict:
     d = [r["diarization"] for r in results if "diarization" in r]
     speech = sum(x["speech_s"] for x in d)
     errors = sum(x["error_s"] for x in d)  # false alarms on clips without reference speech count
+    live = [x for r in results if "live" in r for x in r["live"]["latencies_s"]]
     timed = [r for r in results if r.get("audio_s") and r.get("elapsed_s") is not None]
     audio = sum(r["audio_s"] for r in timed)
     return {
         "languages": per_lang,
         "der": round(errors / speech, 4) if speech else None,
         "rtf": round(sum(r["elapsed_s"] for r in timed) / audio, 3) if audio else None,
+        "live": latency_summary(live) if any("live" in r for r in results) else None,
         "clips": len(results),
         "clips_without_der": sum(1 for r in results if r.get("diarization_ok") is False),
     }
+
+
+def live_line(v: dict) -> str:
+    if not v["segments"]:
+        return "no segments"
+    return f"p50 {v['p50_s']} s, p90 {v['p90_s']} s, max {v['max_s']} s ({v['segments']} segments)"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -299,6 +385,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("root", type=Path, help="eval set folder containing manifest.json")
     p.add_argument("--model", help="Whisper model (default: from config)")
     p.add_argument("--no-diarize", action="store_true", help="skip DER")
+    p.add_argument("--live", action="store_true", help="also measure live caption latency")
     p.add_argument("--json", type=Path, default=Path("eval-results.json"))
     args = p.parse_args(argv)
 
@@ -319,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
             diarizer.diarize(np.zeros(SAMPLE_RATE, dtype=np.float32))
         # one private (0700, created atomically) folder per run, removed by this run only
         with tempfile.TemporaryDirectory(prefix="rcc-eval-") as root:
-            results = [run_clip(c, transcriber, diarizer, Path(root)) for c in clips]
+            results = [run_clip(c, transcriber, diarizer, Path(root), args.live) for c in clips]
     finally:
         transcriber.close()
         if diarizer is not None:
@@ -332,6 +419,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  warning: diarization failed on {s['clips_without_der']} clip(s), not in DER")
     for lang, v in s["languages"].items():
         print(f"  {lang:<4} WER {v['wer']}  language-ID {v['lid_accuracy']}  ({v['words']} words)")
+    if s["live"] is not None:
+        for name, v in [("all", s["live"])] + [(r["id"], r["live"]) for r in results]:
+            print(f"  live {name}: {live_line(v)}")
     print(f"details: {args.json}")
     return 0
 
