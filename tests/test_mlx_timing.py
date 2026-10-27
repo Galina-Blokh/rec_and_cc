@@ -237,6 +237,24 @@ def test_find_alignment_runs_on_mlx_with_numpy_kernels():
     assert 0 <= out[0].start <= out[0].end <= out[1].start <= out[1].end <= frames / 50
 
 
+@pytest.mark.parametrize(("tokens", "num_frames"), [([10, 11], 1), ([], 200)])
+def test_empty_window_or_no_text_tokens_yield_no_words_and_never_raise(tokens, num_frames):
+    """A 1-frame tail window has zero alignment columns, and no tokens nothing to align:
+    both return no words before touching the model (no mlx needed)."""
+    assert mlx_timing.find_alignment(None, None, tokens, None, num_frames) == []
+
+    segments = [{"seek": 0, "start": 0.0, "end": 0.02, "tokens": [*tokens, 100]}]
+    mlx_timing.add_word_timestamps(
+        segments=segments,
+        model=None,
+        tokenizer=types.SimpleNamespace(eot=100),
+        mel=None,
+        num_frames=num_frames,
+        last_speech_timestamp=0.0,
+    )
+    assert segments[0].get("words", []) == []
+
+
 def test_numba_and_scipy_are_never_imported():
     code = (
         "import sys\n"
