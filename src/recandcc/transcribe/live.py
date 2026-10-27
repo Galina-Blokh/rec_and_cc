@@ -219,7 +219,6 @@ class LiveTranscriber:
         # "Speaker N" labels for Others captions (display only, see live_speakers.py)
         if labeler is None and getattr(self.cfg, "live_speaker_labels", False):
             labeler = SpeakerLabeler(clock=clock)
-            labeler.warm()  # load the speaker model now, off the first caption's critical path
         self._labeler = labeler
 
         self._inq: queue.SimpleQueue = queue.SimpleQueue()
@@ -309,6 +308,10 @@ class LiveTranscriber:
     # ------------------------------------------------------------------ worker
     def _run(self) -> None:
         try:
+            if self._labeler is not None:
+                # load the speaker model now, off the first caption's critical path; started here
+                # (not in __init__) so a transcriber that never runs leaks no thread
+                self._labeler.warm()
             self._run_inner()
         finally:
             if self._labeler is not None:

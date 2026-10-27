@@ -5,8 +5,11 @@ Stories: US-33.
 
 from __future__ import annotations
 
+import os
+import sys
 import threading
 import time
+import types
 
 import numpy as np
 import pytest
@@ -101,15 +104,41 @@ def test_short_segment_inherits_only_after_a_recent_one():
     lab.close()
 
 
-def test_extractor_load_failure_is_remembered(monkeypatch):
-    calls = []
-    monkeypatch.setattr(diarize, "model_path", lambda *a, **k: calls.append(1) or "/x")
-    monkeypatch.setitem(__import__("sys").modules, "sherpa_onnx", None)  # import fails
-    lab = SpeakerLabeler()
+def _fake_sherpa(monkeypatch, fail: list[bool]) -> list[int]:
+    """A fake sherpa_onnx whose extractor fails while fail[0]; returns the load-attempt log."""
+    loads: list[int] = []
+
+    class Cfg:
+        def __init__(self, model, num_threads):
+            pass
+
+    class Extractor:
+        def __init__(self, cfg):
+            loads.append(1)
+            if fail[0]:
+                raise RuntimeError("bad model")
+
+    mod = types.SimpleNamespace(
+        SpeakerEmbeddingExtractorConfig=Cfg, SpeakerEmbeddingExtractor=Extractor
+    )
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", mod)
+    return loads
+
+
+def test_extractor_load_failure_is_remembered_until_the_model_file_changes(monkeypatch, tmp_path):
+    model = tmp_path / "model.onnx"
+    model.write_bytes(b"broken")
+    monkeypatch.setattr(diarize, "model_path", lambda *a, **k: model)
+    fail = [True]
+    loads = _fake_sherpa(monkeypatch, fail)
     for _ in range(3):
-        assert embed(lab, long_audio()) is None
-    assert len(calls) == 1  # not retried for every segment
-    lab.close()
+        assert live_speakers._get_extractor() is None
+    assert len(loads) == 1  # not retried for every segment
+    fail[0] = False
+    model.write_bytes(b"verified copy")  # replaced: new mtime
+    os.utime(model, (time.time() + 10, time.time() + 10))
+    assert live_speakers._get_extractor() is not None
+    assert len(loads) == 2
 
 
 def test_expired_requests_are_skipped_not_embedded():
@@ -251,9 +280,18 @@ def test_a_finished_embedding_wakes_the_worker(tmp_path, emitted):
     job.future.result(5)
     while not job.emb_futs:
         time.sleep(0.01)
-    live._wake.clear()
+    # The transcription future's own callback may set live._wake at any time, so the event
+    # alone proves nothing: count wake-ups that happen after the embedding future is done.
+    wakes = []
+    real_set = live._wake.set
+    live._wake.set = lambda: (wakes.append(job.emb_futs[0].done()), real_set())[1]  # type: ignore[method-assign]
     gate.set()
-    assert live._wake.wait(5)
+    deadline = time.monotonic() + 5
+    while True:
+        assert time.monotonic() < deadline
+        if any(wakes):
+            break
+        time.sleep(0.01)
     lab.close()
 
 
@@ -275,7 +313,11 @@ def test_others_captions_stay_in_order_behind_a_stalled_job(tmp_path, emitted):
     live._step(False)
     feed(np.concatenate([burst(2.5, amp=0.9), silence(1.5)]))
     live._step(False)
-    time.sleep(0.5)
+    deadline = time.monotonic() + 5
+    jobs = live._tracks[Track.OTHERS].jobs
+    while not (len(jobs) == 2 and jobs[1].future.done()):  # both transcriptions finished
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
     live._step(False)
     assert emitted == []  # the second phrase waits behind the first
     clock[0] += EMBED_WAIT_S + 0.1
@@ -285,3 +327,46 @@ def test_others_captions_stay_in_order_behind_a_stalled_job(tmp_path, emitted):
     assert [s.start for s in emitted] == sorted(s.start for s in emitted)
     assert len(emitted) == 2
     lab.close()
+
+
+def test_me_is_held_while_an_others_job_waits_for_embeddings(tmp_path, emitted):
+    clock = [100.0]
+    gate = threading.Event()
+    lab = SpeakerLabeler(embedder=lambda a: gate.wait(10) and vec(0), clock=lambda: clock[0])
+    live = manual(
+        FakeTranscriber(),
+        make_session(tmp_path, (Track.OTHERS, Track.ME)),
+        emitted,
+        labeler=lab,
+        clock=lambda: clock[0],
+        echo_hold_s=0.1,
+    )
+    Feeder(live, Track.OTHERS)(np.concatenate([silence(1), burst(2.5), silence(1.5)]))
+    Feeder(live, Track.ME)(np.concatenate([silence(2), burst(1.5), silence(1.5)]))
+    live._step(False)
+    deadline = time.monotonic() + 5
+    while not all(j.future.done() for tb in live._tracks.values() for j in tb.jobs):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    live._step(False)  # Me is collected and held; Others waits for its stalled embedding
+    assert emitted == []
+    clock[0] += 0.2  # past echo_hold_s, before the embedding deadline (EMBED_WAIT_S)
+    live._step(False)
+    assert emitted == []  # Me must not jump ahead of the Others caption
+    clock[0] += EMBED_WAIT_S + 0.1
+    live._step(False)
+    assert [s.speaker for s in emitted] == ["Others", "Me"]  # start order, each once
+    live._step(True)
+    assert len(emitted) == 2
+    gate.set()
+    lab.close()
+
+
+def test_transcriber_that_never_runs_starts_no_labeler_thread(tmp_path, emitted):
+    tr = FakeTranscriber()
+    tr.cfg.live_speaker_labels = True
+    before = set(threading.enumerate())
+    live = manual(tr, make_session(tmp_path), emitted)
+    assert live._labeler is not None
+    assert live._labeler._thread is None
+    assert set(threading.enumerate()) == before

@@ -19,6 +19,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -38,36 +39,48 @@ CLOSE_JOIN_S = 0.5
 Embedder = Callable[[np.ndarray], np.ndarray | None]
 
 # One CAM++ extractor per process (loading takes longer than the live deadline), created lazily
-# on a labeler thread. A failed load is remembered so it is not retried for every segment.
+# on a labeler thread. A failed load is remembered (with the model's path and mtime) so it is
+# not retried for every segment, but is retried once the model file changes.
 _extractor_lock = threading.Lock()
 _extractor: Any = None
-_extractor_failed = False
+_extractor_failed: tuple[str, float] | None = None  # (path, mtime) of the model that failed
 _compute_lock = threading.Lock()  # an extractor is not shared between concurrent computes
 
 
 def _reset_extractor_cache() -> None:  # tests
     global _extractor, _extractor_failed
     with _extractor_lock:
-        _extractor, _extractor_failed = None, False
+        _extractor, _extractor_failed = None, None
+
+
+def _model_key(path: Any) -> tuple[str, float]:
+    try:
+        return str(path), Path(path).stat().st_mtime
+    except OSError:
+        return str(path), 0.0
 
 
 def _get_extractor() -> Any:
     """The shared extractor, or None: model not on disk (checked again next time, it may be
-    downloaded later) or it failed to load (remembered)."""
+    downloaded later) or it failed to load (remembered until the model file changes)."""
     global _extractor, _extractor_failed
     with _extractor_lock:
-        if _extractor is not None or _extractor_failed:
+        if _extractor is not None:
             return _extractor
         path = diarize.model_path(download=False)
         if path is None:
+            return None
+        key = _model_key(path)
+        if _extractor_failed == key:
             return None
         try:
             import sherpa_onnx
 
             cfg = sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(path), num_threads=1)
             _extractor = sherpa_onnx.SpeakerEmbeddingExtractor(cfg)
+            _extractor_failed = None
         except Exception as e:  # noqa: BLE001 - ImportError (Windows) or a bad model
-            _extractor_failed = True
+            _extractor_failed = key
             log.debug("live speaker labels off: cannot load the speaker model: %s", e)
         return _extractor
 
@@ -221,7 +234,8 @@ class SpeakerLabeler:
             self._closed = True
             thread = self._thread
         self._stop.set()  # the thread checks it between jobs, even with a full queue
-        self._embedder = _no_embedder  # release the extractor reference
+        # the extractor itself stays in the module cache (shared, slow to load) for the next session
+        self._embedder = _no_embedder
         while True:  # fail what is still queued so nobody waits on it
             try:
                 _, fut, _ = self._q.get_nowait()
