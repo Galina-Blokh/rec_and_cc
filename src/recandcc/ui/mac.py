@@ -44,6 +44,7 @@ from .present import (
     MODE_LABELS,
     check,
     dialog_timeout,
+    language_menu,
     live_transcript_target,
     onboarding_accepted,
     onboarding_script,
@@ -53,6 +54,8 @@ from .present import (
     prompt_notice,
     record_item_title,
     retention_label,
+    search_notice,
+    search_open_target,
     transcribed_notice,
 )
 
@@ -116,6 +119,9 @@ class MacApp(rumps.App):
             item.retention_days = days  # pyright: ignore[reportAttributeAccessIssue]
             self.retention_menu.add(item)
         self._render_retention()
+        self.lang_menu = rumps.MenuItem("Languages")
+        self._lang_sig: list | None = None
+        self._render_languages()
         self.captions_item = rumps.MenuItem("Show live captions", callback=self._toggle_captions)
         self.captions_item.state = check(self.cfg.live_captions)
         self.live_open_item = rumps.MenuItem("Open live transcript")
@@ -134,6 +140,7 @@ class MacApp(rumps.App):
             None,
             self.perm_menu,
             self.login_item,
+            self.lang_menu,
             self.retention_menu,
             rumps.MenuItem("Edit settings", callback=lambda _: open_path(CONFIG_PATH, True)),
             rumps.MenuItem("Reveal logs", callback=lambda _: reveal_logs()),
@@ -213,6 +220,7 @@ class MacApp(rumps.App):
         if self.rec_item.title != rec_title:
             self.rec_item.title = rec_title
         self.login_item.state = check(autostart.is_enabled())
+        self._render_languages()
         self._render_live(st)
         # close a stale prompt dialog (answered elsewhere, expired, mode changed, ...)
         with self._dialog_lock:
@@ -309,6 +317,25 @@ class MacApp(rumps.App):
         for item in self.retention_menu.values():
             item.state = check(getattr(item, "retention_days", None) == days)
 
+    def _render_languages(self) -> None:
+        """(Re)build the Languages submenu when the setting changed (menu or config.toml)."""
+        rows = language_menu(self.cfg.transcription.languages)
+        if rows == self._lang_sig:
+            return
+        if self._lang_sig is not None:
+            self.lang_menu.clear()
+        self._lang_sig = rows
+        for code, title, on in rows:
+            # rumps greys out an item that has no callback: the "Also from settings" row
+            item = rumps.MenuItem(title, callback=None if code is None else self._set_language)
+            item.language_code = code  # pyright: ignore[reportAttributeAccessIssue]
+            item.state = check(on)
+            self.lang_menu.add(item)
+
+    def _set_language(self, sender) -> None:
+        self.ctrl.toggle_language(sender.language_code)
+        self._render_languages()
+
     def _set_retention(self, sender) -> None:
         self.cfg.transcription.audio_retention_days = sender.retention_days
         self._render_retention()
@@ -393,11 +420,8 @@ class MacApp(rumps.App):
         threading.Thread(target=run, daemon=True, name="search-dialog").start()
 
     def _show_hits(self, query: str, hits) -> None:
-        if isinstance(hits, Exception):
-            self._notify("Search failed", str(hits))
-            return
-        if not hits:
-            self._notify("Search", "No matches")  # not the query: _notify may log it
+        if notice := search_notice(hits):
+            self._notify(*notice)
             return
         labels = [f"{i}. {search_hit_label(h)}"[:200] for i, h in enumerate(hits, 1)]
         script = (
@@ -408,12 +432,7 @@ class MacApp(rumps.App):
         def run():
             number = osascript(script).partition(".")[0]
             if number.isdigit() and 0 < int(number) <= len(hits):
-                hit = hits[int(number) - 1]
-                try:
-                    found = hit.transcript.exists()
-                except OSError:  # e.g. an unreachable volume
-                    found = False
-                open_path(hit.transcript if found else hit.folder)
+                open_path(search_open_target(hits[int(number) - 1]))
 
         threading.Thread(target=run, daemon=True, name="search-results").start()
 
