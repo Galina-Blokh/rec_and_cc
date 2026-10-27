@@ -114,6 +114,8 @@ Menu items:
 - **Recent transcripts**: the last 10, click to open.
 - **Search transcripts…**: full-text search across all your transcripts (English, Russian,
   any language); pick a match to open its transcript. Same as `recandcc search`.
+- **Export latest transcript (DOCX + PDF)**: writes `transcript.docx` and `transcript.pdf`
+  next to the newest transcript. Same as `recandcc export`.
 - **Open transcripts folder**
 - **Permissions**: status and "Grant…" actions.
 - **Launch at login**: starts RecAndCC every time you log in. Turn it on once.
@@ -220,6 +222,7 @@ repo):
 | `recandcc record --seconds 60 [--no-mic]` | Record now without the UI; prints the text live as it is spoken, then the transcript path |
 | `recandcc transcribe <session_dir>` | (Re-)transcribe a recorded session |
 | `recandcc monitor` | Live view of which apps do audio and how the rules classify them. Use it to tune the app lists |
+| `recandcc export <session-folder> [--format docx\|pdf\|both]` | Write `transcript.docx` and/or `transcript.pdf` next to the session's transcript (speakers, timestamps, Hebrew right to left); the PDF needs a system font with Latin, Cyrillic and Hebrew (Arial or DejaVu Sans) |
 | `recandcc search "<words>" [--limit N]` | Search all transcripts; prints each match's date, time in the recording, speaker, the text and the transcript path |
 | `recandcc devices` | List audio devices |
 | `recandcc autostart on\|off\|status` | Launch at login |

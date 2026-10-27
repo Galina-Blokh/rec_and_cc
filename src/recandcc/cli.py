@@ -278,6 +278,20 @@ def cmd_search(args) -> int:
     return 0
 
 
+def cmd_export(args) -> int:
+    setup_logging(to_file=False, level=logging.WARNING)
+    from .transcribe.export import ExportError, export_session
+
+    try:
+        paths = export_session(Path(args.session_dir).expanduser(), args.format)
+    except ExportError as e:
+        print(f"Can't export: {e}", file=sys.stderr)
+        return 1
+    for p in paths:
+        print(p)
+    return 0
+
+
 def cmd_config(args) -> int:
     from .cloudsync import cloud_sync_provider, warning_text
 
@@ -394,6 +408,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("query")
     s.add_argument("--limit", type=int, default=20, help="show at most N matches")
     s.set_defaults(func=cmd_search)
+
+    e = sub.add_parser("export", help="export a session's transcript to DOCX and/or PDF")
+    e.add_argument("session_dir")
+    e.add_argument("--format", choices=["docx", "pdf", "both"], default="both")
+    e.set_defaults(func=cmd_export)
 
     sub.add_parser("devices", help="list audio devices").set_defaults(func=cmd_devices)
 

@@ -399,6 +399,26 @@ class Controller:
 
         threading.Thread(target=run, daemon=True, name="search").start()
 
+    def export_async(self, transcript: Path) -> None:
+        """Export a session's transcript to DOCX + PDF off the UI thread; posts a ``notice``
+        (never the transcript text)."""
+
+        def run() -> None:
+            try:
+                from ..transcribe.export import ExportError, export_session
+
+                try:
+                    paths = export_session(transcript.parent, "both")
+                    msg = "Saved " + " and ".join(p.name for p in paths)
+                except ExportError as e:
+                    msg = str(e)
+            except Exception:  # noqa: BLE001
+                log.exception("transcript export failed")
+                msg = "See the log for details"
+            self.events.put(("notice", "Export", msg))
+
+        threading.Thread(target=run, daemon=True, name="export").start()
+
     # --- live transcription (engine thread)
     def _on_session_start(self, session: SessionInfo) -> None:
         if not self.cfg.transcription.live or self.transcriber is None:

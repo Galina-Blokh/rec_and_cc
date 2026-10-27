@@ -131,6 +131,7 @@ class MacApp(rumps.App):
             rumps.MenuItem("Open transcripts folder", callback=self._open_folder),
             self.recent_menu,
             rumps.MenuItem("Search transcripts…", callback=self._search),
+            rumps.MenuItem("Export latest transcript (DOCX + PDF)", callback=self._export),
             None,
             self.perm_menu,
             self.login_item,
@@ -339,6 +340,13 @@ class MacApp(rumps.App):
     def _open_folder(self, _sender) -> None:
         if err := open_output_folder(self.cfg.output_dir):
             self._notify("Can't open transcripts folder", err)
+
+    def _export(self, _sender) -> None:
+        recent = self.ctrl.recent
+        if not recent:
+            self._notify("Export", "No transcripts yet")
+            return
+        self.ctrl.export_async(recent[0])
 
     def _open_recent(self, sender) -> None:
         open_path(sender.path)
