@@ -29,9 +29,10 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-18 | Runs on Windows | 🟡 untested on Windows hardware (none available; #5 not planned) |
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 language ID checked on a synthetic he/en/ru set; no real Hebrew recordings, ivrit.ai routing not evaluated (#6) |
 | US-20 | Search my transcripts | ✅ search (summaries and export: see US-27, US-25) |
-| US-21 | Speaker names remembered across sessions | 🟡 CLI (#62) and macOS menu (US-26, #76); self-intro hints (#81) and overlap segmentation (#96) shipped (#1) |
-| US-26 | Name speakers and forget voices from the menu | 🟡 macOS menu (first lines and an audio sample); Windows tray not yet (#1) |
+| US-21 | Speaker names remembered across sessions | 🟡 CLI (#62), macOS menu and Windows tray (US-26, #76); self-intro hints (#81) and overlap segmentation (#96) shipped (#1) |
+| US-26 | Name speakers and forget voices from the menu | 🟡 macOS menu (first lines and an audio sample) and Windows tray (tray untested on Windows hardware) (#1) |
 | US-31 | Speaker names from the call app's participant list | 🟡 shipped (#80, #1 A.3): opt-in, macOS, one-to-one only |
+| US-35 | Call-app names in a room recording a call joined | 🟡 claimed (#1): fake-tested; older transcripts stay unnamed |
 | US-25 | Export a transcript to DOCX and PDF | 🟡 CLI, macOS menu and Windows tray; templates planned (#4) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
 | US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
@@ -315,7 +316,9 @@ don't need the command line for it.*
   was purged or is missing, or a session is recording (it would record the sample), **then**
   there is no "Play sample" button, only the first lines. A label from a call is never
   played from the user's own mic track.
-- **Not yet:** the Windows tray items (#1).
+- **Given** Windows, **then** the tray has the same two items; its dialogs are small tkinter
+  windows on worker threads and time out as Cancel (unit-tested with fake dialogs, not yet
+  checked on Windows hardware).
 
 ### US-31 Speaker names from the call app's participant list
 *As the owner, I want `Speaker 2` named after the person shown in Zoom/Teams/Meet, so that I
@@ -341,6 +344,25 @@ don't have to name them myself, without the app ever asking for more permission 
 - **Not yet:** matching several speakers to several names (needs active-speaker highlighting),
   tested layouts for each app version (see ARCHITECTURE). Shipped: the participant-list names
   (#80); the self-introduction hints (A.4, #81) are under US-21.
+
+### US-35 Call-app names in a room recording a call joined
+*As the owner, I want the remote speaker of a call that joined a room recording named after the
+call app's participant, like in any other call, without ever being renamed myself.*
+
+- **Given** a room recording that a call upgraded (both tracks diarized), **when** the
+  transcript is written, **then** every speaker label records the track it came from
+  (`"track": "me"` or `"others"` on its segments in `transcript.json`), and naming a speaker
+  later keeps it.
+- **Given** `names_from_call_app` and `speaker_names` are on, **when** the call app's names are
+  applied, **then** only labels from the call's (system audio) track are counted and can be
+  named, under the US-31 rules (as many names as call-side speakers, voice-matched speakers
+  match names, one `Speaker N` and one name left, a disagreeing self-introduction wins).
+  People in the room, including the owner numbered `Speaker N`, are never named or counted.
+- **Given** a transcript written before labels carried their track, or a label whose track is
+  unknown or mixed, **then** nothing is assigned and the kept names are deleted (fail closed).
+- **Then** the rename checks the label's track again under `NAMING_LOCK`, a "forget all" since
+  the session began names nobody, and names appear nowhere in logs at INFO or above.
+- **Not yet:** a lone remote speaker keeps `Others`, which is never named (as in US-31).
 
 ### US-25 Export a transcript to DOCX and PDF
 *As the owner, I want a transcript as a Word or PDF file, so that I can share or print it.*

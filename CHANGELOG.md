@@ -7,6 +7,8 @@ All notable changes to RecAndCC are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Windows tray: "Recent transcripts → Name speakers…" (with `speaker_names = true`) and
+  "Forget all voices…" (confirmed), the same Controller calls as the macOS menu (#1).
 - Opt-in semantic transcript search (`[search] semantic = true`): a pinned, checksum-verified
   multilingual sentence model, downloaded once, merged with full-text results (#4).
 - RecAndCC is licensed under the Apache License 2.0 (`LICENSE`, `NOTICE`); completes #17.
@@ -91,6 +93,13 @@ All notable changes to RecAndCC are documented here. The format is based on
   (#36, #54, #55).
 
 ### Fixed
+- A recording cut off by a crash, force-quit or power loss is transcribed at the next start:
+  its end time comes from the audio on disk, and `session.json` marks it `recovered`. A full
+  disk at stop no longer keeps a session's end time off disk (#150).
+  A recovered session follows the normal retention rules: if it is already older than
+  `audio_retention_days`, the next hourly retention run deletes its audio once it is
+  transcribed. `recandcc record` keeps a `.recording.lock` in the session folder while it
+  records, so the app never finishes that session early.
 - PDF export no longer silently drops characters its font lacks: bidi controls are stripped
   and emoji or other uncovered glyphs become a visible placeholder (part of #4).
 - A summary stays at the top of DOCX/PDF exports after a speaker rename or call-app names:

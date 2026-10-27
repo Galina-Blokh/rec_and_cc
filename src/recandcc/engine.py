@@ -259,6 +259,10 @@ class Engine:
         self._wake = threading.Event()
         self._stop_evt = threading.Event()
         self._thread: threading.Thread | None = None
+        # shutdown() gave up waiting for the engine thread: it stops the recording on exit
+        # (guarded by _lock, like _thread_exited, so exactly one of them stops it).
+        self._stop_on_exit = False
+        self._thread_exited = True
         self._last_state_key = self._state_locked()._key()  # only report changes
 
     # ------------------------------------------------------------------ public API
@@ -279,11 +283,14 @@ class Engine:
         if self._thread is not None:
             return
         self._stop_evt.clear()
+        self._stop_on_exit, self._thread_exited = False, False
         self._thread = threading.Thread(target=self._run, name="engine", daemon=True)
         self._thread.start()
 
     def shutdown(self, timeout: float = 10.0) -> None:
-        """Stop polling, finish any recording (submitting it for transcription)."""
+        """Stop polling, finish any recording (submitting it for transcription). Returns
+        within about ``timeout``: a stop must not hang the caller (the main thread at quit)
+        on a recorder call the engine thread is stuck in."""
         self._stop_evt.set()
         self._wake.set()
         if self._thread is not None:
@@ -292,7 +299,16 @@ class Engine:
         with self._lock:
             rec = self._rec
             self._rec, self._prompt = None, None
-        if rec is not None:
+            # Still busy (e.g. inside recorder.start(), which holds the lock stop() needs):
+            # leave the stop to it, it runs when the engine thread returns.
+            handed_off = not self._thread_exited
+            self._stop_on_exit = handed_off
+        if handed_off:
+            log.warning(
+                "shutting down: the engine thread is busy; it stops the recording if it "
+                "finishes before the app exits"
+            )
+        elif rec is not None:
             self._do_stop()
         if self.room is not None:
             self.room.close()
@@ -353,6 +369,13 @@ class Engine:
                     log.exception("engine tick failed")
                 self._wake.wait(max(0.05, float(self.det.poll_interval_s)))
                 self._wake.clear()
+            with self._lock:
+                self._thread_exited = True
+                stop = self._stop_on_exit
+            # shutdown() didn't wait for us: finish the recording it left, unless the
+            # post-start stop in _do_start already did.
+            if stop and getattr(self.recorder, "is_recording", True):
+                self._do_stop(racing=True)
         finally:
             # Per-thread resources (Windows COM) must be released by the thread that polled.
             # Only that, so shutdown()'s join budget isn't spent on the full close().
@@ -603,7 +626,12 @@ class Engine:
                     break
 
             # --- new triggers
-            if self._rec is None and self._prompt is None and start_req is None:
+            if (
+                self._rec is None
+                and self._prompt is None
+                and start_req is None
+                and not self._stop_evt.is_set()  # shutting down: nothing new
+            ):
                 cands = [
                     a
                     for k, a in apps.items()
@@ -648,6 +676,8 @@ class Engine:
             self._do_stop()
         if start_req is not None:
             self._do_start(*start_req)
+            if self._stop_evt.is_set():
+                return  # shutting down: that session is stopped, so no prompt, no room mic
         if upgrade_req is not None:
             self._do_upgrade(*upgrade_req)
         if prompt_evt is not None and self.on_prompt:
@@ -687,7 +717,7 @@ class Engine:
         while another process uses the mic. While an app does audio, forget what was heard,
         so neither the pre-roll nor the speech window carry it into a room session."""
         room = self.room
-        if room is None:
+        if room is None or self._stop_evt.is_set():  # quitting: never reopen the mic
             return
         with self._lock:
             r = self._rec
@@ -811,6 +841,14 @@ class Engine:
                     self._suppressed.add(self._rec.key)  # don't retry every second
                 self._rec = None
             return
+        if self._stop_evt.is_set():
+            # shutdown() may have stopped waiting for us while start() ran: nobody else will
+            # stop this session, so finish it now as shutdown would (kept and submitted).
+            # Only the session this start created: never stop one that someone else ended.
+            if getattr(self.recorder, "session", session) is session:
+                log.info("shutting down: stopping the recording that just started")
+                self._do_stop(racing=True)
+            return
         with self._lock:
             if self._rec is not None:
                 self._rec.session = session
@@ -884,7 +922,10 @@ class Engine:
                 f"Some files in {directory} are in use; they will be deleted at the next start",
             )
 
-    def _do_stop(self) -> None:
+    def _do_stop(self, *, racing: bool = False) -> None:
+        """``racing``: one of two stops at shutdown (the engine thread's after a start that
+        raced shutdown, and the one shutdown() left to it). One gets the session; the other
+        gets None and must not report a failed stop or check silence a second time."""
         with self._lock:
             self._rec = None
         try:
@@ -893,6 +934,8 @@ class Engine:
             log.exception("could not stop recording cleanly")
             self._session_end(None, False)
             return
+        if session is None and racing:
+            return  # the other stop ended it (or will): it reports the session
         self._check_silent_tracks()
         self._session_end(session, session is not None)
         if session is None:

@@ -144,10 +144,11 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   and a `Speaker N` (their first lines are shown to help), type a name. On macOS, **Play
   sample** in the name dialog plays a few seconds (up to 6 s) of that speaker from the
   session's own audio while it is still kept (not while recording); the clip is a temp
-  file deleted after playback. Same as `recandcc name-speaker`.
+  file deleted after playback. Same as `recandcc name-speaker`. On Windows the tray shows
+  small windows for the same steps.
 - **Forget all voices…**: after a confirmation, deletes every voice profile and all saved
   session voices (`recandcc voices delete --all`), including those of sessions still waiting
-  to be transcribed. macOS menu only for now.
+  to be transcribed. Closing the confirmation, or leaving it until it times out, deletes nothing.
 - **Export latest transcript (DOCX + PDF)**: writes `transcript.docx` and `transcript.pdf`
   next to the newest transcript. Same as `recandcc export`. If the session has a
   `summary.md`, the summary and action items come first (their freshness follows the transcript text, start/end/text, not file times, so speaker renames and call-app names keep them; deleting `.summary-source` falls back to the file-time rule, which also applies to sessions summarised before this version). The export renders the summary's
@@ -339,7 +340,9 @@ open**, through the macOS Accessibility API: it only reads what is on screen and
 opens or changes anything; only the Zoom and Teams apps and, in a browser, a window showing a Meet/Teams/Zoom call page are read (never Slack, Discord, WhatsApp, FaceTime, Telegram and the like). A name counts only if it is in two samples in a row.
 A speaker is named only when it is certain: the panel shows exactly as many people as there
 are speakers besides `Me`, every speaker recognized by voice matches one of them, and one
-`Speaker N` and one name are left (a self-introduction that disagrees wins). Otherwise nothing
+`Speaker N` and one name are left (a self-introduction that disagrees wins). In a room
+recording a call joined, only the call's speakers count: the people in the room (you
+included, even as `Speaker N`) are never named after a participant. Otherwise nothing
 is guessed (`recandcc speakers` lists the names). This only relabels the transcript: no voice
 profile is saved from it (confirm with `recandcc name-speaker` to remember the voice). A
 recognized voice or `Me` is never overridden.

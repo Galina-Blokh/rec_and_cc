@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
+import re
 import threading
 import time
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 
 from ..models import Segment, SessionInfo, is_rtl
@@ -16,6 +18,8 @@ PARAGRAPH_GAP_S = 2.0
 MD_NAME, JSON_NAME, SRT_NAME = "transcript.md", "transcript.json", "transcript.srt"
 # Unicode bidi controls for right-to-left (Hebrew) segments. transcript.json keeps the raw text.
 RLI, PDI, RLM = "\u2067", "\u2069", "\u200f"
+
+log = logging.getLogger(__name__)
 
 
 def fmt_hms(t: float) -> str:
@@ -38,6 +42,24 @@ def languages_of(segments: list[Segment]) -> list[str]:
     return list(dict.fromkeys(s.language for s in segments if s.language))
 
 
+_BAD_CHARS = re.compile("[\ud800-\udfff\ufffe\uffff]")
+
+
+def sanitize_text(text: str) -> str:
+    """Lone surrogates and the noncharacters U+FFFE/U+FFFF become U+FFFD: they can't be
+    encoded as UTF-8 or stored in DOCX XML, and one of them must not abort an output."""
+    return _BAD_CHARS.sub("\ufffd", text)
+
+
+def _sanitized(segments: list[Segment]) -> list[Segment]:
+    return [
+        replace(s, text=sanitize_text(s.text), speaker=sanitize_text(s.speaker))
+        if _BAD_CHARS.search(s.text + s.speaker)
+        else s
+        for s in segments
+    ]
+
+
 def md_text(seg: Segment) -> str:
     """Markdown body of a segment: right-to-left text goes in a right-to-left isolate (RLI ..
     PDI), so the LTR "[time] Speaker:" prefix stays put and the line's punctuation and
@@ -50,7 +72,9 @@ def srt_text(seg: Segment) -> str:
     """SRT line of a segment. A right-to-left one starts with RLM, so players lay the whole
     subtitle out right to left (label on the right, trailing punctuation on the left); RLM is
     understood by older players that don't know isolates."""
-    line = f"{seg.speaker}: {seg.text.strip()}"
+    # a blank line would end the cue early: collapse runs of newlines into one
+    body = re.sub(r"\s*\n\s*", "\n", seg.text.strip().replace("\r\n", "\n").replace("\r", "\n"))
+    line = f"{seg.speaker}: {body}"
     return RLM + line if is_rtl(seg.language, seg.text) else line
 
 
@@ -69,10 +93,18 @@ def paragraphs(segments: list[Segment], gap_s: float = PARAGRAPH_GAP_S) -> list[
         ):
             text = f"{p.text} {s.text}".strip()
             out[-1] = Segment(
-                p.start, max(p.end, s.end), text, p.speaker, p.language, p.overlap or s.overlap
+                p.start,
+                max(p.end, s.end),
+                text,
+                p.speaker,
+                p.language,
+                p.overlap or s.overlap,
+                p.track,
             )
         else:
-            out.append(Segment(s.start, s.end, s.text.strip(), s.speaker, s.language, s.overlap))
+            out.append(
+                Segment(s.start, s.end, s.text.strip(), s.speaker, s.language, s.overlap, s.track)
+            )
     return out
 
 
@@ -125,10 +157,12 @@ def format_json(session: SessionInfo, segments: list[Segment], duration: float, 
 
 def _segment_json(s: Segment) -> dict:
     """Segment fields for JSON: never the in-memory word timings (no deep copy of them), and
-    `overlap` only where diarization found overlapped speech."""
+    `overlap` only where diarization found overlapped speech, `track` only where it is known."""
     data = {f.name: getattr(s, f.name) for f in fields(s) if f.name != "words"}
     if not s.overlap:
         del data["overlap"]
+    if not s.track:
+        del data["track"]
     return data
 
 
@@ -137,6 +171,7 @@ def write_outputs(
 ) -> list[Path]:
     """Write the three transcript files atomically (tmp + rename); returns their paths."""
     d = Path(session.directory)
+    segments = _sanitized(segments)
     contents = {
         MD_NAME: format_markdown(session, segments, duration),
         JSON_NAME: format_json(session, segments, duration, model),
@@ -147,6 +182,7 @@ def write_outputs(
 
 def write_live_markdown(session: SessionInfo, segments: list[Segment], duration: float) -> Path:
     """Rewrite transcript.md of a session that is still recording (atomically)."""
+    segments = _sanitized(segments)
     return atomic_write(
         Path(session.directory) / MD_NAME,
         format_markdown(session, segments, duration, live=True),
@@ -158,7 +194,11 @@ def atomic_write(path: Path, text: str, tries: int = 5) -> Path:
     """Write via a temp file + rename, so readers never see a half-written file."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
-        tmp.write_text(text, encoding="utf-8")
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            log.warning("%s: unencodable characters replaced with '?'", path.name)
+        tmp.write_text(text, encoding="utf-8", errors="replace")
         for attempt in range(tries):
             try:
                 tmp.replace(path)
