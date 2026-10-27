@@ -324,6 +324,7 @@ class Recorder:
                 w = self._open_track(session, track, factory, pad_frames=pad, replay_s=replay)
                 if w is not None:
                     writers.append(w)
+                    replay = max(replay, w.replay_s) if mic_source else 0.0  # longer pre-roll
 
             if not writers:
                 shutil.rmtree(directory, ignore_errors=True)
@@ -357,6 +358,10 @@ class Recorder:
         try:
             src = factory()
             w = _TrackWriter(track, path, src, self)
+            # A room source knows its pre-roll (a low outside sensitivity widens it).
+            preroll = getattr(src, "preroll_s", None)
+            if isinstance(preroll, int | float) and replay_s:
+                replay_s = max(replay_s, float(preroll) + 5)
             if replay_s:
                 w.replay_s = max(w.replay_s, replay_s)
         except Exception:

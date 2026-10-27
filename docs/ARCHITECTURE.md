@@ -190,15 +190,19 @@ margin. `RoomMonitor` gets the mapping as its `thresholds` callable and reads it
 step, so a preset change applies without reopening the mic and `room.py` doesn't depend on
 `sensitivity.py`. The gate (`room.NoiseFloor`) runs on the `room-vad` worker before the VAD,
 per ~0.5 s step: the step's VAD speech counts in full if the 90th percentile of its 32 ms
-levels is at least the margin (16 dB at 0 down to 10 dB at 100) above the floor, otherwise
+levels is at least the margin (12 dB at 0 down to 9 dB at 100) above the floor, otherwise
 not at all and Silero is skipped. Per step, not per window, so the dips between syllables
-don't cut a 65% conversation below the threshold. The floor is the 15th percentile of the
-per-32 ms levels of the last 20 s, independent of the VAD: it falls within a few quiet seconds
-and rises only once the room stayed louder for most of the window, so steady babble becomes
-the floor while a conversation's pauses keep it below the voices. It is cleared whenever the
-mic opens (it may be another place now), and until 3 s of history exist nothing counts. The
-margins were tuned on seeded syllabic speech and 2/4/8-talker babble (`test_sensitivity.py`).
-Unset keeps every code path as it was.
+don't cut a 65% conversation below the threshold. The floor is the 35th percentile of the
+per-32 ms levels of the last 20 s, independent of the VAD: a conversation is at the floor over
+half the time (pauses, syllable gaps), chatter of two or more people much less, so it sits
+under a conversation but on top of babble. It falls within a few quiet seconds and rises
+slowly; it restarts from the last 3 s when even their 30th percentile is more than half a
+margin above it (carried into a louder place), is cleared when the mic opens, and when
+`_on_frames` sees a wall-clock gap of over 5 s (sleep/wake; a marker through the VAD queue,
+so the callback never blocks). Until 3 s of history exist nothing counts. The constants were
+tuned on seeded syllabic speech, a brown-noise fan and 2/4/8-talker babble
+(`test_sensitivity.py`). A room session's recorder replays the source's own pre-roll length
+(`_Tap.preroll_s`) to live transcription. Unset keeps every code path as it was.
 Not yet: live level meters, caption priority by sensitivity.
 
 ### Two tracks → speaker labels for free

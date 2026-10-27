@@ -653,7 +653,9 @@ class Controller:
 
     def set_sensitivity(self, preset: str) -> None:
         """Sensitivity menu (any thread): apply a preset from ``sensitivity.PRESETS``. The
-        engine picks the new thresholds up on its next tick."""
+        engine picks the new thresholds up on its next tick. A hand edit not yet reloaded
+        is applied first, so saving the preset doesn't overwrite it."""
+        self._maybe_reload_config()
         apply_preset(self.cfg.detection, preset)
         self._save_settings()
 

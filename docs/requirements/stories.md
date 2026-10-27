@@ -254,19 +254,25 @@ noisy café.* (#7)
 - **Given** a sensitivity 0–100, **then** the threshold is scaled 4× at 0, 1× at 50 and
   0.25× at 100: inside scales `min_active_s`; outside scales `room_speech_s` (the window widens
   so speech is at most half of it, so even 0 triggers on a real conversation) and sets a
-  16–10 dB margin above the room's noise floor, judged per ~0.5 s step by its loud parts (so
+  12–9 dB margin above the room's noise floor, judged per ~0.5 s step by its loud parts (so
   the dips between syllables still count). A non-numeric value counts as unset.
 - **Given** outside favoured (high) and inside low, **when** an app plays briefly and then
   people talk in the room, **then** the short app audio starts nothing and the room starts the
   recording; **given** inside favoured, **then** app audio starts it within a second.
-- **Given** a turn-taking conversation (about 65% speech), **then** settings 0, 25, 50 and 75
-  all start a recording, in a quiet room and with the voices 20 dB over café babble.
+- **Given** a turn-taking conversation (1–3 s turns, 0.3–1.5 s pauses), **then** settings 0,
+  25, 50 and 75 all start a recording, in a quiet room and in a café with the voices 10 dB
+  (0, 25) or 8 dB (50, 75) over the babble; quieter voices are a known limit.
 - **Given** steady background noise (a fan, 2–8 talker café babble, even if the voice detector
-  calls it speech), **then** it becomes the noise floor (the quietest 15% of the last 20 s,
-  relearnt during the first 3 s each time the mic opens) and Normal and Noisy place neither
-  start nor, after a room session, restart a recording; Quiet room ignores 4+ talkers, and
-  high values are meant for quiet rooms. A mic opened mid-conversation still counts it.
+  calls it speech), **then** it becomes the noise floor (35th percentile of the last 20 s) and
+  Normal, Noisy place and Quiet room neither start nor, after a room session, restart a
+  recording; 100 is meant for quiet rooms. A mic opened mid-conversation still counts it.
+- **Given** the place changes with the mic open (carried into a café, or after sleep), **then**
+  the floor is relearnt (a level jump of the quieter moments, or a gap of over 5 s in the
+  audio) and the new background doesn't start a recording at 25, 50 or 75.
+- **Then** a room session's live transcript starts with the whole pre-roll, even when a low
+  outside sensitivity widened it beyond `room_preroll_s`.
 - **Given** the menu "Sensitivity" (Off / Quiet room / Normal / Noisy place), **then** the
-  preset is saved to `config.toml` (saves are serialized and atomic) and applies at once.
+  preset is saved to `config.toml` (saves are serialized and atomic) and applies at once; a
+  hand edit not yet reloaded is applied first, so the click doesn't overwrite it.
 - **Not yet:** a settings window with live level meters, a per-source speech score, caption
   priority between the tracks.

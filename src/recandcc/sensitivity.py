@@ -8,7 +8,7 @@ Unset (None) leaves the configured thresholds exactly as they are, with no noise
 
 from __future__ import annotations
 
-from .config import DetectionConfig
+from .config import CONFIG_LOCK, DetectionConfig
 
 # Menu presets: label -> (outside, inside). "Off" = both unset (the plain thresholds).
 PRESETS: dict[str, tuple[int | None, int | None]] = {
@@ -17,7 +17,7 @@ PRESETS: dict[str, tuple[int | None, int | None]] = {
     "Normal": (50, 50),
     "Noisy place": (25, 50),
 }
-MIN_MARGIN_DB, MAX_MARGIN_DB = 10.0, 16.0  # step loudness above the noise floor, at 100 / 0
+MIN_MARGIN_DB, MAX_MARGIN_DB = 9.0, 12.0  # step loudness above the noise floor, at 100 / 0
 # Speech needed is at most this share of the window (the window widens instead): even a busy
 # conversation leaves pauses, so every setting stays reachable.
 MAX_COVERAGE = 0.5
@@ -62,4 +62,5 @@ def current_preset(det: DetectionConfig) -> str | None:
 
 
 def apply_preset(det: DetectionConfig, name: str) -> None:
-    det.outside_sensitivity, det.inside_sensitivity = PRESETS[name]
+    with CONFIG_LOCK:  # never between a reload's or a save's reads
+        det.outside_sensitivity, det.inside_sensitivity = PRESETS[name]

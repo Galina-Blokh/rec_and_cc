@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import sys
@@ -190,22 +191,23 @@ class Config:
             blob = tomli_w.dumps(data).encode()
             path.parent.mkdir(parents=True, exist_ok=True)
             _write_atomic(path, blob)
-            _own_writes[str(path)] = file_signature(path)
+            _own_writes[str(path)] = (hashlib.sha256(blob).hexdigest(), len(blob))
 
 
 # Held while saving and while applying a reload, so neither sees the other half-done.
 # Re-entrant: load_config() saves the defaults on first run.
 CONFIG_LOCK = threading.RLock()
-_own_writes: dict[str, tuple[int, int] | None] = {}  # path -> signature after our last save
+_own_writes: dict[str, tuple[str, int]] = {}  # path -> signature of what our last save wrote
 
 
-def file_signature(path: Path) -> tuple[int, int] | None:
-    """(mtime_ns, size) of the file, None if it is missing."""
+def file_signature(path: Path) -> tuple[str, int] | None:
+    """(sha256, size) of the file's content, None if it can't be read. By content, not
+    mtime: a same-size hand edit within a coarse mtime tick is still noticed."""
     try:
-        st = path.stat()
+        data = path.read_bytes()
     except OSError:
         return None
-    return st.st_mtime_ns, st.st_size
+    return hashlib.sha256(data).hexdigest(), len(data)
 
 
 def written_by_us(path: Path) -> bool:

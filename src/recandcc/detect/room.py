@@ -50,11 +50,18 @@ STEP = 16 * WINDOW  # VAD runs on ~0.5 s of new audio at a time ...
 HISTORY = 32 * WINDOW
 STALL_GRACE_S = 1.0  # frames this late still count as "on time"
 # Noise floor: this percentile of the per-window levels of the last FLOOR_HISTORY_S of audio.
-# A low percentile falls fast (a few quiet seconds) and rises slowly (the room must stay
-# louder for most of the history), so steady babble becomes the floor while the pauses of a
-# conversation keep it below the voices. With less than FLOOR_MIN_S of history nothing counts.
-FLOOR_PERCENTILE, FLOOR_HISTORY_S, FLOOR_MIN_S = 15, 20.0, 3.0
+# A conversation is at the floor over half the time (pauses between turns, gaps between
+# syllables), two or more people chattering much less, so the 35th percentile sits under a
+# conversation but on top of babble. It falls fast (a few quiet seconds) and rises slowly.
+# With less than FLOOR_MIN_S of history nothing counts.
+FLOOR_PERCENTILE, FLOOR_HISTORY_S, FLOOR_MIN_S = 35, 20.0, 3.0
 STEP_PERCENTILE = 90  # a step's loudness: this percentile of its window levels
+# Level shift (walked into a café, woke up somewhere else): when even the quieter moments of
+# the last SHIFT_S are louder than floor + margin/2, the floor restarts from that audio.
+# A conversation always dips back to the floor within a few seconds; babble doesn't.
+SHIFT_PERCENTILE, SHIFT_S = 30, 3.0
+GAP_S = 5.0  # a wall-clock gap between frame batches this long (sleep/wake) clears the floor
+FLOOR_RESET = "floor-reset"  # queue marker from the capture thread to the VAD worker
 
 # vad(audio) -> one speech probability per WINDOW samples (len(audio) is a WINDOW multiple).
 VadFn = Callable[[np.ndarray], np.ndarray]
@@ -79,6 +86,7 @@ class NoiseFloor:
     def __init__(self, history_s: float = FLOOR_HISTORY_S, min_s: float = FLOOR_MIN_S):
         per_s = SAMPLE_RATE / WINDOW
         self._levels: deque[float] = deque(maxlen=int(history_s * per_s))
+        self._recent: deque[float] = deque(maxlen=int(SHIFT_S * per_s))
         self._min = int(min_s * per_s)
         self._lock = threading.Lock()
 
@@ -98,13 +106,29 @@ class NoiseFloor:
             return False
         return float(np.percentile(levels, STEP_PERCENTILE)) >= floor + margin_db - 1e-9
 
-    def add(self, levels: np.ndarray) -> None:
+    def add(self, levels: np.ndarray, margin_db: float | None = None) -> bool:
+        """Account a step's window levels. With a margin, returns True if the room's level
+        shifted up (the floor then restarts from the last SHIFT_S of audio)."""
         with self._lock:
-            self._levels.extend(float(v) for v in levels)
+            vals = [float(v) for v in levels]
+            self._levels.extend(vals)
+            self._recent.extend(vals)
+            if margin_db is None or len(self._levels) < self._min:
+                return False
+            if len(self._recent) < (self._recent.maxlen or 0):
+                return False
+            floor = float(np.percentile(np.fromiter(self._levels, float), FLOOR_PERCENTILE))
+            quiet = float(np.percentile(np.fromiter(self._recent, float), SHIFT_PERCENTILE))
+            if quiet <= floor + margin_db / 2:
+                return False
+            self._levels.clear()
+            self._levels.extend(self._recent)
+            return True
 
     def clear(self) -> None:
         with self._lock:
             self._levels.clear()
+            self._recent.clear()
 
 
 def silero_vad(audio: np.ndarray) -> np.ndarray:
@@ -123,6 +147,7 @@ class _Tap(AudioSource):
 
     def __init__(self, monitor: RoomMonitor):
         self.monitor = monitor
+        self.preroll_s = monitor.preroll_s()  # what start() replays (the recorder asks)
         self._cb: FrameCallback | None = None
         self._lock = threading.Lock()
         self._held: list[np.ndarray] | None = None  # not None while replaying
@@ -310,6 +335,11 @@ class RoomMonitor:
             stall = self.clock() - self._last_frame_clock - STALL_GRACE_S
         return audio_s + max(0.0, stall)
 
+    def preroll_s(self) -> float:
+        """Seconds of audio kept before a trigger: room_preroll_s, or the effective window
+        if that is longer (low outside sensitivities widen it)."""
+        return max(float(self.det.room_preroll_s), float(self.thresholds(self.det)[1]))
+
     def session_source(self) -> AudioSource:
         """An ``AudioSource`` for the room session's mic track: the pre-roll (last
         ``max(room_preroll_s, room_window_s)`` seconds), then the live frames. When it is
@@ -340,16 +370,20 @@ class RoomMonitor:
         block = np.asarray(frames, dtype=np.float32).reshape(-1).copy()
         if not block.size:
             return
-        keep = max(self.det.room_preroll_s, self.thresholds(self.det)[1]) * SAMPLE_RATE
+        keep = self.preroll_s() * SAMPLE_RATE
         with self._lock:
             if stream != self._stream:
                 return
-            self._last_frame_clock = self.clock()
+            now = self.clock()
+            gap = now - self._last_frame_clock > GAP_S  # slept, or the stream stalled
+            self._last_frame_clock = now
             self._ring.append(block)
             self._ring_size += block.size
             while self._ring and self._ring_size - self._ring[0].size >= keep:
                 self._ring_size -= self._ring.popleft().size
             taps, gen, q = self._taps, self._gen, self._q
+        if gap:
+            q.put(FLOOR_RESET)  # maybe another place now: the worker relearns the floor
         for cb in taps:
             try:
                 cb(block)
@@ -372,6 +406,9 @@ class RoomMonitor:
                 if isinstance(item, threading.Event):
                     item.set()
                     continue
+                if isinstance(item, str):  # FLOOR_RESET
+                    self.floor.clear()
+                    continue
                 if isinstance(item, int):  # reset: new stream or a session ended
                     gen, pending, size, ctx = item, [], 0, np.zeros(0, np.float32)
                     continue
@@ -389,7 +426,8 @@ class RoomMonitor:
                 margin = self.thresholds(self.det)[2]
                 levels = window_levels(chunk)
                 loud = None if margin is None else self.floor.loud(levels, margin)
-                self.floor.add(levels)
+                if self.floor.add(levels, margin):
+                    loud = False  # the place got louder: this step is background
                 probs = np.zeros(n // WINDOW, np.float32)
                 if loud is None or loud:  # a step at the floor: skip the VAD
                     try:
