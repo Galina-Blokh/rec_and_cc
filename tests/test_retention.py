@@ -52,6 +52,28 @@ def test_disabled_and_missing_dir(tmp_path):
     assert purge_old_audio(tmp_path / "nope", 7, now=NOW) == []
 
 
+def _symlink(link, target, is_dir=False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=is_dir)
+    except OSError:  # Windows without symlink rights
+        pytest.skip("symlinks not available")
+
+
+def test_never_deletes_audio_outside_the_transcripts_folder(tmp_path):
+    root, outside = tmp_path / "out", tmp_path / "elsewhere"
+    root.mkdir()
+    real = make_session(outside, "real", 10)  # a session folder outside output_dir ...
+    _symlink(root / "2026-10-02", real.parent, is_dir=True)  # ... linked into it
+    kept = make_session(root, "kept", 10)
+    victim = outside / "victim.wav"
+    victim.write_bytes(b"x")
+    (kept / "me.wav").unlink()
+    _symlink(kept / "me.wav", victim)  # a WAV that is a link to a file elsewhere
+    deleted = purge_old_audio(root, 7, now=NOW)
+    assert [p.name for p in deleted] == ["others.wav"]
+    assert len(list(real.glob("*.wav"))) == 2 and victim.exists()
+
+
 def test_ignores_unreadable_sessions(tmp_path):
     bad = tmp_path / "2026-10-01" / "bad"
     bad.mkdir(parents=True)

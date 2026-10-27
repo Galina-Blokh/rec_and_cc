@@ -360,6 +360,18 @@ def test_retention_is_not_purged_when_the_save_fails(tmp_path, monkeypatch):
     assert path.read_text() == "[summary\n"
     assert purged == []  # no audio deleted under a setting that was not saved
     assert ctrl.cfg.transcription.audio_retention_days == 0  # the menu shows what is saved
+    events = [ctrl.events.get_nowait() for _ in range(ctrl.events.qsize())]
+    assert events[-1] == ("retention_changed",)  # after the revert: the menus re-render
+
+
+def test_menu_purge_posts_a_count_only_notice(tmp_path, monkeypatch):
+    ctrl, _path = _ctrl(tmp_path, monkeypatch)
+    wavs = [tmp_path / "a" / "me.wav", tmp_path / "a" / "others.wav", tmp_path / "b" / "me.wav"]
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda: wavs)
+    ctrl.set_retention(1)
+    _join("retention-set")
+    events = [ctrl.events.get_nowait() for _ in range(ctrl.events.qsize())]
+    assert ("notice", "Delete audio after", "Deleted audio of 2 sessions") in events
 
 
 def test_superseded_retention_choice_does_not_purge(tmp_path, monkeypatch):

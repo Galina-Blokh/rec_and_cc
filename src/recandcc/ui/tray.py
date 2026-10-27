@@ -677,6 +677,8 @@ class TrayApp:
                 self.search.post("results", ev[1], ev[2])  # failures and no matches too
             elif ev[0] == "notes":
                 self.notes.post("notes", ev[1])
+            elif ev[0] == "retention_changed":  # e.g. reverted after a failed save
+                self.icon.update_menu()
             elif ev[0] == "transcribed":
                 _, s, res = ev
                 self._notify(

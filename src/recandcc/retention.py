@@ -68,15 +68,23 @@ def _track_wavs(session: SessionInfo) -> list[Path]:
 
 def purge_old_audio(output_dir: Path, days: int, now: datetime | None = None) -> list[Path]:
     """Delete audio of transcribed sessions that ended more than ``days`` days ago.
-    Returns the deleted files. ``days <= 0`` disables retention."""
+    Returns the deleted files. ``days <= 0`` disables retention. A session folder that
+    resolves outside ``output_dir`` (symlink, junction) and symlinked WAVs are skipped, so
+    nothing outside the transcripts folder is ever deleted."""
     if days <= 0 or not output_dir.is_dir():
         return []
     now = now or datetime.now().astimezone()
     cutoff = now - timedelta(days=days)
+    root = output_dir.resolve()
     deleted: list[Path] = []
     for session, ended in _transcribed_sessions(output_dir):
-        if ended <= cutoff:
-            _unlink_all(session.directory.glob("*.wav"), deleted)
+        if ended > cutoff:
+            continue
+        if not session.directory.resolve().is_relative_to(root):
+            log.warning("session %s: ignoring folder outside the transcripts folder", session.id)
+            continue
+        wavs = [w for w in session.directory.glob("*.wav") if not w.is_symlink()]
+        _unlink_all(wavs, deleted)
     if deleted:
         log.info("retention: deleted %d audio file(s) older than %d day(s)", len(deleted), days)
     return deleted

@@ -235,6 +235,8 @@ class MacApp(rumps.App):
                 self._show_hits(ev[1], ev[2])
             elif kind == "notes":
                 self._show_notes(ev[1])
+            elif kind == "retention_changed":
+                self._render_retention()
             elif kind == "refreshed":
                 self._render_recent()
                 self._render_permissions()

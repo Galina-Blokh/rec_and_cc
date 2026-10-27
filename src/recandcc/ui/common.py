@@ -768,11 +768,13 @@ class Controller:
                     return
                 time.sleep(1)
 
-    def purge_audio_now(self) -> None:
+    def purge_audio_now(self) -> list[Path]:
+        """Run ``audio_retention_days`` now; the deleted WAVs (none if it failed)."""
         try:
-            purge_old_audio(self.cfg.output_dir, self.cfg.transcription.audio_retention_days)
+            return purge_old_audio(self.cfg.output_dir, self.cfg.transcription.audio_retention_days)
         except Exception:
             log.exception("audio retention failed")
+            return []
 
     def _purge_leftover_audio(self) -> None:
         """keep_audio = false: delete WAVs left behind by transcribed sessions (e.g. the app
@@ -1343,9 +1345,15 @@ class Controller:
                 if self.cfg.transcription.audio_retention_days != days:
                     return  # a newer click owns the setting now
                 if saved:
-                    self.purge_audio_now()
-                else:  # not in config.toml: show what the next start will use
-                    self.cfg.transcription.audio_retention_days = previous
+                    if n := len({wav.parent for wav in self.purge_audio_now() or ()}):
+                        # count only: a mis-click is visible, no session names or text
+                        what = f"{n} session" + ("s" if n != 1 else "")
+                        self.post_notice("Delete audio after", f"Deleted audio of {what}")
+                    return
+                # not in config.toml: show what the next start will use; the shells re-render
+                # the submenu on the UI thread (the tray's native menu is cached)
+                self.cfg.transcription.audio_retention_days = previous
+            self.events.put(("retention_changed",))
 
         try:
             threading.Thread(target=apply, daemon=True, name="retention-set").start()

@@ -201,3 +201,12 @@ def test_retention_submenu_saves_the_choice_and_moves_the_check(tray):
     extra = rows()["5 days (from settings)"]
     assert extra[1] is None and extra.kw["enabled"] is False
     assert checked() == ["5 days (from settings)"]
+
+
+def test_retention_change_event_refreshes_the_cached_menu(tray):
+    app = _app(tray)
+    refreshed: list[int] = []
+    app.icon = types.SimpleNamespace(update_menu=lambda: refreshed.append(1))
+    app.ctrl.events.put(("retention_changed",))  # e.g. reverted after a failed save
+    app._drain()
+    assert refreshed == [1] and app.notices == []
