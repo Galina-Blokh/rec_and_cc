@@ -15,11 +15,48 @@ All notable changes to RecAndCC are documented here. The format is based on
 - Ruff's bandit rules (`S`) run in CI; every exception is justified inline or scoped per file.
 - Folders created for recordings and transcripts are owner-only (`0700`).
 - Speaker-model downloads refuse non-HTTPS URLs (in addition to the SHA-256 check).
+- Every Whisper model the docs offer (`tiny` to `large-v3-turbo`, both backends, and the
+  `large`/`turbo` aliases) is pinned to a commit; an unpinned or custom repo that isn't on
+  disk is refused unless `transcription.allow_unpinned_models = true` (#48).
+- A model already on disk that fails to load no longer triggers an online re-download; only
+  a genuine cache miss goes online (#47).
+- Offline is enforced end to end: a test runs whole sessions with sockets, DNS, UDP and
+  subprocesses blocked (#49).
+- A warning when the output folder is synced to iCloud, OneDrive, Dropbox, Google Drive or
+  Box, in the log, the menu and `recandcc config`; the default folder is unchanged (#43).
+- "Open transcripts folder" creates the folder owner-only, like session folders (#32).
 
 ### Added
 - `SECURITY.md`: how to report a vulnerability and a threat-model summary.
 - README "Privacy & consent": consent laws, where data lives, retention, deleting everything.
 - This changelog.
+- Search across all transcripts with a local SQLite FTS5 index: `recandcc search` and a
+  menu item (#59).
+- Speaker names that carry over between sessions, from opt-in local voice profiles; name a
+  speaker once from the CLI (#62).
+- Hebrew in `transcription.languages`, with right-to-left captions and transcripts (#60).
+- Record only the app that triggered a session with `detection.system_audio_scope = "app"`
+  (macOS per-app audio tap) (#63, #65).
+- `scripts/eval.py`: WER per language, language-ID accuracy, DER and RTF on a local,
+  consented speech set; see `docs/EVALUATION.md` (#34).
+- Requirements docs: intent, user stories with acceptance criteria, and a traceability table
+  from stories to modules and tests, checked by a test (#33, #35).
+- ADR 0011: stack and packaging after v0.1 (Proposed) (#57).
+
+### Changed
+- Menu-bar presentation logic moved out of the AppKit/pystray shells into `ui/present.py`,
+  so it is unit-tested on every platform (#67).
+- CI type-checks `src/` with pyright and enforces a 70 % coverage floor on non-UI code
+  (#36, #54, #55).
+
+### Fixed
+- With `keep_audio = false`, audio left behind by a quit during slow diarization or a failed
+  delete is removed at the next start (#45).
+- A discarded session is never transcribed later, even if deleting it failed; the delete is
+  retried at startup (#46, #56).
+- The language-ID model setting is validated before loading (#61); a missing import in the
+  macOS menu (#68).
+- A flaky live-captions controller test (#32).
 
 ## [0.1.0] — 2026-10-26
 
