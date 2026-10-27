@@ -169,7 +169,9 @@ room is on the mic, so diarization numbers the speakers of the `Me` track in roo
 **Precedence.** In `tick()` sustained room speech is a candidate `@room`, appended *after*
 the app candidates and only when nothing records or asks and **no other process is doing
 audio** (even one the user switched off, stopped, or that is ignored, such as Voice Memos or
-Spotify): the mic would hear exactly that. While another process uses the mic, the
+Spotify): the mic would hear exactly that. System chimes and alerts that only play
+(`SYSTEM_SOUNDS`: notification center, system sounds, `coreaudiod`) are the exception, so a
+notification doesn't cut a conversation. While another process uses the mic, the
 monitor's mic is closed (nothing is heard or kept); while one plays, its pre-roll and speech
 window are reset every tick, and once more on the first clean snapshot (detection lags the
 audio by ~1-2 s), which must come before room speech can trigger. A running room session
@@ -191,7 +193,8 @@ pseudo-app's "last seen" is refreshed while the room talks or a room session rec
 session the user stopped or discarded stays suppressed until the room has been quiet for
 `stop_after_inactive_s`. If the mic can't be opened, the engine retries after 60 s. The menu
 toggle goes through `Controller.set_room_listening`, which explains the always-on mic
-indicator, battery and consent each time it is turned on.
+indicator, battery and consent each time it is turned on; the same notice appears at every
+start with room listening on and when a hand edit of `config.toml` turns it on.
 
 ### Two tracks → speaker labels for free
 Mic → `Me`, system → `Others`. A mic track that joins mid-session (a media recording upgraded

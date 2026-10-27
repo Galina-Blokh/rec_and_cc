@@ -93,6 +93,8 @@ def test_room_listening_is_off_by_default_and_needs_the_mic(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text('[detection]\nmode = "auto"\n', encoding="utf-8")
     assert load_config(path).detection.room_listening is False
+    path.write_text("[detection]\nroom_speech_s = 6.0\nroom_window_s = 5.0\n", encoding="utf-8")
+    assert load_config(path).detection.room_speech_s == 5.0  # could never trigger: clamped
     assert should_record_mic("calls", TriggerKind.ROOM)
     assert not should_record_mic("never", TriggerKind.ROOM)
     mon, sources = make()
@@ -416,3 +418,13 @@ def test_menu_toggle_saves_warns_and_engine_owns_a_closed_room_monitor(tmp_path,
     assert not cfg.detection.room_listening and ctrl.events.empty()  # no notice when off
     text = keep_prompt_text("Room", TriggerKind.ROOM, "record")
     assert "a conversation near the laptop" in text
+    # Turned on by editing config.toml: the same notice, once.
+    on = Config(output_dir=tmp_path)
+    on.detection.room_listening = True
+    monkeypatch.setattr("recandcc.ui.common.load_config", lambda *a, **k: on)
+    ctrl._mtime = lambda: 42.0
+    ctrl._maybe_reload_config()
+    assert cfg.detection.room_listening
+    assert ctrl.events.get_nowait() == ("notice", "Room listening on", ROOM_LISTENING_NOTICE)
+    ctrl._maybe_reload_config()  # unchanged file: no second notice
+    assert ctrl.events.empty()

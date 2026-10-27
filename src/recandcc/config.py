@@ -254,6 +254,14 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     det = _build(DetectionConfig, data.pop("detection", {}))
     det.mode = Mode(det.mode)
     det.app_modes = {k: Mode(v) for k, v in det.app_modes.items()}
+    if det.room_speech_s > det.room_window_s:  # could never trigger: say so, and clamp
+        log.warning(
+            "room_speech_s (%s) is longer than room_window_s (%s); using %s",
+            det.room_speech_s,
+            det.room_window_s,
+            det.room_window_s,
+        )
+        det.room_speech_s = det.room_window_s
     tr = _build(TranscriptionConfig, data.pop("transcription", {}))
     raw = tr.languages
     tr.languages = normalize_languages(raw)

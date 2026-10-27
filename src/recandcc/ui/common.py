@@ -301,6 +301,8 @@ class Controller:
         )
         self._started_at = datetime.now().astimezone()  # older sessions: not diarized now
         if start_threads:
+            if cfg.detection.room_listening:  # the mic opens right away: say so at every start
+                self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
             self.engine.start()
             threading.Thread(target=self._resubmit_unfinished, daemon=True, name="resubmit").start()
             threading.Thread(target=self._retention_loop, daemon=True, name="retention").start()
@@ -599,8 +601,11 @@ class Controller:
                 log.exception("config.toml is invalid; keeping current settings")
                 self.post_notice("Settings not applied", "config.toml could not be parsed")
                 return
+        was_listening = self.cfg.detection.room_listening
         for f in fields(new.detection):
             setattr(self.cfg.detection, f.name, getattr(new.detection, f.name))
+        if self.cfg.detection.room_listening and not was_listening:  # turned on by hand
+            self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
         self.cfg.output_dir = new.output_dir
         tr, new_tr = self.cfg.transcription, new.transcription
         with self._lang_lock:  # both together: save() pairs them
@@ -713,11 +718,13 @@ class Controller:
         """Menu toggle: the engine opens or closes the room mic (and stops a room session) on
         its next tick. Turning it on explains the always-on mic indicator and the consent
         question. Saves in place, like the other toggles, so quick toggles can't race."""
-        self.cfg.detection.room_listening = bool(on)
-        try:
-            self.cfg.save()
-        except Exception:
-            log.exception("saving settings failed")
+        with self._save_lock:  # never interleaves with a reload of config.toml
+            self.cfg.detection.room_listening = bool(on)
+            try:
+                self.cfg.save()
+                self._config_mtime = self._mtime()  # our own write: nothing to reload
+            except Exception:
+                log.exception("saving settings failed")
         if on:
             self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
             if self.permissions.get("microphone") == "denied":
