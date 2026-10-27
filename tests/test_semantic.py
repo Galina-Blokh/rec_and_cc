@@ -905,6 +905,62 @@ def test_download_pauses_while_busy_and_resumes(model_dir, monkeypatch):
     assert paused_at
 
 
+class _Resp(io.BytesIO):
+    """A response that can raise on read once its connection has sat idle too long."""
+
+    def __init__(self, data, status=200, content_range="", die_after=None):
+        super().__init__(data)
+        self.status = status
+        self.headers = {"Content-Range": content_range} if content_range else {}
+        self.die_after = die_after
+        self.sent = 0
+
+    def read(self, n=-1):
+        if self.die_after is not None and self.sent >= self.die_after:
+            raise ConnectionResetError("idle timeout")
+        block = super().read(n)
+        self.sent += len(block)
+        return block
+
+
+def _resumable(monkeypatch, data, ranges=True):
+    """urlopen whose first connection dies after 1 MiB once it has idled; later ones honour
+    Range (or ignore it, with ranges=False)."""
+    opened = []
+
+    def urlopen(url, timeout=None):
+        rng = url.get_header("Range") if hasattr(url, "get_header") else None
+        opened.append(rng)
+        if rng is None or not ranges:
+            return _Resp(data, die_after=1 << 20 if not opened[:-1] else None)
+        start = int(rng.split("=")[1].rstrip("-"))
+        return _Resp(data[start:], 206, f"bytes {start}-{len(data) - 1}/{len(data)}")
+
+    monkeypatch.setattr(semantic.urllib.request, "urlopen", urlopen)
+    return opened
+
+
+@pytest.mark.parametrize("ranges", [True, False])
+def test_download_reopens_after_a_long_pause_without_backoff(model_dir, monkeypatch, ranges):
+    """Stories: US-32."""
+    data = bytes(range(256)) * (3 << 12)  # 3 MiB
+    opened = _resumable(monkeypatch, data, ranges)
+    monkeypatch.setattr(semantic, "REOPEN_AFTER_PAUSE_S", 0.05)
+    polls = [0]
+
+    def wait():
+        polls[0] += 1
+        if polls[0] == 1:  # a recording runs after the first block; the server drops the idle link
+            time.sleep(0.1)
+        return True
+
+    path = semantic.model_path(_fake_model(data), wait=wait)
+    assert path is not None and path.read_bytes() == data
+    assert semantic._last_failure == 0.0  # not a failure: no backoff
+    # Range resume (2 opens), or a rejected Range followed by a clean restart (3 opens)
+    assert opened[1] is not None and len(opened) == (2 if ranges else 3)
+
+
 def test_download_abandoned_midway_leaves_no_part_and_no_backoff(model_dir, monkeypatch):
     data = b"w" * (3 << 20)
     _urlopen(monkeypatch, data)
@@ -1064,9 +1120,23 @@ def test_close_during_a_slow_load_deadlocks_nothing_and_later_calls_work(tmp_pat
     assert not closer.is_alive()  # close() didn't wait for the load
     monkeypatch.setattr(semantic, "_default", emb)
     search.default_index(True)
-    # the path that used to hold search._default_lock across close()
+    # close() runs after search._default_lock is released: block it and make sure that
+    # default_index(False) still returns, and that the lock is free while close() hangs
+    close_entered, close_release = threading.Event(), threading.Event()
+    real_close = emb.close
+
+    def slow_close():
+        close_entered.set()
+        assert close_release.wait(10)
+        real_close()
+
+    monkeypatch.setattr(emb, "close", slow_close)
     searcher = threading.Thread(target=lambda: search.default_index(False), daemon=True)
     searcher.start()
+    assert close_entered.wait(5)  # we are inside close() ...
+    assert search._default_lock.acquire(timeout=1)  # ... and the lock is not held
+    search._default_lock.release()
+    close_release.set()
     searcher.join(5)
     assert not searcher.is_alive()
     release.set()
@@ -1080,6 +1150,20 @@ def test_close_during_a_slow_load_deadlocks_nothing_and_later_calls_work(tmp_pat
 
 def test_close_while_embedding_and_loading_concurrently_never_deadlocks(tmp_path, monkeypatch):
     emb = _loaded_embedder(monkeypatch, tmp_path)
+    ort = sys.modules["onnxruntime"]
+    real_session = ort.InferenceSession
+    real_run = semantic.OnnxEmbedder._run
+
+    def slow_session(path, opts):
+        time.sleep(0.005)  # loads and embeds overlap with close() instead of finishing instantly
+        return real_session(path, opts)
+
+    def slow_run(loaded, texts):
+        time.sleep(0.005)
+        return real_run(loaded, texts)
+
+    ort.InferenceSession = staticmethod(slow_session)
+    monkeypatch.setattr(semantic.OnnxEmbedder, "_run", staticmethod(slow_run))
     stop = threading.Event()
 
     def churn(fn):
@@ -1097,6 +1181,7 @@ def test_close_while_embedding_and_loading_concurrently_never_deadlocks(tmp_path
     for w in workers:
         w.join(10)
         assert not w.is_alive()
+    ort.InferenceSession = real_session
 
 
 def _failing_session(monkeypatch, exc, times):
@@ -1144,3 +1229,59 @@ def test_a_permanently_invalid_model_is_broken_until_close(tmp_path, monkeypatch
     emb.close()
     assert not emb._broken
     assert emb.embed(["a"]) is not None and emb.ready()  # switching semantic off and on retries
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "Файл занят другим процессом. (os error 32)",
+        "Не удалось загрузить модель: [WinError 33] часть файла заблокирована",
+        "Отказано в доступе. (os error 5)",
+        "ошибка 0x80070020 при открытии файла",
+        "Error 32: файл используется",
+    ],
+)
+def test_localised_windows_lock_errors_are_soft_by_their_codes(msg):
+    """Stories: US-32."""
+    assert semantic._is_soft(RuntimeError(msg))
+
+
+def test_winerror_attribute_is_soft_and_other_failures_are_not():
+    e = RuntimeError("локализованный текст")
+    e.winerror = 32  # type: ignore[attr-defined]
+    assert semantic._is_soft(e)
+    assert not semantic._is_soft(RuntimeError("invalid protobuf"))
+    assert not semantic._is_soft(RuntimeError("tensor of shape 325 is wrong"))
+
+
+def test_a_localised_lock_is_retried_not_broken(tmp_path, monkeypatch):
+    emb = _loaded_embedder(monkeypatch, tmp_path)
+    monkeypatch.setattr(semantic, "LOAD_RETRY_PAUSE_S", 0.0)
+    semantic._verified.update(tmp_path / m.name for m in (semantic.MODEL, semantic.TOKENIZER))
+    _failing_session(monkeypatch, RuntimeError("Файл занят другим процессом (os error 32)"), 100)
+    assert emb.embed(["a"]) is None
+    assert not emb._broken and emb._retry_at > 0
+
+
+@pytest.mark.parametrize("soft", [True, False])
+def test_a_load_failing_after_close_records_no_failure(tmp_path, monkeypatch, soft):
+    emb = _loaded_embedder(monkeypatch, tmp_path)
+    monkeypatch.setattr(semantic, "LOAD_RETRY_PAUSE_S", 0.0)
+    semantic._verified.update(tmp_path / m.name for m in (semantic.MODEL, semantic.TOKENIZER))
+    sys_ort = sys.modules["onnxruntime"]
+    exc = PermissionError("locked") if soft else RuntimeError("invalid protobuf")
+
+    def session(path, opts):
+        emb.close()  # switched off while the load is running
+        raise exc
+
+    sys_ort.InferenceSession = staticmethod(session)
+    assert emb.prepare() is False
+    assert not emb._broken and emb._retry_at == 0.0 and semantic._last_failure == 0.0
+
+
+def test_close_forgets_the_download_backoff(tmp_path, monkeypatch):
+    emb = _loaded_embedder(monkeypatch, tmp_path)
+    monkeypatch.setattr(semantic, "_last_failure", time.monotonic())
+    emb.close()
+    assert semantic._last_failure == 0.0

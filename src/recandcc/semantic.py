@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import threading
 import time
 import urllib.request
@@ -42,7 +43,15 @@ DOWNLOAD_TIMEOUT_S = 30.0
 LOAD_ATTEMPTS = 3  # a fresh file may be held for a moment (antivirus on Windows)
 LOAD_RETRY_PAUSE_S = 0.5
 LOAD_RETRY_AFTER_S = 60.0  # after a load that kept failing softly, don't try again for this long
+REOPEN_AFTER_PAUSE_S = 5.0  # a pause this long may outlive the server's idle timeout: reopen
 _SOFT_MARKERS = ("being used by another process", "sharing violation", "access is denied")
+# Windows messages are localised; the codes are not: ERROR_ACCESS_DENIED 5, SHARING_VIOLATION 32,
+# LOCK_VIOLATION 33 (as "os error 32", "[WinError 32]", "error 33", "0x80070020" ...).
+_SOFT_CODES = re.compile(
+    r"(?:os error|winerror|error)\s*(?:code)?\s*[:=]?\s*(?:5|32|33)\b|0x8007(?:0005|0020|0021)\b",
+    re.IGNORECASE,
+)
+_SOFT_WINERRORS = (5, 32, 33)
 
 
 @dataclass(frozen=True)
@@ -133,6 +142,23 @@ def model_path(
     return path
 
 
+def _open(url: str, offset: int) -> Any:
+    if offset == 0:
+        return urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT_S)  # noqa: S310 - https only
+    req = urllib.request.Request(url, headers={"Range": f"bytes={offset}-"})  # noqa: S310
+    return urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT_S)  # noqa: S310 - https only
+
+
+def _resumes_at(r: Any, offset: int) -> bool:
+    """True if the server answered the Range request with 206 starting at `offset`."""
+    if getattr(r, "status", None) != 206:
+        return False
+    headers = getattr(r, "headers", None)
+    return headers is not None and str(headers.get("Content-Range", "")).startswith(
+        f"bytes {offset}-"
+    )
+
+
 def _download(model: ModelFile, path: Path, wait: Callable[[], bool] | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.part")
@@ -140,20 +166,36 @@ def _download(model: ModelFile, path: Path, wait: Callable[[], bool] | None = No
     if not model.url.startswith("https://"):
         raise ValueError(f"refusing non-https model URL {model.url!r}")
     digest = hashlib.sha256()
+    written = 0
     try:
-        with (
-            urllib.request.urlopen(model.url, timeout=DOWNLOAD_TIMEOUT_S) as r,  # noqa: S310 - https only, checked above
-            tmp.open("wb") as f,
-        ):
-            written = 0
-            while block := r.read(1 << 20):
-                if wait is not None and not wait():
-                    raise _Abandoned
-                written += len(block)
-                if written > model.size:  # a bad or hostile server must not fill the disk
-                    raise ValueError(f"download larger than the expected {model.size} bytes")
-                digest.update(block)
-                f.write(block)
+        r = _open(model.url, 0)
+        try:
+            with tmp.open("wb") as f:
+                while block := r.read(1 << 20):
+                    paused = False
+                    if wait is not None:
+                        t0 = time.monotonic()
+                        if not wait():
+                            raise _Abandoned
+                        paused = time.monotonic() - t0 >= REOPEN_AFTER_PAUSE_S
+                    written += len(block)
+                    if written > model.size:  # a bad or hostile server must not fill the disk
+                        raise ValueError(f"download larger than the expected {model.size} bytes")
+                    digest.update(block)
+                    f.write(block)
+                    if paused:
+                        # The connection sat idle and the server may have dropped it: resume
+                        # on a fresh one from the bytes on disk (the final sha256 still decides).
+                        r.close()
+                        r = _open(model.url, written)
+                        if not _resumes_at(r, written):  # no range support: start clean
+                            r.close()
+                            f.seek(0)
+                            f.truncate()
+                            digest, written = hashlib.sha256(), 0
+                            r = _open(model.url, 0)
+        finally:
+            r.close()
         if written != model.size:
             raise ValueError(f"size mismatch ({written} bytes)")
         if digest.hexdigest() != model.sha256:
@@ -166,10 +208,10 @@ def _download(model: ModelFile, path: Path, wait: Callable[[], bool] | None = No
 
 def _is_soft(e: Exception) -> bool:
     """A failure that says nothing about the files: locked, permissions, sharing."""
-    if isinstance(e, OSError):
+    if isinstance(e, OSError) or getattr(e, "winerror", None) in _SOFT_WINERRORS:
         return True
-    msg = str(e).lower()
-    return any(m in msg for m in _SOFT_MARKERS)
+    msg = str(e)
+    return _SOFT_CODES.search(msg) is not None or any(m in msg.lower() for m in _SOFT_MARKERS)
 
 
 class OnnxEmbedder:
@@ -200,6 +242,8 @@ class OnnxEmbedder:
     def close(self) -> None:
         """Drop the session and tokenizer (~120 MB), cancel a load or download in flight and
         forget past failures; the next ``prepare`` / ``embed`` starts afresh. Never blocks."""
+        global _last_failure
+        _last_failure = 0.0  # the download backoff too: switching off and on retries at once
         with self._lock:
             self._gen += 1
             self._loaded = None
@@ -271,16 +315,21 @@ class OnnxEmbedder:
                         continue
                     log.warning("search model can't be opened now (%s); retrying later", e)
                     with self._lock:
-                        self._retry_at = time.monotonic() + LOAD_RETRY_AFTER_S
+                        if self._gen == gen:  # not after a close(): it forgot failures
+                            self._retry_at = time.monotonic() + LOAD_RETRY_AFTER_S
                     return False
                 log.warning("search model failed to load (%s)", e)
-                _last_failure = time.monotonic()  # the download backoff applies
+                if not self._cancelled(gen):
+                    _last_failure = time.monotonic()  # the download backoff applies
                 for f in (m, t):
                     if f in _verified:
                         with self._lock:
-                            self._broken = True  # intact files: the runtime is the problem
+                            if self._gen == gen:
+                                self._broken = True  # intact files: the runtime is the problem
                     else:
-                        f.unlink(missing_ok=True)  # so a later attempt downloads it again
+                        # safety net for files put on disk outside this process (model_path
+                        # verifies everything it returns): a later attempt downloads it again
+                        f.unlink(missing_ok=True)
                 return False
             with self._lock:
                 if self._gen != gen:
