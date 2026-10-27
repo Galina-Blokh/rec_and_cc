@@ -457,7 +457,7 @@ class CpuGenerator:
         return self._tokenizer.decode(answer, skip_special_tokens=True).strip()
 
     def close(self) -> None:
-        """Free the session (~3.2 GB of RAM while generating, ~5 GB peak at load) between sessions."""
+        """Free the session (~3.2 GB of RAM while generating) between sessions."""
         if self._session is None:
             return
         self._session = self._tokenizer = self._graph = None
