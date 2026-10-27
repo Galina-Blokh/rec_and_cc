@@ -253,6 +253,7 @@ class Controller:
         self._lock = threading.Lock()
         self._perm: dict[str, str] = {}
         self._recent: list[Path] = []
+        self._export_lock = threading.Lock()
         self._refreshing = False
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
@@ -415,20 +416,28 @@ class Controller:
 
     def export_async(self, transcript: Path) -> None:
         """Export a session's transcript to DOCX + PDF off the UI thread; posts a ``notice``
-        (never the transcript text)."""
+        (never the transcript text). One export at a time: a second click is ignored."""
+        if not self._export_lock.acquire(blocking=False):
+            return
 
         def run() -> None:
             try:
                 from ..transcribe.export import ExportError, export_session
 
+                skipped: list[str] = []
                 try:
-                    paths = export_session(transcript.parent, "both")
+                    paths = export_session(transcript.parent, "both", skipped)
                     msg = "Saved " + " and ".join(p.name for p in paths)
+                    if skipped:
+                        msg += f". {skipped[0]}"
                 except ExportError as e:
                     msg = str(e)
-            except Exception:  # noqa: BLE001
-                log.exception("transcript export failed")
-                msg = "See the log for details"
+            except Exception as e:  # noqa: BLE001
+                # the type only: a library error can quote the transcript
+                log.error("transcript export failed: %s", type(e).__name__)
+                msg = "Export failed (see the log)"
+            finally:
+                self._export_lock.release()
             self.events.put(("notice", "Export", msg))
 
         threading.Thread(target=run, daemon=True, name="export").start()

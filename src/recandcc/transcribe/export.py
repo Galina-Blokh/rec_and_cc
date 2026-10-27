@@ -15,6 +15,8 @@ import json
 import logging
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 from ..models import Segment, is_rtl
@@ -80,23 +82,52 @@ def _meta(data: dict, segments: list[Segment]) -> str:
     )
 
 
-def _tmp(path: Path) -> Path:
-    return path.with_name(f".{path.name}.tmp")
+_REPLACE_TRIES, _REPLACE_WAIT_S = 5, 0.05
+_locks: dict[str, threading.Lock] = {}
+_locks_guard = threading.Lock()
 
 
-def _finish(tmp: Path, path: Path) -> Path:
-    if sys.platform != "win32":
-        os.chmod(tmp, 0o600)  # owner-only, like the other session outputs
-    tmp.replace(path)
-    return path
+def _session_lock(folder: Path) -> threading.Lock:
+    """One export at a time per session folder (in this process)."""
+    key = str(Path(folder).resolve())
+    with _locks_guard:
+        return _locks.setdefault(key, threading.Lock())
 
 
-def export_docx(folder: Path) -> Path:
+def _write(path: Path, render) -> Path:
+    """``render(tmp_path)`` writes the file; then it is made owner-only and renamed into
+    place. The temp name is unique per process and thread; Windows may hold the target open
+    (Word, a PDF viewer, sync), so the rename is retried. Only the exception type of a
+    library failure is kept: those messages can quote the transcript."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        try:
+            render(tmp)
+            if sys.platform != "win32":
+                os.chmod(tmp, 0o600)  # owner-only, like the other session outputs
+            for attempt in range(_REPLACE_TRIES):
+                try:
+                    os.replace(tmp, path)
+                    return path
+                except PermissionError:
+                    if attempt + 1 == _REPLACE_TRIES:
+                        raise
+                    time.sleep(_REPLACE_WAIT_S)
+        except ExportError:
+            raise
+        except Exception as e:
+            raise ExportError(f"could not write {path.name} ({type(e).__name__})") from None
+        return path
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def export_docx(folder: Path, loaded=None) -> Path:
     from docx import Document
     from docx.oxml import OxmlElement
     from docx.shared import Pt
 
-    data, segments = load_session(folder)
+    data, segments = loaded or load_session(folder)
     doc = Document()
     doc.core_properties.title = _title(data)
     doc.add_heading(_title(data), level=1)
@@ -113,10 +144,7 @@ def export_docx(folder: Path) -> Path:
             p._p.get_or_add_pPr().append(OxmlElement("w:bidi"))
             for run in (label, body):
                 run._r.get_or_add_rPr().append(OxmlElement("w:rtl"))
-    path = Path(folder) / DOCX_NAME
-    tmp = _tmp(path)
-    doc.save(str(tmp))
-    return _finish(tmp, path)
+    return _write(Path(folder) / DOCX_NAME, lambda tmp: doc.save(str(tmp)))
 
 
 def find_font() -> Path:
@@ -130,10 +158,10 @@ def find_font() -> Path:
     )
 
 
-def export_pdf(folder: Path) -> Path:
+def export_pdf(folder: Path, loaded=None) -> Path:
     from fpdf import FPDF
 
-    data, segments = load_session(folder)
+    data, segments = loaded or load_session(folder)
     font = find_font()
     pdf = FPDF(format="A4")
     pdf.set_title(_title(data))
@@ -170,20 +198,27 @@ def export_pdf(folder: Path) -> Path:
             para(seg.text, 11, rtl=True, gap=3)
         else:
             para(f"{label} {seg.text}", 11, gap=3)
-    path = Path(folder) / PDF_NAME
-    tmp = _tmp(path)
-    pdf.output(str(tmp))
-    return _finish(tmp, path)
+    return _write(Path(folder) / PDF_NAME, lambda tmp: pdf.output(str(tmp)))
 
 
-def export_session(folder: Path, fmt: str = "both") -> list[Path]:
-    """Write the requested files next to the transcript; returns their paths."""
+def export_session(folder: Path, fmt: str = "both", skipped: list[str] | None = None) -> list[Path]:
+    """Write the requested files next to the transcript; returns their paths. Both files are
+    built from one read of transcript.json. With ``both``, a PDF that can't be made (no
+    font) doesn't lose the DOCX: the reason is appended to ``skipped`` if one is given."""
     if fmt not in (*FORMATS, "both"):
         raise ExportError(f"unknown format {fmt!r}")
-    out = []
-    if fmt in ("docx", "both"):
-        out.append(export_docx(folder))
-    if fmt in ("pdf", "both"):
-        out.append(export_pdf(folder))
+    with _session_lock(folder):
+        loaded = load_session(folder)
+        out = []
+        if fmt in ("docx", "both"):
+            out.append(export_docx(folder, loaded))
+        if fmt in ("pdf", "both"):
+            try:
+                out.append(export_pdf(folder, loaded))
+            except ExportError as e:
+                if fmt == "pdf":
+                    raise
+                if skipped is not None:
+                    skipped.append(str(e))
     log.info("exported session %s (%s)", Path(folder).name, fmt)
     return out

@@ -283,12 +283,15 @@ def cmd_export(args) -> int:
     from .transcribe.export import ExportError, export_session
 
     try:
-        paths = export_session(Path(args.session_dir).expanduser(), args.format)
+        skipped: list[str] = []
+        paths = export_session(Path(args.session_dir).expanduser(), args.format, skipped)
     except ExportError as e:
         print(f"Can't export: {e}", file=sys.stderr)
         return 1
     for p in paths:
         print(p)
+    for reason in skipped:
+        print(f"Skipped the PDF: {reason}", file=sys.stderr)
     return 0
 
 
