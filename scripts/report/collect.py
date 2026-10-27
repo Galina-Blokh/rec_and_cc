@@ -23,6 +23,7 @@ import statistics
 import subprocess
 import sys
 import threading
+import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -37,6 +38,8 @@ try:
 except ZoneInfoNotFoundError:  # Windows without the tzdata package: report in UTC
     UK = UTC
 TIMEOUT = 120  # seconds for any one gh or git call
+RETRIES, BACKOFF = 3, 2.0  # retry rate-limited gh calls after 2, 4, 8 s
+RATE_LIMITED = re.compile(r"HTTP 429|HTTP 403|rate limit", re.I)
 CACHE = Path.home() / ".cache" / "recandcc-report"
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 REVIEW_MARK = "## 🤖 Cursor review"
@@ -149,13 +152,21 @@ class GitHub:
     def _path(self, key: str) -> Path:
         return self.cache / (re.sub(r"[^A-Za-z0-9_.-]+", "_", key) + ".json")
 
+    def _load(self, path: Path) -> dict | None:
+        """The cached record at `path`, or None when missing or unreadable (a killed run)."""
+        try:
+            return json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
+
     def get(self, endpoint: str, stamp: str | None = None, paginate: bool = True):
         """Fetch `repos/<repo>/<endpoint>`. With a `stamp`, reuse the cache while it matches."""
         path = self._path(endpoint)
-        if path.exists():
-            cached = json.loads(path.read_text())
-            if self.offline or (stamp is not None and cached.get("stamp") == stamp):
-                return cached["data"]
+        cached = self._load(path)
+        if cached is not None and (
+            self.offline or (stamp is not None and cached.get("stamp") == stamp)
+        ):
+            return cached["data"]
         if self.offline:
             return []
         data = self._api(endpoint, paginate)
@@ -188,7 +199,7 @@ class GitHub:
         and recorded in `self.dropped[endpoint]`. `key` names the list inside a dict page.
         """
         path = self._path(endpoint)
-        cached = json.loads(path.read_text())["data"] if path.exists() else []
+        cached = (self._load(path) or {}).get("data") or []
         if self.offline:
             return cached
         known = {(i["id"], i.get("updated_at")) for i in cached}
@@ -213,6 +224,16 @@ class GitHub:
         if tail_from is not None:
             seen = {i["id"] for i in merged}
             merged += [i for i in cached[tail_from + 1 :] if i["id"] not in seen]
+        if key == "workflow_runs":
+            # Runs are listed by creation time, so a run still going when it was cached can
+            # sit below the stop point; refetch each such run so its result is current.
+            fetched = {i["id"] for i in fresh}
+            merged = [
+                self._api(f"actions/runs/{i['id']}")
+                if i["id"] not in fetched and i.get("status") != "completed"
+                else i
+                for i in merged
+            ]
         kept = {i["id"] for i in merged}
         self.dropped[endpoint] = [i for i in cached if i["id"] not in kept]
         self._write(path, {"stamp": None, "data": merged})
@@ -225,14 +246,19 @@ class GitHub:
             args += ["--paginate", "--slurp"]
         env = dict(os.environ)
         env.setdefault("GH_TOKEN", env.get("git_api_key_0307", ""))
-        try:
-            out = subprocess.run(  # noqa: S603
-                args, capture_output=True, text=True, env=env, check=False, timeout=TIMEOUT
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"gh api {endpoint} timed out after {TIMEOUT} s") from exc
-        with self._lock:
-            self.calls += 1
+        for attempt in range(RETRIES + 1):
+            try:
+                out = subprocess.run(  # noqa: S603
+                    args, capture_output=True, text=True, env=env, check=False, timeout=TIMEOUT
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(f"gh api {endpoint} timed out after {TIMEOUT} s") from exc
+            with self._lock:
+                self.calls += 1
+            limited = out.returncode != 0 and RATE_LIMITED.search(out.stderr or "")
+            if not limited or attempt == RETRIES:
+                break
+            time.sleep(BACKOFF * 2**attempt)  # GitHub secondary rate limits (403/429)
         if out.returncode != 0:
             # gh's stderr never contains the token; keep only its first line.
             first = (out.stderr.strip().splitlines() or ["unknown error"])[0]

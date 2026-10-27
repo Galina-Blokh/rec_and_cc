@@ -304,6 +304,59 @@ def test_runs_list_reads_the_workflow_runs_key(tmp_path):
     assert len(log) == 1  # a short page is the last one
 
 
+def test_unfinished_runs_below_the_stop_point_are_refetched(tmp_path):
+    ep = "actions/runs?per_page=2"
+    gh = collect.GitHub("o/r", tmp_path)
+    page1 = [
+        {"id": 9, "updated_at": "a", "status": "completed"},
+        {"id": 8, "updated_at": "a", "status": "completed"},
+    ]
+    old = [
+        {"id": 7, "updated_at": "a", "status": "completed"},
+        {"id": 6, "updated_at": "a", "status": "in_progress"},
+    ]
+    _fake_api(
+        gh,
+        {
+            f"{ep}&page=1": {"workflow_runs": page1},
+            f"{ep}&page=2": {"workflow_runs": old},
+            f"{ep}&page=3": {"workflow_runs": []},
+        },
+        [],
+    )
+    gh.get_list(ep, key="workflow_runs")  # cold: all pages, run 6 cached as in progress
+    log = []
+    done6 = {"id": 6, "updated_at": "b", "status": "completed", "conclusion": "success"}
+    _fake_api(gh, {f"{ep}&page=1": {"workflow_runs": page1}, "actions/runs/6": done6}, log)
+    runs = gh.get_list(ep, key="workflow_runs")
+    assert log == [f"{ep}&page=1", "actions/runs/6"]  # stops early, refetches only run 6
+    assert [r["id"] for r in runs] == [9, 8, 7, 6] and runs[-1]["conclusion"] == "success"
+
+
+def test_a_corrupt_cache_file_counts_as_empty(tmp_path):
+    ep = "issues?per_page=100"
+    gh = collect.GitHub("o/r", tmp_path)
+    gh._path(ep).write_text('{"stamp": null, "data": [')  # a run killed mid-write
+    _fake_api(gh, {f"{ep}&page=1": [{"id": 1, "updated_at": "t"}]}, [])
+    assert gh.get_list(ep) == [{"id": 1, "updated_at": "t"}]
+    gh._path("pulls/1").write_text("garbage")
+    _fake_api(gh, {"pulls/1": {"number": 1}}, [])
+    assert gh.get("pulls/1", "s", paginate=False) == {"number": 1}
+
+
+def test_rate_limited_calls_are_retried(tmp_path, monkeypatch):
+    monkeypatch.setattr(collect, "BACKOFF", 0)
+    replies = iter([(1, "", "gh: HTTP 429: secondary rate limit"), (0, "[1]", "")])
+
+    def fake_run(args, **kwargs):
+        code, out, err = next(replies)
+        return collect.subprocess.CompletedProcess(args, code, out, err)
+
+    monkeypatch.setattr(collect.subprocess, "run", fake_run)
+    gh = collect.GitHub("o/r", tmp_path)
+    assert gh._api("issues") == [1] and gh.calls == 2
+
+
 def test_pooled_pr_details_match_sequential(tmp_path, monkeypatch):
     pulls = [{"id": n, "number": n, "updated_at": f"u{n}"} for n in range(1, 8)]
 
