@@ -226,6 +226,11 @@ already cached and the network blocked.
    two-way JSON-lines protocol (commands on stdin, events on stdout) is defined. The window
    takes and returns focus correctly from an `.accessory` app. No new TCC prompts. The effort
    and line count are recorded so the owner can decide on B.
+   **Spike done (US-30):** the subcommand edits mode, folder, languages, keep audio, live
+   captions and speaker names. The two-way protocol was not needed: a one-shot JSON snapshot
+   goes in and one JSON line comes out, validated by Python (see ARCHITECTURE.md). About
+   170 Swift and 170 Python lines. `transcription.model`, `transcription.live` and editing
+   the hotkey are left out; a two-way channel is still open.
 
 ## Links
 - Issues [#3](https://github.com/Galina-Blokh/rec_and_cc/issues/3), [#5](https://github.com/Galina-Blokh/rec_and_cc/issues/5),
