@@ -2,19 +2,23 @@
 
 File: `~/Library/Application Support/RecAndCC/config.toml` (macOS) or
 `%LOCALAPPDATA%\RecAndCC\config.toml` (Windows). It is created with defaults on first run.
-Open it from **menu → Edit settings**, or print it with `recandcc config`. Unknown keys are
-ignored, and missing keys take their default values.
+Open it from **menu → Edit config.toml** (macOS) or **Edit settings** (Windows tray), or
+print it with `recandcc config`. On macOS, **menu → Settings…** edits the common keys in a
+window. Unknown keys are ignored, and missing keys take their default values.
 
 A menu change (or `recandcc autostart on/off`) writes only its own key, so other hand edits in
 the file are kept; like any save, it drops comments and rewrites the keys in a fixed order.
-Changes to `[detection]` are picked up while the app runs. Restart the app after changing
-`[transcription]` or `output_dir`.
+These hand edits are picked up while the app runs (a few seconds after you save the file):
+`[detection]`, `[summary]`, `output_dir`, `hotkey`, `live_captions`, and in `[transcription]`
+`languages`, `keep_audio`, `audio_retention_days` and `speaker_names`. Restart the app after
+changing any other `[transcription]` key (models, device, ...). Reload and menu saves never
+interleave, so a menu change made at the same moment is not lost.
 
 ## Top level
 
 | Key | Default | Description |
 |---|---|---|
-| `output_dir` | `~/Documents/Transcribes` | Where sessions are saved (`<date>/<time>_<app>/`). If it is in a known cloud-synced folder (iCloud Drive incl. "Desktop & Documents", `~/Library/CloudStorage`, `~/Dropbox`, `~/Google Drive`, `~/OneDrive*`, `~/Box`; case-insensitive, also through symlinks; Windows: OneDrive, `%USERPROFILE%\Dropbox`, also through junctions; see README → Privacy), the app warns once per folder (log + notification; `recandcc config` too): recordings would be uploaded. Pick a local folder, e.g. `~/Transcribes`, to keep them on this device |
+| `output_dir` | `~/Documents/Transcribes` | Where sessions are saved (`<date>/<time>_<app>/`). If it is in a known cloud-synced folder (iCloud Drive incl. "Desktop & Documents", `~/Library/CloudStorage`, `~/Dropbox`, `~/Google Drive`, `~/OneDrive*`, `~/Box`; case-insensitive, also through symlinks; Windows: OneDrive, `%USERPROFILE%\Dropbox`, also through junctions; see README → Privacy), the app warns once per folder (log + notification; `recandcc config` too): recordings would be uploaded. Pick a local folder, e.g. `~/Transcribes`, to keep them on this device. The same one-time warning appears for a network volume (SMB/AFP/NFS/WebDAV mount, UNC path or mapped network drive): recordings would leave this device over the network |
 | `autostart` | `false` | Informational; use **menu → Launch at login** or `recandcc autostart on` |
 | `hotkey` | `"<ctrl>+<alt>+r"` (⌃⌥R) | Global start/stop shortcut (toggle; stops any recording). Modifiers `<cmd>`, `<shift>`, `<alt>`/`<option>`, `<ctrl>` (`<win>` = Windows key) + one key: `a`–`z`, `0`–`9`, `f1`–`f12`, `space`. Keys other than F1–F12 need a modifier. On Windows `<cmd>` means Ctrl. `""` disables it. Applied live when the file changes |
 | `live_captions` | `true` | Show the floating captions window while recording (needs `transcription.live`) |
@@ -45,7 +49,7 @@ Changes to `[detection]` are picked up while the app runs. Restart the app after
 | `inside_sensitivity` | unset | 0–100: how readily app audio (calls, videos) starts a recording. Scales `min_active_s` the same way (12 s at 0, 0.75 s at 100 with the default 3 s). Unset = plain `min_active_s`. Presets: Quiet room = 75/50, Normal = 50/50, Noisy place = 25/50 (outside/inside), Off = both unset |
 | `call_apps` | Zoom, Teams, FaceTime, Slack, Discord, Telegram, WhatsApp, Skype, Webex | Patterns for call apps |
 | `media_apps` | browsers, QuickTime, VLC, Podcasts, TV | Patterns for media apps |
-| `ignore_apps` | Spotify, Music, system sounds, Siri, Voice Memos | Never trigger |
+| `ignore_apps` | Spotify, Music, system sounds (`com.apple.systemsound`, `coreaudiod`), Notification Center, Siri, Voice Memos, RecAndCC itself, `afplay`, `rcc-audiotap` | Never trigger |
 | `app_modes` | `{}` | Per-app mode overrides, e.g. `{"us.zoom" = "auto", "com.google.chrome" = "ask"}` |
 
 **Patterns** are case-insensitive substrings matched against the app's bundle id (macOS,
