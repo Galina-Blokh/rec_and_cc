@@ -19,6 +19,7 @@ from recandcc.models import TriggerKind
 from recandcc.recorder import make_private_dir, owner_only_sddl
 
 SID = "S-1-5-21-111-222-333-1001"
+REAL_VOLUME_ACL_SUPPORT = recmod._volume_acl_support  # before fake_windows replaces it
 
 
 @pytest.fixture
@@ -85,6 +86,30 @@ def test_warn_once_holds_under_concurrent_threads(fake_windows, caplog):
         for t in threads:
             t.join()
     assert len(caplog.records) == 1
+
+
+def test_long_path_on_an_acl_volume_is_private(fake_windows, monkeypatch, tmp_path, caplog):
+    probed: list[str] = []
+
+    def volume_info(long_path):  # GetVolumePathNameW + GetVolumeInformationW on NTFS
+        probed.append(long_path)
+        return "C:\\", 0x1234ABCD, recmod._FILE_PERSISTENT_ACLS
+
+    monkeypatch.setattr(recmod, "_volume_acl_support", REAL_VOLUME_ACL_SUPPORT)
+    monkeypatch.setattr(recmod, "_volume_info", volume_info)
+    long = "C:\\" + "\\".join(["x" * 100] * 3) + "\\session"  # > MAX_PATH (260)
+    assert recmod._volume_acl_support(Path(long)) == ("C:\\ (1234ABCD)", True)
+    assert probed == ["\\\\?\\" + long]  # probed through the extended-length form
+    with caplog.at_level(logging.WARNING, logger="recandcc.recorder"):
+        assert make_private_dir(tmp_path / ("y" * 100) / ("z" * 100) / ("w" * 100)) is None
+    assert not caplog.records and not recmod._warned
+
+
+def test_volume_roots_lose_the_extended_length_prefix():
+    assert recmod._short_root("\\\\?\\C:\\") == "C:\\"
+    assert recmod._short_root("\\\\?\\UNC\\host\\share\\") == "\\\\host\\share\\"
+    guid = "\\\\?\\Volume{0b1c}\\"
+    assert recmod._short_root(guid) == guid
 
 
 def test_long_paths_use_the_extended_length_prefix():

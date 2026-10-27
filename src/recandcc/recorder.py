@@ -15,6 +15,7 @@ from __future__ import annotations
 import errno
 import logging
 import ntpath
+import os
 import queue
 import re
 import shutil
@@ -189,6 +190,21 @@ def _volume_acl_support(path: Path) -> tuple[str, bool]:
     made every time (no cache): a USB stick swapped under the same drive letter has another
     serial number, so it gets its own key.
     """
+    root, serial, flags = _volume_info(_win_long_path(path))  # \\?\: works past MAX_PATH
+    return f"{root} ({serial:08X})", bool(flags & _FILE_PERSISTENT_ACLS)
+
+
+def _short_root(root: str) -> str:
+    r"""``\\?\C:\`` -> ``C:\``, ``\\?\UNC\h\s\`` -> ``\\h\s\``; GUID roots stay."""
+    if root.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + root[8:]
+    if root.startswith("\\\\?\\") and root[5:6] == ":":
+        return root[4:]
+    return root
+
+
+def _volume_info(long_path: str) -> tuple[str, int, int]:
+    """``(volume root, serial number, file-system flags)`` via the Win32 volume API."""
     if sys.platform != "win32":  # also narrows the Win32-only ctypes names for pyright
         raise OSError("Windows only")
     import ctypes
@@ -207,15 +223,15 @@ def _volume_acl_support(path: Path) -> tuple[str, bool]:
         wintypes.DWORD,
     ]
     buf = ctypes.create_unicode_buffer(1024)
-    if not k32.GetVolumePathNameW(str(path), buf, len(buf)):
+    if not k32.GetVolumePathNameW(long_path, buf, len(buf)):
         raise ctypes.WinError(ctypes.get_last_error())
-    root = buf.value
+    root = _short_root(buf.value)
     serial, flags = wintypes.DWORD(), wintypes.DWORD()
     if not k32.GetVolumeInformationW(
         root, None, 0, ctypes.byref(serial), None, ctypes.byref(flags), None, 0
     ):
         raise ctypes.WinError(ctypes.get_last_error())
-    return f"{root} ({serial.value:08X})", bool(flags.value & _FILE_PERSISTENT_ACLS)
+    return root, serial.value, flags.value
 
 
 def _mkdir_private(path: Path) -> str | None:
@@ -237,7 +253,8 @@ def _mkdir_private(path: Path) -> str | None:
     except FileExistsError:
         raise  # created concurrently / something in the way: not a privacy problem
     except Exception as e:  # keep recording, just warn
-        path.mkdir(mode=PRIVATE_DIR_MODE)  # FileExistsError here reports nothing
+        # FileExistsError here reports nothing; \\?\ so long paths don't abort the start
+        os.mkdir(_win_long_path(path) if sys.platform == "win32" else path, PRIVATE_DIR_MODE)
         return _not_private(
             f"acl-fallback:{_volume_key(path)[0]}",
             "could not create %s with an owner-only ACL (%s); recordings may be readable "
