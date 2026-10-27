@@ -492,14 +492,39 @@ def test_a_session_folder_swapped_for_a_link_is_not_written_through(tmp_path):
 @pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
 def test_pdf_safe_text_placeholder_bidi_and_scripts():
     font = export.find_font()
-    out = export.pdf_safe_text("a\U0001f600b‏‫c⁦d‎", font)
-    assert out.startswith("a") and out[1] in "?�" and out[2:] == "bcd"
+    cmap = export._font_cmap(font)
+    out = export.pdf_safe_text("a\U0001f600b‫c⁦d؜", font)
+    assert out[0] == "a" and out[1] in "?�" and out[2:] == "bcd"
     kept = "Привет שלום\n"
     assert export.pdf_safe_text(kept, font) == kept
+    # LRM/RLM survive only where the font has a glyph; never a placeholder
+    marks = export.pdf_safe_text("x‏y‎z", font)
+    assert marks.replace("‏", "").replace("‎", "") == "xyz"
+    assert ("‏" in marks) == (0x200F in cmap)
 
 
 @pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
-def test_pdf_with_emoji_and_bidi_marks_still_exports(tmp_path):
-    seg = {"start": 0, "end": 1, "text": "hi \U0001f600‏ there", "speaker": "Me"}
+def test_pdf_safe_text_collapses_emoji_sequences():
+    font = export.find_font()
+    cmap = export._font_cmap(font)
+    if any(o in cmap for o in (0x1F468, 0x1F469, 0x1F466, 0x1F44D, 0x1F3FD)):
+        pytest.skip("font covers emoji")
+    family = "\U0001f468‍\U0001f469‍\U0001f466"
+    thumbs = "\U0001f44d\U0001f3fd"
+    out = export.pdf_safe_text(f"{family} {thumbs}", font)
+    assert out.count("?") + out.count("�") == 2 and " " in out
+
+
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_pdf_with_emoji_and_bidi_marks_reads_back(tmp_path):
+    from pypdf import PdfReader
+
+    text = "hi \U0001f600‏ Привет שלום there"
+    seg = {"start": 0, "end": 1, "text": text, "speaker": "Me"}
     (tmp_path / "transcript.json").write_text(json.dumps({"segments": [seg]}), "utf-8")
-    assert export.export_pdf(tmp_path).read_bytes().startswith(b"%PDF")
+    pdf = export.export_pdf(tmp_path)
+    got = "\n".join(pg.extract_text() for pg in PdfReader(str(pdf)).pages)
+    he = "שלום"
+    assert "Привет" in got and (he in got or he[::-1] in got)
+    assert "?" in got or "�" in got
+    assert "\U0001f600" not in got

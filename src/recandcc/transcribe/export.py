@@ -216,10 +216,7 @@ _PROBE = "aZé\u0416\u0451\u044f\u05d0\u05ea\u05b7\u05f3\u05f4—…«»“”"
 def _covers_scripts(path: Path) -> bool:
     """True if the font has glyphs for Latin, Cyrillic and Hebrew (fontTools comes with fpdf2)."""
     try:
-        from fontTools.ttLib import TTFont
-
-        with TTFont(str(path), lazy=True, fontNumber=0) as f:
-            cmap = f.getBestCmap() or {}
+        cmap = _font_cmap(path)
         return all(ord(c) in cmap for c in _PROBE)
     except Exception:  # noqa: BLE001 - an unreadable font is just not a candidate
         return False
@@ -237,32 +234,56 @@ def find_font() -> Path:
     )
 
 
-# Bidi controls and invisible joiners/selectors: dropped, they have no glyph and the PDF
-# lays direction out itself (the DOCX keeps them, they are invisible there).
-_INVISIBLE = dict.fromkeys(
-    [0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0xFEFF, 0xFE0E, 0xFE0F]
-    + list(range(0x202A, 0x202F))
-    + list(range(0x2066, 0x206A))
+# Embedding/isolate controls (and ALM): dropped always, the PDF lays direction out itself.
+_BIDI_CONTROLS = frozenset([0x061C, *range(0x202A, 0x202F), *range(0x2066, 0x206A)])
+# Invisible format characters (LRM/RLM, ZWJ/ZWNJ, ZWSP, word joiner, BOM, soft hyphen, variation
+# selectors): kept when the font has a glyph (LRM/RLM keep neutral punctuation ordered in RTL
+# text, ZWNJ/ZWJ matter for Persian and Indic), otherwise dropped rather than shown as "?".
+_FORMAT = frozenset([0x00AD, 0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0x2060, 0xFEFF]) | frozenset(
+    [*range(0xFE00, 0xFE10)]
 )
+_ZWJ = 0x200D
+_EMOJI_MODIFIERS = range(0x1F3FB, 0x1F400)
 
 
 @functools.lru_cache(maxsize=4)
-def _font_cmap(path: Path) -> frozenset[int]:
+def _cmap_of(path: Path) -> frozenset[int]:
     from fontTools.ttLib import TTFont
 
     with TTFont(str(path), lazy=True, fontNumber=0) as f:
         return frozenset(f.getBestCmap() or {})
 
 
+def _font_cmap(path: Path) -> frozenset[int]:
+    return _cmap_of(Path(path).resolve())  # same key however the caller spells the path
+
+
 def pdf_safe_text(text: str, path: Path) -> str:
     """Strip bidi controls and swap characters the font lacks (emoji, ...) for a visible
-    placeholder, so the PDF never silently loses text the DOCX has."""
+    placeholder, so the PDF never silently loses text the DOCX has. A ZWJ emoji sequence or
+    skin-tone run becomes one placeholder."""
     cmap = _font_cmap(path)
-    mark = "�" if 0xFFFD in cmap else "?"
-    text = text.translate(_INVISIBLE)
-    return "".join(
-        c if c in "\n\t" or not c.isprintable() or ord(c) in cmap else mark for c in text
-    )
+    mark = "\ufffd" if 0xFFFD in cmap else "?"
+    out: list[str] = []
+    after_mark = False  # the last thing emitted is a placeholder that a ZWJ/modifier extends
+    joined = False  # a dropped ZWJ follows that placeholder
+    for c in text:
+        o = ord(c)
+        if o in _BIDI_CONTROLS:
+            continue
+        if after_mark and o == _ZWJ:
+            joined = True  # inside an emoji sequence: glue, not text
+        elif o in cmap or c in "\n\t":
+            out.append(c)
+            after_mark = joined = False
+        elif o in _FORMAT:
+            joined = after_mark and (joined or o == _ZWJ)
+        elif after_mark and (joined or o in _EMOJI_MODIFIERS):
+            joined = False
+        else:
+            out.append(mark)
+            after_mark, joined = True, False
+    return "".join(out)
 
 
 @_type_only
