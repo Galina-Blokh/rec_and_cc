@@ -190,6 +190,7 @@ def test_search_over_100_sessions_is_fast(index: TranscriptIndex, query: str, ex
     # Shown on failure or with `pytest -rA`, so CI logs (Windows included) record the timings.
     backend = "fts5" if index.fts else "like"
     print(
-        f"search-latency {backend} {query!r}: median {median * 1000:.2f} ms, budget {budget * 1000:.0f} ms"
+        f"search-latency {backend} {query!r}: median {median * 1000:.2f} ms, "
+        f"budget {budget * 1000:.0f} ms"
     )
     assert median < budget, f"{query!r}: median {median * 1000:.1f} ms >= {budget * 1000:.0f} ms"
