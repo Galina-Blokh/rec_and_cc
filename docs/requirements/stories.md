@@ -18,12 +18,12 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-07 | A call during a video recording becomes a call | ✅ |
 | US-08 | Separate `Me` / `Others` tracks without echo | ✅ |
 | US-09 | English and Russian detected automatically | ✅ |
-| US-10 | Fast local transcription | ✅ |
+| US-10 | Fast local transcription | ✅ GPU · 🟡 CPU slower |
 | US-11 | Live captions and live transcript | ✅ |
 | US-12 | Speaker labels for the other side | ✅ |
-| US-13 | Readable transcripts in private folders | ✅ |
-| US-14 | Works offline, nothing leaves the device | ✅ |
-| US-15 | Delete old audio automatically | ✅ |
+| US-13 | Readable transcripts in private folders | 🟡 owner-only not enforced on Windows |
+| US-14 | Works offline, nothing leaves the device | 🟡 some models unpinned; no end-to-end offline test |
+| US-15 | Delete old audio automatically | 🟡 `keep_audio = false` can miss a crash |
 | US-16 | Permissions set up from the app | ✅ |
 | US-17 | Always on, visible state | ✅ |
 | US-18 | Runs on Windows | 🟡 untested on hardware (#5) |
@@ -105,7 +105,8 @@ while I decide.*
 
 ### US-10 Fast local transcription
 - **Then** Whisper runs on the device: MLX on the Apple-silicon GPU with CPU workers
-  alongside, faster-whisper on CPU elsewhere; a 1-hour meeting takes about 2–3 minutes.
+  alongside, faster-whisper on CPU elsewhere. A 1-hour meeting takes about 2–3 minutes
+  on the GPU (M5 Max); the CPU-only path (Windows) takes about 15 minutes.
 - **Given** a transcription failure, **then** the session is still saved and the error
   reported; other queued sessions continue.
 
@@ -128,19 +129,28 @@ while I decide.*
 - **Then** each session is saved under `<output_dir>/<date>/<time>_<app>/` with
   `transcript.md`, `.srt`, `.json`, WAVs and `session.json`.
 - **Then** the folders RecAndCC creates are readable only by the owner (`0700` on macOS).
+- **Not yet:** on Windows, `chmod` doesn't restrict NTFS ACLs, so folders inherit the
+  parent's permissions; an owner-only ACL is needed.
 - **Then** the menu lists the 10 most recent transcripts.
 
 ### US-14 Works offline, nothing leaves the device
 - **Given** the models are on disk, **when** all network access is blocked, **then** a
   session records and transcribes end to end.
-- **Then** models download once, pinned to exact revisions or verified by SHA-256; a bad
-  checksum is rejected.
+- **Then** models download once: `tiny`, `base`, `small` and `large-v3-turbo` pinned to
+  exact revisions, the speaker model verified by SHA-256 (a bad checksum is rejected).
+- **Then** RecAndCC uploads nothing itself. The default output folder may still be synced
+  by iCloud or OneDrive; the README warns, the app doesn't yet.
+- **Not yet:** `medium`, `large-v3` and custom repos resolve without a pinned revision, and
+  no automated test runs a whole session with the network blocked (`test_offline.py`
+  covers model loading).
 - **Then** logs contain events, app names and paths, never transcript text or audio.
 
 ### US-15 Delete old audio automatically
 - **Given** `audio_retention_days = N` (menu: Never / 1 / 7 / 30 / 90), **then** WAVs of
   transcribed sessions older than N days are deleted; transcripts are always kept.
 - **Given** `keep_audio = false`, **then** WAVs are deleted right after transcription.
+- **Not yet:** when diarization is slow, deletion waits for it in memory; if the app quits
+  or crashes first, the WAVs stay (until `audio_retention_days` removes them, if set).
 
 ### US-16 Permissions set up from the app
 - **Given** first run on macOS, **then** a setup dialog requests Microphone and System audio.
