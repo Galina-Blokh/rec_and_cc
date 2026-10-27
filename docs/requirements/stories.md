@@ -306,7 +306,9 @@ don't need the command line for it.*
   **then** a few seconds of that speaker (their first segment of at least 2 s, else the
   longest, at most 6 s) play from the session's own WAV, cut into a private temp file that
   is deleted after playback (its folder on quit), off the menu thread. **Given** the audio
-  was purged or is missing, **then** there is no "Play sample" button, only the first lines.
+  was purged or is missing, or a session is recording (it would record the sample), **then**
+  there is no "Play sample" button, only the first lines. A label from a call is never
+  played from the user's own mic track.
 - **Not yet:** the Windows tray items (#1).
 
 ### US-31 Speaker names from the call app's participant list

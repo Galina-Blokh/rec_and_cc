@@ -7,16 +7,24 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import wave
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
+from recandcc.engine import IDLE, PROMPTING, RECORDING
 from recandcc.models import SessionInfo, Track, TriggerKind
 from recandcc.ui import sample
-from recandcc.ui.common import ask_speaker_name, name_dialog_answer, name_dialog_script
+from recandcc.ui.common import (
+    Controller,
+    ask_speaker_name,
+    name_dialog_answer,
+    name_dialog_script,
+)
 
 RATE = 16000
 
@@ -67,11 +75,19 @@ def test_find_clip_uses_the_speakers_segments_on_the_others_track(tmp_path):
     assert sample.find_clip(d, "Speaker 9") is None
 
 
-def test_room_upgraded_session_picks_the_louder_track(tmp_path):
-    d = _session(tmp_path, [(5, 9, "Speaker 1")], room=True, wavs=())
-    _wav(d / "others.wav", 30.0)
-    _wav(d / "me.wav", 30.0, tone_from=5, tone_to=9)
-    assert sample.find_clip(d, "Speaker 1").wav == d / "me.wav"
+def test_plain_room_session_uses_the_mic_track(tmp_path):
+    d = _session(tmp_path, [(5, 9, "Speaker 1")], kind=TriggerKind.ROOM, wavs=("me.wav",))
+    assert sample.find_clip(d, "Speaker 1") == sample.Clip(d / "me.wav", 5.0, 9.0)
+
+
+def test_upgraded_room_session_never_plays_the_mic(tmp_path):
+    # a room session a call upgraded: the label's track is not recorded, so it is Others
+    d = _session(tmp_path, [(5, 9, "Speaker 3")], room=True, wavs=())
+    _wav(d / "me.wav", 30.0, tone_from=0, tone_to=30)  # the user talks the whole time
+    _wav(d / "others.wav", 30.0, tone_from=5, tone_to=9)
+    assert sample.find_clip(d, "Speaker 3") == sample.Clip(d / "others.wav", 5.0, 9.0)
+    _wav(d / "others.wav", 30.0, tone_from=20, tone_to=30)  # padding before the upgrade
+    assert sample.find_clip(d, "Speaker 3") is None  # silence: no sample, never the mic
 
 
 def test_missing_or_purged_audio_gives_no_clip_and_the_plain_dialog(tmp_path):
@@ -79,8 +95,6 @@ def test_missing_or_purged_audio_gives_no_clip_and_the_plain_dialog(tmp_path):
     assert sample.find_clip(d, "Speaker 1") is None  # retention deleted the WAV
     _wav(d / "others.wav", 10.0)
     assert sample.find_clip(d, "Speaker 1") is not None
-    _wav(d / "others.wav", 0.0)  # truncated: the clip lies past the end of the audio
-    assert sample.find_clip(d, "Speaker 1") is None
     (d / "transcript.json").write_text("{not json", encoding="utf-8")
     assert sample.find_clip(d, "Speaker 1") is None  # never raises
 
@@ -92,6 +106,63 @@ def test_missing_or_purged_audio_gives_no_clip_and_the_plain_dialog(tmp_path):
 
     assert ask_speaker_name("Speaker 1", None, ask, lambda _c: None) == "Anna"
     assert "Play sample" not in shown[0]
+
+
+def test_segment_past_the_end_or_a_corrupt_wav_gives_no_clip(tmp_path):
+    d = _session(tmp_path, [(40, 44, "Speaker 1")])  # the WAV is 30 s long
+    assert sample.find_clip(d, "Speaker 1") is None
+    _session(tmp_path, [(0, 4, "Speaker 1")], wavs=())
+    (d / "others.wav").write_bytes(b"RIFF\x00\x00garbage, not a wave file")
+    assert sample.find_clip(d, "Speaker 1") is None
+
+
+def test_no_sample_while_a_session_records(tmp_path):
+    d = _session(tmp_path, [(0, 4, "Speaker 1")])
+    ctrl = Controller.__new__(Controller)
+    for status in (RECORDING, PROMPTING):
+        ctrl.engine = SimpleNamespace(state=SimpleNamespace(status=status))  # type: ignore[assignment]
+        assert not ctrl.sample_allowed
+        assert ctrl.speaker_clip(d, "Speaker 1") is None  # no "Play sample" button
+    ctrl.engine = SimpleNamespace(state=SimpleNamespace(status=IDLE))  # type: ignore[assignment]
+    assert ctrl.speaker_clip(d, "Speaker 1") == sample.Clip(d / "others.wav", 0.0, 4.0)
+
+    calls: list = []
+    player = sample.SamplePlayer(
+        popen=lambda *a, **k: calls.append(a), allowed=lambda: False, root=tmp_path
+    )
+    assert player.play(sample.Clip(d / "others.wav", 0.0, 4.0)) is None
+    assert calls == []
+    player.close()
+
+
+def test_overlapping_segments_are_used_only_when_nothing_else_is_left(tmp_path):
+    d = _session(tmp_path, [(2, 8, "Speaker 1"), (10, 11, "Speaker 1")])
+    data = json.loads((d / "transcript.json").read_text(encoding="utf-8"))
+    data["segments"][0]["overlap"] = True
+    (d / "transcript.json").write_text(json.dumps(data), encoding="utf-8")
+    assert sample.find_clip(d, "Speaker 1") == sample.Clip(d / "others.wav", 10.0, 11.0)
+    data["segments"] = data["segments"][:1]  # only the overlap is left
+    (d / "transcript.json").write_text(json.dumps(data), encoding="utf-8")
+    assert sample.find_clip(d, "Speaker 1") == sample.Clip(d / "others.wav", 2.0, 8.0)
+
+
+def test_many_replays_keep_the_typed_name(tmp_path):
+    clip = sample.Clip(tmp_path / "others.wav", 0.0, 3.0)
+    replays = 50  # no cap: the name typed before the last replay is kept
+    answers = iter(
+        ["button returned:Play sample, text returned:Anna"] * replays
+        + ["button returned:Save, text returned:Anna"]
+    )
+    shown: list[str] = []
+    played: list = []
+
+    def ask(script: str) -> str:
+        shown.append(script)
+        return next(answers)
+
+    assert ask_speaker_name("Speaker 1", clip, ask, played.append) == "Anna"
+    assert len(played) == replays
+    assert all('default answer "Anna"' in s for s in shown[1:])
 
 
 def test_dialog_plays_the_sample_and_comes_back_with_the_typed_text(tmp_path):
@@ -117,21 +188,36 @@ def test_dialog_plays_the_sample_and_comes_back_with_the_typed_text(tmp_path):
 
 
 class FakeProc:
-    def __init__(self, args, **_kw):
+    """Plays until killed (``block``) or at once."""
+
+    def __init__(self, args, block: bool = False, **_kw):
         self.args = args
         self.thread = threading.current_thread()
         self.existed = Path(args[-1]).exists()
+        self.dir_mode = Path(args[-1]).parent.stat().st_mode & 0o777
         with wave.open(args[-1], "rb") as w:
             self.seconds = w.getnframes() / w.getframerate()
+        self.done = threading.Event()
+        if not block:
+            self.done.set()
+        self.killed = False
 
     def wait(self, timeout=None):
+        self.done.wait(5)
         return 0
 
     def poll(self):
-        return 0
+        return 0 if self.done.is_set() else None
 
-    def terminate(self):
-        pass
+    def kill(self):
+        self.killed = True
+        self.done.set()
+
+
+def _start(player: sample.SamplePlayer, clip: sample.Clip) -> threading.Thread:
+    t = player.play(clip)
+    assert t is not None
+    return t
 
 
 def test_player_plays_off_the_calling_thread_and_deletes_the_clip(tmp_path, caplog):
@@ -142,19 +228,22 @@ def test_player_plays_off_the_calling_thread_and_deletes_the_clip(tmp_path, capl
         procs.append(FakeProc(args, **kw))
         return procs[-1]
 
-    player = sample.SamplePlayer(popen=popen)
+    player = sample.SamplePlayer(popen=popen, root=tmp_path)
     clip = sample.find_clip(d, "Anna Secret")
     assert clip is not None
     with caplog.at_level(logging.DEBUG, logger="recandcc"):
-        player.play(clip).join(5)
+        _start(player, clip).join(5)
     (proc,) = procs
     assert proc.thread is not threading.main_thread()
-    assert proc.args[0] == "afplay" and proc.existed
+    assert proc.args[0] == "/usr/bin/afplay" and proc.existed  # never a PATH lookup
+    if os.name == "posix":
+        assert proc.dir_mode == 0o700
     assert abs(proc.seconds - sample.MAX_S) < 0.01
     folder = Path(proc.args[-1]).parent
+    assert folder.name.startswith("rcc-sample-")
     assert list(folder.iterdir()) == []  # deleted after playback
     player.close()
-    assert not folder.exists()  # the temp folder goes on exit
+    assert not folder.exists()  # the temp folder goes on quit / exit
     assert all(
         "Anna" not in r.getMessage() and "secret" not in r.getMessage() for r in caplog.records
     )
@@ -171,41 +260,47 @@ def test_player_failure_still_deletes_and_logs_only_the_error_type(tmp_path, cap
         seen.append(args[-1])
         raise FileNotFoundError(args[-1])  # no afplay
 
-    player = sample.SamplePlayer(popen=popen)
+    player = sample.SamplePlayer(popen=popen, root=tmp_path)
     with caplog.at_level(logging.DEBUG, logger="recandcc"):
-        player.play(clip).join(5)
+        _start(player, clip).join(5)
     assert seen and not Path(seen[0]).exists()
     assert any("FileNotFoundError" in r.getMessage() for r in caplog.records)
     assert not [r for r in caplog.records if r.levelno >= logging.INFO]
     player.close()
 
 
-def test_a_new_sample_stops_the_one_playing(tmp_path):
+def test_quick_plays_leave_one_player_and_close_kills_it(tmp_path):
     d = _session(tmp_path, [(0, 3, "Speaker 1")])
     clip = sample.find_clip(d, "Speaker 1")
     assert clip is not None
-    release = threading.Event()
-    stopped: list[bool] = []
+    procs: list[FakeProc] = []
 
-    class Slow(FakeProc):
-        def wait(self, timeout=None):
-            release.wait(5)
-            return 0
+    def popen(args, **kw):
+        procs.append(FakeProc(args, block=True))
+        return procs[-1]
 
-        def poll(self):
-            return None if not release.is_set() else 0
-
-        def terminate(self):
-            stopped.append(True)
-            release.set()
-
-    player = sample.SamplePlayer(popen=lambda a, **k: Slow(a))
-    first = player.play(clip)
-    for _ in range(100):
-        if player._proc is not None:
+    player = sample.SamplePlayer(popen=popen, root=tmp_path)
+    threads = [_start(player, clip), _start(player, clip)]
+    for _ in range(500):
+        if len(procs) == 2:
             break
         threading.Event().wait(0.01)
-    player.play(clip).join(5)
-    first.join(5)
-    assert stopped == [True]
+    assert len(procs) == 2
+    assert sum(not p.killed for p in procs) == 1  # the newer one stopped the older one
     player.close()
+    assert all(p.killed for p in procs)  # quitting stops the one still playing
+    for t in threads:
+        t.join(5)
+        assert not t.is_alive()
+    assert not list(tmp_path.glob("rcc-sample-*"))
+    assert player.play(clip) is None  # closed
+
+
+def test_stale_sample_folders_are_swept_at_start(tmp_path):
+    old = tmp_path / "rcc-sample-old"
+    old.mkdir()
+    (old / "sample-1.wav").write_bytes(b"x")
+    other = tmp_path / "keep-me"
+    other.mkdir()
+    sample.SamplePlayer(root=tmp_path).close()
+    assert not old.exists() and other.exists()

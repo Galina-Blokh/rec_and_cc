@@ -142,8 +142,8 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
 - **Recent transcripts → Name speakers…** (only with `speaker_names = true`): pick a session
   and a `Speaker N` (their first lines are shown to help), type a name. On macOS, **Play
   sample** in the name dialog plays a few seconds (up to 6 s) of that speaker from the
-  session's own audio while it is still kept; the clip is a temp file deleted after
-  playback. Same as `recandcc name-speaker`.
+  session's own audio while it is still kept (not while recording); the clip is a temp
+  file deleted after playback. Same as `recandcc name-speaker`.
 - **Forget all voices…**: after a confirmation, deletes every voice profile and all saved
   session voices (`recandcc voices delete --all`), including those of sessions still waiting
   to be transcribed. macOS menu only for now.

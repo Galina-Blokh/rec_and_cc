@@ -8,8 +8,10 @@ playback (the folder on exit). Nothing about the content is logged.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import json
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -21,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..models import SessionInfo, Track, TriggerKind
+from ..models import SessionInfo, Track
 
 log = logging.getLogger(__name__)
 
@@ -83,24 +85,25 @@ def find_clip(directory: Path, label: str) -> Clip | None:
 
         directory = Path(directory)
         data = json.loads((directory / JSON_NAME).read_text(encoding="utf-8"))
-        span = pick_span(
-            [(s["start"], s["end"]) for s in data.get("segments", []) if s["speaker"] == label]
-        )
+        mine = [s for s in data.get("segments", []) if s["speaker"] == label]
+        # two voices at once make a poor sample: overlaps only if nothing else is left
+        clean = [s for s in mine if not s.get("overlap")] or mine
+        span = pick_span([(s["start"], s["end"]) for s in clean])
         if span is None:
             return None
+        from ..transcribe.engine import diarized_tracks  # lazy: on the dialog worker
+
         session = SessionInfo.load(directory)
-        # the diarized tracks: the mic in a room session, both if a call upgraded it
-        if session.trigger_kind == TriggerKind.ROOM:
-            order = (Track.ME,)
-        elif session.started_as_room:
-            order = (Track.ME, Track.OTHERS)
-        else:
-            order = (Track.OTHERS,)
-        wavs = [p for t in order if (p := _track_wav(session, t))]
-        if not wavs:
+        tracks = diarized_tracks(session)
+        # Others whenever it was diarized: a room session a call upgraded diarizes both
+        # tracks, but nothing records which track a label came from, so a label is never
+        # played from the user's own mic unless the mic is the only diarized track.
+        track = Track.OTHERS if Track.OTHERS in tracks else Track.ME
+        wav = _track_wav(session, track)
+        if wav is None:
             return None
-        # both tracks: the speaker is on the one that is louder during the clip
-        wav = max(wavs, key=lambda p: _loudness(p, *span)) if len(wavs) > 1 else wavs[0]
+        if len(tracks) > 1 and _loudness(wav, *span) == 0.0:
+            return None  # the call's padding before the upgrade: a room speaker, not on Others
         _read(wav, *span)  # readable and long enough
         return Clip(wav, *span)
     except Exception as e:  # noqa: BLE001 - no sample is the fallback, never a crash
@@ -117,26 +120,53 @@ def cut_clip(clip: Clip, out: Path) -> Path:
     return out
 
 
+AFPLAY = "/usr/bin/afplay"  # an absolute path: never a PATH lookup
+PREFIX = "rcc-sample-"
+
+
+def sweep_stale(root: Path | None = None) -> None:
+    """Remove ``rcc-sample-*`` folders the user owns, left in the temp dir by a crash."""
+    try:
+        uid = os.getuid() if hasattr(os, "getuid") else None
+        for d in Path(root or tempfile.gettempdir()).glob(PREFIX + "*"):
+            if d.is_dir() and not d.is_symlink() and (uid is None or d.stat().st_uid == uid):
+                shutil.rmtree(d, ignore_errors=True)
+    except OSError as e:
+        log.debug("could not sweep old speaker samples: %s", type(e).__name__)
+
+
 class SamplePlayer:
     """Plays clips one at a time on a worker thread; ``play`` returns at once.
 
-    ``popen`` is injectable for tests. Each clip is deleted after playback; ``close``
-    stops playback and removes the private temp folder (also run at exit)."""
+    ``popen`` is injectable for tests; ``allowed()`` is checked before playing (False while
+    a session records: system capture would record the sample). Starting a sample stops
+    the one playing; each clip is deleted after playback; ``close`` kills the player and
+    removes the private temp folder (also at exit). Old folders are swept at start."""
 
     def __init__(
         self,
         popen: Callable[..., subprocess.Popen] = subprocess.Popen,
-        command: Sequence[str] = ("afplay",),
+        command: Sequence[str] = (AFPLAY,),
+        allowed: Callable[[], bool] = lambda: True,
+        root: Path | None = None,
     ) -> None:
         self._popen = popen
         self._command = list(command)
-        self._lock = threading.Lock()
+        self._allowed = allowed
+        self._root = root
+        self._lock = threading.Lock()  # covers stop-old, cut and register-new
         self._dir: Path | None = None
         self._proc: subprocess.Popen | None = None
         self._count = 0
+        self._closed = False
+        sweep_stale(root)
         atexit.register(self.close)
 
-    def play(self, clip: Clip) -> threading.Thread:
+    def play(self, clip: Clip) -> threading.Thread | None:
+        """Start playing `clip` on a worker thread; None if not allowed now."""
+        if self._closed or not self._allowed():
+            log.debug("speaker sample refused: busy or closed")
+            return None
         t = threading.Thread(target=self._run, args=(clip,), daemon=True, name="speaker-sample")
         t.start()
         return t
@@ -145,13 +175,14 @@ class SamplePlayer:
         path: Path | None = None
         try:
             with self._lock:
+                self._kill()  # one sample at a time: the newest wins
+                if self._closed or not self._allowed():
+                    return
                 if self._dir is None:  # mkdtemp: owner-only (0700)
-                    self._dir = Path(tempfile.mkdtemp(prefix="rcc-sample-"))
+                    self._dir = Path(tempfile.mkdtemp(prefix=PREFIX, dir=self._root))
                 self._count += 1
-                path = self._dir / f"sample-{self._count}.wav"
-                self._stop()  # one sample at a time
-            cut_clip(clip, path)
-            with self._lock:
+                path = cut_clip(clip, self._dir / f"sample-{self._count}.wav")
+                self._kill()  # still under the lock: no other afplay can overlap this one
                 proc = self._proc = self._popen(
                     [*self._command, str(path)],
                     stdout=subprocess.DEVNULL,
@@ -171,14 +202,16 @@ class SamplePlayer:
             if path is not None:
                 path.unlink(missing_ok=True)
 
-    def _stop(self) -> None:
-        if self._proc is not None and self._proc.poll() is None:
-            self._proc.terminate()
-        self._proc = None
+    def _kill(self) -> None:
+        proc, self._proc = self._proc, None
+        if proc is not None and proc.poll() is None:
+            with contextlib.suppress(OSError):
+                proc.kill()
 
     def close(self) -> None:
         with self._lock:
-            self._stop()
+            self._closed = True
+            self._kill()
             folder, self._dir = self._dir, None
         if folder is not None:
             shutil.rmtree(folder, ignore_errors=True)

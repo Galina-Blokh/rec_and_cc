@@ -97,7 +97,7 @@ class MacApp(rumps.App):
         self._recent_sig: tuple = ()
         self._naming_open = False  # a speaker chooser/name dialog is up
         self._naming_lock = threading.Lock()
-        self._sampler = sample.SamplePlayer()  # "Play sample" in the name dialog (afplay)
+        self._sampler = sample.SamplePlayer(allowed=lambda: self.ctrl.sample_allowed)
         # live captions (main thread only)
         self.captions = CaptionsPanel() if CaptionsPanel is not None else None
         self._live_id: str | None = None  # session currently being captioned
@@ -600,7 +600,7 @@ class MacApp(rumps.App):
                 if not (number.isdigit() and 0 < int(number) <= len(speakers)):
                     return
                 label = speakers[int(number) - 1][0]
-                clip = sample.find_clip(directory, label)  # None: audio gone, no button
+                clip = self.ctrl.speaker_clip(directory, label)  # None: no button
                 ask = functools.partial(osascript, timeout=DIALOG_TIMEOUT_S)
                 if name := ask_speaker_name(label, clip, ask, self._sampler.play):
                     dispatched = True  # the "named" event clears the guard

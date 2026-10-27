@@ -318,19 +318,19 @@ def name_dialog_answer(output: str) -> tuple[bool, str]:
     return button.strip() == f"button returned:{PLAY_SAMPLE}", text.strip()
 
 
-def ask_speaker_name(label: str, clip, ask: Callable[[str], str], play, tries: int = 20) -> str:
+def ask_speaker_name(label: str, clip, ask: Callable[[str], str], play) -> str:
     """Ask for `label`'s name on a dialog worker thread (``ask`` runs the AppleScript). With a
-    `clip` the dialog can play it (``play(clip)`` returns at once) and comes back; without
-    one it is the plain prompt. Returns the name, "" if cancelled."""
+    `clip` the dialog can play it (``play(clip)`` returns at once) and comes back with the
+    text typed so far, as often as the user likes; without one it is the plain prompt.
+    Returns the name, "" if cancelled or timed out."""
     answer = ""
-    for _ in range(tries):
+    while True:
         replay, answer = name_dialog_answer(
             ask(name_dialog_script(label, clip is not None, answer))
         )
         if not (replay and clip is not None):
             return answer
         play(clip)
-    return ""
 
 
 # ----------------------------------------------------------------------- controller
@@ -722,6 +722,21 @@ class Controller:
     @property
     def speaker_names_enabled(self) -> bool:
         return self.cfg.transcription.speaker_names
+
+    @property
+    def sample_allowed(self) -> bool:
+        """A speaker sample plays only while nothing records: system capture leaves out only
+        our own process, so ``afplay`` would end up in the recording."""
+        return self.engine.state.status == IDLE
+
+    def speaker_clip(self, directory: Path, label: str):
+        """The label's audio sample (``ui.sample.Clip``) for the name dialog, or None while
+        recording or when the audio is gone. Call it on a worker thread (reads the WAV)."""
+        if not self.sample_allowed:
+            return None
+        from . import sample
+
+        return sample.find_clip(directory, label)
 
     def speakers_async(self, directory: Path) -> None:
         """List the session's speakers that have voice data, with their first lines; posts
