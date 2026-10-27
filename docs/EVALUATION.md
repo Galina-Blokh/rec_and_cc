@@ -225,7 +225,8 @@ waits while recording, and shares the GPU lock with Whisper.
 
 Cross-check: an independent run by another session on the same machine class (M5 Max,
 Qwen2.5-3B-Instruct-4bit, 8 chunks, about 9,000 en/ru words) took 30.7 s, in line with the
-numbers above.
+numbers above. That run is `tests/test_summary_timing.py` (`uv run pytest -m slow -k
+summary_timing -s`, offline, fails above 180 s).
 
 To regenerate: `uv run python scripts/make_synthetic_meeting_transcript.py "$TMPDIR/rcc-meeting"`,
 then time `summarize` on that folder.
