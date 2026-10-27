@@ -3,21 +3,24 @@
 Pipeline (CPU only; ~2 s for 13 min of audio on an M5 Max, see docs/ARCHITECTURE.md)::
 
     others.wav -> Silero VAD speech regions (the VAD already used for chunking)
-               -> regions cut into ~2 s windows
+               -> (optional, ADR 0014) pyannote segmentation-3.0 (6 MB ONNX) on 10 s chunks:
+                  speaker-change points cut the regions, overlapped speech is marked
+               -> regions (or their pieces) cut into ~2 s windows
                -> one speaker embedding per window: 3D-Speaker CAM++ (zh+en "advanced",
                   28 MB ONNX) through sherpa-onnx, on a small thread pool (ONNX Runtime
                   releases the GIL, so windows are embedded in parallel)
                -> agglomerative clustering (average linkage, cosine distance) of the windows
                   >= 1 s into k speakers, k picked by silhouette (optional min/max hints);
-                  shorter windows and tiny clusters join the nearest speaker
+                  shorter windows, overlapped windows and tiny clusters join the nearest speaker
                -> turns (start, end, speaker id)
 
 ``assign_speakers`` then gives every "Others" transcript segment the speaker it overlaps
 most, numbered "Speaker 1", "Speaker 2", ... by first appearance. With a single speaker the
-label stays "Others". With ``speaker_names`` on, speakers that match a voice profile
-(voices.py) are named instead of numbered.
+label stays "Others". Segments with overlapped speech get ``overlap=True``. With
+``speaker_names`` on, speakers that match a voice profile (voices.py) are named instead of
+numbered.
 
-The embedding model is downloaded once (sha256-verified) into the platform cache dir
+The models are downloaded once (sha256-verified) into the platform cache dir
 (``MODELS_DIR``); after that nothing here touches the network. If the download fails (offline)
 diarization is skipped and retried at most every ``RETRY_AFTER_S``.
 """
@@ -29,6 +32,8 @@ import hashlib
 import itertools
 import logging
 import os
+import shutil
+import tarfile
 import threading
 import time
 import urllib.request
@@ -55,8 +60,9 @@ MODELS_DIR = Path(platformdirs.user_cache_dir(APP_NAME, appauthor=False)) / "mod
 class ModelFile:
     name: str
     url: str
-    sha256: str
-    size: int
+    sha256: str  # of the download (the archive if `member` is set)
+    size: int  # of the file on disk
+    member: str = ""  # file to extract from a .tar.bz2 download
 
 
 # 3D-Speaker CAM++ trained on a large zh+en corpus ("common_advanced"), Apache-2.0. Chosen over
@@ -72,6 +78,19 @@ EMBEDDING_MODEL = ModelFile(
     size=28_281_164,
 )
 
+# pyannote segmentation-3.0 (MIT) as converted to ONNX for sherpa-onnx: 10 s chunk -> per
+# ~17 ms frame one of 7 powerset classes (silence, 3 local speakers, their 3 pairs).
+SEGMENTATION_MODEL = ModelFile(
+    name="pyannote-segmentation-3.0.onnx",
+    url=(
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/"
+        "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
+    ),
+    sha256="24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488",
+    size=5_992_913,
+    member="sherpa-onnx-pyannote-segmentation-3-0/model.onnx",
+)
+
 # --- tuning (measured on synthetic en/ru multi-voice tracks, see the slow test) -------------
 WINDOW_S = 2.0  # speech regions are cut into windows of about this length
 MIN_UNIT_S = 1.0  # shorter windows are too noisy to define a speaker; they join the nearest
@@ -84,6 +103,15 @@ MAX_CLUSTER_UNITS = 3000  # beyond this, cluster an even subsample (memory: n^2 
 MIN_ADAPTIVE_UNITS = 10
 MAX_AUTO_SPEAKERS = 20
 MIN_SPLIT_SCORE = 0.3
+# Segmentation (ADR 0014): chunks every SEG_STEP_S; each chunk is trusted for the middle
+# SEG_STEP_S of it (its edges see too little context). Class runs shorter than MIN_RUN_S are
+# jitter; a cut never leaves a piece shorter than MIN_PIECE_S; a segment is marked overlapped
+# with at least OVERLAP_MARK_S of overlapped speech.
+SEG_STEP_S = 5.0
+SEG_BATCH = 16
+MIN_RUN_S = 0.25
+MIN_PIECE_S = 0.4
+OVERLAP_MARK_S = 0.5
 RETRY_AFTER_S = 600.0  # after a failed download, don't try again for this long
 DOWNLOAD_TIMEOUT_S = 30.0
 
@@ -95,6 +123,7 @@ class Turn:
     start: float
     end: float
     speaker: int
+    overlap: bool = False  # two speakers at once; `speaker` is the dominant one
 
 
 class Turns(list):
@@ -108,13 +137,12 @@ class Turns(list):
 
 # --------------------------------------------------------------------------- model files
 _download_lock = threading.Lock()
-_last_failure = 0.0
+_last_failure: dict[str, float] = {}  # model name -> time of its last failed download
 
 
 def model_path(model: ModelFile = EMBEDDING_MODEL, download: bool = True) -> Path | None:
     """Local path of `model`, downloading (and verifying) it once if needed. None if it is not
     on disk and can't be downloaded now. A model on disk is used without any network access."""
-    global _last_failure
     path = MODELS_DIR / model.name
     if path.is_file() and path.stat().st_size == model.size:
         return path
@@ -123,13 +151,14 @@ def model_path(model: ModelFile = EMBEDDING_MODEL, download: bool = True) -> Pat
     with _download_lock:
         if path.is_file() and path.stat().st_size == model.size:
             return path
-        if _last_failure and time.monotonic() - _last_failure < RETRY_AFTER_S:
+        failed = _last_failure.get(model.name)
+        if failed and time.monotonic() - failed < RETRY_AFTER_S:
             return None
         try:
             _download(model, path)
         except Exception as e:  # noqa: BLE001 - offline, proxy, disk full, bad checksum ...
-            _last_failure = time.monotonic()
-            log.warning("speaker diarization unavailable: can't download %s (%s)", model.name, e)
+            _last_failure[model.name] = time.monotonic()
+            log.warning("can't download speaker model %s (%s)", model.name, e)
             return None
     return path
 
@@ -152,10 +181,30 @@ def _download(model: ModelFile, path: Path) -> None:
                 f.write(block)
         if digest.hexdigest() != model.sha256:
             raise ValueError(f"sha256 mismatch ({digest.hexdigest()})")
-        tmp.replace(path)
+        if model.member:
+            _extract(tmp, model, path)
+        else:
+            tmp.replace(path)
     finally:
         tmp.unlink(missing_ok=True)
     log.info("downloaded %s in %.1fs", path, time.monotonic() - t0)
+
+
+def _extract(archive: Path, model: ModelFile, path: Path) -> None:
+    """Copy `model.member` out of the verified `archive` to `path` (only that file)."""
+    out = path.with_name(f".{path.name}.x")
+    try:
+        with tarfile.open(archive, "r:bz2") as tar:
+            src = tar.extractfile(tar.getmember(model.member))  # KeyError if missing
+            if src is None:
+                raise ValueError(f"{model.member} is not a file")
+            with src, out.open("wb") as f:
+                shutil.copyfileobj(src, f)
+        if out.stat().st_size != model.size:
+            raise ValueError(f"{model.member}: unexpected size {out.stat().st_size}")
+        out.replace(path)
+    finally:
+        out.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------- pure logic
@@ -171,6 +220,67 @@ def speech_windows(
         step = (e - s) / n
         out.extend((s + i * step, s + (i + 1) * step) for i in range(n))
     return out
+
+
+def chunk_events(
+    classes: np.ndarray, times: np.ndarray, lo: float, hi: float, n_local: int = 3
+) -> tuple[list[float], list[tuple[float, float]]]:
+    """Speaker-change points and overlapped stretches in [lo, hi) of one segmentation chunk.
+
+    `classes`: powerset class per frame (0 silence, 1..n_local one local speaker, above that
+    two at once); `times`: frame centres in seconds. Runs shorter than ``MIN_RUN_S`` and silence
+    are skipped; a change is where the next kept run has another class (between the two runs).
+    """
+    if len(classes) == 0:
+        return [], []
+    frame_s = float(times[1] - times[0]) if len(times) > 1 else 0.0
+    edges = np.flatnonzero(np.diff(classes)) + 1
+    starts, ends = np.r_[0, edges], np.r_[edges, len(classes)]
+    min_frames = MIN_RUN_S / frame_s if frame_s else 0
+    runs = [
+        (int(classes[a]), float(times[a]) - frame_s / 2, float(times[b - 1]) + frame_s / 2)
+        for a, b in zip(starts, ends, strict=True)
+        if classes[a] != 0 and b - a >= min_frames
+    ]
+    changes = [
+        t
+        for (c0, _, e0), (c1, s1, _) in itertools.pairwise(runs)
+        if c0 != c1 and lo <= (t := (e0 + s1) / 2) < hi
+    ]
+    overlaps = [
+        (max(s, lo), min(e, hi)) for c, s, e in runs if c > n_local and min(e, hi) > max(s, lo)
+    ]
+    return changes, overlaps
+
+
+def cut_regions(
+    regions: Sequence[tuple[float, float]],
+    changes: Sequence[float],
+    min_piece_s: float = MIN_PIECE_S,
+) -> list[tuple[float, float]]:
+    """Cut each region at the change points inside it; a cut that would leave a piece shorter
+    than `min_piece_s` is skipped."""
+    changes = sorted(changes)
+    out = []
+    for s, e in regions:
+        a = s
+        for t in changes[bisect.bisect_right(changes, s) : bisect.bisect_left(changes, e)]:
+            if t - a >= min_piece_s and e - t >= min_piece_s:
+                out.append((a, t))
+                a = t
+        out.append((a, e))
+    return out
+
+
+def overlap_flags(
+    windows: Sequence[tuple[float, float]], overlaps: Sequence[tuple[float, float]]
+) -> list[bool]:
+    """Per window: is at least half of it overlapped speech?"""
+    return [_covered(s, e, overlaps) >= (e - s) / 2 > 0 for s, e in windows]
+
+
+def _covered(s: float, e: float, spans: Sequence[tuple[float, float]]) -> float:
+    return sum(max(0.0, min(e, b) - max(s, a)) for a, b in spans)
 
 
 def cluster_embeddings(
@@ -357,7 +467,8 @@ def label_speakers(
     names: dict[int, str] | None = None,
 ) -> tuple[list[Segment], dict[int, str]]:
     """``assign_speakers`` plus the label given to each speaker id that got segments (a lone
-    unnamed speaker keeps `speaker`)."""
+    unnamed speaker keeps `speaker`). Segments with at least ``OVERLAP_MARK_S`` of overlapped
+    turns get ``overlap=True`` (their label is still the speaker they overlap most)."""
     segments = list(segments)
     if not turns:
         return segments, {}
@@ -372,6 +483,10 @@ def label_speakers(
     ids = set(picks.values())
     if not ids:
         return segments, {}
+    spans = [(t.start, t.end) for t in turns if t.overlap]
+    for i in picks if spans else ():  # turns don't overlap each other: no double counting
+        if _covered(segments[i].start, segments[i].end, spans) >= OVERLAP_MARK_S:
+            segments[i] = replace(segments[i], overlap=True)
     if len(ids) == 1 and not ids & names.keys():
         return segments, {ids.pop(): speaker}
     taken = {n.casefold() for n in names.values()}
@@ -419,19 +534,73 @@ def _silero(audio: np.ndarray) -> list[tuple[float, float]]:
     return find_speech(audio)
 
 
+class Segmenter:
+    """pyannote segmentation-3.0 over the speech of a track: speaker-change points and
+    overlapped stretches (seconds). ONNX Runtime on `threads` intra-op threads."""
+
+    def __init__(self, path: Path, threads: int) -> None:
+        import onnxruntime as ort
+
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads, opts.inter_op_num_threads = threads, 1
+        opts.log_severity_level = 3
+        self.session = ort.InferenceSession(str(path), opts, providers=["CPUExecutionProvider"])
+        meta = self.session.get_modelmeta().custom_metadata_map
+        self.window = int(meta["window_size"])  # samples per chunk (10 s)
+        self.shift = int(meta["receptive_field_shift"])  # samples per output frame
+        self.offset = int(meta["receptive_field_size"]) / 2  # first frame's centre
+        self.n_local = int(meta["num_speakers"])
+
+    def __call__(
+        self, audio: np.ndarray, regions: Sequence[tuple[float, float]]
+    ) -> tuple[list[float], list[tuple[float, float]]]:
+        win, step = self.window, int(SEG_STEP_S * SAMPLE_RATE)
+        margin = (win - step) // 2  # each chunk is trusted for its middle `step` samples
+        spans = [(int(s * SAMPLE_RATE), int(e * SAMPLE_RATE)) for s, e in regions]
+        last = max(0, -(-(len(audio) - win) // step)) * step  # chunk reaching the end
+        starts = [  # chunks containing speech
+            c for c in range(0, last + 1, step) if any(s < c + win and e > c for s, e in spans)
+        ]
+        changes: list[float] = []
+        overlaps: list[tuple[float, float]] = []
+        for b in range(0, len(starts), SEG_BATCH):
+            batch = starts[b : b + SEG_BATCH]
+            x = np.zeros((len(batch), 1, win), dtype=np.float32)
+            for row, c in enumerate(batch):
+                piece = audio[c : c + win]
+                x[row, 0, : len(piece)] = piece
+            y = np.asarray(self.session.run(None, {self.session.get_inputs()[0].name: x})[0])
+            for c, scores in zip(batch, y, strict=True):
+                times = (c + self.offset + self.shift * np.arange(len(scores))) / SAMPLE_RATE
+                lo = (c + margin) / SAMPLE_RATE if c else -np.inf
+                hi = (c + margin + step) / SAMPLE_RATE if c < last else np.inf
+                ch, ov = chunk_events(np.argmax(scores, axis=-1), times, lo, hi, self.n_local)
+                changes += ch
+                overlaps += ov
+        return changes, overlaps
+
+
 class Diarizer:
-    """Loads the embedding model lazily; runs one diarization at a time on its own thread
+    """Loads the models lazily; runs one diarization at a time on its own thread
     (``submit``), embedding windows on `threads` worker threads. Thread-safe; reusable after
-    ``close``."""
+    ``close``. `segmentation`: cut windows at speaker changes and mark overlapped speech
+    (``Segmenter``); without its model, fixed ~2 s windows as before."""
 
     def __init__(
-        self, threads: int = 0, vad: VadFn = _silero, min_speakers: int = 0, max_speakers: int = 0
+        self,
+        threads: int = 0,
+        vad: VadFn = _silero,
+        min_speakers: int = 0,
+        max_speakers: int = 0,
+        segmentation: bool = True,
     ) -> None:
         self.threads = threads or default_threads()
         self.vad = vad
         self.min_speakers, self.max_speakers = min_speakers, max_speakers  # 0 = no hint
+        self.segmentation = segmentation
         self._lock = threading.Lock()
         self._extractor = None
+        self._segmenter: Segmenter | None = None
         self._pool: ThreadPoolExecutor | None = None  # embedding workers
         self._jobs: ThreadPoolExecutor | None = None  # one diarization at a time
         self.load_s: float | None = None  # last model load time, until a job reports it
@@ -459,6 +628,20 @@ class Diarizer:
                 return None
             return self._extractor, self._pool
 
+    def _load_segmenter(self) -> Segmenter | None:
+        if not self.segmentation:
+            return None
+        with self._lock:
+            if self._segmenter is None:
+                path = model_path(SEGMENTATION_MODEL)
+                if path is None:
+                    log.info("no segmentation model: speaker turns from fixed ~2 s windows")
+                    return None
+                t0 = time.monotonic()
+                self._segmenter = Segmenter(path, self.threads)
+                self.load_s = (self.load_s or 0.0) + time.monotonic() - t0
+            return self._segmenter
+
     def diarize(self, audio: np.ndarray) -> list[Turn] | None:
         """Speaker turns of a 16 kHz mono track; None if diarization is unavailable."""
         t0 = time.monotonic()
@@ -468,9 +651,13 @@ class Diarizer:
         extractor, pool = loaded
         regions = self.vad(audio)
         t_vad = time.monotonic() - t0
-        windows = speech_windows(regions)
+        segmenter = self._load_segmenter() if regions else None
+        changes, overlaps = segmenter(audio, regions) if segmenter else ([], [])
+        t_seg = time.monotonic() - t0 - t_vad
+        windows = speech_windows(cut_regions(regions, changes))
         if not windows:
             return []
+        flags = overlap_flags(windows, overlaps)
 
         def embed(window: tuple[float, float]) -> np.ndarray:
             stream = extractor.create_stream()
@@ -480,24 +667,31 @@ class Diarizer:
             return np.asarray(extractor.compute(stream), dtype=np.float32)
 
         embeddings = np.stack(list(pool.map(embed, windows)))
+        mixed = np.array(flags, dtype=bool)
+        # overlapped windows mix two voices: they don't shape the clusters (duration 0 = not a
+        # clustering unit) or the voice centroids, and take the nearest (dominant) speaker
         labels = cluster_embeddings(
             embeddings,
-            np.array([e - s for s, e in windows]),
+            np.where(mixed, 0.0, [e - s for s, e in windows]),
             min_speakers=self.min_speakers,
             max_speakers=self.max_speakers,
         )
-        turns = Turns(centroids=speaker_centroids(embeddings, labels))
+        clean = ~mixed if not mixed.all() else mixed
+        turns = Turns(centroids=speaker_centroids(embeddings[clean], labels[clean]))
         turns += [
-            Turn(round(s, 3), round(e, 3), int(k))
-            for (s, e), k in zip(windows, labels, strict=True)
+            Turn(round(s, 3), round(e, 3), int(k), overlap)
+            for (s, e), k, overlap in zip(windows, labels, flags, strict=True)
         ]
         log.info(
-            "diarized %.0fs of audio: %d windows -> %d speakers in %.2fs (vad %.2fs)",
+            "diarized %.0fs of audio: %d windows (%d overlapped) -> %d speakers in %.2fs "
+            "(vad %.2fs, segmentation %.2fs)",
             len(audio) / SAMPLE_RATE,
             len(windows),
+            int(mixed.sum()),
             len(set(labels.tolist())),
             time.monotonic() - t0,
             t_vad,
+            t_seg,
         )
         return turns
 
@@ -538,7 +732,7 @@ class Diarizer:
         transcript rewrite that follows it) finish first; else drop it."""
         with self._lock:
             jobs, pool = self._jobs, self._pool
-            self._jobs = self._pool = self._extractor = None
+            self._jobs = self._pool = self._extractor = self._segmenter = None
         if jobs is not None:
             jobs.shutdown(wait=wait, cancel_futures=not wait)
         if pool is not None:
@@ -548,13 +742,18 @@ class Diarizer:
 __all__ = [
     "EMBEDDING_MODEL",
     "MODELS_DIR",
+    "SEGMENTATION_MODEL",
     "Diarizer",
+    "Segmenter",
     "Turn",
     "Turns",
     "assign_speakers",
+    "chunk_events",
     "cluster_embeddings",
+    "cut_regions",
     "label_speakers",
     "model_path",
+    "overlap_flags",
     "speaker_centroids",
     "speech_windows",
 ]

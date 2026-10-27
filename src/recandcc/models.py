@@ -77,6 +77,7 @@ class Segment:
     text: str
     speaker: str  # "Me", "Others" (later: "Speaker 1", ...)
     language: str  # ISO 639-1 code, e.g. "en", "ru", "he"
+    overlap: bool = False  # diarization: two other speakers at once (json only, when True)
 
 
 def is_rtl(language: str, text: str = "") -> bool:

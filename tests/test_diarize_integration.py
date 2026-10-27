@@ -138,6 +138,39 @@ def test_diarizer_separates_voices(track, offline):
     check(truth, labels, min_ok=len(truth) - 1)
 
 
+def test_segmentation_finds_overlaps_and_keeps_the_voices(track, offline):
+    """Real segmentation model (skipped unless cached): each phrase starts 1 s before the
+    previous one ends; the overlaps are marked and the voices still separated."""
+    if diarize.model_path(diarize.SEGMENTATION_MODEL, download=False) is None:
+        pytest.skip("segmentation model not cached")
+    audio, truth, _ = track
+    clips = [audio[int(s * SAMPLE_RATE) : int(e * SAMPLE_RATE)] for s, e, _ in truth]
+    mixed = np.zeros(len(audio), np.float32)
+    spans, at = [], SAMPLE_RATE // 2
+    for (*_, voice), clip in zip(truth, clips, strict=True):
+        mixed[at : at + len(clip)] += clip
+        spans.append((at / SAMPLE_RATE, (at + len(clip)) / SAMPLE_RATE, voice))
+        at += len(clip) - SAMPLE_RATE
+    d = Diarizer()
+    try:
+        t0 = time.monotonic()
+        turns = d.diarize(mixed[: at + 2 * SAMPLE_RATE])
+        print(f"diarized with overlaps in {time.monotonic() - t0:.2f}s")
+        clean = d.diarize(audio)
+    finally:
+        d.close()
+    assert turns and clean and not any(t.overlap for t in clean)  # pauses: no overlap
+    flagged = [(t.start, t.end) for t in turns if t.overlap]
+    true = [(b[0], a[1]) for a, b in zip(spans, spans[1:], strict=False)]  # 1 s each
+    hit = sum(max(0.0, min(e, b) - max(s, a)) for s, e in true for a, b in flagged)
+    print(
+        f"overlap: {hit:.1f}s of {len(true)}s found, {sum(b - a for a, b in flagged):.1f}s marked"
+    )
+    assert hit >= 0.5 * len(true)
+    assert sum(b - a for a, b in flagged) <= 1.5 * len(true)
+    check(spans, labels_per_phrase(spans, [(t.start, t.end, t.speaker) for t in turns]), 8)
+
+
 def _session(tmp: Path, audio: np.ndarray, me: np.ndarray) -> SessionInfo:
     sf.write(tmp / "others.wav", audio, SAMPLE_RATE, subtype="PCM_16")
     mic = np.zeros_like(audio)

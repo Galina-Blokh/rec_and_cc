@@ -9,9 +9,10 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import tarfile
 import threading
 import time
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import timedelta
 
 import numpy as np
@@ -24,10 +25,16 @@ from recandcc.config import TranscriptionConfig
 from recandcc.models import SAMPLE_RATE, Segment, Track
 from recandcc.transcribe import diarize
 from recandcc.transcribe.diarize import (
+    Diarizer,
     ModelFile,
+    Segmenter,
     Turn,
     assign_speakers,
+    chunk_events,
     cluster_embeddings,
+    cut_regions,
+    label_speakers,
+    overlap_flags,
     speech_windows,
 )
 from recandcc.transcribe.diarize import model_path as real_model_path
@@ -237,11 +244,165 @@ def test_speech_windows():
     assert len(w) == 2 and w[0] == (10, 12.5) and w[-1][1] == 15
 
 
+# --------------------------------------------------------------------------- segmentation
+def test_chunk_events_finds_changes_and_overlaps():
+    # 0.1 s frames: A 1 s, jitter of C (0.1 s), A, silence, B, A+B overlap, B, short C
+    classes = np.array([1] * 10 + [3] + [1] * 5 + [0] * 3 + [2] * 10 + [4] * 6 + [2] * 4 + [3])
+    times = 0.05 + 0.1 * np.arange(len(classes))
+    changes, overlaps = chunk_events(classes, times, -np.inf, np.inf)
+    assert changes == pytest.approx([1.75, 2.9, 3.5])  # A|B mid-pause, B|AB, AB|B; no C
+    assert overlaps == [pytest.approx((2.9, 3.5))]
+    # only [lo, hi) of the chunk is used
+    changes, overlaps = chunk_events(classes, times, 2.0, 3.2)
+    assert changes == pytest.approx([2.9]) and overlaps == [pytest.approx((2.9, 3.2))]
+    assert chunk_events(np.zeros(0, int), np.zeros(0), 0, 1) == ([], [])
+
+
+def test_cut_regions_at_changes_but_not_into_slivers():
+    regions = [(0.0, 4.0), (5.0, 9.0)]
+    assert cut_regions(regions, [1.5, 4.5, 8.8, 6.0, 6.2]) == [
+        (0.0, 1.5),
+        (1.5, 4.0),
+        (5.0, 6.0),  # 6.2 would leave a 0.2 s piece, 8.8 one at the end
+        (6.0, 9.0),
+    ]
+    assert cut_regions(regions, []) == regions
+
+
+def test_overlap_flags_need_half_the_window():
+    flags = overlap_flags([(0, 2), (2, 4), (4, 4)], [(1.2, 2.5), (3.5, 3.6)])
+    assert flags == [False, False, False]
+    assert overlap_flags([(0, 2), (2, 3)], [(0.5, 1.0), (1.0, 1.6), (2.0, 3.0)]) == [True, True]
+
+
+def test_segmenter_chunks_count_every_event_once():
+    """Chunks every 5 s overlap; each instant is read from one chunk only."""
+    change, ov = 7.45, (12.3, 13.3)  # next to the 7.5 s / 12.5 s hand-over points
+
+    class FakeSession:
+        batches = []
+
+        def get_inputs(self):
+            return [type("I", (), {"name": "x"})]
+
+        def run(self, _out, feeds):
+            x = feeds["x"]
+            self.batches.append(len(x))
+            t = (x[:, 0, :1] + seg.offset + seg.shift * np.arange(589)) / SAMPLE_RATE  # (N, 589)
+            cls = np.where(t < change, 1, 2) + 2 * ((t >= ov[0]) & (t < ov[1]))
+            return [np.eye(7)[cls]]
+
+    seg = Segmenter.__new__(Segmenter)
+    seg.session, seg.window, seg.shift, seg.offset, seg.n_local = FakeSession(), 160000, 270, 495, 3
+    audio = np.arange(60 * SAMPLE_RATE, dtype=np.float32)  # sample value = its index
+    changes, overlaps = seg(audio, [(0.0, 30.0)])
+    assert changes == pytest.approx([change, ov[0], ov[1]], abs=0.03)
+    assert sum(e - s for s, e in overlaps) == pytest.approx(1.0, abs=0.03)
+    assert FakeSession.batches == [6]  # chunks at 0..25 s; 30..50 s hold no speech
+
+
+class FakeExtractor:
+    """Embedding = direction set by the window's mean sample: 1.0 voice A, 2.0 voice B."""
+
+    def create_stream(self):
+        return type("S", (), {"accept_waveform": _accept, "input_finished": lambda self: None})()
+
+    def compute(self, stream):
+        theta = (float(np.mean(stream.audio)) - 1.0) * np.pi / 2
+        return [np.cos(theta), np.sin(theta), 0.0]
+
+
+def _accept(stream, sr, audio):
+    stream.audio = audio
+
+
+def _voices_track():
+    """A 0-5.3 s, B 5.3-12 s (no pause), A+B 12-13 s (A louder), A 13-16 s."""
+    level = np.r_[np.full(53, 1.0), np.full(67, 2.0), np.full(10, 1.3), np.full(30, 1.0)]
+    return np.repeat(level, SAMPLE_RATE // 10).astype(np.float32)
+
+
+def _fake_diarizer(monkeypatch, segmenter=None, **kwargs) -> Diarizer:
+    d = Diarizer(threads=1, vad=lambda a: [(0.0, 16.0)], **kwargs)
+    pool = ThreadPoolExecutor(1)
+    monkeypatch.setattr(d, "_load", lambda: (FakeExtractor(), pool))
+    if segmenter is not None:
+        monkeypatch.setattr(d, "_load_segmenter", lambda: segmenter)
+    return d
+
+
+def test_windows_follow_segmentation_and_overlap_takes_the_dominant_speaker(monkeypatch):
+    d = _fake_diarizer(monkeypatch, lambda audio, regions: ([5.3, 12.0, 13.0], [(12.0, 13.0)]))
+    turns = d.diarize(_voices_track())
+    a, b = turns[0].speaker, next(t.speaker for t in turns if t.start >= 5.3)
+    assert a != b
+    assert [(t.start, t.end) for t in turns if t.speaker == b] == pytest.approx(
+        [(5.3, 7.533), (7.533, 9.767), (9.767, 12.0)], abs=1e-3
+    )
+    assert [(t.start, t.end, t.speaker) for t in turns if t.overlap] == [(12.0, 13.0, a)]
+    assert np.allclose(turns.centroids[a], [1, 0, 0])  # the mixed window is left out
+
+
+def test_missing_segmentation_model_falls_back_to_fixed_windows(monkeypatch, caplog):
+    calls = []
+    monkeypatch.setattr(diarize, "model_path", lambda m=None, **k: calls.append(m))
+    with caplog.at_level("INFO", logger="recandcc.transcribe.diarize"):
+        turns = _fake_diarizer(monkeypatch).diarize(_voices_track())
+    assert [(t.start, t.end) for t in turns] == [(2.0 * i, 2.0 * i + 2) for i in range(8)]
+    assert not any(t.overlap for t in turns)
+    assert calls == [diarize.SEGMENTATION_MODEL]
+    assert "no segmentation model: speaker turns from fixed ~2 s windows" in caplog.messages
+    calls.clear()
+    _fake_diarizer(monkeypatch, segmentation=False).diarize(_voices_track())
+    assert calls == []  # diarize_overlap = false: never looked up
+
+
+def test_overlap_marks_only_segments_with_enough_overlapped_speech():
+    turns = [Turn(0, 5, 0), Turn(5, 5.3, 1, True), Turn(5.3, 8, 1), Turn(8, 9, 1, True)]
+    out, _ = label_speakers([seg(1, 4), seg(4, 6), seg(6, 10), seg(7, 9, "Me")], turns)
+    assert [s.overlap for s in out] == [False, False, True, False]  # 0.3 s < OVERLAP_MARK_S
+    assert speakers(out) == ["Speaker 1", "Speaker 1", "Speaker 2", "Me"]
+
+
 # --------------------------------------------------------------------------- model files
+def test_segmentation_model_is_pinned_like_the_speaker_model():
+    for m in (diarize.EMBEDDING_MODEL, diarize.SEGMENTATION_MODEL):
+        assert m.url.startswith("https://github.com/k2-fsa/sherpa-onnx/releases/download/")
+        assert len(m.sha256) == 64 and int(m.sha256, 16) and m.size > 1_000_000
+    assert diarize.SEGMENTATION_MODEL.member.endswith("/model.onnx")
+    assert diarize.SEGMENTATION_MODEL.name != diarize.EMBEDDING_MODEL.name  # same folder
+
+
+def _archive(files: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:bz2") as tar:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def test_archived_model_is_verified_then_extracted(model_dir, monkeypatch):
+    onnx = b"segmentation" * 100
+    data = _archive({"pkg/model.onnx": onnx, "pkg/run.sh": b"rm -rf /"})
+    sha = hashlib.sha256(data).hexdigest()
+    calls = _urlopen(monkeypatch, data)
+    good = ModelFile(
+        "seg.onnx", "https://example.invalid/s.tar.bz2", sha, len(onnx), "pkg/model.onnx"
+    )
+    assert real_model_path(good).read_bytes() == onnx and len(calls) == 1
+    assert real_model_path(good) is not None and len(calls) == 1  # on disk now
+    assert sorted(p.name for p in model_dir.iterdir()) == ["seg.onnx"]  # nothing else unpacked
+    assert real_model_path(ModelFile("x.onnx", good.url, sha, 1, "pkg/missing.onnx")) is None
+    assert real_model_path(ModelFile("y.onnx", good.url, "0" * 64, len(onnx), good.member)) is None
+    assert sorted(p.name for p in model_dir.iterdir()) == ["seg.onnx"]  # no partial files
+
+
 @pytest.fixture
 def model_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(diarize, "MODELS_DIR", tmp_path / "models")
-    monkeypatch.setattr(diarize, "_last_failure", 0.0)
+    monkeypatch.setattr(diarize, "_last_failure", {})
     return tmp_path / "models"
 
 
@@ -356,6 +517,24 @@ def test_slow_diarization_without_result_still_deletes_audio(tmp_path):
     pending.set_result(None)  # unavailable
     assert (tmp_path / "transcript.md").read_text(encoding="utf-8") == before
     assert not (tmp_path / "me.wav").exists()
+
+
+def test_json_marks_overlap_only_where_found(tmp_path, monkeypatch):
+    s = _session_with_audio(tmp_path)
+    t = Transcriber(TranscriptionConfig(model="fake"))
+    files = ("transcript.md", "transcript.srt")
+    monkeypatch.setattr(t, "start_diarization", lambda _s: _done(TURNS))
+    t.write_final(s, SEGS, 15.0)
+    before = [(tmp_path / f).read_text(encoding="utf-8") for f in files]
+    data = json.loads((tmp_path / "transcript.json").read_text(encoding="utf-8"))
+    assert not any("overlap" in x for x in data["segments"])
+    mixed = [Turn(0, 5, 3), Turn(5, 7, 8), Turn(7, 8, 8, overlap=True), Turn(8, 15, 3)]
+    monkeypatch.setattr(t, "start_diarization", lambda _s: _done(mixed))
+    t.write_final(s, SEGS, 15.0)
+    data = json.loads((tmp_path / "transcript.json").read_text(encoding="utf-8"))
+    assert [x.get("overlap") for x in data["segments"]] == [None, None, True, None]
+    assert [Segment(**x).overlap for x in data["segments"]] == [False, False, True, False]
+    assert [(tmp_path / f).read_text(encoding="utf-8") for f in files] == before  # unchanged
 
 
 def test_start_diarization_respects_config_and_missing_audio(tmp_path):

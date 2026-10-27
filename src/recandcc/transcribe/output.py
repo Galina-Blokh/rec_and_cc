@@ -112,9 +112,16 @@ def format_json(session: SessionInfo, segments: list[Segment], duration: float, 
         "duration": round(duration, 3),
         "languages": languages_of(segments),
         "model": model,
-        "segments": [asdict(s) for s in segments],
+        "segments": [_segment_json(s) for s in segments],
     }
     return json.dumps(data, indent=2, ensure_ascii=False)
+
+
+def _segment_json(s: Segment) -> dict:
+    data = asdict(s)
+    if not s.overlap:  # only where diarization found overlapped speech
+        del data["overlap"]
+    return data
 
 
 def write_outputs(
