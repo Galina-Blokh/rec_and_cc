@@ -469,7 +469,7 @@ class TrayApp:
         def mode_item(label, mode):
             return Item(
                 label,
-                lambda: self.ctrl.engine.set_mode(mode),
+                lambda: self.ctrl.set_mode(mode),
                 checked=lambda _i: st().mode == mode,
                 radio=True,
             )

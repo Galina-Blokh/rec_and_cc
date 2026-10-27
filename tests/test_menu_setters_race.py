@@ -207,3 +207,20 @@ def test_a_failing_then_step_is_logged_and_leaves_no_mark(tmp_path, monkeypatch,
     assert "live_captions = false" in path.read_text()
     assert not ctrl._dirty
     assert "after-save step for live_captions failed" in caplog.text
+
+
+def test_mode_click_survives_a_reload_while_its_save_is_blocked(tmp_path, monkeypatch):
+    from recandcc.models import Mode
+
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    _race(
+        ctrl,
+        path,
+        monkeypatch,
+        lambda: ctrl.set_mode(Mode.AUTO),
+        '[detection]\nmode = "ask"\n',
+    )
+    assert ctrl.cfg.detection.mode == Mode.AUTO
+    assert ctrl.engine.state.mode == Mode.AUTO
+    assert 'mode = "auto"' in path.read_text()
+    assert not ctrl._dirty

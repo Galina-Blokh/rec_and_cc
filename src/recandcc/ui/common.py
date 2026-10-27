@@ -1042,10 +1042,9 @@ class Controller:
             # a menu click changed meanwhile keeps the click (its queued save writes it).
             was_listening = self.cfg.detection.room_listening
             # _dirty_lock spans snapshot and apply. Menu/tray setters (menu_set, menu_apply,
-            # toggle_language) mark + set under it too, so their click lands either before the
-            # snapshot (seen as dirty) or after the apply (kept), never between. Other writers
-            # (the engine's mode save marks after it sets) are covered only by the `before`
-            # comparison, i.e. for changes made after this reload took its first snapshot.
+            # set_mode, toggle_language) mark + set under it too, so their click lands either
+            # before the snapshot (seen as dirty) or after the apply (kept), never between.
+            # The Settings window applies and writes under _save_lock, which this holds too.
             with self._dirty_lock:
                 now = self._reloadable(self.cfg)
                 dirty = set(self._dirty)  # changed in the menu, save not written yet
@@ -1201,6 +1200,16 @@ class Controller:
         for part in filter(None, owner.split(".")):
             target = getattr(target, part)
         self.menu_apply((key,), lambda: setattr(target, name, value), title=title, then=then)
+
+    def set_mode(self, mode: Mode | str) -> None:
+        """Menu/tray "Mode": mark ``detection.mode`` and switch the engine in one step (see
+        ``menu_apply``), so a config reload can't revert the click between set and mark. Lock
+        order is ``_dirty_lock`` then the engine's lock, as in the reload."""
+        self.menu_apply(
+            ("detection.mode",),
+            lambda: self.engine.set_mode(mode, save=False),
+            title="Mode",
+        )
 
     def menu_apply(
         self,

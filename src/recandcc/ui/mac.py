@@ -358,7 +358,7 @@ class MacApp(rumps.App):
     # ------------------------------------------------------------------ callbacks
     def _set_mode_cb(self, mode: Mode):
         def cb(_sender):
-            self.ctrl.engine.set_mode(mode)
+            self.ctrl.set_mode(mode)
             self._render()
 
         return cb
