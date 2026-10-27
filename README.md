@@ -179,7 +179,8 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
 ### Live captions
 
 While a session is being transcribed live, a small floating window at the bottom of the
-screen shows the text as it is spoken, one line per phrase, labelled `Me` / `Others`
+screen shows the text as it is spoken, one line per phrase, labelled `Me` and, for others,
+`Speaker 1`, `Speaker 2`, … (provisional; `Others` with `live_speaker_labels = false`)
 (English and Russian mixed freely). It stays on top of other windows, including full-screen
 video and Zoom, on every desktop, and never takes keyboard focus. Drag or resize it and it
 remembers where you put it. It scrolls along with new text unless you scroll up to reread
