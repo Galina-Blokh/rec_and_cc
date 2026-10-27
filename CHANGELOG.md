@@ -84,9 +84,9 @@ videos.
 - macOS permissions survive code updates (reproducible, ad-hoc signed app bundle).
 - **CI** on macOS and Windows, and an advisory AI review of every pull request by the Cursor
   agent (four parallel reviewers), hardened against prompt injection from PR content.
-
 - **Crash reports** in a local `faults.log`, a **Reveal logs** menu item, and per-session
   pipeline metrics in `session.json` (#21).
+
 ### Fixed
 - UTF-8 file I/O on Windows.
 - Crash when requesting the system-audio permission.
