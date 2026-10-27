@@ -51,7 +51,14 @@ from ..config import (
     validate_settings,
 )
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
-from ..models import Mode, SessionInfo, TriggerKind, discard_session, recording_lock_held
+from ..models import (
+    Mode,
+    SessionInfo,
+    TriggerKind,
+    discard_session,
+    recording_lock_held,
+    still_writing,
+)
 from ..recorder import make_private_dir
 from ..retention import purge_old_audio, purge_transcribed_audio
 from ..sensitivity import PRESETS as SENSITIVITY_PRESETS
@@ -1005,7 +1012,9 @@ class Controller:
         live, self._live = self._live, None
         if live is None:
             return
-        if kept and session is not None:
+        # A writer still finishing the WAVs (stalled disk): the flush would diarize partial
+        # audio, so the queue transcribes it from the WAVs once they are final instead.
+        if kept and session is not None and not still_writing(session.directory):
             # Transcribe the tail now (not when the queue gets to it); live_end is posted by
             # the LiveTranscriber once the final transcript is written.
             live.flush(session)

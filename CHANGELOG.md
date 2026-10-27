@@ -124,6 +124,12 @@ All notable changes to RecAndCC are documented here. The format is based on
   delete is removed at the next start (#45).
 - A discarded session is never transcribed later, even if deleting it failed; the delete is
   retried at startup (#46, #56).
+- A stalled disk (network volume, slow USB, sleep) no longer grows memory without bound or
+  freezes the app when a recording stops: each track buffers at most 120 s for its writer
+  (overflow is logged and written as silence, so the tracks stay aligned), and stopping waits
+  at most 15 s before the writer finishes the file in the background (#150).
+- Such a session is transcribed only once its audio is final (never from a half-written
+  WAV), and a notice says when a stalled disk cost audio (#150).
 
 ## [0.1.0] — 2026-10-26
 

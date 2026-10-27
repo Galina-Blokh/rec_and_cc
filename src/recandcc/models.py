@@ -136,6 +136,9 @@ class SessionInfo:
     FILENAME = "session.json"
     # Present in a folder the user discarded: never transcribe or list it (discard_session).
     DISCARD_MARKER = ".discarded"
+    # Present while a writer that stop() gave up waiting for still finishes a WAV (stalled
+    # disk): the audio isn't final, so it isn't transcribed yet (``still_writing``).
+    WRITING_MARKER = ".writing"
     # Present while a slow diarization still reads the WAVs to relabel the transcript:
     # retention keeps the audio. One older than LABELS_PENDING_MAX_S is stale (a crash).
     LABELS_PENDING_MARKER = ".labels-pending"
@@ -218,6 +221,50 @@ def _replace_json(target: Path, text: str) -> None:
     finally:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
+
+
+# Sessions of this run whose writers are still finishing their WAVs. still_writing() asks
+# only this set, never the file: no read on the engine thread, no reader blocking the unlink
+# on Windows, and a WRITING_MARKER left by an earlier run (quit or crash before the disk
+# recovered) doesn't block, as that writer is gone and the audio is as final as it gets.
+_writing: set[Path] = set()
+_writing_lock = threading.Lock()
+_CLEAR_TRIES, _CLEAR_WAIT_S = 50, 0.1
+
+
+def mark_writing(directory: Path) -> None:
+    """A writer of this session is still finishing its WAV in the background. The marker
+    file is only a hint for recovery after a crash. Never raises."""
+    with _writing_lock:
+        _writing.add(Path(directory))
+    try:
+        (Path(directory) / SessionInfo.WRITING_MARKER).touch()
+    except OSError as e:
+        log.warning("could not mark a session as still writing (%s)", type(e).__name__)
+
+
+def clear_writing(directory: Path) -> None:
+    """Every writer of this session closed its WAV. Never raises; may retry deleting the
+    marker for a few seconds (something has it open), so call it off latency-sensitive
+    threads."""
+    with _writing_lock:
+        _writing.discard(Path(directory))
+    marker = Path(directory) / SessionInfo.WRITING_MARKER
+    for attempt in range(_CLEAR_TRIES):
+        try:
+            marker.unlink(missing_ok=True)
+            return
+        except OSError as e:
+            if attempt + 1 == _CLEAR_TRIES:
+                log.warning("could not delete a session's writing marker (%s)", type(e).__name__)
+            else:
+                time.sleep(_CLEAR_WAIT_S)
+
+
+def still_writing(directory: Path) -> bool:
+    """True while a writer of this run is still finishing the session's audio."""
+    with _writing_lock:
+        return Path(directory) in _writing
 
 
 RECORDING_LOCK = ".recording.lock"  # in a session folder another process records into
