@@ -1,16 +1,17 @@
 """Is a folder synced to a cloud drive? (iCloud Drive, OneDrive, Dropbox, Google Drive.)
 
 Used to warn when ``output_dir`` would upload recordings and transcripts off this device.
-Purely local and cheap: path-prefix checks (paths are not resolved, only a symlink at
-``output_dir`` itself is followed one level) plus reading Finder's preferences file; no
-subprocess, no network, and no ``stat`` into a cloud mount (those can stall). The result is a
-hint for a warning, never a reason to refuse a folder, and not exhaustive.
+Purely local and cheap: path-prefix checks plus reading Finder's preferences file. Paths are
+not resolved: symlinks in ``output_dir`` are followed by reading the link text, and nothing
+inside a known cloud root is ever stat-ed (that can stall). No subprocess, no network. The
+result is a hint for a warning, never a reason to refuse a folder, and not exhaustive.
 
 - macOS: anything under ``~/Library/Mobile Documents`` (iCloud Drive),
   ``~/Library/CloudStorage`` (File Provider: OneDrive, Dropbox, Google Drive, Box, ...),
-  ``~/Dropbox``, ``~/Google Drive`` or ``/Volumes/GoogleDrive``; and ``~/Desktop`` /
-  ``~/Documents`` when iCloud "Desktop & Documents Folders" is on, read from Finder's
-  ``FXICloudDriveDesktop`` / ``FXICloudDriveDocuments`` preferences.
+  ``~/Dropbox``, ``~/Google Drive``, ``~/OneDrive*``, ``~/Box``, ``~/Box Sync`` or
+  ``/Volumes/GoogleDrive`` (case-insensitive); and ``~/Desktop`` / ``~/Documents`` when
+  iCloud "Desktop & Documents Folders" is on, read from Finder's ``FXICloudDriveDesktop`` /
+  ``FXICloudDriveDocuments`` preferences.
 - Windows: anything under ``%OneDrive%``, ``%OneDriveConsumer%``, ``%OneDriveCommercial%``
   or ``%USERPROFILE%\\Dropbox``, and ``%USERPROFILE%\\Documents`` / ``Desktop`` when OneDrive
   folder backup has moved them (compared case-insensitively).
@@ -18,6 +19,7 @@ hint for a warning, never a reason to refuse a folder, and not exhaustive.
 
 from __future__ import annotations
 
+import functools
 import logging
 import ntpath
 import os
@@ -36,11 +38,14 @@ _PROVIDERS = {  # ~/Library/CloudStorage/<prefix>-<account>
     "GoogleDrive": "Google Drive",
     "Box": "Box",
 }
-_MAC_FOLDERS = {  # legacy (non-File-Provider) sync folders
-    "Dropbox": "Dropbox",
-    "Google Drive": "Google Drive",
-    "/Volumes/GoogleDrive": "Google Drive",
+_MAC_HOME_FOLDERS = {  # legacy (non-File-Provider) sync folders in ~, compared casefolded
+    "dropbox": "Dropbox",
+    "google drive": "Google Drive",
+    "box": "Box",
+    "box sync": "Box",
 }
+_MAC_VOLUMES = {"/volumes/googledrive": "Google Drive"}
+_MAX_LINKS = 8  # symlinks followed per path (stops cycles)
 
 
 def _under(path: PurePath, root: PurePath) -> PurePath | None:
@@ -79,34 +84,59 @@ def icloud_desktop_documents(home: Path) -> set[str]:
 
 
 def _mac_classify(path: Path, home: Path) -> str | None:
-    lib = home / "Library"
-    if _under(path, lib / "Mobile Documents") is not None:
+    """Pure prefix checks. macOS volumes are usually case-insensitive, so compare casefolded."""
+    cf = PurePath(str(path).casefold())
+    h = PurePath(str(home).casefold())
+    if _under(cf, h / "library" / "mobile documents") is not None:
         return ICLOUD_DRIVE
-    rel = _under(path, lib / "CloudStorage")
+    rel = _under(cf, h / "library" / "cloudstorage")
     if rel is not None and rel.parts:
-        name = rel.parts[0]
         for prefix, label in _PROVIDERS.items():
-            if name.startswith(prefix):
+            if rel.parts[0].startswith(prefix.casefold()):
                 return label
-        return name.split("-", 1)[0] or "a cloud drive"
-    for root, label in _MAC_FOLDERS.items():
-        if _under(path, home / root) is not None:  # an absolute root replaces home
+        return path.parts[len(cf.parts) - len(rel.parts)].split("-", 1)[0] or "a cloud drive"
+    for root, label in _MAC_VOLUMES.items():
+        if _under(cf, PurePath(root)) is not None:
             return label
-    rel = _under(path, home)
-    if rel is not None and rel.parts and rel.parts[0] in icloud_desktop_documents(home):
+    rel = _under(cf, h)
+    if rel is None or not rel.parts:
+        return None
+    top = rel.parts[0]
+    if top in _MAC_HOME_FOLDERS:
+        return _MAC_HOME_FOLDERS[top]
+    if top.startswith("onedrive"):  # ~/OneDrive, ~/OneDrive - Acme
+        return "OneDrive"
+    if top in {n.casefold() for n in icloud_desktop_documents(home)}:
         return f"{ICLOUD_DRIVE} (Desktop & Documents)"
     return None
 
 
+def _follow_one_link(path: Path) -> Path | None:
+    """``path`` with its first symlinked component replaced by the link's target, or None.
+    Reads link text only (lstat + readlink); never stats inside the target."""
+    for anc in [*reversed(path.parents), path]:
+        if anc.parent != anc and os.path.islink(anc):
+            return _absolute(anc.parent / os.readlink(anc)) / path.relative_to(anc)
+    return None
+
+
 def mac_provider(path: str | os.PathLike, home: Path | None = None) -> str | None:
+    """Classify ``path``; if nothing matches, follow symlinks in it (``~/Transcribes`` ->
+    iCloud Drive, or a symlinked parent) one at a time, re-checking after each."""
     home = _absolute(home or Path.home())
     path = _absolute(path)
-    found = _mac_classify(path, home)
-    if found is None and os.path.islink(path):  # e.g. ~/Transcribes -> iCloud Drive
-        found = _mac_classify(_absolute(path.parent / os.readlink(path)), home)
-    return found
+    for _ in range(_MAX_LINKS):
+        found = _mac_classify(path, home)
+        if found is not None:
+            return found  # known cloud root: nothing below it is touched
+        nxt = _follow_one_link(path)
+        if nxt is None:
+            return None
+        path = nxt
+    return None
 
 
+@functools.cache
 def _known_folders() -> list[str]:
     """Where Windows really keeps Documents / Desktop (moved into OneDrive by folder backup)."""
     if sys.platform != "win32":

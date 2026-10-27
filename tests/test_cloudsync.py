@@ -75,16 +75,48 @@ def test_mac_legacy_sync_folders(tmp_path):
         assert mac_provider("/Volumes/GoogleDrive/My Drive/Rec", tmp_path) == "Google Drive"
     box = tmp_path / "Library" / "CloudStorage" / "Box-Box" / "Rec"
     assert mac_provider(box, tmp_path) == "Box"
+    assert mac_provider(tmp_path / "OneDrive - Acme" / "Rec", tmp_path) == "OneDrive"
+    assert mac_provider(tmp_path / "OneDrive" / "Rec", tmp_path) == "OneDrive"
+    assert mac_provider(tmp_path / "Box" / "Rec", tmp_path) == "Box"
+    assert mac_provider(tmp_path / "Box Sync" / "Rec", tmp_path) == "Box"
+    assert mac_provider(tmp_path / "Boxes" / "Rec", tmp_path) is None
+
+
+def test_mac_case_insensitive(tmp_path):
+    _finder_prefs(tmp_path, FXICloudDriveDocuments=True)
+    assert mac_provider(tmp_path / "documents" / "Rec", tmp_path) == (
+        "iCloud Drive (Desktop & Documents)"
+    )
+    assert mac_provider(tmp_path / "library" / "mobile documents" / "x", tmp_path) == (
+        "iCloud Drive"
+    )
+    cs = tmp_path / "Library" / "cloudstorage" / "onedrive-Personal" / "Rec"
+    assert mac_provider(cs, tmp_path) == "OneDrive"
+    assert mac_provider(tmp_path / "dropbox", tmp_path) == "Dropbox"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need admin rights on Windows")
-def test_mac_resolves_symlinks(tmp_path):
+def test_mac_follows_symlinks_by_link_text(tmp_path):
     home = tmp_path / "home"
     real = home / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "Rec"
     real.mkdir(parents=True)
     link = home / "Rec"
     link.symlink_to(real)
     assert mac_provider(link, home) == "iCloud Drive"
+    # a symlinked parent: ~/Transcribes -> iCloud, output_dir = ~/Transcribes/2026
+    assert mac_provider(link / "2026" / "x", home) == "iCloud Drive"
+    # a chain: ~/Out -> ~/Rec -> iCloud
+    (home / "Out").symlink_to(link)
+    assert mac_provider(home / "Out" / "sub", home) == "iCloud Drive"
+    # a relative link and a local target
+    local = home / "Local"
+    local.mkdir()
+    (home / "Rel").symlink_to("Local")
+    assert mac_provider(home / "Rel" / "x", home) is None
+    # a cycle stops
+    (home / "A").symlink_to(home / "B")
+    (home / "B").symlink_to(home / "A")
+    assert mac_provider(home / "A" / "x", home) is None
 
 
 def test_windows_onedrive_env_case_insensitive():
