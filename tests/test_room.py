@@ -17,7 +17,7 @@ import soundfile as sf
 
 from recandcc.capture.base import AudioSource
 from recandcc.config import Config, DetectionConfig, load_config
-from recandcc.detect.room import WINDOW, RoomMonitor, silero_vad
+from recandcc.detect.room import WINDOW, RoomMonitor, plain_thresholds, silero_vad
 from recandcc.models import SAMPLE_RATE, SessionInfo, Track, TriggerKind
 from recandcc.recorder import Recorder, should_record_mic
 
@@ -95,7 +95,9 @@ def test_room_listening_is_off_by_default_and_needs_the_mic(tmp_path):
     path.write_text('[detection]\nmode = "auto"\n', encoding="utf-8")
     assert load_config(path).detection.room_listening is False
     path.write_text("[detection]\nroom_speech_s = 6.0\nroom_window_s = 5.0\n", encoding="utf-8")
-    assert load_config(path).detection.room_speech_s == 5.0  # could never trigger: clamped
+    det = load_config(path).detection
+    assert det.room_speech_s == 6.0  # the file's value is kept ...
+    assert plain_thresholds(det)[:2] == (5.0, 5.0)  # ... and clamped where it is used
     assert should_record_mic("calls", TriggerKind.ROOM)
     assert not should_record_mic("never", TriggerKind.ROOM)
     mon, sources = make()

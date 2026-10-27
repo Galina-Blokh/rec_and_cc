@@ -203,3 +203,32 @@ def test_own_save_does_not_trigger_a_reload(tmp_path, monkeypatch):
     assert ctrl._config_mtime == ctrl._mtime()
     ctrl._maybe_reload_config()
     assert calls == []
+
+
+def test_reload_applies_transcription_summary_and_captions_keys(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch, '["en"]')
+    path.write_text(
+        "live_captions = false\n"
+        "[transcription]\nkeep_audio = false\naudio_retention_days = 9\nspeaker_names = true\n"
+        '[summary]\nenabled = true\nmax_tokens = 123\nmodel = "/m"\n'
+    )
+    ctrl._config_mtime = -1.0
+    ctrl._maybe_reload_config()
+    cfg = ctrl.cfg
+    assert cfg.live_captions is False
+    assert (cfg.transcription.keep_audio, cfg.transcription.audio_retention_days) == (False, 9)
+    assert cfg.transcription.speaker_names is True
+    assert (cfg.summary.enabled, cfg.summary.max_tokens, cfg.summary.model) == (True, 123, "/m")
+
+
+def test_menu_save_after_reload_never_writes_stale_values(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch, '["en"]')
+    path.write_text(
+        'live_captions = false\n[transcription]\nlanguages = ["en"]\nkeep_audio = false\n'
+    )
+    ctrl._config_mtime = -1.0
+    ctrl._maybe_reload_config()
+    # a save right after the reload writes the reloaded values, not the old in-memory ones
+    ctrl.write_settings("live_captions", "transcription.keep_audio")
+    saved = load_config(path)
+    assert saved.live_captions is False and saved.transcription.keep_audio is False
