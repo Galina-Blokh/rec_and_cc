@@ -6,7 +6,9 @@ import contextlib
 import logging
 import os
 import sys
+import tempfile
 import tomllib
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
@@ -280,24 +282,62 @@ def save_keys(path: Path | None, updates: dict[str, Any]) -> float:
     path = (
         CONFIG_PATH if path is None else path
     ).resolve()  # a symlinked config.toml stays a symlink
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
-    for dotted, value in updates.items():
-        *parents, leaf = dotted.split(".")
-        table = data
-        for name in parents:
-            table = table.setdefault(name, {})
-            if not isinstance(table, dict):
-                raise ValueError(f"{name} in {path} is not a table")
-        table[leaf] = value
-    return _write_atomic(path, tomli_w.dumps(data).encode())
+    if not path.exists():  # don't create the lock file (or the dir) for a missing config
+        raise FileNotFoundError(path)
+    with _file_lock(path.with_name(f".{path.name}.lock")):  # the CLI is another process
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        for dotted, value in updates.items():
+            *parents, leaf = dotted.split(".")
+            table = data
+            for name in parents:
+                table = table.setdefault(name, {})
+                if not isinstance(table, dict):
+                    raise ValueError(f"{name} in {path} is not a table")
+            table[leaf] = value
+        return _write_atomic(path, tomli_w.dumps(data).encode())
+
+
+@contextlib.contextmanager
+def _file_lock(lock_path: Path) -> Iterator[None]:
+    """Hold an exclusive advisory lock on ``lock_path`` (a sidecar file that is never
+    replaced), so read-modify-writes from the app and the CLI don't lose each other's keys."""
+    with open(lock_path, "a+b") as f:
+        if sys.platform == "win32":
+            import msvcrt
+
+            while True:  # LK_LOCK gives up after ~10 s; keep waiting like flock does
+                try:
+                    f.seek(0)
+                    msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                    break
+                except OSError:
+                    continue
+            try:
+                yield
+            finally:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 def _write_atomic(path: Path, payload: bytes) -> float:
     """Replace ``path`` in one step, so a crash mid-write never leaves half a config. Returns
     the new file's mtime."""
-    tmp = path.with_name(f".{path.name}.tmp")
+    # A unique temp name per write: a fixed one let one writer's os.replace consume another's.
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(name)
     try:
-        tmp.write_bytes(payload)
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
         with contextlib.suppress(OSError):
             os.chmod(tmp, path.stat().st_mode & 0o777)  # keep the user's file mode
         mtime = tmp.stat().st_mtime  # os.replace keeps it

@@ -798,6 +798,8 @@ class Controller:
                 try:
                     mtime = save_keys(CONFIG_PATH, values)
                 except FileNotFoundError:
+                    if CONFIG_PATH.exists():  # a write error, not a missing file: keep edits
+                        raise
                     self.cfg.save(CONFIG_PATH)  # no file yet: write a fresh one
                     mtime = self._mtime()
                 if not edited:

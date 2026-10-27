@@ -95,6 +95,45 @@ def test_save_keys_removes_its_temp_file_on_failure(tmp_path, monkeypatch):
     assert not list(tmp_path.glob(".*.tmp"))
 
 
+def test_concurrent_save_keys_keep_both_keys(tmp_path):
+    """The app menu and the CLI write config.toml at once: neither loses the other's key,
+    and neither trips over the other's temp file."""
+    path = tmp_path / "config.toml"
+    path.write_text("a = 0\nb = 0\n")
+    errors: list[BaseException] = []
+
+    def writer(key: str) -> None:
+        try:
+            for i in range(200):
+                save_keys(path, {key: i})
+        except BaseException as e:  # noqa: BLE001 - reported below
+            errors.append(e)
+
+    threads = [threading.Thread(target=writer, args=(k,)) for k in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert errors == []
+    assert tomllib.loads(path.read_text()) == {"a": 199, "b": 199}
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_write_error_does_not_overwrite_hand_edits(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    before = path.read_text()
+
+    def lost_temp(*_a):
+        raise FileNotFoundError("temp file gone")
+
+    monkeypatch.setattr(common, "save_keys", lost_temp)
+    ctrl.cfg.live_captions = False
+    ctrl.write_settings("live_captions")
+    assert path.read_text() == before  # no full cfg.save over the user's file
+    notice = ("notice", "Settings not saved", "config.toml could not be written")
+    assert ctrl.events.get_nowait() == notice
+
+
 def test_cli_autostart_keeps_hand_edits(tmp_path, monkeypatch):
     from recandcc import autostart, cli
 
