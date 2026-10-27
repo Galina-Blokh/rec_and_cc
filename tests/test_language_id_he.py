@@ -20,6 +20,7 @@ from recandcc.config import TranscriptionConfig
 from recandcc.models import SAMPLE_RATE
 from recandcc.transcribe.engine import LANGUAGE_ID_MODEL, MIN_LANGUAGE_CONFIDENCE
 from recandcc.transcribe.merge import language_confidence, smooth_languages
+from recandcc.transcribe.revisions import FASTER_WHISPER_REPOS, faster_whisper_revision
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -42,11 +43,21 @@ def test_confident_or_long_hebrew_regions_are_kept():
     assert smooth_languages(regions, det, MIN_LANGUAGE_CONFIDENCE) == ["en", "he", "en", "he"]
 
 
-def test_smoothing_for_en_ru_does_not_depend_on_hebrew():
-    """Smoothing only reads the detections, so en/ru results are the same with or without 'he'."""
+def test_en_ru_smoothing_is_the_same_with_hebrew_in_the_language_list():
+    """For en/ru speech the tiny Hebrew mass is renormalised away, so the languages and the
+    smoothed result match whether or not 'he' is configured."""
     regions = [(0, 5), (5.5, 6.0), (10, 15)]
-    det = [("ru", 0.95), ("en", 0.55), ("en", 0.9)]
-    assert smooth_languages(regions, det, MIN_LANGUAGE_CONFIDENCE) == ["ru", "ru", "en"]
+    raw = [
+        [("ru", 0.95), ("en", 0.04), ("he", 0.001)],
+        [("en", 0.55), ("ru", 0.44), ("he", 0.01)],
+        [("en", 0.90), ("ru", 0.09), ("he", 0.01)],
+    ]
+    with_he = [language_confidence(p, ["en", "ru", "he"]) for p in raw]
+    without_he = [language_confidence(p, ["en", "ru"]) for p in raw]
+    assert [lang for lang, _ in with_he] == [lang for lang, _ in without_he] == ["ru", "en", "en"]
+    expected = ["ru", "ru", "en"]  # the 0.5 s uncertain 'en' takes its ru neighbour
+    assert smooth_languages(regions, with_he, MIN_LANGUAGE_CONFIDENCE) == expected
+    assert smooth_languages(regions, without_he, MIN_LANGUAGE_CONFIDENCE) == expected
 
 
 def test_language_id_is_restricted_to_the_configured_languages():
@@ -61,11 +72,15 @@ def test_language_id_accuracy_on_the_synthetic_mixed_set(tmp_path):
     from recandcc.transcribe import Transcriber
     from recandcc.transcribe.chunking import find_speech, load_track
     from recandcc.transcribe.gpu import hf_cache_folder
-    from recandcc.transcribe.revisions import FASTER_WHISPER_REPOS
 
+    # Only the pinned language-ID snapshot counts: _load() resolves it with local_files_only and
+    # would download it otherwise. The main model is never loaded here.
     repo = FASTER_WHISPER_REPOS.get(LANGUAGE_ID_MODEL, "")
-    snaps = hf_cache_folder(repo) / "snapshots" if repo else None
-    if snaps is None or not any(snaps.glob("*/model.bin")):
+    rev = faster_whisper_revision(LANGUAGE_ID_MODEL)
+    if not repo or rev is None:
+        pytest.skip("language-ID model has no pinned revision")
+    snap = hf_cache_folder(repo) / "snapshots" / rev
+    if not ((snap / "model.bin").is_file() and (snap / "tokenizer.json").is_file()):
         pytest.skip("language-ID model not cached")
 
     spec = importlib.util.spec_from_file_location(
@@ -82,9 +97,7 @@ def test_language_id_accuracy_on_the_synthetic_mixed_set(tmp_path):
 
     langs = ["en", "ru", "he"]
     tr = Transcriber(TranscriptionConfig(languages=langs))
-    tr._ensure_loaded()
-    if tr._lid_model is None:
-        pytest.skip("no language-ID model")
+    tr._lid_model = tr._load(LANGUAGE_ID_MODEL)  # only the language-ID model, offline
     ok = total = 0
     try:
         for clip in manifest["clips"]:
