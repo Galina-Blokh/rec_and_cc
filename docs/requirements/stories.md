@@ -27,7 +27,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-16 | Permissions set up from the app | ✅ |
 | US-17 | Always on, visible state | ✅ |
 | US-18 | Runs on Windows | 🟡 untested on Windows hardware (none available; #5 not planned) |
-| US-19 | Hebrew transcripts and right-to-left captions | 🟡 no Hebrew test set, ivrit.ai routing not evaluated (#6) |
+| US-19 | Hebrew transcripts and right-to-left captions | 🟡 language ID checked on a synthetic he/en/ru set; no real Hebrew recordings, ivrit.ai routing not evaluated (#6) |
 | US-20 | Search my transcripts | ✅ search (summaries and export: see US-27, US-25) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI (#62) and macOS menu (US-26, #76); self-intro hints (#81) and overlap segmentation (#96) shipped (#1) |
 | US-26 | Name speakers and forget voices from the menu | 🟡 macOS menu, first lines instead of an audio sample; Windows tray not yet (#1) |
@@ -216,6 +216,11 @@ while I decide.*
 - **Given** a Hebrew segment, **then** `transcript.md` wraps its text in a right-to-left
   isolate and `transcript.srt` starts its line with RLM, so editors and players render mixed
   Hebrew/English correctly; en/ru lines and `transcript.json` are unchanged.
+- **Given** the three languages, **then** per-region language ID is at least 95% correct on the
+  synthetic he/en/ru set, and a short region with low confidence takes its neighbour's
+  language (en/ru behaviour is the same with or without `he`). This is checked on synthetic
+  TTS only; accuracy on real Hebrew recordings is still open until the consented set has
+  Hebrew (#13).
 - **Given** `"iw"` or an unknown code in `languages`, **then** it is mapped to `he` or
   dropped with a log warning.
 - **Given** the menu **Languages** (English, Russian, Hebrew, Any language), **when** I tick
