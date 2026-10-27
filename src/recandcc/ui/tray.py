@@ -12,6 +12,8 @@ Meeting notes: ``TkNotes``, the same pattern (list, open/rename/delete via the C
 Transcript search: ``TkSearch``, a small window on its own Tk thread (query entry, results
 list); the search runs on a Controller worker and its hits arrive as a ``search`` event,
 which the poll thread forwards to the window's queue (UNTESTED on Windows as well).
+Export and "Delete audio after" use the same Controller calls as the macOS menu
+(``export_async`` on a worker, its result a ``notice``; ``set_retention``).
 Global shortcut (default Ctrl+Shift+R): ``hotkey.WinHotkeyListener``, owned by the Controller;
 the Start/Stop item shows it after a tab (Win32 menus right-align text after ``\t``).
 """
@@ -57,6 +59,7 @@ from .present import (
     live_transcript_target,
     prompt_notice,
     record_item_title,
+    retention_menu,
     search_hit_row,
     search_open_target,
     search_status,
@@ -497,6 +500,15 @@ class TrayApp:
             rows = language_menu(self.cfg.transcription.languages)
             return [language_item(*row) for row in rows]
 
+        def retention_item(days: int, title: str, on: bool):
+            return Item(
+                title, lambda: self.ctrl.set_retention(days), checked=lambda _i: on, radio=True
+            )
+
+        def retention():  # rebuilt on each update_menu(): the check follows the setting
+            rows = retention_menu(self.cfg.transcription.audio_retention_days)
+            return [retention_item(*row) for row in rows]
+
         def perms():
             perm = self.ctrl.permissions
             items = [
@@ -566,9 +578,11 @@ class TrayApp:
             Item("Open transcripts folder", self._open_folder),
             Item("Recent transcripts", pystray.Menu(recent)),
             Item("Search transcripts…", lambda: self.search.post("ask")),
+            Item("Export latest transcript (DOCX + PDF)", lambda: self.ctrl.export_async()),
             Item("Meeting notes…", lambda: self.ctrl.notes_async()),
             Item("Permissions", pystray.Menu(perms)),
             Item("Languages", pystray.Menu(languages)),
+            Item("Delete audio after", pystray.Menu(retention)),
             Item("Launch at login", self._toggle_login, checked=lambda _i: autostart.is_enabled()),
             Item("Edit settings", lambda: open_path(CONFIG_PATH, True)),
             Item("Reveal logs", lambda: reveal_logs()),

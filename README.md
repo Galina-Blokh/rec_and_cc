@@ -138,8 +138,9 @@ Menu items:
   any language); pick a match to open its transcript. Same as `recandcc search`. On
   Windows the tray item opens a small window: type the words, press Enter, and
   double-click a match (time, speaker, snippet) to open it.
-- **Export latest transcript (DOCX + PDF)**: writes `transcript.docx` and `transcript.pdf`
-  next to the newest transcript. Same as `recandcc export`.
+- **Export latest transcript (DOCX + PDF)** (macOS menu and Windows tray): writes
+  `transcript.docx` and `transcript.pdf` next to the newest transcript. Same as
+  `recandcc export`.
 - **Meeting notes…**: your past sessions, newest first, with title (the app that triggered
   it, or one you gave it), date and time, duration, speakers, languages and whether it is
   transcribed. Pick one to open its transcript or `summary.md` (if there is one; its first
@@ -154,7 +155,7 @@ Menu items:
   languages speech is detected among (`languages` in the settings). Applies at once, also to
   the rest of a recording in progress; at least one stays ticked unless Any is chosen. Codes
   you added in the settings by hand are kept and listed as "Also from settings".
-- **Delete audio after**: Never / 1 / 7 / 30 / 90 days. Audio of transcribed recordings is
+- **Delete audio after** (macOS menu and Windows tray): Never / 1 / 7 / 30 / 90 days. Audio of transcribed recordings is
   deleted after that many days; transcripts are always kept. Any number of days can be set as
   `audio_retention_days` in the settings.
 - **Settings…** (needs the rebuilt helper, `./native/macos/build.sh`): a window for mode,

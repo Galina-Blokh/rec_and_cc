@@ -1,8 +1,9 @@
 """Windows tray wiring that needs no display: the "Search transcripts…" item, ``search``
-events reaching the Tk search window, and that window's submit/open hooks. pystray and
-Pillow are stubbed; the Tk widgets themselves are checked by hand on Windows.
+events reaching the Tk search window, and that window's submit/open hooks; the export and
+"Delete audio after" items. pystray and Pillow are stubbed; the Tk widgets themselves are
+checked by hand on Windows.
 
-Stories: US-20, US-28.
+Stories: US-15, US-20, US-25, US-28.
 """
 
 from __future__ import annotations
@@ -19,6 +20,18 @@ import pytest
 from recandcc.search import Hit
 
 
+class _Item(tuple):
+    """A stub pystray.MenuItem: its positional args, plus ``kw`` (checked=, radio=...)."""
+
+    kw: dict
+
+
+def _item(*a, **k):
+    item = _Item(a)
+    item.kw = k
+    return item
+
+
 def _menu(*items):
     return items
 
@@ -29,9 +42,7 @@ _menu.SEPARATOR = None  # type: ignore[attr-defined]
 @pytest.fixture
 def tray(monkeypatch):
     stubs = {
-        "pystray": types.SimpleNamespace(
-            Icon=lambda *a, **k: None, MenuItem=lambda *a, **k: a, Menu=_menu
-        ),
+        "pystray": types.SimpleNamespace(Icon=lambda *a, **k: None, MenuItem=_item, Menu=_menu),
         "PIL": types.SimpleNamespace(Image=None, ImageDraw=None),
     }
     for name, mod in stubs.items():
@@ -145,3 +156,41 @@ def test_notes_window_actions(tray, tmp_path, monkeypatch):
     assert asked == ["rename", "delete", "delete"]
     assert acted == [(tmp_path, "rename", "Budget"), (tmp_path, "delete")]
     assert opened == [tmp_path]
+
+
+def test_export_item_runs_the_controller_export(tray):
+    app = _app(tray)
+    calls: list[str] = []
+    app.ctrl.export_async = lambda: calls.append("export")  # spawns its own worker
+    actions = {i[0]: i[1] for i in app._menu() if i and isinstance(i[0], str)}
+    actions["Export latest transcript (DOCX + PDF)"]()
+    assert calls == ["export"]
+    app.ctrl.events.put(("notice", "Export", "Saved transcript.docx"))
+    app._drain()
+    assert app.notices == [("Export", "Saved transcript.docx")]  # the tray's notify path
+
+
+def test_retention_submenu_saves_the_choice_and_moves_the_check(tray):
+    app = _app(tray)
+    app.cfg = types.SimpleNamespace(transcription=types.SimpleNamespace(audio_retention_days=0))
+    saved: list[int] = []
+
+    def set_retention(days):
+        saved.append(days)
+        app.cfg.transcription.audio_retention_days = days
+
+    app.ctrl.set_retention = set_retention
+    submenu = {i[0]: i[1] for i in app._menu() if i and isinstance(i[0], str)}
+
+    def rows():
+        (build,) = submenu["Delete audio after"]  # a callable menu, rebuilt on each update
+        return {i[0]: i for i in build()}
+
+    def checked():
+        return [title for title, i in rows().items() if i.kw["checked"](i)]
+
+    assert checked() == ["Never (keep audio)"]
+    assert all(i.kw["radio"] for i in rows().values())
+    rows()["30 days"][1]()
+    assert saved == [30]
+    assert checked() == ["30 days"]

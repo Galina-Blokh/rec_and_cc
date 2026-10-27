@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ..config import language_code, normalize_languages
 from ..models import Mode, SessionInfo, TriggerKind
+from ..retention import RETENTION_CHOICES
 from .common import (
     ONBOARDING_TEXT,
     PERM_LABELS,
@@ -53,6 +54,11 @@ def retention_label(days: int) -> str:
     if days == 0:
         return "Never (keep audio)"
     return f"{days} day" + ("s" if days > 1 else "")
+
+
+def retention_menu(current: int) -> list[tuple[int, str, bool]]:
+    """Rows of the "Delete audio after" submenu as (days, title, checked)."""
+    return [(days, retention_label(days), days == current) for days in RETENTION_CHOICES]
 
 
 def language_menu(languages: list[str]) -> list[tuple[str | None, str, bool]]:

@@ -1145,6 +1145,17 @@ class Controller:
             "detection.outside_sensitivity", "detection.inside_sensitivity", title="Sensitivity"
         )
 
+    def set_retention(self, days: int) -> None:
+        """ "Delete audio after" menu (both shells): apply ``days`` in memory at once (the menu
+        check reads it), then save only this key and purge expired audio on a worker."""
+        self.cfg.transcription.audio_retention_days = int(days)
+
+        def apply() -> None:
+            self.write_settings("transcription.audio_retention_days", title="Delete audio after")
+            self.purge_audio_now()
+
+        threading.Thread(target=apply, daemon=True, name="retention-set").start()
+
     def sensitivity_preset(self) -> str | None:
         return current_preset(self.cfg.detection)
 

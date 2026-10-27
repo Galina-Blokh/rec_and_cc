@@ -1,6 +1,6 @@
 """Menu toggles save only their own key: hand edits to config.toml survive a menu save.
 
-Stories: US-17.
+Stories: US-15, US-17.
 """
 
 import sys
@@ -180,6 +180,19 @@ def test_missing_config_is_created(tmp_path, monkeypatch):
     ctrl.save_settings("live_captions")
     _join()
     assert load_config(path).live_captions is False
+
+
+def test_retention_choice_saves_its_key_and_purges(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    purged: list[int] = []
+    monkeypatch.setattr(
+        ctrl, "purge_audio_now", lambda: purged.append(ctrl.cfg.transcription.audio_retention_days)
+    )
+    ctrl.set_retention(7)
+    assert ctrl.cfg.transcription.audio_retention_days == 7  # in memory at once: the check
+    _join("retention-set")
+    assert _kept(path)["transcription"]["audio_retention_days"] == 7
+    assert purged == [7]  # after the save, with the new value
 
 
 def _fake_autostart(monkeypatch, module) -> None:
