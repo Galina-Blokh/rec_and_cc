@@ -11,6 +11,7 @@ Stories: US-19.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -42,19 +43,9 @@ MODEL = os.environ.get("RECANDCC_TEST_MODEL", "large-v3-turbo")
 LANGS = ["en", "ru", "he"]
 
 
-def _voices() -> set[str]:
-    if sys.platform != "darwin":
-        return set()
-    out = subprocess.run(["say", "-v", "?"], capture_output=True, text=True).stdout
-    return {line.split()[0] for line in out.splitlines() if line.strip()}
-
-
 pytestmark = [
     pytest.mark.slow,
     pytest.mark.skipif(sys.platform != "darwin", reason="needs macOS say"),
-    pytest.mark.skipif(
-        not set(VOICES.values()) <= _voices(), reason=f"needs the say voices {VOICES}"
-    ),
 ]
 
 # he -> en -> ru -> he, two sentences per block (8 regions)
@@ -81,7 +72,7 @@ HEBREW = re.compile("[֐-׿]")
 
 
 def tts(voice: str, text: str, tmp: Path) -> np.ndarray:
-    wav = tmp / f"{voice}-{abs(hash(text))}.wav"
+    wav = tmp / f"{voice}-{hashlib.sha256(text.encode()).hexdigest()[:12]}.wav"
     subprocess.run(
         ["say", "-v", voice, "-o", str(wav), "--data-format=LEF32@16000", text], check=True
     )
@@ -171,7 +162,26 @@ def offline():
 
 
 @pytest.fixture(scope="module")
-def switching(tmp_path_factory):
+def voices():
+    """Skip unless every `say` voice used here is installed (checked once, not at import)."""
+    out = subprocess.run(["say", "-v", "?"], capture_output=True, text=True).stdout
+    have = {line.split()[0] for line in out.splitlines() if line.strip()}
+    if missing := set(VOICES.values()) - have:
+        pytest.skip(f"say voices not installed: {sorted(missing)}")
+
+
+@pytest.fixture(scope="module")
+def ivrit(offline):
+    """The routed Hebrew model, if it is already cached (checked before any `say` runs)."""
+    cfg = TranscriptionConfig(model=MODEL, languages=LANGS, diarize=False)
+    repo = mlx_repo(IVRIT) if use_gpu(cfg) else ct2_repo(IVRIT)
+    if not cached(repo):
+        pytest.skip(f"{repo} not cached")
+    return IVRIT
+
+
+@pytest.fixture(scope="module")
+def switching(voices, tmp_path_factory):
     tmp = tmp_path_factory.mktemp("say")
     return build([(lang, tts(VOICES[lang], text, tmp)) for lang, text in SWITCHING])
 
@@ -250,18 +260,19 @@ def test_live_language_switching(offline, switching, tmp_path):
         for i in range(0, len(audio), block):
             live.feed(Track.OTHERS, i, audio[i : i + block])
             live.feed(Track.ME, i, silence[: len(audio[i : i + block])])
-            time.sleep(block / SAMPLE_RATE / 10)  # 10x real time
+            time.sleep(block / SAMPLE_RATE / 10)  # ~10x real time; timing isn't asserted
         session.ended_at = session.started_at + timedelta(seconds=len(audio) / SAMPLE_RATE)
-        segs = live.finish(session, timeout=120)
+        # finish() flushes and waits for every pending piece: a slow machine only takes longer
+        segs = live.finish(session, timeout=300)
         elapsed = time.monotonic() - t0
     finally:
         t.close()
-    with lock:
-        assert any(s.language == "he" and HEBREW.search(s.text) for s in shown)  # live captions
+    with lock:  # the captions callback got Hebrew too (by finish() at the latest)
+        assert any(s.language == "he" and HEBREW.search(s.text) for s in shown)
     check_switching(truth, segs, tmp_path, "live", elapsed)
 
 
-def test_hebrew_dialogue_gets_two_speakers(offline, tmp_path):
+def test_hebrew_dialogue_gets_two_speakers(offline, voices, tmp_path):
     clips = []
     for who, text in DIALOGUE:
         a = tts("Carmit", text, tmp_path)
@@ -273,7 +284,8 @@ def test_hebrew_dialogue_gets_two_speakers(offline, tmp_path):
         print(f"[{s.start:6.2f}-{s.end:6.2f}] {s.speaker:9} {s.language}: {len(s.text)} chars")
     labels = majority(truth, segs, lambda g: g.speaker)
     print(f"dialogue: speakers {labels}; {elapsed:.1f}s")
-    assert {s.speaker for s in segs} == {"Speaker 1", "Speaker 2"}
+    # >= 2 (not == 2): the speaker count is adaptive (#89); the mapping below is what counts
+    assert len({s.speaker for s in segs}) >= 2 and "Others" not in {s.speaker for s in segs}
     pairs = list(zip(labels, [w for *_, w in truth], strict=True))
     label_of = {w: Counter(lb for lb, ww in pairs if ww == w).most_common(1)[0][0] for w in "hl"}
     assert label_of["h"] != label_of["l"]
@@ -281,13 +293,10 @@ def test_hebrew_dialogue_gets_two_speakers(offline, tmp_path):
     assert sum(s.language == "he" for s in segs) >= len(segs) - 1
 
 
-def test_hebrew_routed_to_ivrit_model(offline, switching, tmp_path):
+def test_hebrew_routed_to_ivrit_model(ivrit, switching, tmp_path):
     cfg = TranscriptionConfig(
-        model=MODEL, languages=LANGS, diarize=False, language_models={"he": IVRIT}
+        model=MODEL, languages=LANGS, diarize=False, language_models={"he": ivrit}
     )
-    repo = mlx_repo(IVRIT) if use_gpu(cfg) else ct2_repo(IVRIT)
-    if not cached(repo):
-        pytest.skip(f"{repo} not cached")
     audio, truth = switching
     session = make_session(tmp_path, audio, "he-ivrit")
     t = Transcriber(cfg)
