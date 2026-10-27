@@ -611,9 +611,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.diarize_overlap and not args.no_diarize:
         from recandcc.transcribe.diarize import SEGMENTATION_MODEL, model_path
 
-        if (
-            model_path(SEGMENTATION_MODEL, download=False) is None
-        ):  # never download, never fall back
+        # never download, never fall back to fixed windows
+        if model_path(SEGMENTATION_MODEL, download=False) is None:
             p.error(
                 "--diarize-overlap: the segmentation model is not on disk (nothing is downloaded)"
             )
