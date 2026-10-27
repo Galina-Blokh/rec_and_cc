@@ -265,6 +265,8 @@ def still_writing(directory: Path) -> bool:
     """True while a writer of this run is still finishing the session's audio."""
     with _writing_lock:
         return Path(directory) in _writing
+
+
 RECORDING_LOCK = ".recording.lock"  # in a session folder another process records into
 
 

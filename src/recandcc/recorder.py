@@ -1024,8 +1024,7 @@ class Recorder:
                             str(w.track): round(w.backlog_max / SAMPLE_RATE, 3) for w in writers
                         },
                         "writer_dropped_s": {  # audio lost to a stalled disk, as silence
-                            str(w.track): round(w.dropped_frames / SAMPLE_RATE, 3)
-                            for w in writers
+                            str(w.track): round(w.dropped_frames / SAMPLE_RATE, 3) for w in writers
                         },
                     },
                 )
