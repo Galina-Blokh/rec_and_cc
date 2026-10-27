@@ -670,6 +670,10 @@ class Transcriber:
                 except Exception:  # noqa: BLE001 - names are optional; numbers still work
                     log.exception("session %s: could not match voice profiles", session.id)
             taken = {s.speaker for s in out} - {ME, OTHERS}
+            # One person, one name: a profile already given on an earlier track numbers this
+            # track's cluster instead (and its stored voice can't overwrite the first one).
+            folded = {t.casefold() for t in taken}
+            names = {k: n for k, n in names.items() if n.casefold() not in folded}
             out, labels = label_speakers(
                 out, track_turns or [], SPEAKERS[track], names=names, reserved=taken
             )
@@ -690,7 +694,7 @@ class Transcriber:
         if not any(by_track.values()):
             return segments
         log.info(  # counts only: names are personal data
-            "session %s: %d other speaker(s), %d recognized by voice",
+            "session %s: %d speaker(s), %d recognized by voice",
             session.id,
             n_labels,
             n_named,

@@ -460,6 +460,27 @@ def test_upgraded_room_keeps_a_lone_me_and_stores_no_voice_for_it(tmp_path):
     assert out == ["Speaker 1", "Speaker 2", "Others", "Others"]
 
 
+def test_upgraded_room_gives_a_matched_name_to_one_track_only(tmp_path):
+    from recandcc.transcribe import voices
+    from recandcc.transcribe.diarize import Turn, Turns
+
+    rng = np.random.default_rng(3)
+    alice, bob = (v / np.linalg.norm(v) for v in rng.normal(size=(2, 192)))
+    voices.save_profile("Alice", alice)
+    close = alice + 0.05 * bob  # the call side sounds like Alice too
+    turns = {
+        "me.wav": Turns([Turn(0, 5, 0), Turn(5, 10, 1)], centroids={0: alice, 1: bob}),
+        "others.wav": Turns(
+            [Turn(0, 5, 0), Turn(10, 15, 1)], centroids={0: close / np.linalg.norm(close), 1: bob}
+        ),
+    }
+    out, _, _ = _diarized_final(tmp_path, TriggerKind.CALL, True, turns, speaker_names=True)
+    assert out == ["Alice", "Speaker 1", "Speaker 2", "Speaker 3"]
+    stored = voices.read_session_voices("u1")
+    assert set(stored) == {"Alice", "Speaker 1", "Speaker 2", "Speaker 3"}
+    assert np.allclose(stored["Alice"]["centroid"], alice, atol=1e-4)  # the room's, kept
+
+
 def test_room_transcript_numbers_and_names_the_speakers_on_the_mic(tmp_path):
     from concurrent.futures import Future
 
