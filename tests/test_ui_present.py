@@ -1,7 +1,8 @@
 """Menu-bar presenter logic shared by the macOS and Windows shells: menu titles and check
-marks, notification texts, the ask-mode dialog script and its answers, toast placement.
+marks, notification texts, the ask-mode dialog script and its answers, toast placement,
+search results.
 
-Stories: US-03, US-04, US-05, US-11, US-15, US-16, US-17.
+Stories: US-03, US-04, US-05, US-11, US-15, US-16, US-17, US-20.
 """
 
 from datetime import datetime
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from recandcc.models import Mode, SessionInfo, TriggerKind
 from recandcc.retention import RETENTION_CHOICES
+from recandcc.search import Hit
 from recandcc.ui import present as p
 from recandcc.ui.common import PROMPT_BUTTONS
 
@@ -103,3 +105,27 @@ def test_toast_goes_top_right_and_expires():
     assert not p.toast_expired(None, 100.0)
     assert not p.toast_expired(106.0, 105.9)
     assert p.toast_expired(106.0, 106.0)
+
+
+def _hit(folder: Path, start: float = 725.4, snippet: str = "…the [budget]\n for…") -> Hit:
+    return Hit(folder, "s1", "2026-10-26T14:03:12", start, "Me", "en", snippet)
+
+
+def test_search_hit_row_and_notices(tmp_path):
+    hit = _hit(tmp_path / "2026-10-26" / "140312_zoom-us")
+    row = ("2026-10-26 14:03 zoom-us", "12:05", "Me", "…the [budget] for…")
+    assert p.search_hit_row(hit) == row
+    assert p.search_notice([hit]) is None
+    assert p.search_notice([]) == ("Search", "No matches")  # never the query: may be logged
+    assert p.search_notice(RuntimeError("disk")) == ("Search failed", "disk")
+    assert p.search_status("budget", [hit]) == "1 match for “budget”"
+    assert p.search_status("budget", [hit, hit]) == "2 matches for “budget”"
+    assert p.search_status("budget", []) == "No matches for “budget”"
+    assert p.search_status("budget", RuntimeError("disk")) == "Search failed: disk"
+
+
+def test_search_open_target_falls_back_to_the_folder(tmp_path):
+    hit = _hit(tmp_path)
+    assert p.search_open_target(hit) == tmp_path
+    hit.transcript.write_text("# t", encoding="utf-8")
+    assert p.search_open_target(hit) == hit.transcript

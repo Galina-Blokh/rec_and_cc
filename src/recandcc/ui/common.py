@@ -130,10 +130,14 @@ def transcript_label(path: Path) -> str:
 
 def search_hit_label(hit) -> str:
     """'2026-10-26 14:03 zoom-us · 12:05 Me: …the [budget] for…' for a search.Hit."""
-    t = int(hit.start)
-    when = f"{t // 60:02d}:{t % 60:02d}"
     text = " ".join(hit.snippet.split())
-    return f"{transcript_label(hit.transcript)} · {when} {hit.speaker}: {text}"
+    return f"{transcript_label(hit.transcript)} · {clock(hit.start)} {hit.speaker}: {text}"
+
+
+def clock(seconds: float) -> str:
+    """'12:05' (minutes:seconds) for an offset into a recording."""
+    t = int(seconds)
+    return f"{t // 60:02d}:{t % 60:02d}"
 
 
 def untranscribed_sessions(output_dir: Path) -> list[SessionInfo]:

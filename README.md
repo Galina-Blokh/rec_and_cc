@@ -113,7 +113,9 @@ Menu items:
 - **Open live transcript**: opens the current (or last) live session's `transcript.md`.
 - **Recent transcripts**: the last 10, click to open.
 - **Search transcripts…**: full-text search across all your transcripts (English, Russian,
-  any language); pick a match to open its transcript. Same as `recandcc search`.
+  any language); pick a match to open its transcript. Same as `recandcc search`. On
+  Windows the tray item opens a small window: type the words, press Enter, and
+  double-click a match (time, speaker, snippet) to open it.
 - **Open transcripts folder**
 - **Permissions**: status and "Grant…" actions.
 - **Launch at login**: starts RecAndCC every time you log in. Turn it on once.
