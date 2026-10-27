@@ -394,6 +394,7 @@ def test_menu_purge_uses_its_own_value_not_a_newer_click(tmp_path, monkeypatch):
     ctrl.cfg.transcription.audio_retention_days = 1  # click B, assigned after A's check
     ctrl.purge_audio_now(30)  # A's purge
     assert calls == [(ctrl.cfg.output_dir, 30)]  # A's value, not B's live 1
+    save_keys(_path, {"transcription.audio_retention_days": 1})  # B saved
     ctrl.purge_audio_now()  # startup / hourly: the current setting
     assert calls[-1] == (ctrl.cfg.output_dir, 1)
     asked: list = []
@@ -1013,13 +1014,35 @@ def test_retention_purges_only_after_a_successful_save(tmp_path, monkeypatch):
 
 
 def test_hourly_purge_waits_while_a_retention_save_is_pending(tmp_path, monkeypatch):
-    ctrl, _ = _ctrl(tmp_path, monkeypatch)
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
     purged = []
     monkeypatch.setattr(common, "purge_old_audio", lambda _out, days: purged.append(days))
     ctrl.cfg.transcription.audio_retention_days = 1
     ctrl._mark_dirty([common.RETENTION_KEY], 1)  # clicked, save still waiting on the lock
     ctrl.purge_audio_now()
     assert purged == []
+    save_keys(path, {"transcription.audio_retention_days": 1})  # the save ran
     ctrl._mark_dirty([common.RETENTION_KEY], -1)
     ctrl.purge_audio_now()
     assert purged == [1]
+
+
+def test_hourly_purge_never_uses_an_unsaved_retention_click(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    purged: list = []
+    monkeypatch.setattr(common, "purge_old_audio", lambda _out, days: purged.append(days) or [])
+    save_keys(path, {"transcription.audio_retention_days": 30})
+    ctrl.cfg.transcription.audio_retention_days = 30
+    readable = path.read_text()
+    path.write_text("[summary\n")  # mid-edit: the save fails and nothing can be restored
+    ctrl.set_retention(1)  # a stricter click
+    _join("retention-set")
+    assert ctrl.cfg.transcription.audio_retention_days == 1  # kept in memory, unsaved
+    ctrl.purge_audio_now()  # startup / hourly
+    path.write_text(readable)  # readable again, still 30 on disk
+    ctrl.purge_audio_now()
+    assert purged == []  # never by the unsaved 1
+    ctrl.set_retention(1)  # now it saves ...
+    _join("retention-set")
+    ctrl.purge_audio_now()  # ... and the hourly purge follows the saved value
+    assert purged == [1, 1]  # the click's own purge, then the hourly one

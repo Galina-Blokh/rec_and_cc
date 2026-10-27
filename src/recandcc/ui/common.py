@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 from dataclasses import fields
 from datetime import datetime
 from pathlib import Path
@@ -901,18 +902,33 @@ class Controller:
         """Delete audio older than ``days`` now; the deleted WAVs (none if it failed or was
         skipped). A menu click passes its own saved value: memory may already hold a newer,
         unsaved click. Without ``days`` (startup, the hourly loop) use the in-memory retention,
-        but not while a menu save of it is pending: a value that may never be saved must not
-        delete audio (the save's own purge, or the next hourly run, follows)."""
+        but only when config.toml holds that same value: not while a menu save of it is pending
+        or pinned unsaved, and not after a failed save left an unsaved click in memory (e.g.
+        config.toml was unreadable, so nothing could be restored). A value that was never
+        saved must not delete audio; the save's own purge, or the next hourly run, follows."""
         if days is None:
             with self._dirty_lock:
-                if RETENTION_KEY in self._dirty:
+                if RETENTION_KEY in self._dirty or RETENTION_KEY in self._unsaved:
                     return []
             days = self.cfg.transcription.audio_retention_days
+            if days > 0 and self._retention_on_disk() != days:
+                log.info("retention: the current value is not in config.toml; purge skipped")
+                return []
         try:
             return purge_old_audio(self.cfg.output_dir, days)
         except Exception:
             log.exception("audio retention failed")
             return []
+
+    def _retention_on_disk(self) -> int | None:
+        """``audio_retention_days`` as config.toml holds it, or None when the file is missing
+        or unreadable. A plain parse: no lock, no default file, no config warnings."""
+        try:
+            raw = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            value = raw.get("transcription", {}).get("audio_retention_days", 0)
+            return value if isinstance(value, int) and not isinstance(value, bool) else None
+        except Exception:  # missing, mid-edit TOML, unreadable
+            return None
 
     def _purge_leftover_audio(self) -> None:
         """keep_audio = false: delete WAVs left behind by transcribed sessions (e.g. the app
