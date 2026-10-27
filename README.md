@@ -169,7 +169,7 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   deleted after that many days; transcripts are always kept. Choosing a value deletes at once
   the transcribed audio already older than that ("1 day" deletes transcribed audio more than
   a day old). Any number of days can be set as `audio_retention_days` in the settings.
-  Session folders that are links (symlinks, junctions) to somewhere else are skipped.
+  Session folders that are links (symlinks, junctions) to somewhere else are skipped (logged once per folder).
 - **Settings…** (*macOS only*; needs the rebuilt helper, `./native/macos/build.sh`): a window for mode,
   transcripts folder, languages, keep audio, live captions and speaker names. Saved values
   apply at once. Without it, the app opens `config.toml` instead.
