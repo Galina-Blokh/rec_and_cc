@@ -106,6 +106,27 @@ def test_fuse_mounts_are_judged_by_their_source():
     # known local vaults do not
     assert nv("/V/x", fuse("macfuse", "Cryptomator@/Users/me/vault")) is None
     assert nv("/V/x", fuse("fuse-t", "gocryptfs")) is None
+    assert nv("/V/x", fuse("fuse-t", "/Users/me/vault.gocryptfs")) is None
+    # a vault name inside a network source's path does not make it local
+    assert nv("/V/x", fuse("fuse-t", "me@host:/backups/gocryptfs")) == "a network volume"
+    assert nv("/V/x", fuse("macfuse", "//nas/cryptomator")) == "a network volume"
+    assert "cryptomator-" not in cs._LOCAL_FUSE
+    # local vault paths with vault names in any component, or look-alike words, stay local
+    assert nv("/V/x", fuse("macfuse", "/Users/me/cryfs/vault1")) is None
+    assert nv("/V/x", fuse("macfuse", "/Users/me/Cryptomator/vaultX")) is None
+    assert nv("/V/x", fuse("macfuse", "/Users/me/rclone-vault/gocryptfs")) is None
+    assert nv("/V/x", fuse("macfuse", "/Volumes/rclone-cache/x.gocryptfs")) is None
+    # a vault word buried inside another word is not a vault
+    assert nv("/V/x", fuse("macfuse", "/Users/me/notgocryptfsx/y")) == "a network volume"
+    assert nv("/V/x", fuse("macfuse", "/Users/me/my-cryfs-stuff/y")) == "a network volume"
+    # network names are case-insensitive and anchored to the fstype or source head
+    assert nv("/V/x", fuse("macfuse", "Rclone")) == "a network volume"
+    assert nv("/V/x", fuse("macfuse", "SSHFS#me@h")) == "a network volume"
+    assert nv("/V/x", fuse("s3fs", "cryptomator-backup")) == "a network volume"
+    assert nv("/V/x", fuse("gcsfuse", "gocryptfs-bucket")) == "a network volume"
+    assert nv("/V/x", fuse("macfuse", "s3fs")) == "a network volume"
+    # vault names are not a bare substring of an odd non-path source
+    assert nv("/V/x", fuse("macfuse", "backup-gocryptfs")) == "a network volume"
     assert nv("/V/x", fuse("macfuse", "veracrypt")) is None
     assert nv("/V/x", lambda p: ("smbfs", cs._MNT_LOCAL)) == "SMB"
     mounts = "x /mnt/vault fuse.cryptomator rw 0 0\ns:/ /mnt/s fuse.sshfs rw 0 0\n"
