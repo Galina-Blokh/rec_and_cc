@@ -432,11 +432,8 @@ class MacApp(rumps.App):
         self.cfg.transcription.audio_retention_days = sender.retention_days
         self._render_retention()
 
-        def apply():
-            self.ctrl.write_settings("transcription.audio_retention_days")
-            self.ctrl.purge_audio_now()
-
-        threading.Thread(target=apply, daemon=True, name="retention-set").start()
+        # saves, then purges with the saved value only if the save succeeded
+        threading.Thread(target=self.ctrl.save_retention, daemon=True, name="retention-set").start()
 
     def _toggle_captions(self, sender) -> None:
         self.cfg.live_captions = not self.cfg.live_captions
