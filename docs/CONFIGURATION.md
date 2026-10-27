@@ -94,6 +94,9 @@ post-session pass.
 | `accept_qwen_research_licence` | `false` | `true` keeps `model = "mlx-community/Qwen2.5-3B-Instruct-4bit"` (non-commercial use only). With `false`, that model is read as the old default, which earlier versions wrote into every `config.toml`, and the current default is used instead (logged at INFO). Its cached copy (~1.7 GB, `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-3B-Instruct-4bit`) can then be deleted |
 | `max_tokens` | `400` | Longest generated answer (the summary, the action list, each chunk's notes) |
 
+Saving from the **Settings…** window or the **Languages** menu rewrites `config.toml`
+through a TOML library: values are kept, comments are not.
+
 ## Example
 
 ```toml

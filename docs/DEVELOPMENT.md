@@ -42,7 +42,7 @@ src/recandcc/
   permissions.py native.py      TCC permissions + helper discovery (macOS)
   ui/                           common Controller + rumps (mac) / pystray (windows) + live captions
   autostart.py cli.py logging_setup.py
-native/macos/AudioTap/          SwiftPM: rcc-audiotap (monitor/capture/permissions/hotkey) + RecAndCC launcher
+native/macos/AudioTap/          SwiftPM: rcc-audiotap (monitor/capture/permissions/hotkey/settings) + RecAndCC launcher
 tests/                          pytest suite
 scripts/                        dev tools (captions_demo.py, eval.py, pyinstaller_spike.py)
 docs/                           this documentation
@@ -197,6 +197,25 @@ reads `GH_TOKEN`, or `git_api_key_0307` from `~/.env`, and prints what moved sin
 run. `artifact.html` is the same page without its `<html>` wrapper, for hosts that add
 their own. Refresh after each merge; `.report/` is git-ignored. Claude cost is an estimate at
 Anthropic list prices (the table is in `collect.py`).
+
+## Third-party licences (transcript export)
+
+The DOCX/PDF export (`recandcc export`, #4) adds these dependencies, all imported lazily:
+
+| Package | Licence | Used for |
+|---|---|---|
+| fpdf2 | LGPL-3.0 | PDF output |
+| python-docx | MIT | DOCX output |
+| uharfbuzz | Apache-2.0 | text shaping for Hebrew in the PDF |
+| fonttools | MIT | font subsetting and glyph checks (via fpdf2) |
+| lxml | BSD | XML for python-docx |
+| defusedxml | PSF | via fpdf2 |
+| pypdf | BSD | dev only: reads PDFs back in tests |
+
+fpdf2 is LGPL-3.0: it is imported dynamically and used unmodified. When the app is
+distributed (for example as a frozen bundle), users must be able to replace fpdf2 with their
+own build of it, so keep it a separate, replaceable package and don't patch it. Owner
+decision 2026-10-27: keep fpdf2.
 
 ## Conventions
 
