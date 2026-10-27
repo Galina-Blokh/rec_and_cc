@@ -99,7 +99,9 @@ class Transcriber:
         self._routed: dict[str, Any] = {}
         self._route_retry: dict[str, float] = {}
         self._route_noticed: set[str] = set()
-        self._route_lock = threading.Lock()
+        self._route_lock = threading.Lock()  # held for a whole routed load (or download)
+        # Guards storing a routed model against close(), which never waits for _route_lock.
+        self._store_lock = threading.Lock()
         self.clock = time.monotonic
         # (title, message) toast from any thread, e.g. the controller's post_notice
         self.on_notice: Callable[[str, str], None] | None = None
@@ -227,7 +229,14 @@ class Transcriber:
             if name not in self._routed and self.clock() >= self._route_retry.get(name, 0.0):
                 model = self._load_routed(name, language, main)
                 if model is not None:
-                    self._routed[name] = model
+                    with self._store_lock:
+                        closed = self._model is not main
+                        if not closed:
+                            self._routed[name] = model
+                    if closed:  # close() ran during the load: drop the late result
+                        if isinstance(model, MlxWhisper):
+                            model.close()
+                        return None
             return self._routed.get(name)
 
     def start_prefetch(self) -> None:
@@ -251,6 +260,8 @@ class Transcriber:
                 return model
             return self._load(ct2_repo(name))
         except Exception as e:  # noqa: BLE001 - the main model still transcribes this language
+            if self._model is not main:  # closed meanwhile (e.g. its GPU thread shut down)
+                return None
             permanent = isinstance(e, UnpinnedModelError)
             self._route_retry[name] = float("inf") if permanent else self.clock() + ROUTE_RETRY_S
             log.warning(
@@ -282,16 +293,21 @@ class Transcriber:
     def close(self) -> None:
         """Release the models and pool. The Transcriber reloads lazily if used again."""
         with self._init_lock:
+            main = self._model
             if self._pool:
                 self._pool.shutdown(wait=True)
-            with self._route_lock:
+            # Not _route_lock: a routed load (or download) may hold it for minutes, and close()
+            # runs on the UI thread at Quit. A load that finishes later sees the transcriber
+            # closed and drops its result.
+            with self._store_lock:
                 routed, self._routed, self._route_retry = self._routed, {}, {}
+                self._model = None
             for model in routed.values():
                 if isinstance(model, MlxWhisper):
                     model.close()  # before the main model, whose GPU thread it shares
-            if isinstance(self._model, MlxWhisper):
-                self._model.close()
-            self._pool, self._model, self._lid_model = None, None, None
+            if isinstance(main, MlxWhisper):
+                main.close()
+            self._pool, self._lid_model = None, None
             diarizer, self._diarizer = self._diarizer, None
         if diarizer is not None:
             diarizer.close(wait=True)  # lets a pending transcript relabel finish (seconds)
