@@ -414,7 +414,7 @@ def test_failure_logs_the_type_only(tmp_path, monkeypatch, caplog):
     from recandcc.config import TranscriptionConfig
     from recandcc.transcribe.engine import Transcriber
 
-    def boom(_directory):
+    def boom(_directory, since=None):
         raise ValueError(NAME)
 
     monkeypatch.setattr(callnames, "apply", boom)
@@ -646,3 +646,62 @@ def test_turning_the_option_off_mid_call_stops_sampling_and_drops_names():
     n = len(reads)
     time.sleep(0.1)
     assert len(reads) <= n + 1 and s.stop() == []  # at most one sample was already in flight
+
+
+def test_a_forget_between_reading_and_writing_the_voices_keeps_none(tmp_path, monkeypatch):
+    """A "forget all" (another process: no NAMING_LOCK) lands after the call-app rename read
+    the session's voices: they are not written back under the new label."""
+    s = _session_with_voice(tmp_path, ["Anna"])
+    real = voices.read_session_voices
+
+    def read_then_forget(session_id, voices_dir=None):
+        stored = real(session_id, voices_dir)
+        voices.delete_all_profiles()  # the same thread holds the file lock: re-entrant
+        return stored
+
+    monkeypatch.setattr(voices, "read_session_voices", read_then_forget)
+    callnames.apply(tmp_path)
+    monkeypatch.undo()
+    assert voices.read_session_voices(s.id) == {}
+    assert voices.read_session_names(s.id) == []
+
+
+def test_a_forget_before_the_call_app_rename_names_nobody(tmp_path):
+    s = _session_with_voice(tmp_path, ["Anna"])
+    since = voices.forget_generation()
+    voices.forget_all()
+    voices.write_session_names(s, ["Anna"])  # even names stored again later aren't used
+    assert callnames.apply(tmp_path, since=since) is False
+    assert "Anna" not in (tmp_path / "transcript.json").read_text()
+
+
+def test_call_app_rename_waits_for_a_running_naming_and_stays_consistent(tmp_path, monkeypatch):
+    """`name-speaker` holds NAMING_LOCK while it rewrites the transcript; the call-app rename
+    waits, then sees the new name and does not overwrite it."""
+    s = _session_with_voice(tmp_path, ["Anna"])
+    started, release = threading.Event(), threading.Event()
+    real_write = voices.write_outputs
+
+    def slow_write(*args, **kwargs):
+        started.set()
+        assert release.wait(5)
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(voices, "write_outputs", slow_write)
+    naming = threading.Thread(target=voices.name_speaker, args=(tmp_path, "Speaker 1", "Carl"))
+    naming.start()
+    assert started.wait(5)
+    result: list[bool] = []
+    renaming = threading.Thread(target=lambda: result.append(callnames.apply(tmp_path)))
+    renaming.start()
+    renaming.join(0.2)
+    assert renaming.is_alive()  # waiting for NAMING_LOCK, not working from a stale transcript
+    release.set()
+    naming.join(5)
+    renaming.join(5)
+    assert result == [False]  # no unnamed speaker left for the call-app name
+    labels = {
+        seg["speaker"] for seg in json.loads((tmp_path / "transcript.json").read_text())["segments"]
+    }
+    assert labels == {"Me", "Carl"}
+    assert list(voices.read_session_voices(s.id)) == ["Carl"]  # voices match the transcript

@@ -349,6 +349,18 @@ def _stop_quietly(source: AudioSource | None) -> None:
         log.exception("could not stop a system audio source")
 
 
+def _voices_generation() -> int | None:
+    """The voices store's forget generation now: a "Forget all voices" after this point
+    drops the voice data and call-app names of the session being started."""
+    try:
+        from .transcribe import voices
+
+        return voices.forget_generation()
+    except Exception:  # noqa: BLE001 - never stops a recording; unknown means "check later"
+        log.warning("could not read the voices forget generation")
+        return None
+
+
 class _TrackWriter:
     def __init__(self, track: Track, path: Path, source: AudioSource, recorder: Recorder):
         self.track = track
@@ -607,6 +619,7 @@ class Recorder:
                 trigger_kind=kind,
                 trigger_app=app,
                 started_as_room=kind == TriggerKind.ROOM,
+                voices_generation=_voices_generation(),
             )
             want_mic = (
                 should_record_mic(self.cfg.detection.record_mic, kind)
