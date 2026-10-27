@@ -6,7 +6,6 @@ import logging
 import os
 import subprocess
 import threading
-from functools import cache
 from pathlib import Path
 
 import numpy as np
@@ -32,16 +31,25 @@ def _target_args(target: AppTarget) -> list[str]:
     return args
 
 
-@cache
+_SUPPORTS: dict[tuple[Path, float], bool] = {}
+
+
 def _supports_targets(helper: Path, mtime: float) -> bool:
-    """Whether this helper build knows ``capture --pid/--match`` (asked once per build)."""
+    """Whether this helper build knows ``capture --pid/--match`` (asked once per build).
+
+    Only a real answer is remembered: a failed or timed-out probe (e.g. under load) returns
+    False for this session but is asked again next time, so one hiccup can't pin a helper
+    build to the global tap for the rest of the run."""
+    if (key := (helper, mtime)) in _SUPPORTS:
+        return _SUPPORTS[key]
     try:
         out = subprocess.run(  # noqa: S603 - fixed argv: our own bundled helper, no shell
             [str(helper), "help"], capture_output=True, text=True, timeout=5
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    return "--match" in out.stdout
+    _SUPPORTS[key] = ok = "--match" in out.stdout
+    return ok
 
 
 class MacSystemAudioSource(AudioSource):

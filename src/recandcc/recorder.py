@@ -12,15 +12,20 @@ sends a sentinel to each writer, joins them, and persists session.json.
 
 from __future__ import annotations
 
+import errno
 import logging
+import ntpath
+import os
 import queue
 import re
 import shutil
+import sys
 import threading
 import time
 from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timedelta
+from functools import cache
 from pathlib import Path
 
 import numpy as np
@@ -32,28 +37,260 @@ from .models import SAMPLE_RATE, AppTarget, SessionInfo, Track, TriggerKind
 
 log = logging.getLogger(__name__)
 
-PRIVATE_DIR_MODE = 0o700  # owner-only (POSIX; ignored on Windows, where ACLs apply)
+PRIVATE_DIR_MODE = 0o700  # owner-only on POSIX; Windows gets an owner-only DACL instead
+_IS_WINDOWS = sys.platform == "win32"  # module flag so tests can fake Windows safely
+_ERROR_ALREADY_EXISTS = 183
+_FILE_PERSISTENT_ACLS = 0x8  # GetVolumeInformationW file-system flag
+_warned: set[str] = set()  # "<reason>:<volume>" keys already logged
+_noticed: set[str] = set()  # "<reason>:<volume>" keys already shown to the user
+_keys_lock = threading.Lock()  # engine and UI threads both create folders
+PRIVACY_NOTICE = (
+    "Recordings may be readable by other users",
+    "RecAndCC couldn't make its recording folder private (no owner-only access list on this "
+    "drive). Keep output_dir on a local NTFS drive; see the log for details.",
+)
 
 
-def make_private_dir(path: Path) -> None:
+def _not_private(key: str, msg: str, *args: object) -> str:
+    """Log a folder-not-private warning once per ``key`` and return ``key``."""
+    with _keys_lock:
+        first = key not in _warned
+        _warned.add(key)
+    if first:
+        log.warning(msg, *args)
+    return key
+
+
+def _win_long_path(path: Path | str) -> str:
+    """``\\\\?\\`` form of an absolute Windows path, so folders past MAX_PATH stay private."""
+    s = ntpath.normpath(str(path))
+    if s.startswith("\\\\?\\") or not ntpath.isabs(s):
+        return s
+    if s.startswith("\\\\"):  # \\host\share\... -> \\?\UNC\host\share\...
+        return "\\\\?\\UNC\\" + s[2:]
+    return "\\\\?\\" + s if s[1:3] == ":\\" else s
+
+
+def _volume_key(path: Path) -> tuple[str, bool]:
+    """``(volume key, persists ACLs)``; can't tell -> ``(drive, False)``: assume the worst."""
+    try:
+        return _volume_acl_support(path)
+    except Exception as e:
+        log.debug("could not check ACL support for %s: %s", path, e)
+        return path.anchor or str(path), False
+
+
+@cache
+def _current_user_sid() -> str:
+    """SID of the user running the app, e.g. ``S-1-5-21-...-1001`` (Windows only)."""
+    if sys.platform != "win32":  # also narrows the Win32-only ctypes names for pyright
+        raise OSError("Windows only")
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.LocalFree.argtypes = [ctypes.c_void_p]
+    adv.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p]
+    adv.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+    ]
+    adv.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+
+    token = wintypes.HANDLE()
+    if not adv.OpenProcessToken(k32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+        raise ctypes.WinError(ctypes.get_last_error())  # TOKEN_QUERY ^
+    try:
+        size = wintypes.DWORD()
+        adv.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))  # 1 = TokenUser
+        buf = ctypes.create_string_buffer(size.value)
+        if not adv.GetTokenInformation(token, 1, buf, size, ctypes.byref(size)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        psid = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]  # TOKEN_USER.User.Sid
+        text = wintypes.LPWSTR()
+        if not adv.ConvertSidToStringSidW(psid, ctypes.byref(text)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return str(text.value)
+        finally:
+            k32.LocalFree(ctypes.cast(text, ctypes.c_void_p))
+    finally:
+        k32.CloseHandle(token)
+
+
+def owner_only_sddl(user_sid: str) -> str:
+    """DACL with full control for ``user_sid`` and SYSTEM only.
+
+    ``P`` (protected) blocks inheritance from the parent folder (e.g. ``Users: Read`` on a
+    shared drive); ``OICI`` passes the same two entries to files and subfolders inside.
+    """
+    return f"D:P(A;OICI;FA;;;{user_sid})(A;OICI;FA;;;SY)"
+
+
+def _exists_error(err: int, path: Path) -> FileExistsError | None:
+    """``FileExistsError`` if ``CreateDirectoryW`` failed with ERROR_ALREADY_EXISTS (183)."""
+    if err == _ERROR_ALREADY_EXISTS:
+        return FileExistsError(errno.EEXIST, "folder already exists", str(path))
+    return None
+
+
+def _win_mkdir_owner_only(path: Path) -> None:
+    """Create one folder with an owner-only DACL in a single call (no permissive window)."""
+    sddl = owner_only_sddl(_current_user_sid())
+    if sys.platform != "win32":  # also narrows the Win32-only ctypes names for pyright
+        raise OSError("Windows only")
+    import ctypes
+    from ctypes import wintypes
+
+    class SecurityAttributes(ctypes.Structure):
+        _fields_ = [
+            ("nLength", wintypes.DWORD),
+            ("lpSecurityDescriptor", ctypes.c_void_p),
+            ("bInheritHandle", wintypes.BOOL),
+        ]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    k32.CreateDirectoryW.argtypes = [wintypes.LPCWSTR, ctypes.c_void_p]
+    k32.LocalFree.argtypes = [ctypes.c_void_p]
+    adv.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    sd = ctypes.c_void_p()
+    if not adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl,
+        1,
+        ctypes.byref(sd),
+        None,  # 1 = SDDL_REVISION_1
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        sa = SecurityAttributes(ctypes.sizeof(SecurityAttributes), sd, False)
+        if not k32.CreateDirectoryW(_win_long_path(path), ctypes.byref(sa)):
+            err = ctypes.get_last_error()
+            raise _exists_error(err, path) or ctypes.WinError(err)
+    finally:
+        k32.LocalFree(sd)
+
+
+def _volume_acl_support(path: Path) -> tuple[str, bool]:
+    """``(volume key, persists ACLs)`` for an existing ``path``; key = root + serial number.
+
+    FAT/exFAT and some shares accept ``CreateDirectoryW`` with a security descriptor but
+    silently drop it; their volumes lack ``FILE_PERSISTENT_ACLS``. Two in-process API calls,
+    made every time (no cache): a USB stick swapped under the same drive letter has another
+    serial number, so it gets its own key.
+    """
+    root, serial, flags = _volume_info(_win_long_path(path))  # \\?\: works past MAX_PATH
+    return f"{root} ({serial:08X})", bool(flags & _FILE_PERSISTENT_ACLS)
+
+
+def _short_root(root: str) -> str:
+    r"""``\\?\C:\`` -> ``C:\``, ``\\?\UNC\h\s\`` -> ``\\h\s\``; GUID roots stay."""
+    if root.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + root[8:]
+    if root.startswith("\\\\?\\") and root[5:6] == ":":
+        return root[4:]
+    return root
+
+
+def _volume_info(long_path: str) -> tuple[str, int, int]:
+    """``(volume root, serial number, file-system flags)`` via the Win32 volume API."""
+    if sys.platform != "win32":  # also narrows the Win32-only ctypes names for pyright
+        raise OSError("Windows only")
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetVolumePathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    k32.GetVolumeInformationW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+    ]
+    buf = ctypes.create_unicode_buffer(1024)
+    if not k32.GetVolumePathNameW(long_path, buf, len(buf)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    root = _short_root(buf.value)
+    serial, flags = wintypes.DWORD(), wintypes.DWORD()
+    if not k32.GetVolumeInformationW(
+        root, None, 0, ctypes.byref(serial), None, ctypes.byref(flags), None, 0
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return root, serial.value, flags.value
+
+
+def _mkdir_private(path: Path) -> str | None:
+    """Create one folder (parent must exist), private to the current user from the start.
+
+    POSIX: ``0700`` (chmod-ed too: ``mkdir(mode=...)`` is filtered by the umask). Windows: an
+    owner-only DACL set at creation. If Windows refuses the DACL (e.g. some network shares),
+    this falls back to a plain ``mkdir(mode=0o700)``; if the volume doesn't keep ACLs (FAT/
+    exFAT, or it can't tell), the folder is not private. Either way recording goes on, a
+    warning is logged once per (reason, volume), and that key is returned (None = private).
+    Raises ``FileExistsError`` if something is already at ``path``.
+    """
+    if not _IS_WINDOWS:
+        path.mkdir(mode=PRIVATE_DIR_MODE)
+        path.chmod(PRIVATE_DIR_MODE)
+        return None
+    try:
+        _win_mkdir_owner_only(path)
+    except FileExistsError:
+        raise  # created concurrently / something in the way: not a privacy problem
+    except Exception as e:  # keep recording, just warn
+        # FileExistsError here reports nothing; \\?\ so long paths don't abort the start
+        os.mkdir(_win_long_path(path) if sys.platform == "win32" else path, PRIVATE_DIR_MODE)
+        return _not_private(
+            f"acl-fallback:{_volume_key(path)[0]}",
+            "could not create %s with an owner-only ACL (%s); recordings may be readable "
+            "by other users",
+            path,
+            e,
+        )
+    volume, persists = _volume_key(path)
+    if persists:
+        return None
+    return _not_private(
+        f"no-acl:{volume}",
+        "%s may not keep file permissions (e.g. FAT/exFAT): recordings in %s may be "
+        "readable by other users",
+        volume,
+        path,
+    )
+
+
+def make_private_dir(path: Path) -> str | None:
     """Create ``path`` (and missing parents) with owner-only permissions, if it doesn't exist.
 
-    ``mkdir(mode=...)`` is filtered by the umask and only applies to the last component, so
-    each folder this creates is chmod-ed explicitly. Existing folders are left untouched.
+    Each folder this creates is made private (``_mkdir_private``); existing folders are left
+    untouched. Returns a not-private key if a folder it created isn't private, else None.
     """
     if path.is_dir():
-        return
+        return None
     if path.parent == path:  # a missing drive / UNC share root: nothing left to create
         raise FileNotFoundError(f"{path} does not exist")
-    if not path.parent.is_dir():
-        make_private_dir(path.parent)
+    issue = make_private_dir(path.parent) if not path.parent.is_dir() else None
     try:
-        path.mkdir(mode=PRIVATE_DIR_MODE)
+        return _mkdir_private(path) or issue
     except FileExistsError:
         if path.is_dir():
-            return  # created concurrently
+            return issue  # created concurrently
         raise  # a file (or dangling symlink) is in the way
-    path.chmod(PRIVATE_DIR_MODE)
 
 
 # Sessions with less audio than this (longest track) are deleted instead of transcribed.
@@ -219,6 +456,7 @@ class Recorder:
         self._op_lock = threading.Lock()  # serialises start/stop
         self._lvl_lock = threading.Lock()  # guards _last_sound
         self._session: SessionInfo | None = None
+        self._privacy_issue: str | None = None  # last start's not-private key (privacy_notice)
         self._writers: list[_TrackWriter] = []
         self._started_mono = 0.0
         self._last_sound = 0.0
@@ -257,6 +495,21 @@ class Recorder:
             last = self._last_sound
         return max(0.0, self.clock() - last) if self.is_recording else 0.0
 
+    def privacy_notice(self) -> tuple[str, str] | None:
+        """``(title, message)`` if the last successful start created a folder that isn't
+        private and no notice was delivered yet for its (reason, volume) in this process.
+        Call ``privacy_noticed()`` once the notice was shown."""
+        key = self._privacy_issue
+        with _keys_lock:
+            return None if key is None or key in _noticed else PRIVACY_NOTICE
+
+    def privacy_noticed(self) -> None:
+        """The notice from ``privacy_notice()`` reached the user: don't repeat it."""
+        key, self._privacy_issue = self._privacy_issue, None
+        if key is not None:
+            with _keys_lock:
+                _noticed.add(key)
+
     def silent_tracks(self) -> list[Track]:
         """Tracks of the last stopped session that were digital silence the whole time
         (typically a missing microphone / system-audio permission)."""
@@ -277,7 +530,9 @@ class Recorder:
         return self.clock() - self._started_mono if self.is_recording else 0.0
 
     # ---- lifecycle ----------------------------------------------------------
-    def _make_dir(self, now: datetime, app: str | None, kind: TriggerKind) -> tuple[str, Path]:
+    def _make_dir(
+        self, now: datetime, app: str | None, kind: TriggerKind
+    ) -> tuple[str, Path, str | None]:
         day = self.cfg.output_dir / now.strftime("%Y-%m-%d")
         slug = slugify(app, default=str(kind))
         base = f"{now.strftime('%H%M%S')}_{slug}"
@@ -286,12 +541,12 @@ class Recorder:
         while d.exists():
             d = day / f"{base}-{n}"
             n += 1
-        # Recordings and transcripts are private: owner-only folders (0700) at every level the
-        # recorder creates. An output folder that already exists keeps its permissions.
-        for p in (self.cfg.output_dir, day):
-            make_private_dir(p)
-        d.mkdir(mode=PRIVATE_DIR_MODE)
-        return f"{now.strftime('%Y-%m-%d')}_{d.name}", d
+        # Recordings and transcripts are private: owner-only folders (0700 / owner-only DACL)
+        # at every level the recorder creates. An existing output folder keeps its permissions.
+        issues = [make_private_dir(p) for p in (self.cfg.output_dir, day)]
+        issues.append(_mkdir_private(d))
+        issue = next((i for i in issues if i), None)
+        return f"{now.strftime('%Y-%m-%d')}_{d.name}", d, issue
 
     def _per_app(self, target: AppTarget | None) -> AppTarget | None:
         """``target`` if the Others track should record only that app, else None."""
@@ -329,7 +584,8 @@ class Recorder:
             if self._session is not None:
                 raise RuntimeError("already recording")
             now = datetime.now().astimezone()
-            sid, directory = self._make_dir(now, app, kind)
+            self._privacy_issue = None
+            sid, directory, privacy_issue = self._make_dir(now, app, kind)
             session = SessionInfo(
                 id=sid, directory=directory, started_at=now, trigger_kind=kind, trigger_app=app
             )
@@ -370,6 +626,7 @@ class Recorder:
             if mic_source is not None:  # the tracks begin with the replayed pre-roll
                 preroll = max(w.frames_received for w in writers) / SAMPLE_RATE
                 session.started_at = now - timedelta(seconds=preroll)
+            self._privacy_issue = privacy_issue  # reported by privacy_notice()
             self._started_mono = self.clock()
             with self._lvl_lock:
                 self._last_sound = self._started_mono
