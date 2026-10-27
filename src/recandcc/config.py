@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
 import os
 import sys
+import tempfile
+import time
 import tomllib
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
@@ -217,8 +221,12 @@ class Config:
     summary: SummaryConfig = field(default_factory=SummaryConfig)
 
     def save(self, path: Path | None = None) -> None:
-        path = CONFIG_PATH if path is None else path
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # Resolve first: os.replace on a symlinked config.toml (dotfiles) would swap the link
+        # for a regular file and leave the real one stale.
+        path = (CONFIG_PATH if path is None else path).resolve()
+        # A dir we create is private (0700); an existing one keeps its mode. The file itself
+        # is 0600 on first write (mkstemp) and keeps the user's mode after that.
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         data = asdict(self)
         data["output_dir"] = str(self.output_dir)
         # Keep the user's own spelling of `languages` ("iw", unknown codes) unless the list
@@ -231,7 +239,8 @@ class Config:
         # fields today; add any new section with an Optional field here.
         for section in ("detection", "transcription"):
             data[section] = {k: v for k, v in data[section].items() if v is not None}
-        path.write_bytes(tomli_w.dumps(data).encode())
+        with _file_lock(path.with_name(f".{path.name}.lock")):  # shared with save_keys / CLI
+            _write_atomic(path, tomli_w.dumps(data).encode())
 
 
 def _build(cls, data: dict):
@@ -297,28 +306,66 @@ def save_keys(path: Path | None, updates: dict[str, Any]) -> float:
     null); a table left empty by that is removed too, and removing a key that isn't there
     changes nothing. Like every save, it drops TOML comments and rewrites the file in
     tomli_w's key order. ``path=None`` means CONFIG_PATH, read at call time. Returns the new
-    file's mtime. Raises FileNotFoundError if there is no file yet, ValueError if it is not
-    valid TOML or a key's parent is not a table."""
+    file's mtime. Writers in this process and the CLI are serialized by a lock file; an
+    editor saving in the same millisecond is not (it doesn't take it). Raises
+    FileNotFoundError if there is no file yet, ValueError if it is not valid TOML or a key's
+    parent is not a table."""
     path = (
         CONFIG_PATH if path is None else path
     ).resolve()  # a symlinked config.toml stays a symlink
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
-    changed = False
-    for dotted, value in updates.items():
-        *parents, leaf = dotted.split(".")
-        if value is None:
-            changed |= _remove_key(data, parents, leaf)
-            continue
-        table = data
-        for name in parents:
-            table = table.setdefault(name, {})
-            if not isinstance(table, dict):
-                raise ValueError(f"{name} in {path} is not a table")
-        table[leaf] = value
-        changed = True
-    if not changed:  # only absent keys were removed: leave the file as it is
-        return path.stat().st_mtime
-    return _write_atomic(path, tomli_w.dumps(data).encode())
+    if not path.exists():  # don't create the lock file (or the dir) for a missing config
+        raise FileNotFoundError(path)
+    with _file_lock(path.with_name(f".{path.name}.lock")):  # the CLI is another process
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        changed = False
+        for dotted, value in updates.items():
+            *parents, leaf = dotted.split(".")
+            if value is None:
+                changed |= _remove_key(data, parents, leaf)
+                continue
+            table = data
+            for name in parents:
+                table = table.setdefault(name, {})
+                if not isinstance(table, dict):
+                    raise ValueError(f"{name} in {path} is not a table")
+            table[leaf] = value
+            changed = True
+        if not changed:  # only absent keys were removed: leave the file as it is
+            return path.stat().st_mtime
+        return _write_atomic(path, tomli_w.dumps(data).encode())
+
+
+@contextlib.contextmanager
+def _file_lock(lock_path: Path) -> Iterator[None]:
+    """Hold an exclusive advisory lock on ``lock_path`` (a sidecar file that is never
+    replaced), so read-modify-writes from the app and the CLI don't lose each other's keys."""
+    with open(lock_path, "a+b") as f:
+        if sys.platform == "win32":
+            import msvcrt
+
+            while True:  # LK_LOCK gives up after ~10 s; keep waiting like flock does
+                try:
+                    f.seek(0)
+                    msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                    break
+                except OSError as e:
+                    # LK_LOCK reports "still held after ~10 s" as EDEADLOCK; anything else
+                    # (a real permission error) would otherwise retry forever.
+                    if e.errno != errno.EDEADLK:
+                        raise
+            try:
+                yield
+            finally:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 def _remove_key(data: dict, parents: list[str], leaf: str) -> bool:
@@ -343,17 +390,36 @@ def _remove_key(data: dict, parents: list[str], leaf: str) -> bool:
 def _write_atomic(path: Path, payload: bytes) -> float:
     """Replace ``path`` in one step, so a crash mid-write never leaves half a config. Returns
     the new file's mtime."""
-    tmp = path.with_name(f".{path.name}.tmp")
+    # A unique temp name per write: a fixed one let one writer's os.replace consume another's.
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(name)
     try:
-        tmp.write_bytes(payload)
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
         with contextlib.suppress(OSError):
             os.chmod(tmp, path.stat().st_mode & 0o777)  # keep the user's file mode
         mtime = tmp.stat().st_mtime  # os.replace keeps it
-        os.replace(tmp, path)
+        _replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
     return mtime
+
+
+def _replace(src: Path, dst: Path) -> None:
+    """os.replace, retried briefly on Windows, where a reader that has the file open (an
+    editor, antivirus, the app's own reload) makes it fail with PermissionError."""
+    for delay in (0.05, 0.1, 0.2, 0.4):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if sys.platform != "win32":
+                raise
+            time.sleep(delay)
+    os.replace(src, dst)
 
 
 def save_languages(languages: list, path: Path | None = None) -> None:
@@ -396,7 +462,7 @@ def validate_settings(values) -> dict:
                 raise ValueError("languages must be a list of codes")
             langs = list(dict.fromkeys(language_code(v) for v in value))  # [] = any language
             clean = normalize_languages(langs)
-            if len(clean) != len(langs):
+            if any(c not in WHISPER_LANGUAGES for c in langs) or len(clean) != len(langs):
                 raise ValueError("languages: unknown language code")
             out[name] = clean
         elif isinstance(value, bool):
