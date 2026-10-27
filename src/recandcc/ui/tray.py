@@ -529,6 +529,10 @@ def tk_dialog(
     return result
 
 
+# Two dialogs plus the speakers worker; a naming flow older than this is assumed lost.
+NAMING_STALE_S = 2 * DIALOG_TIMEOUT_S + 60
+
+
 class TrayApp:
     _dialog = staticmethod(tk_dialog)  # tests replace it
 
@@ -544,7 +548,9 @@ class TrayApp:
         self._live_id: str | None = None
         self._live_dir: str | None = None
         self._naming_open = False  # a speaker chooser/name dialog is up
+        self._naming_since = 0.0  # monotonic start of the open flow
         self._naming_lock = threading.Lock()
+        self._forget_open = False  # the forget confirmation is up
         self.icon = pystray.Icon(
             "RecAndCC", make_icon(COLORS["ask"], False, False), "RecAndCC", menu=self._menu()
         )
@@ -714,10 +720,14 @@ class TrayApp:
         return bool(self.ctrl.speaker_names_enabled and self.ctrl.recent)
 
     def _begin_naming(self) -> bool:
+        """One naming flow at a time. A flow older than NAMING_STALE_S (longer than its dialogs
+        can stay open) is treated as lost, so a worker that never reported can't block naming
+        until restart."""
         with self._naming_lock:
-            if self._naming_open:
+            now = time.monotonic()
+            if self._naming_open and now - self._naming_since < NAMING_STALE_S:
                 return False
-            self._naming_open = True
+            self._naming_open, self._naming_since = True, now
             return True
 
     def _end_naming(self) -> None:
@@ -782,14 +792,23 @@ class TrayApp:
         """Confirm, then delete through ``voices.forget_all`` (as ``voices delete --all``).
         Cancel, closing or leaving the dialog until it times out deletes nothing."""
 
+        with self._naming_lock:  # a second click while the confirmation is up does nothing
+            if self._forget_open:
+                return
+            self._forget_open = True
+
         def run() -> None:
-            if (
-                self._dialog(
-                    "Forget all voices", FORGET_VOICES_TEXT, ok="Forget all voices", danger=True
-                )
-                is True
-            ):
-                self.ctrl.forget_voices_async()
+            try:
+                if (
+                    self._dialog(
+                        "Forget all voices", FORGET_VOICES_TEXT, ok="Forget all voices", danger=True
+                    )
+                    is True
+                ):
+                    self.ctrl.forget_voices_async()
+            finally:
+                with self._naming_lock:
+                    self._forget_open = False
 
         threading.Thread(target=run, daemon=True, name="forget-voices-dialog").start()
 

@@ -64,6 +64,7 @@ def _voices_app(tray, monkeypatch, answers, speaker_names=True, recent=True):
     dialog past the end answers None = Cancel). Returns (app, controller calls, dialogs)."""
     app = _app(tray)
     app._naming_open, app._naming_lock = False, threading.Lock()
+    app._naming_since, app._forget_open = 0.0, False
     calls: list = []
     asked: list = []
     app.ctrl.speaker_names_enabled = speaker_names
@@ -173,3 +174,35 @@ def test_forget_all_voices_needs_an_explicit_confirmation(tray, monkeypatch, ans
 def test_tk_dialog_without_tk_counts_as_cancel(tray, monkeypatch):
     monkeypatch.setitem(sys.modules, "tkinter", None)  # import fails, as without Tk
     assert tray.tk_dialog("t", "x", ok="Forget all voices", danger=True) is None
+
+
+def test_a_lost_naming_flow_stops_blocking_after_the_stale_timeout(tray, monkeypatch):
+    app, _calls, _asked = _voices_app(tray, monkeypatch, [])
+    clock = [1000.0]
+    monkeypatch.setattr(tray.time, "monotonic", lambda: clock[0])
+    assert app._begin_naming()
+    assert not app._begin_naming()  # a flow is open
+    clock[0] += tray.NAMING_STALE_S + 1  # its worker never reported back
+    assert app._begin_naming()
+
+
+def test_a_second_forget_click_does_not_stack_a_confirmation(tray, monkeypatch):
+    app, calls, asked = _voices_app(tray, monkeypatch, [])
+    gate = threading.Event()
+    shown: list = []
+
+    def slow_dialog(*a, **k):
+        shown.append(a)
+        gate.wait(5)
+        return None
+
+    app._dialog = slow_dialog
+    item = _top_items(app)["Forget all voices…"][1]
+    item()
+    _wait(lambda: shown)
+    item()  # while the first confirmation is still up
+    time.sleep(0.05)
+    assert len(shown) == 1
+    gate.set()
+    _wait(lambda: not app._forget_open)
+    assert calls == []
