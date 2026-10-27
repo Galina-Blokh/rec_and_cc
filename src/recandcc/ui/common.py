@@ -30,7 +30,7 @@ from pathlib import Path
 from .. import hotkey as hotkey_mod
 from ..config import CONFIG_PATH, LOG_DIR, Config, load_config
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
-from ..models import Mode, SessionInfo, TriggerKind
+from ..models import Mode, SessionInfo, TriggerKind, discard_session
 from ..recorder import make_private_dir
 from ..retention import purge_old_audio
 
@@ -103,7 +103,11 @@ def open_output_folder(path: Path) -> str | None:
 def recent_transcripts(output_dir: Path, n: int = RECENT_COUNT) -> list[Path]:
     """Newest ``n`` transcript.md files under <output_dir>/<day>/<session>/."""
     try:
-        files = list(Path(output_dir).glob("*/*/transcript.md"))
+        files = [
+            f
+            for f in Path(output_dir).glob("*/*/transcript.md")
+            if not (f.parent / SessionInfo.DISCARD_MARKER).exists()
+        ]
         files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return files[:n]
     except OSError:
@@ -122,27 +126,22 @@ def untranscribed_sessions(output_dir: Path) -> list[SessionInfo]:
     """Finished sessions never transcribed (e.g. app quit mid-queue), oldest first."""
     out = []
     for f in sorted(Path(output_dir).glob(f"*/*/{SessionInfo.FILENAME}")):
+        if (f.parent / SessionInfo.DISCARD_MARKER).exists():
+            continue  # discarded; purge_discarded_sessions deletes it
         try:
             s = SessionInfo.load(f.parent)
         except Exception:
             continue
-        if s.ended_at is not None and not s.transcribed and s.tracks and not s.discarded:
+        if s.ended_at is not None and not s.transcribed and s.tracks:
             out.append(s)
     return out
 
 
 def purge_discarded_sessions(output_dir: Path) -> int:
-    """Retry deleting sessions the user discarded but whose files were in use; returns how
-    many are still left."""
-    left = 0
-    for f in sorted(Path(output_dir).glob(f"*/*/{SessionInfo.FILENAME}")):
-        try:
-            s = SessionInfo.load(f.parent)
-        except Exception:
-            continue
-        if s.discarded and not s.discard():
-            left += 1
-    return left
+    """Retry deleting sessions the user discarded but whose files were in use (session.json
+    may be unreadable there); returns how many are still left."""
+    markers = sorted(Path(output_dir).glob(f"*/*/{SessionInfo.DISCARD_MARKER}"))
+    return sum(not discard_session(m.parent) for m in markers)
 
 
 def permissions_module():
@@ -416,15 +415,15 @@ class Controller:
 
     def _resubmit_unfinished(self) -> None:
         try:
-            purge_discarded_sessions(self.cfg.output_dir)
-        except Exception:
-            log.exception("deleting discarded sessions failed")
-        try:
             for s in untranscribed_sessions(self.cfg.output_dir):
                 log.info("re-queueing untranscribed session %s", s.directory)
                 self.tq.submit(s)
         except Exception:
             log.exception("scanning for untranscribed sessions failed")
+        try:  # after re-queueing, so deleting big WAVs doesn't delay recovery
+            purge_discarded_sessions(self.cfg.output_dir)
+        except Exception:
+            log.exception("deleting discarded sessions failed")
 
     # --- periodic refresh (permissions, recent transcripts, config file)
     def refresh_async(self, force: bool = False) -> None:

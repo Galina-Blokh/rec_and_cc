@@ -602,26 +602,35 @@ def test_failing_session_callbacks_do_not_break_engine():
     assert h.status == IDLE and len(h.q.submitted) == 1
 
 
+# --- discard must stick, even when Windows still locks a file (US-03)
+
+DAY = "2026-10-27"
+
+
+def _fill(s: SessionInfo) -> SessionInfo:
+    """Give a session what the real Recorder + live transcript leave on disk."""
+    from datetime import datetime
+
+    s.directory.mkdir(parents=True, exist_ok=True)
+    s.ended_at = datetime.now()
+    s.tracks = {Track.OTHERS: "others.wav", Track.ME: "me.wav"}
+    for name in ("others.wav", "me.wav", "transcript.md"):
+        (s.directory / name).write_bytes(b"x")
+    s.save()
+    return s
+
+
 class LockedWavRecorder(DiscardingRecorder):
-    """Sessions like the real Recorder's: finished, with a WAV and session.json on disk."""
-
     def stop(self):
-        from datetime import datetime
-
-        s = super().stop()
-        s.ended_at = datetime.now()
-        s.tracks = {Track.OTHERS: "others.wav"}
-        (s.directory / "others.wav").write_bytes(b"RIFF")
-        s.save()
-        return s
+        return _fill(super().stop())
 
 
-def _lock_wavs(monkeypatch):
-    """Make WAV deletion fail the way Windows does while a file is still open."""
+def _lock(monkeypatch, *names):
+    """Make deleting these files fail the way Windows does while they are still open."""
     real_unlink = Path.unlink
 
     def unlink(self, *a, **kw):
-        if self.suffix == ".wav":
+        if self.name in names:
             raise PermissionError(13, "file in use", str(self))
         return real_unlink(self, *a, **kw)
 
@@ -630,7 +639,7 @@ def _lock_wavs(monkeypatch):
 
 def _discard_one(tmp_path):
     h = Harness(Mode.ASK)
-    h.rec = h.eng.recorder = LockedWavRecorder(tmp_path / "2026-10-27")
+    h.rec = h.eng.recorder = LockedWavRecorder(tmp_path / DAY)
     h.mon.procs = [CHROME]
     h.run(4)
     h.eng.respond("ignore")
@@ -639,27 +648,87 @@ def _discard_one(tmp_path):
 
 
 def test_failed_discard_is_marked_and_never_transcribed(tmp_path, monkeypatch):
-    from recandcc.ui.common import untranscribed_sessions
+    from recandcc.ui.common import recent_transcripts, untranscribed_sessions
 
-    _lock_wavs(monkeypatch)
+    _lock(monkeypatch, "others.wav", "transcript.md")
     h = _discard_one(tmp_path)
     d = h.rec.dirs[0]
     assert (d / "others.wav").exists() and h.q.submitted == []
-    assert SessionInfo.load(d).discarded
+    assert not (d / "me.wav").exists()  # one locked file doesn't keep the rest
+    assert (d / SessionInfo.DISCARD_MARKER).exists()
     assert h.notices == ["Recording not fully deleted"]
     assert untranscribed_sessions(tmp_path) == []  # startup recovery skips it
+    assert recent_transcripts(tmp_path) == []  # and the menu doesn't list it
+
+
+def test_discard_sticks_when_no_marker_can_be_written(tmp_path, monkeypatch):
+    from recandcc.ui.common import purge_discarded_sessions, untranscribed_sessions
+
+    real_touch = Path.touch
+
+    def touch(self, *a, **kw):
+        if self.name == SessionInfo.DISCARD_MARKER:
+            raise PermissionError(13, "denied", str(self))
+        return real_touch(self, *a, **kw)
+
+    with monkeypatch.context() as m:
+        _lock(m, "others.wav")
+        m.setattr(Path, "touch", touch)
+        h = _discard_one(tmp_path)
+        d = h.rec.dirs[0]
+        assert (d / "others.wav").exists() and untranscribed_sessions(tmp_path) == []
+    assert purge_discarded_sessions(tmp_path) == 0  # session.json became the marker
+    assert not d.exists()
 
 
 def test_startup_retry_deletes_leftover_discarded_session(tmp_path, monkeypatch):
     from recandcc.ui.common import purge_discarded_sessions, untranscribed_sessions
 
     with monkeypatch.context() as m:
-        _lock_wavs(m)
+        _lock(m, "others.wav")
         h = _discard_one(tmp_path)
         assert purge_discarded_sessions(tmp_path) == 1  # still locked: left for next time
-    kept = LockedWavRecorder(tmp_path / "2026-10-27")
+    kept = LockedWavRecorder(tmp_path / DAY)
     kept.stops = 5
     kept.stop()  # an ordinary unfinished session must survive the purge
+    truncated = tmp_path / DAY / "crashed"  # discarded, with a cut-short session.json
+    truncated.mkdir()
+    (truncated / SessionInfo.FILENAME).write_text("{", encoding="utf-8")
+    (truncated / SessionInfo.DISCARD_MARKER).touch()
+    stray = tmp_path / DAY / "unreadable"  # unreadable but not discarded: left alone
+    stray.mkdir()
+    (stray / SessionInfo.FILENAME).write_text("{", encoding="utf-8")
     assert purge_discarded_sessions(tmp_path) == 0
-    assert not h.rec.dirs[0].exists()
+    assert not h.rec.dirs[0].exists() and not truncated.exists() and stray.exists()
     assert [s.id for s in untranscribed_sessions(tmp_path)] == ["s6"]
+
+
+def test_discard_when_recorder_stop_fails(tmp_path):
+    class StopFails(FakeRecorder):
+        def start(self, kind, app=None):
+            s = super().start(kind, app)
+            s.directory = tmp_path / DAY / "s"
+            return _fill(s)
+
+        def stop(self):
+            raise RuntimeError("boom")
+
+    h = Harness(Mode.ASK)
+    h.rec = h.eng.recorder = StopFails()
+    h.mon.procs = [CHROME]
+    h.run(4)
+    h.eng.respond("ignore")
+    h.eng.tick()
+    assert h.status == IDLE and not (tmp_path / DAY / "s").exists()
+
+
+def test_discard_tolerates_vanished_files_and_save_is_atomic(tmp_path):
+    from datetime import datetime
+
+    from recandcc.models import discard_session
+
+    assert discard_session(tmp_path / "gone")  # already deleted (e.g. by a racing purge)
+    s = _fill(SessionInfo("s", tmp_path / "d", datetime.now(), TriggerKind.CALL))
+    names = sorted(p.name for p in s.directory.iterdir())
+    assert names == ["me.wav", "others.wav", SessionInfo.FILENAME, "transcript.md"]  # no temp
+    assert discard_session(s.directory) and not s.directory.exists()

@@ -28,7 +28,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from .config import Config, DetectionConfig
-from .models import AudioProcess, Mode, SessionInfo, TriggerKind
+from .models import AudioProcess, Mode, SessionInfo, TriggerKind, discard_session
 
 log = logging.getLogger(__name__)
 
@@ -618,17 +618,19 @@ class Engine:
     def _do_discard(self) -> None:
         """Stop the current session and delete it (the user chose not to keep it)."""
         with self._lock:
+            started = self._rec.session if self._rec is not None else None
             self._rec = None
         try:
             session = self.recorder.stop()
         except Exception:
             log.exception("could not stop recording cleanly")
             self._session_end(None, False)
-            return
-        self._session_end(session, False)
+            session = started  # whatever it wrote must still go
+        else:
+            self._session_end(session, False)
         if session is None:
             return
-        if session.discard():
+        if discard_session(session.directory):
             log.info("discarded recording %s", session.directory)
         else:
             self._notice(

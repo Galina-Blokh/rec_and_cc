@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import shutil
 import threading
 from dataclasses import asdict, dataclass, field
@@ -75,10 +76,10 @@ class SessionInfo:
     # Pipeline measurements, by stage ("recording", "live", "transcription", ...): plain
     # JSON values. Absent in session.json files written before it existed.
     metrics: dict[str, dict] = field(default_factory=dict)
-    # The user chose not to keep it: never transcribe; delete whatever is left (see discard).
-    discarded: bool = False
 
     FILENAME = "session.json"
+    # Present in a folder the user discarded: never transcribe or list it (discard_session).
+    DISCARD_MARKER = ".discarded"
 
     def update_metrics(self, stage: str, values: dict) -> None:
         """Merge `values` into ``metrics[stage]`` (thread-safe; not saved until ``save``)."""
@@ -92,9 +93,10 @@ class SessionInfo:
         data["started_at"] = self.started_at.isoformat()
         data["ended_at"] = self.ended_at.isoformat() if self.ended_at else None
         data["tracks"] = {str(k): v for k, v in self.tracks.items()}
-        (self.directory / self.FILENAME).write_text(
-            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        # Atomic: a crash mid-write must not leave a truncated session.json behind.
+        tmp = self.directory / f"{self.FILENAME}.{threading.get_ident()}.tmp"  # per thread
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self.directory / self.FILENAME)
 
     @classmethod
     def load(cls, directory: Path) -> SessionInfo:
@@ -109,30 +111,62 @@ class SessionInfo:
             tracks={Track(k): v for k, v in data.get("tracks", {}).items()},
             transcribed=data.get("transcribed", False),
             metrics=data.get("metrics") or {},
-            discarded=data.get("discarded", False),
         )
 
-    def discard(self) -> bool:
-        """Delete this session's folder for good; True once it is gone.
 
-        session.json is marked ``discarded`` first and deleted last, so if the deletion fails
-        (e.g. Windows still locks a WAV) the leftover is never transcribed and is deleted
-        again at the next start."""
-        self.discarded = True
-        # Folder already gone, or unwritable: the deletion below decides.
-        with contextlib.suppress(OSError):
-            self.save()
+def discard_session(directory: Path) -> bool:
+    """Delete a session folder the user discarded; True once it is gone.
+
+    The folder is marked with ``SessionInfo.DISCARD_MARKER`` before any audio is touched (or,
+    if that fails, session.json is renamed to the marker), and the marker goes last. So if a
+    file can't be deleted (e.g. Windows still locks a WAV) the leftover is never transcribed
+    and is deleted again at the next start. Files that vanish meanwhile are fine."""
+    d = Path(directory)
+    marker, meta = d / SessionInfo.DISCARD_MARKER, d / SessionInfo.FILENAME
+    try:
+        marker.touch()
+    except FileNotFoundError:
+        return not d.exists()
+    except OSError:
+        try:  # never leave a recoverable session.json behind
+            os.replace(meta, marker)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            with contextlib.suppress(OSError):
+                meta.unlink(missing_ok=True)
+    failed: list[str] = []
+    for _ in range(2):  # a second pass catches files written meanwhile (e.g. a racing purge)
+        failed = []
         try:
-            for p in self.directory.iterdir():
-                if p.name == self.FILENAME:
-                    continue
+            entries = list(d.iterdir())
+        except FileNotFoundError:
+            return True
+        except OSError as e:
+            failed.append(str(e))
+            break
+        # Audio and transcripts first, then session.json, the marker last.
+        for p in sorted(entries, key=lambda p: (p == marker, p == meta)):
+            if p == marker and failed:
+                break
+            try:
                 if p.is_dir() and not p.is_symlink():
                     shutil.rmtree(p)
                 else:
-                    p.unlink()
-            shutil.rmtree(self.directory)
-        except OSError as e:
-            if self.directory.exists():
-                log.warning("could not delete discarded session %s: %s", self.directory, e)
-                return False
+                    p.unlink(missing_ok=True)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                failed.append(f"{p.name}: {e.strerror or e}")
+        if not failed:
+            try:
+                d.rmdir()
+                return True
+            except FileNotFoundError:
+                return True
+            except OSError as e:
+                failed.append(str(e))
+    if not d.exists():
         return True
+    log.warning("could not delete discarded session %s: %s", d, "; ".join(failed))
+    return False

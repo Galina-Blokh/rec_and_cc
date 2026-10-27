@@ -218,6 +218,8 @@ discard / too short ─► cancel() (nothing written) ─► live_end ─► dir
 ```
 
 At startup, sessions with `transcribed = false` (for example after quitting mid-queue) are
-queued again. A discarded session is first marked `discarded = true` in `session.json`, which
-is deleted last; if some file can't be deleted (Windows locks an open WAV) the user gets a
-notice, the leftover is never transcribed, and deletion is retried at the next start.
+queued again. Discarding a session first drops a `.discarded` marker in its folder (or, if
+that fails, renames `session.json` to it) and deletes the marker last, retrying each file
+separately. If some file can't be deleted (Windows locks an open WAV) the user gets a notice,
+the leftover is never transcribed or listed, and deletion is retried at the next start, after
+the re-queueing. `session.json` is written atomically (temp file + `os.replace`).
