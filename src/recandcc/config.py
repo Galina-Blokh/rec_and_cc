@@ -177,6 +177,8 @@ class Config:
     summary: SummaryConfig = field(default_factory=SummaryConfig)
 
     def save(self, path: Path = CONFIG_PATH) -> None:
+        """Write the config, keeping keys this version does not know (hand-added keys,
+        newer versions' keys)."""
         path.parent.mkdir(parents=True, exist_ok=True)
         data = asdict(self)
         data["output_dir"] = str(self.output_dir)
@@ -186,7 +188,23 @@ class Config:
         raw = getattr(tr, "_raw_languages", None)
         if raw is not None and normalize_languages(raw) == tr.languages:
             data["transcription"]["languages"] = raw
-        path.write_bytes(tomli_w.dumps(data).encode())
+        try:
+            existing = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            existing = {}
+        for key, value in data.items():
+            if isinstance(value, dict) and isinstance(existing.get(key), dict):
+                existing[key].update(value)
+            else:
+                existing[key] = value
+        _write_atomic(path, existing)
+
+
+def _write_atomic(path: Path, data: dict) -> None:
+    """Write ``data`` as TOML to a temp file next to ``path``, then replace it."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(tomli_w.dumps(data).encode())
+    tmp.replace(path)
 
 
 def _build(cls, data: dict):
@@ -233,7 +251,7 @@ def save_languages(languages: list, path: Path = CONFIG_PATH) -> None:
     FileNotFoundError if there is no file yet, ValueError if it is not valid TOML."""
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     data.setdefault("transcription", {})["languages"] = list(languages)
-    path.write_bytes(tomli_w.dumps(data).encode())
+    _write_atomic(path, data)
 
 
 # Keys the native settings window may change: flat name -> (section or "", key).
@@ -264,6 +282,8 @@ def validate_settings(values) -> dict:
             if not isinstance(value, str) or not value.strip():
                 raise ValueError("output_dir must be a folder path")
             out[name] = Path(value).expanduser()
+            if not out[name].is_absolute():
+                raise ValueError("output_dir must be an absolute path")
         elif name == "languages":
             if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
                 raise ValueError("languages must be a list of codes")
@@ -291,9 +311,7 @@ def save_settings(updates: dict, path: Path = CONFIG_PATH) -> None:
             if isinstance(value, Mode)
             else (str(value) if isinstance(value, Path) else value)
         )
-    tmp = path.with_suffix(".toml.tmp")
-    tmp.write_bytes(tomli_w.dumps(data).encode())
-    tmp.replace(path)
+    _write_atomic(path, data)
 
 
 def load_config(path: Path = CONFIG_PATH) -> Config:

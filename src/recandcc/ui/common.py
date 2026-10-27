@@ -45,7 +45,7 @@ from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind, discard_session
 from ..recorder import make_private_dir
 from ..retention import purge_old_audio, purge_transcribed_audio
-from ..settings_window import SettingsUnavailable, close_settings, run_settings
+from ..settings_window import SettingsUnavailable, close_settings, raise_settings, run_settings
 
 if TYPE_CHECKING:
     from ..transcribe.live import LiveTranscriber
@@ -293,6 +293,7 @@ class Controller:
             monitor,
             recorder,
             _LiveAwareQueue(self),
+            save_config=self._save_cfg,
             on_prompt=self._on_prompt,
             on_notice=self.post_notice,
             on_state_change=lambda st: self.events.put(("state", st)),
@@ -653,19 +654,30 @@ class Controller:
                 log.exception("saving settings failed")
                 self.post_notice("Settings not saved", "config.toml could not be written")
 
+    def _save_cfg(self) -> None:
+        """Engine's config save (mode changes): merges into the file under the save lock."""
+        with self._save_lock:
+            edited = self._mtime() != self._config_mtime
+            self.cfg.save(CONFIG_PATH)
+            if not edited:
+                self._config_mtime = self._mtime()
+
     def open_settings_async(self) -> None:
         """Menu "Settings…": the native window runs on a worker thread (it blocks until it is
         closed); the outcome comes back as a ``settings_saved`` or ``settings_fallback`` event
         and ``apply_settings`` runs on the UI thread."""
         if not self._settings_lock.acquire(blocking=False):
-            return  # already open
+            raise_settings()  # already open: bring it to the front
+            return
 
         def run() -> None:
             try:
                 raw = run_settings(self.cfg)
-                if raw is None:
+                if not raw:  # cancelled, closed, or nothing changed
                     return
                 updates = validate_settings(raw)
+                if "output_dir" in updates:
+                    make_private_dir(updates["output_dir"])
                 with self._save_lock:
                     edited = self._mtime() != self._config_mtime  # hand edit not reloaded yet
                     try:
@@ -682,6 +694,9 @@ class Controller:
             except ValueError as e:
                 log.warning("settings not saved: %s", e)
                 self.post_notice("Settings not saved", str(e))
+            except OSError as e:
+                log.warning("settings not saved: %s", e)
+                self.post_notice("Settings not saved", "the transcripts folder can't be created")
             except Exception:
                 log.exception("settings window failed")
                 self.post_notice("Settings not saved", "config.toml could not be written")
@@ -706,7 +721,10 @@ class Controller:
                 tr._raw_languages = None  # type: ignore[attr-defined]
                 tr.languages = list(updates["languages"])
         if "mode" in updates and updates["mode"] != cfg.detection.mode:
-            self.engine.set_mode(updates["mode"])
+            # set_mode saves the config: keep that file I/O off the UI thread
+            threading.Thread(
+                target=self.engine.set_mode, args=(updates["mode"],), daemon=True, name="set-mode"
+            ).start()
 
     @property
     def permissions(self) -> dict[str, str]:

@@ -160,7 +160,17 @@ func runSettings(configPath: String) -> Never {
     window.center()
     window.makeKeyAndOrderFront(nil)
     app.activate(ignoringOtherApps: true)
-    signal(SIGTERM) { _ in exit(0) }
+    // SIGTERM (the app is quitting): leave at once, no answer = cancelled. _exit, not exit:
+    // exit() runs atexit handlers, which is not safe inside a signal handler.
+    signal(SIGTERM) { _ in _exit(0) }
+    // SIGUSR1 (Settings… clicked again): bring the open window to the front.
+    signal(SIGUSR1, SIG_IGN)
+    let raise = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+    raise.setEventHandler {
+        app.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+    raise.resume()
     app.run()
     exit(0)
 }

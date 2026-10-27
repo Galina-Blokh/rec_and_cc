@@ -56,6 +56,29 @@ def make_ctrl(tmp_path, monkeypatch):
     return ctrl, path
 
 
+@pytest.fixture(autouse=True)
+def _real_config_untouched():
+    """Nothing here may write the owner's real config.toml (all saves use tmp paths)."""
+    from recandcc.config import CONFIG_PATH
+
+    def stamp():
+        try:
+            st = CONFIG_PATH.stat()
+            return st.st_mtime_ns, st.st_size
+        except OSError:
+            return None
+
+    before = stamp()
+    yield
+    assert stamp() == before, "a test wrote the real config.toml"
+
+
+def join_threads(name, timeout=5.0):
+    for t in threading.enumerate():
+        if t.name == name:
+            t.join(timeout)
+
+
 def next_event(ctrl, kinds, timeout=10.0):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
@@ -102,9 +125,12 @@ def test_save_writes_toml_keeps_unknown_keys_and_applies(tmp_path, monkeypatch):
     assert reloaded.live_captions is False
     assert str(reloaded.output_dir) == "/tmp/rcc-out"
     ctrl.apply_settings(ev[1])  # UI thread
+    join_threads("set-mode")
     assert ctrl.cfg.transcription.keep_audio is False
     assert ctrl.cfg.detection.mode == Mode.AUTO
     assert ctrl.cfg.transcription.languages == ["en", "he"]
+    # the engine's own save (set_mode) merged into the file: unknown keys survive
+    assert "unknown = 1" in path.read_text()
 
 
 @mac_only
@@ -140,6 +166,7 @@ def test_invalid_values_are_rejected(tmp_path, monkeypatch):
         {"languages": ["xx"]},
         {"languages": "en"},
         {"keep_audio": "yes"},
+        {"output_dir": "relative/dir"},
     ],
 )
 def test_validate_rejects(bad):
@@ -247,6 +274,26 @@ def test_quitting_closes_an_open_window(tmp_path, monkeypatch):
         time.sleep(0.02)
     assert settings_window._proc is not None
     settings_window.close_settings()
-    assert next_event(ctrl, {"settings_fallback", "settings_saved", "notice"})[0] == (
-        "settings_fallback"
-    )  # no answer from the closed helper; the app is quitting anyway
+    deadline = time.monotonic() + 5
+    while ctrl._settings_lock.locked() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not ctrl._settings_lock.locked()
+    assert ctrl.events.empty()  # killed on quit = cancelled: no fallback, no config opened
+
+
+@mac_only
+def test_only_changed_values_are_applied(tmp_path, monkeypatch):
+    ctrl, path = make_ctrl(tmp_path, monkeypatch)
+    # same mode as shown, a changed flag: only the flag comes back from run_settings
+    values = dict(settings_window.snapshot(ctrl.cfg), keep_audio=False)
+    fake_helper(tmp_path, monkeypatch, reply({"settings": "saved", "values": values}))
+    assert settings_window.run_settings(ctrl.cfg) == {"keep_audio": False}
+
+
+@mac_only
+def test_mode_change_keeps_unknown_keys(tmp_path, monkeypatch):
+    ctrl, path = make_ctrl(tmp_path, monkeypatch)
+    ctrl.apply_settings({"mode": Mode.OFF})
+    join_threads("set-mode")
+    text = path.read_text()
+    assert "unknown = 1" in text and 'mode = "off"' in text

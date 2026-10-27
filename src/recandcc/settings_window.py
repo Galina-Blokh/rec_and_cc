@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import signal
 import subprocess
 import sys
 import tempfile
@@ -48,6 +49,14 @@ def snapshot(cfg: Config) -> dict:
         "speaker_names": tr.speaker_names,
         "hotkey": cfg.hotkey,
     }
+
+
+def raise_settings() -> None:
+    """Bring the open settings window to the front (SIGUSR1: the helper handles it)."""
+    with _proc_lock:
+        proc = _proc
+    if proc is not None and proc.poll() is None:
+        proc.send_signal(signal.SIGUSR1)
 
 
 def close_settings() -> None:
@@ -89,10 +98,11 @@ def run_settings(cfg: Config, timeout: float = SETTINGS_TIMEOUT_S) -> dict | Non
             _proc = proc
         try:
             stdout, _err = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as e:
+        except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
-            raise SettingsUnavailable("settings window timed out") from e
+            log.warning("settings window timed out; treated as cancelled")
+            return None
         finally:
             with _proc_lock:
                 _proc = None
@@ -101,8 +111,12 @@ def run_settings(cfg: Config, timeout: float = SETTINGS_TIMEOUT_S) -> dict | Non
         reply = json.loads(lines[-1])
         state = reply["settings"]
     except (IndexError, ValueError, KeyError, TypeError) as e:
+        if proc.returncode == 0 or proc.returncode < 0:
+            return None  # closed by SIGTERM (app quitting) or killed: same as cancelled
         log.info("rcc-audiotap settings gave no answer (exit %s)", proc.returncode)
         raise SettingsUnavailable("the helper has no settings window (rebuild it)") from e
     if state == "saved" and isinstance(reply.get("values"), dict):
-        return reply["values"]
+        # only what the user changed: edits made to config.toml meanwhile are not reverted
+        shown = snapshot(cfg)
+        return {k: v for k, v in reply["values"].items() if shown.get(k) != v}
     return None

@@ -205,6 +205,8 @@ class MacApp(rumps.App):
             elif kind == "settings_saved":
                 self.ctrl.apply_settings(ev[1])
                 self.captions_item.state = check(self.cfg.live_captions)
+                if "live_captions" in ev[1]:
+                    self._apply_captions()
                 self._notify("Settings saved", "Applied")
             elif kind == "settings_fallback":
                 self._notify("Settings window unavailable", "Opening config.toml instead")
@@ -358,6 +360,10 @@ class MacApp(rumps.App):
         self.cfg.live_captions = not self.cfg.live_captions
         sender.state = 1 if self.cfg.live_captions else 0
         threading.Thread(target=self.cfg.save, daemon=True).start()
+        self._apply_captions()
+
+    def _apply_captions(self) -> None:
+        """Show or hide the captions panel to match ``cfg.live_captions`` (main thread)."""
         if self.captions is None:
             return
         if self.cfg.live_captions:
