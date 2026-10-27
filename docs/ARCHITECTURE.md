@@ -96,6 +96,15 @@ A process tap delivers **no IO cycles while nothing is playing**. To keep the "o
 aligned with the mic track and continuous on disk, the helper fills those gaps with zeros,
 paced by the wall clock.
 
+With `detection.system_audio_scope = "app"` the engine passes the trigger app as an
+`AppTarget` (pattern + pids) through `Recorder.start` to `create_system_source(target)`, and
+the helper taps only those processes (`CATapDescription(stereoMixdownOfProcesses:)`). Each
+second it re-matches the pattern and updates the running tap's description, so browser or
+Electron helpers that start later are included; `pid` / `match` lines on its stdin add a
+second app when a call upgrades a media session. No process object yet, or a failing
+per-app tap, falls back to the global tap
+([ADR 0012](adr/0012-per-app-system-audio-tap.md)).
+
 ### Permissions belong to RecAndCC, not Terminal/python
 macOS (TCC) attributes permission requests to the *responsible process*. `RecAndCC.app`'s
 executable is a tiny Swift launcher that `posix_spawn`s Python as a child, so the app stays
@@ -164,6 +173,17 @@ are deleted only after that, if `keep_audio = false`). No WAV (deleted) or `diar
 `platformdirs.user_cache_dir("RecAndCC")/models`; if that fails (offline) diarization is
 skipped, retried at most every 10 minutes, and transcripts keep `Others`. Once it is on
 disk, nothing touches the network (tested with all network access blocked).
+
+**Speaker names (opt-in, `speaker_names`, `voices.py`).** Diarization also returns each
+speaker's centroid (unit mean of its window embeddings). With the option on, the final pass
+names a speaker whose centroid matches a voice profile (cosine ≥ 0.6 and 0.1 ahead of the
+next profile; each name once per session, `Me` never; numbers skip names) and saves the
+session's centroids, so `recandcc name-speaker` can name a speaker later without re-running
+diarization. Profiles (running mean + count + embedding model, one JSON file per name) and the
+session centroids (`sessions/`, keyed by session id) live in the owner-only (0700/0600)
+`platformdirs.user_data_dir("RecAndCC")/voices`, never in `output_dir`, which may be synced
+to a cloud drive. A transcript written without labels or with the option off deletes its
+session's centroids. All of it runs on the diarizer / writer threads, after the audio threads.
 
 ### Mixed English/Russian
 Whisper normally detects one language per 30 s window. Instead:
