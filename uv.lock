@@ -967,29 +967,6 @@ wheels = [
 ]
 
 [[package]]
-name = "onnxruntime-genai"
-version = "0.18.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-    { name = "onnxruntime" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/01/a0/06b0e3e6b3e42d716f50c113f6e1888178d708d850a2f99fea07d014d1ce/onnxruntime_genai-0.18.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:8c5af57dac86f0d0d19dc205a21119d07b438d4389f75b793462a6d877a59adc", size = 10925688, upload-time = "2026-10-14T04:25:54.108Z" },
-    { url = "https://files.pythonhosted.org/packages/1c/ad/dc7fe235c1ca1e411d9c3702b17d488c164f72632c4b8740c81d5ea4d0c3/onnxruntime_genai-0.18.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:6df22d9d74a86409cf06f6af0045b999524941426dab6eba4f937ef2aed513a7", size = 11246705, upload-time = "2026-10-14T04:25:56.773Z" },
-    { url = "https://files.pythonhosted.org/packages/f4/9b/a86531b836730c1b7fa8af0925762dd99390df14f8e5c48e2faab753db53/onnxruntime_genai-0.18.0-cp312-cp312-win_amd64.whl", hash = "sha256:a60afa6ec0b9387e954a74ff6a253164943c9977589cf81ae601b5f89880df05", size = 4308821, upload-time = "2026-10-14T04:25:58.757Z" },
-    { url = "https://files.pythonhosted.org/packages/da/6c/4cfe08d53d31bce39b38da120c27a9f545f003f554a73ef405c9cd739e8b/onnxruntime_genai-0.18.0-cp312-cp312-win_arm64.whl", hash = "sha256:124216f984a5ca43e4b5e73893a6a68fb23763fcb49f789f88db6813ffbe144b", size = 4144649, upload-time = "2026-10-14T04:26:00.413Z" },
-    { url = "https://files.pythonhosted.org/packages/e1/b8/0ff150b3e41b8a9d4426062d50440d407e60c52cfa62390a52865d6a8770/onnxruntime_genai-0.18.0-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:6423348b4bbeb3b0add66af04dea17ca8a9be229bf6946a9c460be3b589a1c64", size = 10925697, upload-time = "2026-10-14T04:26:03.835Z" },
-    { url = "https://files.pythonhosted.org/packages/96/e9/25005b799fb268f792f85de277c505c754e7b1558cf3b20ff413a7a7bdf0/onnxruntime_genai-0.18.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:5e841f51315eba711ad60c2df1cd59332387fc1cf3708ce1d2320991a1479438", size = 11246660, upload-time = "2026-10-14T04:26:06.467Z" },
-    { url = "https://files.pythonhosted.org/packages/72/b0/015663ac2f2231dc574cee5465552c7e6cd80a3e8d1c52b6e961f27ebbd3/onnxruntime_genai-0.18.0-cp313-cp313-win_amd64.whl", hash = "sha256:c388ea51a435d2ee781f3ed56b4a450da23349bff17c5e3e43fda35c40657009", size = 4308770, upload-time = "2026-10-14T04:26:08.403Z" },
-    { url = "https://files.pythonhosted.org/packages/16/d8/acb47efb167e9670bd709f5632b0c5ce848991f493d7b76d500ebd679aca/onnxruntime_genai-0.18.0-cp313-cp313-win_arm64.whl", hash = "sha256:adfd70ab76051719a4a77f17e10b7dd67c67d2145f55360938c9f4f7ece31e11", size = 4144687, upload-time = "2026-10-14T04:26:10.068Z" },
-    { url = "https://files.pythonhosted.org/packages/3b/cd/4c09a743b3d9a23d94c83b3586a8a48e795109e7d4c4e3fe4c68dd9bd4c2/onnxruntime_genai-0.18.0-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:5e0d37fb5509469bcf53095a312028caff52a00bc12ce7446cc642a090d12fd3", size = 10927059, upload-time = "2026-10-14T04:26:13.238Z" },
-    { url = "https://files.pythonhosted.org/packages/91/c9/70b85dfffa400787a71ae1e859db5b4b93ea7821362f0333f6ccfefdd980/onnxruntime_genai-0.18.0-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:83b656b4efa54ff9999c9b7a409eb697ab7c8e981a7c7544302c04afe17aba0e", size = 11247043, upload-time = "2026-10-14T04:26:15.292Z" },
-    { url = "https://files.pythonhosted.org/packages/3f/ea/699cdc3ddc546434ea11243cd25276c9c1477b417537fe93f136cd4ef119/onnxruntime_genai-0.18.0-cp314-cp314-win_amd64.whl", hash = "sha256:5f2dcc6ea9d772ea3a55455a02fab078f6ed462f006856debe65a823883035a9", size = 4454701, upload-time = "2026-10-14T04:26:17.307Z" },
-    { url = "https://files.pythonhosted.org/packages/83/73/16919441bc7f98de5fee49dfd9c7e76a80cdea44a52f82ad347fb5b2209e/onnxruntime_genai-0.18.0-cp314-cp314-win_arm64.whl", hash = "sha256:df4312a8bb933b670a20d7c30e70a40c45d4bc719873c7cd04b98682080a88f9", size = 4289801, upload-time = "2026-10-14T04:26:18.83Z" },
-]
-
-[[package]]
 name = "packaging"
 version = "26.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1393,7 +1370,6 @@ dependencies = [
     { name = "mlx-whisper", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "numpy" },
     { name = "onnxruntime" },
-    { name = "onnxruntime-genai", marker = "sys_platform != 'darwin'" },
     { name = "pillow", marker = "sys_platform == 'win32'" },
     { name = "platformdirs" },
     { name = "pyaudiowpatch", marker = "sys_platform == 'win32'" },
@@ -1429,7 +1405,6 @@ requires-dist = [
     { name = "mlx-whisper", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.4.3" },
     { name = "numpy", specifier = ">=2.5.4" },
     { name = "onnxruntime", specifier = ">=1.20" },
-    { name = "onnxruntime-genai", marker = "sys_platform != 'darwin'", specifier = ">=0.18" },
     { name = "pillow", marker = "sys_platform == 'win32'", specifier = ">=13.0.0" },
     { name = "platformdirs", specifier = ">=4.13.5" },
     { name = "pyaudiowpatch", marker = "sys_platform == 'win32'", specifier = ">=0.2.12.9" },

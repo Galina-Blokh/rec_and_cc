@@ -217,10 +217,7 @@ def _pinned_cpu_model(monkeypatch, tmp_path) -> summary_cpu.CpuModel:
         "onnx/model.onnx", hashlib.sha256(CPU_WEIGHTS).hexdigest(), len(CPU_WEIGHTS)
     )
     return summary_cpu.CpuModel(
-        repo="onnx-community/offline-test",
-        revision="c" * 40,
-        files=(file,),
-        config={"model": {"type": "qwen2"}},
+        repo="onnx-community/offline-test", revision="c" * 40, files=(file,)
     )
 
 
@@ -234,7 +231,6 @@ def test_cached_cpu_summary_model_never_touches_the_network(monkeypatch, tmp_pat
 
     monkeypatch.setattr(summary_cpu, "_open", unexpected)
     assert summary_cpu.model_dir(model) == model.folder
-    assert (model.folder / summary_cpu.CONFIG_NAME).is_file()
 
 
 def test_missing_cpu_summary_model_makes_exactly_one_pinned_request(monkeypatch, tmp_path):
