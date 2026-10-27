@@ -539,17 +539,14 @@ class Controller:
         return f"Idle — {str(st.mode).capitalize()} mode"
 
     def set_room_listening(self, on: bool) -> None:
-        """Menu toggle (any thread): the engine opens or closes the room mic on its next tick.
-        Turning it on explains the always-on mic indicator and the consent question."""
+        """Menu toggle: the engine opens or closes the room mic (and stops a room session) on
+        its next tick. Turning it on explains the always-on mic indicator and the consent
+        question. Saves in place, like the other toggles, so quick toggles can't race."""
         self.cfg.detection.room_listening = bool(on)
-
-        def save():
-            try:
-                self.cfg.save()
-            except Exception:
-                log.exception("saving settings failed")
-
-        threading.Thread(target=save, daemon=True, name="settings-save").start()
+        try:
+            self.cfg.save()
+        except Exception:
+            log.exception("saving settings failed")
         if on:
             self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
             if self.permissions.get("microphone") == "denied":

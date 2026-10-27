@@ -193,7 +193,8 @@ without pressing anything, like a call, and only when I have turned that on.* (#
   stopped or that is ignored), **then** room speech starts nothing, the room mic is closed
   while the other app uses it, and nothing it heard reaches a later room session; a call
   that starts during a room session turns it into that call's session, without a second
-  session, and an excluded app starting during a room session stops it.
+  session, and an excluded app starting during a room session (or turning room listening
+  off) stops it.
 - **Given** a room session, **then** it stops after `room_stop_after_silence_s` (90 s)
   without speech; after a manual stop or a discard it doesn't restart until the room was
   quiet for `stop_after_inactive_s`.

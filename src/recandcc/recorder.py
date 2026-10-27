@@ -20,7 +20,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -328,6 +328,9 @@ class Recorder:
             if not writers:
                 shutil.rmtree(directory, ignore_errors=True)
                 raise RuntimeError("no audio source could be started")
+            if mic_source is not None:  # the tracks begin with the replayed pre-roll
+                preroll = max(w.frames_received for w in writers) / SAMPLE_RATE
+                session.started_at = now - timedelta(seconds=preroll)
             self._started_mono = self.clock()
             with self._lvl_lock:
                 self._last_sound = self._started_mono
