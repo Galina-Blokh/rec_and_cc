@@ -559,6 +559,9 @@ def load_config(path: Path | None = None) -> Config:
             )
     summary = _build(SummaryConfig, data.pop("summary", {}))
     search = _build(SearchConfig, data.pop("search", {}))
+    if not isinstance(search.semantic, bool):  # "false" is a truthy string: never download on it
+        log.warning("config: [search] semantic must be true or false; using false")
+        search.semantic = False
     cfg = _build(Config, data)
     cfg.search = search
     cfg.output_dir = Path(cfg.output_dir).expanduser()

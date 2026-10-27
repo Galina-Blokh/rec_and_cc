@@ -73,6 +73,12 @@ All notable changes to RecAndCC are documented here. The format is based on
   (#36, #54, #55).
 
 ### Fixed
+- Semantic search (#4): a hand edit of `[search] semantic = false` stops the embedding worker
+  and model download at once (not at the next search); a non-boolean value such as `"false"`
+  is treated as off with a warning; a download paused right before its last block no longer
+  ends in an HTTP 416 and a re-download; a meeting deleted while it was being embedded can't
+  leave its text in the index; `recandcc search` leaves the download to a running app and
+  waits at most 15 s for another process's download.
 - With `keep_audio = false`, audio left behind by a quit during slow diarization or a failed
   delete is removed at the next start (#45).
 - A discarded session is never transcribed later, even if deleting it failed; the delete is

@@ -389,6 +389,9 @@ class TranscriptIndex:
                 with self._lock, contextlib.closing(self._connect()) as db:
                     if self.embedder is not embedder:
                         return  # switched off or swapped: don't store
+                    # Check and write in one transaction: another process (the app or a CLI
+                    # search) can't drop the session in between and leave its text here.
+                    db.execute("BEGIN IMMEDIATE")
                     cur = db.execute("SELECT stamp FROM sessions WHERE folder = ?", (folder,))
                     if (row := cur.fetchone()) is None or row[0] != stamp:
                         continue

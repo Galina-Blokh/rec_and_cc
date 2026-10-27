@@ -1023,7 +1023,7 @@ class Controller:
         """Apply edits made to config.toml by hand (detection settings, output dir, hotkey,
         languages, keep_audio, audio_retention_days, speaker_names, live_captions, [summary]).
         Read and apply are one step under ``_save_lock``: a menu write never interleaves."""
-        hotkey_changed = False
+        hotkey_changed = semantic_changed = False
         with self._save_lock:
             m = self._mtime()
             if m == self._config_mtime:
@@ -1040,6 +1040,7 @@ class Controller:
             # "file read" and "memory updated", so it can't write half-applied values. A field
             # a menu click changed meanwhile keeps the click (its queued save writes it).
             was_listening = self.cfg.detection.room_listening
+            was_semantic = self.cfg.search.semantic
             # _dirty_lock spans snapshot and apply: a click marks + sets under it too, so it
             # lands either before the snapshot (seen) or after the apply (kept), never between.
             with self._dirty_lock:
@@ -1061,8 +1062,14 @@ class Controller:
                         setattr(self._reload_target(owner), name, value)
             if self.cfg.detection.room_listening and not was_listening:  # turned on by hand
                 self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
+            semantic_changed = self.cfg.search.semantic != was_semantic
         if hotkey_changed:  # re-registering the listener may block: outside the lock
             self.apply_hotkey()  # reads cfg.hotkey under the hotkey lock
+        if semantic_changed:
+            # Apply [search] semantic now, not at the next search: switched off, the embed
+            # worker and any model download stop and the vectors are deleted; switched on,
+            # embedding starts (while idle). A sync scans the output folder: own thread.
+            threading.Thread(target=self._sync_index, daemon=True, name="search-reload").start()
         log.info("config reloaded from %s", CONFIG_PATH)
 
     @staticmethod
@@ -1077,7 +1084,7 @@ class Controller:
             out[("detection", f.name)] = getattr(cfg.detection, f.name)
         for f in fields(cfg.summary):
             out[("summary", f.name)] = getattr(cfg.summary, f.name)
-        for f in fields(cfg.search):  # [search] semantic: applies from the next search
+        for f in fields(cfg.search):  # [search] semantic: applied at once (_sync_index)
             out[("search", f.name)] = getattr(cfg.search, f.name)
         for name in RELOADED_TRANSCRIPTION_KEYS:
             out[("transcription", name)] = getattr(cfg.transcription, name)
