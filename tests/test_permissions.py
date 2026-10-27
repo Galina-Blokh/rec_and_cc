@@ -1,4 +1,7 @@
-"""permissions: helper JSON parsing and per-platform fallbacks, with the helper faked."""
+"""permissions: helper JSON parsing and per-platform fallbacks, with the helper faked.
+
+Stories: US-16, US-18.
+"""
 
 import json
 import subprocess

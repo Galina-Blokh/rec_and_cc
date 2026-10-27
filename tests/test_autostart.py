@@ -1,4 +1,7 @@
-"""autostart: the macOS LaunchAgent plist and the Windows Run key, both faked on disk."""
+"""autostart: the macOS LaunchAgent plist and the Windows Run key, both faked on disk.
+
+Stories: US-17, US-18.
+"""
 
 import plistlib
 import sys
