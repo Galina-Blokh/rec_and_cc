@@ -288,7 +288,9 @@ def test_controller_drops_deleted_sessions_at_startup(out):
         f.unlink()
     a.rmdir()
     ctrl = Controller.__new__(Controller)  # only the startup scan, no runtime
-    ctrl.cfg = type("C", (), {"output_dir": out})()
+    from recandcc.config import Config
+
+    ctrl.cfg = Config(output_dir=out)
     ctrl._resubmit_unfinished()
     assert search.default_index().search("forgotten") == []
 
