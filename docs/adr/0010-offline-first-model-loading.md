@@ -35,9 +35,12 @@ Resolve every model from the local cache first and download only when it is miss
   requests; diarization was likewise tested offline.
 - The first run still needs the network to download the models.
 - Risks: cached Whisper models are never updated automatically and are not pinned to a
-  revision or checksum (only the diarization model is sha256-checked); a corrupt cache entry
-  fails the local load and triggers a re-download attempt. Pinned model revisions are
+  revision or checksum (only the diarization model is sha256-checked). Pinned model revisions are
   [#14](https://github.com/Galina-Blokh/rec_and_cc/issues/14).
+- Only a genuine cache miss (`FileNotFoundError`, which includes huggingface_hub's
+  `LocalEntryNotFoundError`) falls back to a download. Any other local-load failure (corrupt
+  cache entry, permission error, init failure) is raised without contacting the network;
+  delete the model's cache folder to force a fresh download.
 
 ## Links
 - `src/recandcc/transcribe/engine.py` (`_load`), `src/recandcc/transcribe/gpu.py`

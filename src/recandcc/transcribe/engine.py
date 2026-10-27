@@ -100,12 +100,17 @@ class Transcriber:
             cpu_threads=self.cpu_threads,
             revision=faster_whisper_revision(name),  # pinned commit (revisions.py)
         )
-        # Offline first: once downloaded, a model loads without contacting Hugging Face.
+        # Offline first: once downloaded, a model loads without contacting Hugging Face. Only
+        # a cache miss (huggingface_hub's LocalEntryNotFoundError, a FileNotFoundError) goes
+        # online; any other failure (corrupt cache, permissions, ...) is raised as is.
         try:
             model = WhisperModel(name, local_files_only=True, **kwargs)
-        except Exception:
+        except FileNotFoundError:
             log.info("model %s not on disk yet; downloading it once", name)
             model = WhisperModel(name, **kwargs)
+        except Exception:
+            log.warning("model %s failed to load from the local cache", name)
+            raise
         elapsed = time.monotonic() - t0
         self._load_times[name] = rounded(elapsed, 2)
         log.info(

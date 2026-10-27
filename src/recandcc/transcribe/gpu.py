@@ -57,9 +57,13 @@ def local_model_path(repo: str) -> str:
         log.info("model %s has no pinned revision; using its latest version", repo)
     try:
         return snapshot_download(repo, revision=rev, local_files_only=True)
-    except Exception:
+    except FileNotFoundError:  # cache miss (huggingface_hub's LocalEntryNotFoundError)
         log.info("model %s not on disk yet; downloading it once", repo)
-        return snapshot_download(repo, revision=rev)
+    except Exception:
+        # Anything else (corrupt cache, permissions, ...) must not go online: surface it.
+        log.warning("model %s failed to load from the local cache", repo)
+        raise
+    return snapshot_download(repo, revision=rev)
 
 
 def gpu_available() -> bool:
