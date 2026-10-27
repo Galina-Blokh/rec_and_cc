@@ -278,17 +278,22 @@ def cmd_devices(args) -> int:
 def cmd_autostart(args) -> int:
     from . import autostart
 
-    if args.action == "on":
-        autostart.enable()
-    elif args.action == "off":
-        autostart.disable()
     if args.action in ("on", "off"):
-        load_config(CONFIG_PATH)  # creates the file on first run
+        # config.toml first, the login item only once it is saved: a failed save (locked,
+        # unwritable, invalid TOML) leaves both unchanged instead of out of step.
         try:
+            load_config(CONFIG_PATH)  # creates the file on first run (takes the lock too)
             save_keys(CONFIG_PATH, {"autostart": args.action == "on"})  # keeps other hand edits
-        except OSError as e:  # incl. ConfigLockTimeout
-            print(f"Can't save the setting: {type(e).__name__}", file=sys.stderr)
+        except (OSError, ValueError) as e:  # incl. ConfigLockTimeout
+            print(
+                f"Can't save the setting: {type(e).__name__}; launch at login not changed",
+                file=sys.stderr,
+            )
             return 1
+        if args.action == "on":
+            autostart.enable()
+        else:
+            autostart.disable()
     print(f"Launch at login: {autostart.describe()}")
     return 0
 

@@ -71,6 +71,20 @@ RECENT_COUNT = 10
 SEARCH_LIMIT = 20
 HOTKEY_DEBOUNCE_S = 0.5
 NET_PROBE_WAIT_S = 2.0  # how long a refresh waits for the network-volume probe
+# Menu settings whose effect already happened outside config.toml when their save fails: the
+# login item was changed, the captions panel shown/hidden, Off stopped a recording, the room
+# mic closed. Putting the old value back would undo the click only on paper (autostart,
+# captions) or, worse, resume recording or reopen the mic the user just turned off (mode, room
+# listening). They keep the new value; the "not saved" notice tells the user.
+NO_ROLLBACK_KEYS = frozenset(
+    {
+        "autostart",
+        "live_captions",
+        "detection.mode",
+        "detection.app_modes",
+        "detection.room_listening",
+    }
+)
 NET_PROBE_RETRY_S = 300.0  # after a hung or failed probe
 REFRESH_EVERY_S = 10.0
 PERM_KINDS = ("microphone", "system_audio")
@@ -1062,9 +1076,9 @@ class Controller:
 
         def run() -> None:
             try:
-                self.write_settings(*keys, **kw)
+                self._write_settings(*keys, **kw)
             finally:
-                self._mark_dirty(keys, -1)
+                self._mark_dirty(keys, -1)  # one mark per pending save (see _restore_from_disk)
 
         t = threading.Thread(target=run, name="save-config")
         t.daemon = True
@@ -1098,25 +1112,41 @@ class Controller:
                     self._config_mtime = mtime  # our own write: nothing to reload
             except ValueError:  # invalid TOML (mid-edit?): don't overwrite the user's file
                 log.warning("config.toml could not be parsed; %s not saved", ", ".join(keys))
-                self._restore_from_disk(keys)
+                self._restore_from_disk(values)
                 self.post_notice(f"{title} not saved", "config.toml could not be parsed")
             except ConfigLockTimeout:
                 log.warning("settings not saved: config lock timed out")  # no traceback
-                self._restore_from_disk(keys)
+                self._restore_from_disk(values)
                 self.post_notice("Settings not saved", "config.toml is locked by another process")
             except Exception:
                 log.exception("saving settings failed")
-                self._restore_from_disk(keys)
+                self._restore_from_disk(values)
                 self.post_notice("Settings not saved", "config.toml could not be written")
 
-    def _restore_from_disk(self, keys) -> None:
-        """A failed write leaves config.toml as it was: put the menu's in-memory value of
-        exactly ``keys`` back to what the file says, so the menu doesn't show a change that
-        would silently vanish on restart. Caller holds ``_save_lock``."""
+    def _restore_from_disk(self, tried: dict) -> None:
+        """A failed write leaves config.toml as it was: put the menu's in-memory value of each
+        key in ``tried`` ({dotted key: value this save tried to write}) back to what the file
+        says, so the menu doesn't show a change that would silently vanish on restart. The
+        menu re-reads cfg on every tick (macOS ``_render``, tray rebuild), so it follows.
+
+        A key is left alone when a newer click owns it: memory no longer holds the value this
+        save tried to write, or another save of the key is still pending (each pending save
+        holds one ``_dirty`` mark; this one holds its own). That save writes the newer value,
+        or restores it if it fails too. Keys in ``NO_ROLLBACK_KEYS`` are never restored.
+        Caller holds ``_save_lock``."""
+        if not set(tried) - NO_ROLLBACK_KEYS:
+            return
         try:
-            disk = load_config()
+            disk = load_config()  # first: the checks below then sit right before the writes
         except Exception:
             return  # unreadable file: keep memory, the next successful reload corrects it
+        with self._dirty_lock:  # a leaf lock: read the counts, nothing nested
+            pending = {k: self._dirty.get(k, 0) for k in tried}
+        keys = [
+            k
+            for k in tried
+            if k not in NO_ROLLBACK_KEYS and pending[k] <= 1 and self._setting(k) == tried[k]
+        ]
         for key in keys:
             if key == "transcription.languages":
                 tr, src = self.cfg.transcription, disk.transcription
