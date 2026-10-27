@@ -21,3 +21,6 @@ report-data.json
 /build/
 # make_synthetic_evalset.py renders these in a temp dir; guard against stray copies
 *.aiff
+# PR body / review-reply drafts written by agents
+.pr*-body.md
+.pr*-reply.md

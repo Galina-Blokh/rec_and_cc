@@ -28,6 +28,7 @@ from ..engine import RECORDING
 from ..models import Mode, TriggerKind
 from . import notes as notes_ui
 from .common import (
+    DIALOG_TIMEOUT_S,
     PERM_KINDS,
     PERM_TITLES,
     ROOM_ITEM,
@@ -36,7 +37,9 @@ from .common import (
     SENSITIVITY_PRESETS,
     Controller,
     as_str,
+    chooser_script,
     keep_prompt_text,
+    name_dialog_script,
     open_output_folder,
     open_path,
     osascript,
@@ -48,8 +51,10 @@ from .present import (
     MODE_LABELS,
     check,
     dialog_timeout,
+    forgot_notice,
     language_menu,
     live_transcript_target,
+    named_notice,
     onboarding_accepted,
     onboarding_script,
     permission_title,
@@ -60,6 +65,8 @@ from .present import (
     retention_menu,
     search_notice,
     search_open_target,
+    speaker_choice_label,
+    speakers_notice,
     transcribed_notice,
 )
 
@@ -85,6 +92,8 @@ class MacApp(rumps.App):
         self._onboarded = False
         self._delegate = None
         self._recent_sig: tuple = ()
+        self._naming_open = False  # a speaker chooser/name dialog is up
+        self._naming_lock = threading.Lock()
         # live captions (main thread only)
         self.captions = CaptionsPanel() if CaptionsPanel is not None else None
         self._live_id: str | None = None  # session currently being captioned
@@ -153,6 +162,7 @@ class MacApp(rumps.App):
             rumps.MenuItem("Open transcripts folder", callback=self._open_folder),
             self.recent_menu,
             rumps.MenuItem("Search transcripts…", callback=self._search),
+            rumps.MenuItem("Forget all voices…", callback=self._forget_voices),
             rumps.MenuItem("Export latest transcript (DOCX + PDF)", callback=self._export),
             rumps.MenuItem("Meeting notes…", callback=lambda _: ctrl.notes_async()),
             None,
@@ -233,6 +243,13 @@ class MacApp(rumps.App):
                 open_path(CONFIG_PATH, True)
             elif kind == "search":
                 self._show_hits(ev[1], ev[2])
+            elif kind == "speakers":
+                self._pick_speaker(ev[1], ev[2])
+            elif kind == "named":
+                self._end_naming()
+                self._notify(*named_notice(ev[3]))
+            elif kind == "forgot":
+                self._notify(*forgot_notice(ev[1]))
             elif kind == "notes":
                 self._show_notes(ev[1])
             elif kind == "retention_changed":
@@ -291,7 +308,8 @@ class MacApp(rumps.App):
 
     def _render_recent(self) -> None:
         recent = self.ctrl.recent
-        sig = tuple(recent)
+        enabled = self.ctrl.speaker_names_enabled
+        sig = (tuple(recent), enabled)
         if sig == self._recent_sig:
             return
         self._recent_sig = sig
@@ -303,6 +321,11 @@ class MacApp(rumps.App):
             item = rumps.MenuItem(transcript_label(path), callback=self._open_recent)
             item.path = path  # pyright: ignore[reportAttributeAccessIssue] - read by _open_recent
             self.recent_menu.add(item)
+        self.recent_menu.add(None)
+        # no callback = greyed out, unless transcription.speaker_names is on
+        self.recent_menu.add(
+            rumps.MenuItem("Name speakers…", callback=self._name_speakers if enabled else None)
+        )
 
     def _render_permissions(self) -> None:
         perm = self.ctrl.permissions
@@ -523,6 +546,84 @@ class MacApp(rumps.App):
                 open_path(search_open_target(hits[int(number) - 1]))
 
         threading.Thread(target=run, daemon=True, name="search-results").start()
+
+    def _begin_naming(self) -> bool:
+        with self._naming_lock:
+            if self._naming_open:
+                return False
+            self._naming_open = True
+            return True
+
+    def _end_naming(self) -> None:
+        with self._naming_lock:
+            self._naming_open = False
+
+    def _name_speakers(self, _sender) -> None:
+        """Pick a recent session (dialog on a worker), then list its speakers (another
+        worker, ``speakers`` event). One flow, one chooser at a time."""
+        recent = list(self.ctrl.recent)
+        if not recent:
+            return
+        if not self._begin_naming():
+            self._notify("Naming already in progress", "Finish or cancel the open dialog first.")
+            return  # cleared by the "named" event or a cancel/notice below
+        labels = [f"{i}. {transcript_label(p)}" for i, p in enumerate(recent, 1)]
+        script = chooser_script(labels, "Name the speakers of:", "Next")
+
+        def run():
+            handed_over = False
+            try:
+                number = osascript(script, DIALOG_TIMEOUT_S).partition(".")[0]
+                if number.isdigit() and 0 < int(number) <= len(recent):
+                    self.ctrl.speakers_async(recent[int(number) - 1].parent)
+                    handed_over = True  # the "speakers" event continues the flow
+            finally:
+                if not handed_over:
+                    self._end_naming()
+
+        threading.Thread(target=run, daemon=True, name="name-speakers-pick").start()
+
+    def _pick_speaker(self, directory, speakers) -> None:
+        if notice := speakers_notice(speakers):
+            self._end_naming()
+            self._notify(*notice)
+            return
+        labels = [speaker_choice_label(i, lbl, ln) for i, (lbl, ln) in enumerate(speakers, 1)]
+        pick = chooser_script(labels, "Who is this? (first lines shown)", "Name…")
+
+        def run():
+            dispatched = False
+            try:
+                number = osascript(pick, DIALOG_TIMEOUT_S).partition(".")[0]
+                if not (number.isdigit() and 0 < int(number) <= len(speakers)):
+                    return
+                label = speakers[int(number) - 1][0]
+                if (
+                    name := osascript(name_dialog_script(label), DIALOG_TIMEOUT_S)
+                    .partition("text returned:")[2]
+                    .strip()
+                ):
+                    dispatched = True  # the "named" event clears the guard
+                    self.ctrl.name_speaker_async(directory, label, name)
+            finally:
+                if not dispatched:
+                    self._end_naming()
+
+        threading.Thread(target=run, daemon=True, name="name-speaker-dialog").start()
+
+    def _forget_voices(self, _sender) -> None:
+        script = (
+            'display dialog "Delete all saved voice profiles and the voice data of every '
+            'session? Names already written into transcripts stay." with title "RecAndCC" '
+            'buttons {"Cancel", "Forget all voices"} default button "Cancel" with icon caution'
+        )
+
+        def run():
+            # an unanswered dialog times out to "" and counts as Cancel
+            if "Forget all voices" in osascript(script, DIALOG_TIMEOUT_S):
+                self.ctrl.forget_voices_async()
+
+        threading.Thread(target=run, daemon=True, name="forget-voices-dialog").start()
 
     def _show_notes(self, notes: list) -> None:
         """Meeting notes as AppleScript dialogs on a worker thread (pick a meeting, then an

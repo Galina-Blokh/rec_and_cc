@@ -30,6 +30,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 no Hebrew test set, ivrit.ai routing not evaluated (#6) |
 | US-20 | Search my transcripts | ✅ search (summaries and export: see US-27, US-25) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
+| US-26 | Name speakers and forget voices from the menu | 🟡 macOS menu, first lines instead of an audio sample; Windows tray not yet (#1) |
 | US-31 | Speaker names from the call app's participant list | 🟡 claimed (#1 A.3): opt-in, macOS, one-to-one only |
 | US-25 | Export a transcript to DOCX and PDF | 🟡 CLI, macOS menu and Windows tray; templates planned (#4) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
@@ -279,6 +280,25 @@ I don't have to work out who `Speaker 2` was every time.*
 - **Not yet:** naming from the menu with a voice sample, names from the call app, overlap
   handling and an accuracy measurement on real speech (#1, #13).
 
+### US-26 Name speakers and forget voices from the menu
+*As the owner, I want to name a speaker and delete all voice data from the menu, so that I
+don't need the command line for it.*
+
+- **Given** `speaker_names = true`, **when** I choose "Recent transcripts → Name speakers…",
+  pick a session and a `Speaker N` (shown with their first lines), and type a name, **then**
+  the result is exactly that of `recandcc name-speaker` (same function): transcript files and
+  the voice profile are updated.
+- **Given** `speaker_names = false` (default), **then** "Name speakers…" is greyed out and
+  naming through the controller is refused.
+- **When** I choose "Forget all voices…" and confirm, **then** every voice profile and every
+  session's saved voices are deleted (like `voices delete --all`); cancelling (or leaving the
+  dialog unanswered until it times out) deletes nothing. A session recorded or queued before
+  the forget keeps no voices or call-app names either, even if it is transcribed after it.
+- **Then** dialogs run off the menu thread, disk work on worker threads, and neither names
+  nor transcript text are logged at INFO or above.
+- **Not yet:** a short audio sample (the first lines are shown instead), the Windows tray
+  items (#1).
+
 ### US-31 Speaker names from the call app's participant list
 *As the owner, I want `Speaker 2` named after the person shown in Zoom/Teams/Meet, so that I
 don't have to name them myself, without the app ever asking for more permission on its own.*
@@ -313,6 +333,9 @@ don't have to name them myself, without the app ever asking for more permission 
   and one paragraph per segment with its timestamp.
 - **Given** English, Russian and Hebrew segments, **then** all are readable; Hebrew segments
   are right to left (bidi paragraphs in DOCX, shaped and reordered text in the PDF).
+- **Given** the session folder also has a `summary.md` (US-27), **then** its summary and
+  action items come first in the DOCX and PDF, under their own headings and before a
+  "Transcript" heading (Hebrew right to left); without `summary.md` the files are unchanged.
 - **Then** export needs no network, the files are owner-only and logs never contain the
   transcript text.
 - **Not yet:** custom templates; the PDF needs a system font with

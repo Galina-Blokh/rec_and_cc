@@ -47,7 +47,8 @@ All notable changes to RecAndCC are documented here. The format is based on
   with a short summary and action items after each transcript, from a pinned Qwen2.5 3B
   model via mlx-lm; `recandcc summarize <session_dir>` (#4).
 - Speaker names that carry over between sessions, from opt-in local voice profiles; name a
-  speaker once from the CLI (#62).
+  speaker once from the CLI (#62), or from the macOS menu ("Name speakers…", "Forget all
+  voices…").
 - `recandcc speakers` suggests a name when a speaker introduces themself in their first
   2 minutes (English, Russian, Hebrew); only a hint, nothing is stored (#1).
 - Hebrew in `transcription.languages`, with right-to-left captions and transcripts (#60).
