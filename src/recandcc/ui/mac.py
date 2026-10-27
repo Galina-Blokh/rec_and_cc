@@ -16,6 +16,7 @@ same timer feeds them to a floating ``CaptionsPanel`` (``captions_mac.py``) when
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 import subprocess
 import threading
@@ -28,6 +29,7 @@ from ..engine import RECORDING
 from ..models import Mode, TriggerKind
 from ..retention import RETENTION_CHOICES
 from . import notes as notes_ui
+from . import sample
 from .common import (
     DIALOG_TIMEOUT_S,
     PERM_KINDS,
@@ -38,9 +40,9 @@ from .common import (
     SENSITIVITY_PRESETS,
     Controller,
     as_str,
+    ask_speaker_name,
     chooser_script,
     keep_prompt_text,
-    name_dialog_script,
     open_output_folder,
     open_path,
     osascript,
@@ -95,6 +97,7 @@ class MacApp(rumps.App):
         self._recent_sig: tuple = ()
         self._naming_open = False  # a speaker chooser/name dialog is up
         self._naming_lock = threading.Lock()
+        self._sampler = sample.SamplePlayer()  # "Play sample" in the name dialog (afplay)
         # live captions (main thread only)
         self.captions = CaptionsPanel() if CaptionsPanel is not None else None
         self._live_id: str | None = None  # session currently being captioned
@@ -482,6 +485,7 @@ class MacApp(rumps.App):
     def _quit(self, _sender) -> None:
         self.timer.stop()
         self.title = "…"
+        self._sampler.close()  # stop a sample and delete its temp folder
         try:
             self.ctrl.shutdown()
         finally:
@@ -596,11 +600,9 @@ class MacApp(rumps.App):
                 if not (number.isdigit() and 0 < int(number) <= len(speakers)):
                     return
                 label = speakers[int(number) - 1][0]
-                if (
-                    name := osascript(name_dialog_script(label), DIALOG_TIMEOUT_S)
-                    .partition("text returned:")[2]
-                    .strip()
-                ):
+                clip = sample.find_clip(directory, label)  # None: audio gone, no button
+                ask = functools.partial(osascript, timeout=DIALOG_TIMEOUT_S)
+                if name := ask_speaker_name(label, clip, ask, self._sampler.play):
                     dispatched = True  # the "named" event clears the guard
                     self.ctrl.name_speaker_async(directory, label, name)
             finally:

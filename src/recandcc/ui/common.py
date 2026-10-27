@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import fields
 from datetime import datetime
 from pathlib import Path
@@ -292,11 +293,38 @@ def chooser_script(labels: list[str], prompt: str, button: str) -> str:
     )
 
 
-def name_dialog_script(label: str) -> str:
+PLAY_SAMPLE = "Play sample"
+
+
+def name_dialog_script(label: str, sample: bool = False, answer: str = "") -> str:
+    """The name prompt; with `sample` a "Play sample" button too, after which the dialog is
+    shown again with the text typed so far (`answer`)."""
+    buttons = f'{{"Cancel", {as_str(PLAY_SAMPLE)}, "Save"}}' if sample else '{"Cancel", "Save"}'
     return (
-        f'display dialog {as_str(f"Name for {label}:")} default answer "" '
-        'with title "RecAndCC" buttons {"Cancel", "Save"} default button "Save"'
+        f"display dialog {as_str(f'Name for {label}:')} default answer {as_str(answer)} "
+        f'with title "RecAndCC" buttons {buttons} default button "Save"'
     )
+
+
+def name_dialog_answer(output: str) -> tuple[bool, str]:
+    """(play the sample?, typed text) from a ``name_dialog_script`` result; "" = cancelled."""
+    button, _, text = output.partition(", text returned:")
+    return button.strip() == f"button returned:{PLAY_SAMPLE}", text.strip()
+
+
+def ask_speaker_name(label: str, clip, ask: Callable[[str], str], play, tries: int = 20) -> str:
+    """Ask for `label`'s name on a dialog worker thread (``ask`` runs the AppleScript). With a
+    `clip` the dialog can play it (``play(clip)`` returns at once) and comes back; without
+    one it is the plain prompt. Returns the name, "" if cancelled."""
+    answer = ""
+    for _ in range(tries):
+        replay, answer = name_dialog_answer(
+            ask(name_dialog_script(label, clip is not None, answer))
+        )
+        if not (replay and clip is not None):
+            return answer
+        play(clip)
+    return ""
 
 
 # ----------------------------------------------------------------------- controller

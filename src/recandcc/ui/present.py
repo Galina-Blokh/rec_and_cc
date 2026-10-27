@@ -211,7 +211,8 @@ def speakers_notice(speakers) -> tuple[str, str] | None:
 
 
 def speaker_choice_label(index: int, label: str, lines: list[str]) -> str:
-    """'1. Speaker 2: “hi there” / “ok”' (first lines as a hint: no audio sample)."""
+    """'1. Speaker 2: “hi there” / “ok”' (first lines as a hint; the name dialog
+    can play an audio sample, see ``ui/sample.py``)."""
     hint = " / ".join(f"“{' '.join(ln.split())[:40]}”" for ln in lines[:2])
     return f"{index}. {label}: {hint}"[:200]
 
