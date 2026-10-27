@@ -320,7 +320,7 @@ CSS = Path(__file__).with_name("report.css")
 JS = Path(__file__).with_name("report.js")
 
 
-def render(d: dict) -> str:
+def render(d: dict, now: datetime | None = None) -> str:
     s, ser, cm, ci, cl = d["summary"], d["series"], d["commits"], d["ci"], d["claude"]
     prs, issues = d["prs"], d["issues"]
     merged = [p for p in prs if p["state"] == "merged"]
@@ -331,7 +331,9 @@ def render(d: dict) -> str:
     gen = ts(d["generated_at"])
     refresh = d.get("refresh") or {}
     stale_after = refresh.get("minutes")
-    stale = bool(stale_after) and datetime.now(UTC) - gen > timedelta(minutes=2 * stale_after)
+    stale = bool(stale_after) and (now or datetime.now(UTC)) - gen > timedelta(
+        minutes=2 * stale_after
+    )
     fs = findings(d)
 
     # ---- headline ----
@@ -912,7 +914,7 @@ def render(d: dict) -> str:
                 stacked=True,
             ),
             ["Hour", "passed", "failed"],
-            [[h["hour"], h["passed"], h["failed"]] for h in ci["per_hour"]],
+            [[h["hour"], h["passed"], h["failed"]] for h in ci_hours],
             [("passed", "--good"), ("failed", "--crit")],
         )
         + "<h3>Workflows</h3>"

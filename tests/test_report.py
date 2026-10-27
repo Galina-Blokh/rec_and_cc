@@ -334,6 +334,26 @@ def test_render_survives_an_empty_record():
     assert 'id="tldr"' in page and "0 merged pull requests" in page
 
 
+def test_stale_banner_follows_the_refresh_cadence():
+    data = _report_data()  # generated 26/10 14:00 UTC, refreshed every 6 h
+    fresh = render.render(data, now=collect.ts("2026-10-26T20:00:00Z"))
+    late = render.render(data, now=collect.ts("2026-10-27T03:00:00Z"))
+    assert "Stale: the scheduled refresh has not run." not in fresh
+    assert "Stale: the scheduled refresh has not run." in late
+
+
+def test_ci_hour_table_matches_the_gap_filled_chart():
+    data = _report_data()
+    data["ci"]["per_hour"] = [
+        {"hour": "2026-10-26 10:00", "passed": 1, "failed": 0},
+        {"hour": "2026-10-26 13:00", "passed": 0, "failed": 1},
+    ]
+    page = render.render(data)
+    figure = page.split('id="c-ciday"', 1)[1].split("</figure>", 1)[0]
+    table = figure.split("<tbody>", 1)[1]
+    assert table.count("<tr>") == 4 and "2026-10-26 11:00" in table
+
+
 def test_day_names_do_not_depend_on_the_locale():
     assert render.day_name("2026-10-27") == "Tue 27/10"
 
