@@ -20,8 +20,10 @@ or handle only one language per recording.
    `Speaker N`), English and Russian detected automatically even when the language switches
    mid-meeting. Live captions while recording; the final transcript a few seconds after the
    stop.
-3. **Completely private.** Audio and transcripts stay on the device. Works offline once the
-   models are downloaded.
+3. **Completely private.** RecAndCC itself never uploads audio or transcripts, and works
+   offline once the models are downloaded. (A synced folder is another matter: the default
+   `~/Documents/Transcribes` may be uploaded by iCloud "Desktop & Documents" or OneDrive
+   folder backup; the README says so, and the app doesn't warn yet.)
 4. **Invisible when idle.** An always-on menu-bar / tray app that starts at login, uses
    little CPU while waiting, and needs no attention.
 5. **Portable.** macOS first; Windows supported by design so the owner can switch laptops.
@@ -40,8 +42,8 @@ or handle only one language per recording.
 | Constraint | Means | Enforced by |
 |---|---|---|
 | Local only | Whisper (MLX on Apple-silicon GPU, faster-whisper on CPU) and diarization run on the device | ADR 0004, 0009 |
-| Offline | No network except the one-time, pinned and checksum-verified model download; no telemetry or update checks | `tests/test_offline.py`, AGENTS.md rule 5 |
-| Privacy | No audio or transcript content in logs at INFO+; recording folders owner-only | AGENTS.md rule 6, `tests/test_recorder.py` |
+| Offline | No network except the one-time model download (default models pinned to exact revisions, speaker model SHA-256-verified); no telemetry or update checks | AGENTS.md rule 5; `tests/test_offline.py` checks model loading only, no end-to-end blocked-network test yet |
+| Privacy | No audio or transcript content in logs at INFO+; recording folders owner-only (POSIX `0700`; not yet enforced by Windows ACLs) | AGENTS.md rule 6, `tests/test_recorder.py` |
 | Languages | English and Russian, auto-detected per speech region | ADR 0005 |
 | Platforms | macOS 14.4+ (Core Audio process taps); Windows through the same interfaces | ADR 0001, 0002; CI on Windows |
 | Responsiveness | Audio threads never block; UI only on the main thread | AGENTS.md rules 1–3 |
@@ -52,6 +54,8 @@ or handle only one language per recording.
 - A call or video with voice is recorded within ~3 s of audio starting, with no user action
   in Auto mode.
 - Live captions appear about 1 s after each phrase on Apple silicon.
-- A 1-hour meeting transcribes in about 2–3 minutes; the live transcript is final a few
+- A 1-hour meeting transcribes in about 2–3 minutes on the Apple-silicon GPU (about
+  15 minutes on CPU-only machines such as Windows); the live transcript is final a few
   seconds after the recording stops.
-- With all network access blocked, a session records and transcribes end to end.
+- With all network access blocked, a session records and transcribes end to end (target;
+  not yet covered by an automated test).
