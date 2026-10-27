@@ -718,7 +718,9 @@ class Recorder:
                 if daemons := self._daemons(per_app):
                     per_app = AppTarget((*per_app.match, *daemons), per_app.pids)
                 for w in self._writers:
-                    if w.track == Track.OTHERS and not w.source.add_target(per_app):
+                    if w.track != Track.OTHERS or w.source.add_target(per_app):
+                        continue
+                    if not (session.started_as_room and self._reopen_per_app(w, per_app)):
                         log.info("Others track: could not add %s to the per-app tap", app)
             have_mic = any(w.track == Track.ME for w in self._writers)
             if not have_mic and should_record_mic(self.cfg.detection.record_mic, TriggerKind.CALL):
@@ -734,6 +736,40 @@ class Recorder:
                 ", ".join(str(t) for t in session.tracks),
             )
             return True
+
+    def _reopen_per_app(self, w: _TrackWriter, target: AppTarget) -> bool:
+        """A room session taps all system audio (no app to follow). Once a call upgrades it
+        in app scope, record only the call app from now on: the per-app tap starts first,
+        its frames held back until the system-wide one has stopped, and the moment between
+        is padded with silence to the longest track, so the WAV stays aligned and continuous.
+        False (the system-wide tap is kept) if a per-app tap can't be started."""
+        gate = threading.Event()
+
+        def on_frames(frames: np.ndarray) -> None:  # capture thread: drop until switched
+            if gate.is_set():
+                w.on_frames(frames)
+
+        try:
+            new = self.system_factory(target)
+            if new.scope == "app":  # not on Windows
+                new.start(on_frames)
+        except Exception:
+            log.exception("per-app system audio unavailable; still recording all system audio")
+            return False
+        if new.scope != "app":  # also an outdated helper (it falls back to all in start())
+            new.stop()
+            return False
+        old, w.source = w.source, new
+        try:
+            old.stop()
+        except Exception:
+            log.exception("could not stop the system-wide tap")
+        lead = max(x.frames_received for x in self._writers) - w.frames_received
+        if lead > 0:
+            w.pad_silence(lead)
+        gate.set()
+        log.info("Others track: now recording only %s", ", ".join(target.match) or target.pids)
+        return True
 
     def stop(self) -> SessionInfo | None:
         """Stop, flush and close. Returns the session, or None if nothing was recording

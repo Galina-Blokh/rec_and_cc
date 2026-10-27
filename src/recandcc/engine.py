@@ -490,7 +490,9 @@ class Engine:
                     elif r is None:
                         self._rec = _Rec(p.key, p.name, p.kind, now, manual=False)
                         a = apps.get(p.key)
-                        start_req = (p.kind, p.name, a.target() if a else AppTarget((p.key,)))
+                        # a pseudo key (the room) is no app to tap: record all system audio
+                        fallback = AppTarget((p.key,)) if p.key != ROOM_KEY else None
+                        start_req = (p.kind, p.name, a.target() if a else fallback)
 
             # --- prompt expiry
             if self._prompt is not None and now >= self._prompt.deadline:

@@ -1244,3 +1244,17 @@ def test_invalid_inside_sensitivity_does_not_break_ticks():
     h.mon.procs = [CHROME]
     h.run(4)  # treated as unset
     assert h.rec.starts == [(TriggerKind.MEDIA, "Google Chrome")]
+
+
+def test_answering_a_room_prompt_after_a_failed_start_records_all_system_audio():
+    h = _room_harness(Mode.ASK)
+    h.rec.fail = True
+    h.run(1)
+    h.room.speech = True
+    h.eng.tick()  # the provisional room recording could not start; the prompt stays
+    assert h.prompts == [("Room", TriggerKind.ROOM)] and h.rec.starts == []
+    h.rec.fail = False
+    h.eng.respond("record")
+    h.eng.tick()
+    assert h.rec.starts == [(TriggerKind.ROOM, "Room")]
+    assert h.rec.targets == [None]  # not AppTarget(("@room",)): no app to tap

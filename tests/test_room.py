@@ -389,12 +389,13 @@ class FakeDiarizer:
     """``Diarizer.submit`` stand-in: the turns for each WAV name, done right away."""
 
     def __init__(self, turns):
-        self.turns, self.paths = turns, []
+        self.turns, self.paths, self.hints = turns, [], {}
 
-    def submit(self, path, timing=None):
+    def submit(self, path, timing=None, hints=None):
         from concurrent.futures import Future
 
         self.paths.append(path.name)
+        self.hints[path.name] = hints
         if timing is not None:
             timing["elapsed_s"] = 0.5
         done: Future = Future()
@@ -558,3 +559,85 @@ def test_menu_toggle_saves_warns_and_engine_owns_a_closed_room_monitor(tmp_path,
     assert ctrl.events.get_nowait() == ("notice", "Room listening on", ROOM_LISTENING_NOTICE)
     ctrl._maybe_reload_config()  # unchanged file: no second notice
     assert ctrl.events.empty()
+
+
+def _hinted(tmp_path, monkeypatch, kind, started_as_room):
+    from recandcc.config import TranscriptionConfig
+    from recandcc.transcribe import engine as teng
+
+    made = []
+
+    class Recording(FakeDiarizer):
+        def __init__(self, **kw):
+            super().__init__({})
+            self.kw = kw
+            made.append(self)
+
+    for name in ("me.wav", "others.wav"):
+        sf.write(tmp_path / name, silence(1), SR)
+    s = SessionInfo("h", tmp_path, datetime.now(), kind, started_as_room=started_as_room)
+    s.tracks = {Track.ME: "me.wav", Track.OTHERS: "others.wav"}
+    monkeypatch.setattr(teng, "Diarizer", Recording)
+    cfg = TranscriptionConfig(model="fake", min_speakers=3, max_speakers=1)
+    teng.Transcriber(cfg).start_diarization(s)
+    assert made[0].kw["min_speakers"] == 3 and made[0].kw["max_speakers"] == 1  # for Others
+    return made[0].hints
+
+
+def test_speaker_hints_count_the_remote_side_only(tmp_path, monkeypatch):
+    # min/max_speakers count the other side of a call: the room mic is clustered freely
+    assert _hinted(tmp_path, monkeypatch, TriggerKind.ROOM, True) == {"me.wav": (0, 0)}
+    assert _hinted(tmp_path, monkeypatch, TriggerKind.CALL, False) == {"others.wav": None}
+    upgraded = _hinted(tmp_path, monkeypatch, TriggerKind.CALL, True)
+    assert upgraded == {"me.wav": (0, 0), "others.wav": None}
+
+
+class TappedSource(ManualSource):
+    def __init__(self, target=None, scope=None):
+        super().__init__()
+        self.target, self.scope = target, scope or ("app" if target else "all")
+
+
+def _app_scope_recorder(tmp_path, scope=None):
+    cfg = Config(output_dir=tmp_path)
+    cfg.detection.system_audio_scope = "app"
+    made: list[TappedSource] = []
+
+    def system(*target):
+        made.append(TappedSource(*target, scope=scope))
+        return made[-1]
+
+    return Recorder(cfg, system_factory=system, min_session_s=0), made
+
+
+def test_upgraded_room_session_in_app_scope_reopens_others_for_the_call_app(tmp_path):
+    from recandcc.models import AppTarget
+
+    rec, made = _app_scope_recorder(tmp_path)
+    mic = ManualSource()
+    session = rec.start(TriggerKind.ROOM, "Room", mic_source=lambda: mic)
+    mic.push(np.full(2 * SR, 0.1, np.float32))
+    made[0].push(np.full(SR, 0.25, np.float32))  # music on the system-wide tap
+    zoom = AppTarget(("us.zoom",), (10,))
+    assert rec.upgrade_to_call("zoom.us", target=zoom) is True
+    assert [m.target for m in made] == [None, zoom] and made[0].stopped
+    made[1].push(np.full(SR, 0.5, np.float32))  # only the call app from now on
+    mic.push(np.full(SR, 0.1, np.float32))
+    out = rec.stop()
+    assert out is not None and out.metrics["recording"]["system_audio_scope"] == "app"
+    me, _ = sf.read(session.directory / "me.wav", dtype="float32")
+    others, _ = sf.read(session.directory / "others.wav", dtype="float32")
+    assert len(me) == len(others) == 3 * SR  # the switch is padded: still aligned
+    np.testing.assert_allclose(others[:SR], 0.25, atol=1e-4)
+    assert not others[SR : 2 * SR].any()
+    np.testing.assert_allclose(others[2 * SR :], 0.5, atol=1e-4)
+
+
+def test_room_upgrade_keeps_the_system_wide_tap_when_per_app_is_unavailable(tmp_path):
+    from recandcc.models import AppTarget
+
+    rec, made = _app_scope_recorder(tmp_path, scope="all")  # Windows, an outdated helper
+    rec.start(TriggerKind.ROOM, "Room", mic_source=ManualSource)
+    assert rec.upgrade_to_call("zoom.us", target=AppTarget(("us.zoom",))) is True
+    assert not made[0].stopped and made[1].cb is None  # the fallback was never started
+    rec.stop()
