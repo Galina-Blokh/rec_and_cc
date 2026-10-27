@@ -546,3 +546,25 @@ def test_queue_stamps_an_older_session_without_a_generation(tmp_path):
         q.shutdown()
     assert session.voices_generation == voices.forget_generation()
 
+
+def test_forget_dialog_has_a_timeout_and_a_timeout_cancels(monkeypatch):
+    import threading
+
+    pytest.importorskip("rumps")
+    from recandcc.ui import mac
+
+    seen: list = []
+    done = threading.Event()
+
+    def fake_osascript(script, timeout=None):
+        seen.append(timeout)
+        done.set()
+        return ""  # what osascript returns when the dialog times out
+
+    monkeypatch.setattr(mac, "osascript", fake_osascript)
+    app = mac.MacApp.__new__(mac.MacApp)
+    app.ctrl = type("C", (), {"forget_voices_async": lambda self: seen.append("forgot")})()
+    app._forget_voices(None)
+    assert done.wait(5)
+    time.sleep(0.05)
+    assert seen == [mac.DIALOG_TIMEOUT_S]  # no forget after the timeout

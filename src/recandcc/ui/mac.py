@@ -613,7 +613,8 @@ class MacApp(rumps.App):
         )
 
         def run():
-            if "Forget all voices" in osascript(script):
+            # an unanswered dialog times out to "" and counts as Cancel
+            if "Forget all voices" in osascript(script, DIALOG_TIMEOUT_S):
                 self.ctrl.forget_voices_async()
 
         threading.Thread(target=run, daemon=True, name="forget-voices-dialog").start()
