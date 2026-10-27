@@ -26,6 +26,7 @@ import os
 import queue
 import threading
 import time
+from collections.abc import Callable
 
 import pystray  # pyright: ignore[reportMissingImports] - Windows-only dependency
 from PIL import Image, ImageDraw  # pyright: ignore[reportMissingImports] - Windows-only dependency
@@ -35,7 +36,15 @@ from ..config import CONFIG_PATH
 from ..engine import PROMPTING, RECORDING
 from ..models import Mode, TriggerKind
 from . import notes as notes_ui
-from .captions import CaptionBuffer, header_text, should_auto_hide, tk_parts
+from .captions import (
+    MAX_LINES,
+    CaptionBuffer,
+    geometry_width,
+    header_text,
+    should_auto_hide,
+    text_area_width,
+    tk_parts,
+)
 from .common import (
     ONBOARDING_TEXT,
     PERM_KINDS,
@@ -111,6 +120,7 @@ class TkCaptions:
     def _run(self) -> None:
         try:
             import tkinter as tk
+            from tkinter import font as tkfont
         except Exception:
             log.info("tkinter unavailable; no live captions window")
             return
@@ -148,14 +158,48 @@ class TkCaptions:
         buf = CaptionBuffer()
         st = {"title": "", "started": None, "ended": None, "visible": False}
 
+        fonts: dict = {}  # one Font per kind, reused for every measure
+        wrapped: dict = {}  # (line, width) -> pieces, so an append doesn't re-measure all lines
+
+        def wrap_limit() -> tuple[float | None, Callable[[str], float], Callable[[str], float]]:
+            # Usable text width and font measures; RTL lines are wrapped before reordering.
+            # A withdrawn window has no real width yet: use the one it will get from geometry.
+            try:
+                rmargin = float(text.tag_cget("rtl", "rmargin") or 0)
+            except ValueError:  # a unit string such as '10c'
+                rmargin = 0.0
+            widget_w = text.winfo_width()
+            if widget_w < 100:
+                widget_w = geometry_width(win.geometry())
+            width = text_area_width(
+                widget_w,
+                float(text.cget("padx")),
+                float(text.cget("borderwidth")),
+                float(text.cget("highlightthickness")),
+                rmargin,
+            )
+            if width is None:  # no usable size at all: fall back to a character count
+                return None, len, len
+            if not fonts:
+                fonts["text"] = tkfont.Font(font=text.cget("font"))
+                fonts["label"] = tkfont.Font(font=("Segoe UI", 10, "bold"))
+            return width, fonts["text"].measure, fonts["label"].measure
+
         def render(force_scroll: bool = False) -> None:
+            st["width"] = text.winfo_width()
+            width, measure, label_measure = wrap_limit()  # once per render, not per line
+            if len(wrapped) > 2 * MAX_LINES:
+                wrapped.clear()
             follow = force_scroll or text.yview()[1] >= 0.999
             text.configure(state="normal")
             text.delete("1.0", "end")
             for i, ln in enumerate(buf.lines):
                 tag = ln.label if ln.label in ("Me", "Others") else "other"
                 para = ("rtl",) if ln.rtl else ("line",)
-                for piece, is_label in tk_parts(ln):
+                key = (ln, width)
+                if key not in wrapped:
+                    wrapped[key] = tk_parts(ln, width, measure, label_measure)
+                for piece, is_label in wrapped[key]:
                     text.insert("end", piece, (tag, *para) if is_label else para)
                 if i < len(buf) - 1:
                     text.insert("end", "\n", para)
@@ -163,11 +207,32 @@ class TkCaptions:
             if follow:
                 text.see("end")
 
+        st["width"] = 0
+        st["resize"] = None
+
+        def on_resize(_event=None) -> None:
+            # Re-wrap RTL lines when the width changes (debounced); this also covers the first
+            # real width after the window was unmapped (reveal).
+            if st["resize"] is not None:
+                text.after_cancel(st["resize"])
+
+            def apply() -> None:
+                st["resize"] = None
+                w = text.winfo_width()
+                if w != st["width"]:
+                    render()
+
+            st["resize"] = text.after_idle(apply)
+
+        text.bind("<Configure>", on_resize)
+
         def set_visible(on: bool) -> None:
             st["visible"] = on
             if on:
                 win.deiconify()
                 win.attributes("-topmost", True)
+                win.update_idletasks()
+                render()
             else:
                 win.withdraw()
 
