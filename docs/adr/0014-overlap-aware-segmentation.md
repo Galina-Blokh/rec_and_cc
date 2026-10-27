@@ -24,16 +24,21 @@ hour still diarizes in seconds; keep the clustering of [0013](0013-adaptive-spea
   in the voice centroid) and take the nearest centroid: the dominant voice.
 - A segment with ≥ 0.5 s of overlapped turns gets `"overlap": true` in `transcript.json`; the
   key is absent otherwise; md/srt are unchanged.
-- On by default (`diarize_overlap`); without the model (offline) it falls back to fixed
-  windows with an INFO line. Its download failure doesn't delay CAM++ retries (per-model
-  back-off).
+- **Opt-in** (`diarize_overlap = false` by default): it beat fixed windows on every
+  synthetic test below, but nothing was measured on real meetings yet
+  ([#13](https://github.com/Galina-Blokh/rec_and_cc/issues/13)); when it is off the model is
+  never downloaded. Without the model (offline) it falls back to fixed windows with an INFO
+  line; a broken model (load or run error) logs a WARNING and turns it off for that
+  diarizer, so the speaker labels are never lost. Its download failure doesn't delay CAM++
+  retries (per-model back-off).
 
 ## Alternatives considered
 - **sherpa-onnx's `OfflineSpeakerDiarization`**: same model but its own clustering and 10 s
   embedding windows, 20 s per 13 min and 141/170 phrases in 0009's test; drops 0013.
 - **Overlapping chunks with averaged scores** (pyannote's 1 s step): ~10x the inferences; local
   speaker ids must be aligned across chunks first.
-- **Opt-in only**: it is at least as good on every test below, so off would hide the gain.
+- **On by default**: at least as good on every synthetic test below, but synthetic `say`
+  voices are no evidence for real meetings (codecs, crosstalk, noise); revisit with #13.
 
 ## Consequences
 Synthetic `say` voices, 3 speakers, 9 phrases (fixed windows → with segmentation):

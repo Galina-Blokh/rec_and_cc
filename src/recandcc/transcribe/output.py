@@ -52,7 +52,8 @@ def srt_text(seg: Segment) -> str:
 
 def paragraphs(segments: list[Segment], gap_s: float = PARAGRAPH_GAP_S) -> list[Segment]:
     """Join consecutive same-speaker segments separated by less than `gap_s` (but not across a
-    change of writing direction, so each paragraph reads one way)."""
+    change of writing direction, so each paragraph reads one way). A paragraph is `overlap`
+    if any of its segments is."""
     out: list[Segment] = []
     for s in segments:
         p = out[-1] if out else None
@@ -62,11 +63,12 @@ def paragraphs(segments: list[Segment], gap_s: float = PARAGRAPH_GAP_S) -> list[
             and s.start - p.end < gap_s
             and is_rtl(p.language, p.text) == is_rtl(s.language, s.text)
         ):
+            text = f"{p.text} {s.text}".strip()
             out[-1] = Segment(
-                p.start, max(p.end, s.end), f"{p.text} {s.text}".strip(), p.speaker, p.language
+                p.start, max(p.end, s.end), text, p.speaker, p.language, p.overlap or s.overlap
             )
         else:
-            out.append(Segment(s.start, s.end, s.text.strip(), s.speaker, s.language))
+            out.append(Segment(s.start, s.end, s.text.strip(), s.speaker, s.language, s.overlap))
     return out
 
 

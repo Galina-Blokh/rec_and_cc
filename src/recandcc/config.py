@@ -144,9 +144,10 @@ class TranscriptionConfig:
     # speakers is picked automatically within [min_speakers, max_speakers]. 0 = no hint.
     min_speakers: int = 0
     max_speakers: int = 0
-    # Find speaker changes without a pause and overlapped speech with a segmentation model
-    # (6 MB, downloaded once); off or without the model: fixed ~2 s windows. ADR 0014.
-    diarize_overlap: bool = True
+    # Opt-in: find speaker changes without a pause and overlapped speech with a segmentation
+    # model (6 MB, downloaded once when on); off or without the model: fixed ~2 s windows.
+    # Off by default until it is measured on real meetings (#13). ADR 0014.
+    diarize_overlap: bool = False
     # Remember speakers' voices so that a speaker named once (`recandcc name-speaker`) is named
     # in later sessions. Off by default: voice profiles are biometric data. See voices.py.
     speaker_names: bool = False

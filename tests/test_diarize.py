@@ -347,14 +347,42 @@ def test_missing_segmentation_model_falls_back_to_fixed_windows(monkeypatch, cap
     calls = []
     monkeypatch.setattr(diarize, "model_path", lambda m=None, **k: calls.append(m))
     with caplog.at_level("INFO", logger="recandcc.transcribe.diarize"):
-        turns = _fake_diarizer(monkeypatch).diarize(_voices_track())
-    assert [(t.start, t.end) for t in turns] == [(2.0 * i, 2.0 * i + 2) for i in range(8)]
+        turns = _fake_diarizer(monkeypatch, segmentation=True).diarize(_voices_track())
+    assert [(t.start, t.end) for t in turns] == FIXED
     assert not any(t.overlap for t in turns)
     assert calls == [diarize.SEGMENTATION_MODEL]
     assert "no segmentation model: speaker turns from fixed ~2 s windows" in caplog.messages
     calls.clear()
-    _fake_diarizer(monkeypatch, segmentation=False).diarize(_voices_track())
-    assert calls == []  # diarize_overlap = false: never looked up
+    _fake_diarizer(monkeypatch).diarize(_voices_track())
+    assert calls == []  # diarize_overlap = false (default): never looked up or downloaded
+    assert TranscriptionConfig().diarize_overlap is False
+
+
+FIXED = [(2.0 * i, 2.0 * i + 2) for i in range(8)]
+
+
+def test_broken_segmentation_model_keeps_speaker_labels(tmp_path, monkeypatch, caplog):
+    bad = tmp_path / "seg.onnx"
+    bad.write_bytes(b"\0" * diarize.SEGMENTATION_MODEL.size)  # right size, not a model
+    monkeypatch.setattr(diarize, "model_path", lambda *a, **k: bad)
+    d = _fake_diarizer(monkeypatch, segmentation=True)
+    with caplog.at_level("WARNING", logger="recandcc.transcribe.diarize"):
+        turns = d.diarize(_voices_track())
+    assert [(t.start, t.end) for t in turns] == FIXED and len({t.speaker for t in turns}) == 2
+    assert d.segmentation is False  # not retried for this Diarizer
+    assert caplog.messages[0].startswith("segmentation model failed to load (")
+
+    def broken(audio, regions):
+        raise RuntimeError("ORT run failed: secret detail")
+
+    d = _fake_diarizer(monkeypatch, broken, segmentation=True)
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="recandcc.transcribe.diarize"):
+        assert [(t.start, t.end) for t in d.diarize(_voices_track())] == FIXED
+    assert d.segmentation is False
+    assert caplog.messages == [
+        "segmentation model failed to run (RuntimeError); speaker turns from fixed ~2 s windows"
+    ]
 
 
 def test_overlap_marks_only_segments_with_enough_overlapped_speech():
@@ -362,6 +390,9 @@ def test_overlap_marks_only_segments_with_enough_overlapped_speech():
     out, _ = label_speakers([seg(1, 4), seg(4, 6), seg(6, 10), seg(7, 9, "Me")], turns)
     assert [s.overlap for s in out] == [False, False, True, False]  # 0.3 s < OVERLAP_MARK_S
     assert speakers(out) == ["Speaker 1", "Speaker 1", "Speaker 2", "Me"]
+    from recandcc.transcribe.output import paragraphs
+
+    assert [p.overlap for p in paragraphs(out)] == [False, True, False]  # carried into paragraphs
 
 
 # --------------------------------------------------------------------------- model files

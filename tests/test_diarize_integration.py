@@ -151,7 +151,7 @@ def test_segmentation_finds_overlaps_and_keeps_the_voices(track, offline):
         mixed[at : at + len(clip)] += clip
         spans.append((at / SAMPLE_RATE, (at + len(clip)) / SAMPLE_RATE, voice))
         at += len(clip) - SAMPLE_RATE
-    d = Diarizer()
+    d = Diarizer(segmentation=True)
     try:
         t0 = time.monotonic()
         turns = d.diarize(mixed[: at + 2 * SAMPLE_RATE])

@@ -151,7 +151,7 @@ and has similar text (`difflib` ratio ≥ 0.6).
 The system-audio track mixes everyone else on the call. Only the **final** transcript splits
 it; live captions keep `Others`, and `Me` is never touched (`diarize.py`):
 
-1. Silero VAD (the one used for chunking) finds speech in `others.wav`. With
+1. Silero VAD (the one used for chunking) finds speech in `others.wav`. With the opt-in
    `diarize_overlap` ([ADR 0014](adr/0014-overlap-aware-segmentation.md)), pyannote
    segmentation-3.0 (6 MB ONNX, ONNX Runtime, 10 s chunks every 5 s over the speech) finds
    speaker-change points, where the regions are cut, and overlapped speech. Then ~2 s

@@ -139,10 +139,11 @@ while I decide.*
   with noisy audio, **then** the number of speakers is estimated per session instead of fixed
   by a threshold, within `min_speakers` / `max_speakers` if set, and an hour still
   diarizes in seconds.
-- **Given** a speaker change without a pause, or two speakers at once, **then** the turn
+- **Given** `diarize_overlap = true` and a speaker change without a pause, or two speakers
+  at once, **then** the turn
   boundary follows the change (segmentation model), overlapped speech gets the dominant
   speaker, and that segment has `"overlap": true` in `transcript.json` (only there); without
-  the segmentation model, fixed ~2 s windows as before.
+  the segmentation model (off, offline or broken), fixed ~2 s windows as before.
 
 ### US-13 Readable transcripts in private folders
 - **Then** each session is saved under `<output_dir>/<date>/<time>_<app>/` with

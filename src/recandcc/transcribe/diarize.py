@@ -592,7 +592,7 @@ class Diarizer:
         vad: VadFn = _silero,
         min_speakers: int = 0,
         max_speakers: int = 0,
-        segmentation: bool = True,
+        segmentation: bool = False,
     ) -> None:
         self.threads = threads or default_threads()
         self.vad = vad
@@ -629,18 +629,47 @@ class Diarizer:
             return self._extractor, self._pool
 
     def _load_segmenter(self) -> Segmenter | None:
-        if not self.segmentation:
+        with self._lock:
+            if not self.segmentation or self._segmenter is not None:
+                return self._segmenter if self.segmentation else None
+        path = model_path(SEGMENTATION_MODEL)  # may download: outside the lock
+        if path is None:
+            log.info("no segmentation model: speaker turns from fixed ~2 s windows")
+            return None
+        t0 = time.monotonic()
+        try:
+            segmenter = Segmenter(path, self.threads)
+        except Exception as e:  # noqa: BLE001 - corrupt file, missing metadata, ORT error
+            self._segmentation_failed("load", e)
             return None
         with self._lock:
             if self._segmenter is None:
-                path = model_path(SEGMENTATION_MODEL)
-                if path is None:
-                    log.info("no segmentation model: speaker turns from fixed ~2 s windows")
-                    return None
-                t0 = time.monotonic()
-                self._segmenter = Segmenter(path, self.threads)
+                self._segmenter = segmenter
                 self.load_s = (self.load_s or 0.0) + time.monotonic() - t0
             return self._segmenter
+
+    def _segment(
+        self, audio: np.ndarray, regions: list[tuple[float, float]]
+    ) -> tuple[list[float], list[tuple[float, float]]]:
+        segmenter = self._load_segmenter() if regions else None
+        if segmenter is None:
+            return [], []
+        try:
+            return segmenter(audio, regions)
+        except Exception as e:  # noqa: BLE001 - optional: fixed windows still work
+            self._segmentation_failed("run", e)
+            return [], []
+
+    def _segmentation_failed(self, what: str, e: Exception) -> None:
+        """A broken segmentation model must not cost the speaker labels: fixed windows from now
+        on for this Diarizer."""
+        log.warning(
+            "segmentation model failed to %s (%s); speaker turns from fixed ~2 s windows",
+            what,
+            type(e).__name__,
+        )
+        with self._lock:
+            self.segmentation, self._segmenter = False, None
 
     def diarize(self, audio: np.ndarray) -> list[Turn] | None:
         """Speaker turns of a 16 kHz mono track; None if diarization is unavailable."""
@@ -651,8 +680,7 @@ class Diarizer:
         extractor, pool = loaded
         regions = self.vad(audio)
         t_vad = time.monotonic() - t0
-        segmenter = self._load_segmenter() if regions else None
-        changes, overlaps = segmenter(audio, regions) if segmenter else ([], [])
+        changes, overlaps = self._segment(audio, regions)
         t_seg = time.monotonic() - t0 - t_vad
         windows = speech_windows(cut_regions(regions, changes))
         if not windows:
