@@ -1027,6 +1027,43 @@ def test_hourly_purge_waits_while_a_retention_save_is_pending(tmp_path, monkeypa
     assert purged == [1]
 
 
+def test_menu_purge_uses_the_value_written_not_the_click(tmp_path, monkeypatch):
+    ctrl, _path = _ctrl(tmp_path, monkeypatch)
+    purged: list = []
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda days=None: purged.append(days) or [])
+    tr = ctrl.cfg.transcription
+
+    def interleaved(*keys, **_kw):  # click A=7's save, while B and C come in
+        tr.audio_retention_days = 30  # B, before A reads memory
+        written = {k: ctrl._setting(k) for k in keys}  # A writes B's 30
+        tr.audio_retention_days = 7  # C, its save still pending
+        return written
+
+    monkeypatch.setattr(ctrl, "_write_settings", interleaved)
+    ctrl.set_retention(7)  # A
+    _join("retention-set")
+    assert purged == []  # not by 7: disk holds 30 and C's 7 may never be saved
+
+
+def test_a_non_number_retention_never_breaks_the_hourly_loop(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    purged: list = []
+    monkeypatch.setattr(common, "purge_old_audio", lambda _out, days: purged.append(days) or [])
+    path.write_text('[transcription]\naudio_retention_days = "7"\n')
+    ctrl.cfg.transcription.audio_retention_days = "7"  # type: ignore[assignment]  # by hand
+    assert ctrl.purge_audio_now() == [] and purged == []  # no TypeError, nothing deleted
+    calls: list[str] = []
+
+    def boom(_days=None):
+        calls.append("purge")
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(ctrl, "purge_audio_now", boom)
+    monkeypatch.setattr(common.time, "sleep", lambda _s: setattr(ctrl, "_shut", True))
+    ctrl._retention_loop()  # returns at shutdown instead of dying on the error
+    assert calls == ["purge"]
+
+
 def test_hourly_purge_never_uses_an_unsaved_retention_click(tmp_path, monkeypatch):
     ctrl, path = _ctrl(tmp_path, monkeypatch)
     purged: list = []

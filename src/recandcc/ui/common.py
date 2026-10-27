@@ -339,6 +339,13 @@ def _privatize_new_folder(path: Path) -> None:
 
 # transcription keys a hand edit applies live (models and device need a restart)
 RETENTION_KEY = "transcription.audio_retention_days"
+
+
+def _is_days(value: object) -> bool:
+    """A usable ``audio_retention_days``: a whole number (``True`` is not one)."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 # Settings-window fields that are NO_ROLLBACK_KEYS: a successful window save writes them.
 WINDOW_KEYS = {"live_captions": "live_captions", "mode": "detection.mode"}
 RELOADED_TRANSCRIPTION_KEYS = ("keep_audio", "audio_retention_days", "speaker_names")
@@ -890,7 +897,10 @@ class Controller:
         """Delete expired audio at startup and then hourly (audio_retention_days); sync the
         search index hourly too (half an hour in, clear of the startup sync)."""
         while not getattr(self, "_shut", False):
-            self.purge_audio_now()
+            try:  # one failure must not end the hourly purge and index sync for good
+                self.purge_audio_now()
+            except Exception:
+                log.exception("audio retention failed")
             for i in range(3600):  # sleep 1 h, but notice shutdown promptly
                 if i == 1800:
                     self._sync_index()
@@ -906,15 +916,18 @@ class Controller:
         or pinned unsaved, and not after a failed save left an unsaved click in memory (e.g.
         config.toml was unreadable, so nothing could be restored). A value that was never
         saved must not delete audio; the save's own purge, or the next hourly run, follows."""
-        if days is None:
-            with self._dirty_lock:
-                if RETENTION_KEY in self._dirty or RETENTION_KEY in self._unsaved:
-                    return []
-            days = self.cfg.transcription.audio_retention_days
-            if days > 0 and self._retention_on_disk() != days:
-                log.info("retention: the current value is not in config.toml; purge skipped")
-                return []
         try:
+            if days is None:
+                with self._dirty_lock:
+                    if RETENTION_KEY in self._dirty or RETENTION_KEY in self._unsaved:
+                        return []
+                days = self.cfg.transcription.audio_retention_days
+                if not _is_days(days):  # e.g. a hand-written "7": treated as not on disk
+                    log.warning("audio_retention_days is not a whole number; purge skipped")
+                    return []
+                if days > 0 and self._retention_on_disk() != days:
+                    log.info("retention: the current value is not in config.toml; purge skipped")
+                    return []
             return purge_old_audio(self.cfg.output_dir, days)
         except Exception:
             log.exception("audio retention failed")
@@ -926,7 +939,7 @@ class Controller:
         try:
             raw = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8"))
             value = raw.get("transcription", {}).get("audio_retention_days", 0)
-            return value if isinstance(value, int) and not isinstance(value, bool) else None
+            return value if _is_days(value) else None
         except Exception:  # missing, mid-edit TOML, unreadable
             return None
 
@@ -1579,10 +1592,13 @@ class Controller:
             if saved is None:  # rolled back (or kept for a newer click): the shells re-render
                 self.events.put(("retention_changed",))  # on the UI thread (cached tray menu)
                 return
+            # purge by the value actually written: an earlier worker may have written a newer
+            # click's value, and memory may already hold a later, still unsaved one
+            value = saved.get(RETENTION_KEY)
             with self._retention_lock:  # serialises menu purges; the check sees the latest
-                if self.cfg.transcription.audio_retention_days != days:
+                if not _is_days(value) or self.cfg.transcription.audio_retention_days != value:
                     return  # a newer click owns the setting now
-                if n := len({wav.parent for wav in self.purge_audio_now(days) or ()}):
+                if n := len({wav.parent for wav in self.purge_audio_now(value) or ()}):
                     # count only: a mis-click is visible, no session names or text
                     what = f"{n} session" + ("s" if n != 1 else "")
                     self.post_notice("Delete audio after", f"Deleted audio of {what}")
