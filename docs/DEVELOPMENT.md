@@ -97,7 +97,8 @@ scripts/review_lanes.sh /tmp/pr.diff security                # one lane
 
 ```bash
 uv run pytest                    # fast suite (~11 s): no models, no network; coverage report
-uv run pytest -m slow            # + real Whisper integration test (en/ru speech made with `say`)
+uv run pytest -m slow            # + real Whisper integration tests (en/ru/he speech made with `say`;
+                                 #   cached models only for the Hebrew one, else it skips)
 RECANDCC_TEST_MODEL=large-v3-turbo uv run pytest -m slow   # same with the production model
 uv run ruff check . && uv run ruff format --check src tests
 uv run pyright                   # type check src/ (basic mode; CI runs it in the lint job)
