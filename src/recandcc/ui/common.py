@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 import tomllib
+from collections.abc import Callable
 from dataclasses import fields
 from datetime import datetime
 from pathlib import Path
@@ -1131,8 +1132,10 @@ class Controller:
             # "file read" and "memory updated", so it can't write half-applied values. A field
             # a menu click changed meanwhile keeps the click (its queued save writes it).
             was_listening = self.cfg.detection.room_listening
-            # _dirty_lock spans snapshot and apply: a click marks + sets under it too, so it
-            # lands either before the snapshot (seen) or after the apply (kept), never between.
+            # _dirty_lock spans snapshot and apply. Menu/tray setters (menu_set, menu_apply,
+            # set_mode, toggle_language) mark + set under it too, so their click lands either
+            # before the snapshot (seen as dirty) or after the apply (kept), never between.
+            # The Settings window applies and writes under _save_lock, which this holds too.
             with self._dirty_lock:
                 now = self._reloadable(self.cfg)
                 # changed in the menu, save not written yet (or failed: _unsaved)
@@ -1227,24 +1230,32 @@ class Controller:
 
         tr = self.cfg.transcription
         key = "transcription.languages"
-        try:
-            # mark + set together under _dirty_lock (a leaf lock; only _lang_lock nests in it)
-            with self._dirty_lock:
-                self._dirty[key] = self._dirty.get(key, 0) + 1
+        # mark + set together under _dirty_lock (a leaf lock; only _lang_lock nests in it)
+        new = None
+        with self._dirty_lock:
+            self._dirty[key] = self._dirty.get(key, 0) + 1
+            try:
                 with self._lang_lock:
                     new = toggle_languages(tr.languages, getattr(tr, "_raw_languages", None), code)
                     if new is not None:
                         langs = normalize_languages(new)
                         tr._raw_languages = new if new != langs else None  # type: ignore[attr-defined]
                         tr.languages = langs  # a new list: other threads never see it half-built
-            if new is not None:
-                self.save_settings(key, title="Languages", marked=True)
-        except BaseException:
-            self._mark_dirty((key,), -1)  # the save thread never started: don't leak the mark
-            raise
+            except BaseException:
+                new = None
+                raise
+            finally:
+                if new is None:  # raised or refused: nothing to save, drop our mark right here
+                    n = self._dirty[key] - 1
+                    if n > 0:
+                        self._dirty[key] = n
+                    else:
+                        del self._dirty[key]
         if new is None:
-            self._mark_dirty((key,), -1)
             self.post_notice("Languages", LANGUAGES_KEEP_ONE)
+            return
+        # from here save_settings owns the unmark (exactly once, even if its thread can't start)
+        self.save_settings(key, title="Languages", marked=True)
 
     def toggle_call_app_names(self) -> None:
         """Menu "Use names from the call app" (macOS), from the main thread; never blocks.
@@ -1282,14 +1293,67 @@ class Controller:
         threading.Thread(target=run, daemon=True, name="ax-settings").start()
 
     def _set_call_app_names(self, on: bool) -> None:
-        self.cfg.transcription.names_from_call_app = on
-        self.save_settings("transcription.names_from_call_app", title="Names from the call app")
+        self.menu_set("transcription.names_from_call_app", on, title="Names from the call app")
+
+    def menu_set(self, key: str, value: object, *, title: str = "Settings") -> None:
+        """A menu/tray setter: set dotted ``key`` in memory and save it (see ``menu_apply``)."""
+        owner, _, name = key.rpartition(".")
+        target = self.cfg
+        for part in filter(None, owner.split(".")):
+            target = getattr(target, part)
+        self.menu_apply((key,), lambda: setattr(target, name, value), title=title)
+
+    def set_mode(self, mode: Mode | str) -> None:
+        """Menu/tray "Mode": mark ``detection.mode`` and switch the engine in one step (see
+        ``menu_apply``), so a config reload can't revert the click between set and mark. Lock
+        order is ``_dirty_lock`` then the engine's lock, as in the reload."""
+        self.menu_apply(
+            ("detection.mode",),
+            lambda: self.engine.set_mode(mode, save=False),
+            title="Mode",
+        )
+
+    def menu_apply(
+        self,
+        keys: tuple[str, ...],
+        change: Callable[[], None],
+        *,
+        title: str = "Settings",
+    ) -> None:
+        """Mark ``keys`` dirty and run ``change`` (a quick in-memory update) in one step (see
+        ``_mark_and_apply``), then queue their save. Never blocks: no file I/O and no
+        ``_save_lock`` here."""
+        self._mark_and_apply(keys, change)
+        self.save_settings(*keys, title=title, marked=True)
+
+    def _mark_and_apply(self, keys: tuple[str, ...], change: Callable[[], None]) -> None:
+        """Mark ``keys`` dirty and run ``change`` together under ``_dirty_lock``. A config
+        reload holds ``_dirty_lock`` across its snapshot and apply, so the click lands wholly
+        before (seen as dirty) or after (kept), and can never be reverted by a hand edit read
+        meanwhile. On success the caller owns exactly one mark per key, which its pending save
+        drops (``_restore_from_disk`` counts on one mark per pending save); if ``change``
+        raises, the mark is dropped here. ``change`` must not take ``_dirty_lock``."""
+        with self._dirty_lock:
+            for k in keys:
+                self._dirty[k] = self._dirty.get(k, 0) + 1
+            try:
+                change()
+            except BaseException:
+                for k in keys:
+                    n = self._dirty[k] - 1
+                    if n > 0:
+                        self._dirty[k] = n
+                    else:
+                        del self._dirty[k]
+                raise
 
     def save_settings(self, *keys: str, title: str = "Settings", marked: bool = False) -> None:
         """Save the in-memory value of each dotted key ("live_captions",
         "transcription.audio_retention_days") to config.toml on a worker thread. Menu
-        callbacks use this instead of ``cfg.save()``, which would overwrite hand edits.
-        ``marked``: the caller already marked ``keys`` dirty (before changing memory)."""
+        callbacks use ``menu_set``/``menu_apply`` (which call this) instead of ``cfg.save()``,
+        which would overwrite hand edits. ``marked``: the caller already marked ``keys`` dirty
+        (before changing memory); from then on this unmarks them exactly once, whether or not
+        the thread starts."""
         if not marked:
             self._mark_dirty(keys, 1)  # a config reload before the write must not undo the change
 
@@ -1602,8 +1666,7 @@ class Controller:
         """Menu toggle: the engine opens or closes the room mic (and stops a room session) on
         its next tick. Turning it on explains the always-on mic indicator and the consent
         question. Saves only this key, like the other toggles (the last toggle wins)."""
-        self.cfg.detection.room_listening = bool(on)
-        self.save_settings("detection.room_listening")
+        self.menu_set("detection.room_listening", bool(on))
         if on:
             self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
             if self.permissions.get("microphone") == "denied":
@@ -1615,9 +1678,10 @@ class Controller:
     def set_sensitivity(self, preset: str) -> None:
         """Sensitivity menu: apply a preset from ``sensitivity.PRESETS`` in memory (the engine
         and the room monitor read it on their next tick) and save only these two keys."""
-        apply_preset(self.cfg.detection, preset)
-        self.save_settings(
-            "detection.outside_sensitivity", "detection.inside_sensitivity", title="Sensitivity"
+        self.menu_apply(
+            ("detection.outside_sensitivity", "detection.inside_sensitivity"),
+            lambda: apply_preset(self.cfg.detection, preset),
+            title="Sensitivity",
         )
 
     def set_retention(self, days: int) -> None:
@@ -1628,8 +1692,10 @@ class Controller:
         rolled back by ``_restore_from_disk`` alone (this save holds the key's only pending
         mark, as ``save_settings`` does); this method only asks the menus to re-render."""
         days = int(days)
-        self._mark_dirty((RETENTION_KEY,), 1)  # a reload before the write must keep the click
-        self.cfg.transcription.audio_retention_days = days
+        tr = self.cfg.transcription
+        # mark + set in one step under _dirty_lock: a reload can't revert the click between
+        # them; from here this save holds the key's one pending mark, dropped once in apply()
+        self._mark_and_apply((RETENTION_KEY,), lambda: setattr(tr, "audio_retention_days", days))
 
         def apply() -> None:
             try:
