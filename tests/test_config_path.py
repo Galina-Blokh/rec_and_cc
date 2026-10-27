@@ -22,6 +22,7 @@ GUARDED = [
     ("recandcc.logging_setup", "LOG_FILE"),
     ("recandcc.logging_setup", "FAULTS_FILE"),
     ("recandcc.autostart", "PLIST_PATH"),
+    ("recandcc.transcribe.diarize", "MODELS_DIR"),
     ("recandcc.autostart", "LOG_DIR"),
     ("recandcc.ui.common", "CONFIG_PATH"),
     ("recandcc.ui.common", "LOG_DIR"),

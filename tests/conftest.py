@@ -41,7 +41,7 @@ def _import_path_modules():
     import sys
 
     names = ["recandcc.config", "recandcc.autostart", "recandcc.logging_setup", "recandcc.cli"]
-    names.append("recandcc.ui.common")
+    names += ["recandcc.ui.common", "recandcc.transcribe.diarize"]
     if sys.platform == "darwin":
         names.append("recandcc.ui.mac")
     for name in names:
@@ -49,13 +49,56 @@ def _import_path_modules():
             importlib.import_module(name)
 
 
+def _logging_state():
+    import logging
+    import sys
+    import threading
+
+    root = logging.getLogger()
+    return (
+        list(root.handlers),
+        root.level,
+        getattr(root, "_recandcc_configured", False),
+        sys.excepthook,
+        threading.excepthook,
+    )
+
+
+def _undo_setup_logging(before) -> None:
+    """Undo what a test's `setup_logging` left behind: root handlers (and the open log file),
+    the configured flag, faulthandler and the excepthooks."""
+    import faulthandler
+    import logging
+    import sys
+    import threading
+
+    from recandcc import logging_setup
+
+    handlers, level, configured, excepthook, thread_hook = before
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if handler not in handlers:
+            root.removeHandler(handler)
+            handler.close()
+    root.setLevel(level)
+    root._recandcc_configured = configured  # type: ignore[attr-defined]
+    sys.excepthook = excepthook
+    threading.excepthook = thread_hook
+    if logging_setup._faults_file is not None:
+        faulthandler.disable()
+        logging_setup._faults_file.close()
+        logging_setup._faults_file = None
+    logging_setup._installed = False
+
+
 @pytest.fixture(autouse=True)
-def _private_config(tmp_path, monkeypatch, _import_path_modules):
+def _private_config(request, tmp_path, monkeypatch, _import_path_modules):
     """No test reads or writes the user's real config, logs, LaunchAgent plist, lock file or
     default output folder, even through a bare `Config().save()` or a module that imported
     the constant by name."""
     import sys
 
+    before = _logging_state()
     private = {
         "CONFIG_DIR": tmp_path / "private-config",
         "CONFIG_PATH": tmp_path / "private-config" / "config.toml",
@@ -65,9 +108,13 @@ def _private_config(tmp_path, monkeypatch, _import_path_modules):
         "PLIST_PATH": tmp_path / "private-launchagents" / "recandcc.plist",
         "DEFAULT_OUTPUT_DIR": tmp_path / "private-transcribes",
     }
+    if request.node.get_closest_marker("slow") is None:  # slow tests need the real model cache
+        private["MODELS_DIR"] = tmp_path / "private-models"
     for name, module in list(sys.modules.items()):
         if name.split(".")[0] != "recandcc":
             continue
         for const, value in private.items():
             if hasattr(module, const):
                 monkeypatch.setattr(module, const, value)
+    yield
+    _undo_setup_logging(before)
