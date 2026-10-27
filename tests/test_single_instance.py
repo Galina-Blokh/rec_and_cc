@@ -155,7 +155,7 @@ def _patch_run(monkeypatch, results):
     monkeypatch.setattr(cli, "setup_logging", lambda: None)
     monkeypatch.setattr(cli, "_ACQUIRE_RETRY_S", 0)
 
-    def stop():
+    def stop(*_a, **_k):
         raise _Stop
 
     monkeypatch.setattr(cli, "load_config", stop)
