@@ -110,6 +110,8 @@ Menu items:
 - **Show live captions**: on/off switch for the floating captions window (saved to settings).
 - **Open live transcript**: opens the current (or last) live session's `transcript.md`.
 - **Recent transcripts**: the last 10, click to open.
+- **Search transcripts…**: full-text search across all your transcripts (English, Russian,
+  any language); pick a match to open its transcript. Same as `recandcc search`.
 - **Open transcripts folder**
 - **Permissions**: status and "Grant…" actions.
 - **Launch at login**: starts RecAndCC every time you log in. Turn it on once.
@@ -209,6 +211,7 @@ repo):
 | `recandcc record --seconds 60 [--no-mic]` | Record now without the UI; prints the text live as it is spoken, then the transcript path |
 | `recandcc transcribe <session_dir>` | (Re-)transcribe a recorded session |
 | `recandcc monitor` | Live view of which apps do audio and how the rules classify them. Use it to tune the app lists |
+| `recandcc search "<words>" [--limit N]` | Search all transcripts; prints each match's date, time in the recording, speaker, the text and the transcript path |
 | `recandcc devices` | List audio devices |
 | `recandcc autostart on\|off\|status` | Launch at login |
 | `recandcc config` | Show the config path and contents |
@@ -246,6 +249,7 @@ models load from disk without contacting anything (tested with all network acces
 |---|---|---|
 | Recordings (`*.wav`), transcripts (`transcript.md/.json/.srt`), `session.json` | `~/Documents/Transcribes/` (or your `output_dir`) | `Documents\Transcribes\` |
 | Settings (`config.toml`) | `~/Library/Application Support/RecAndCC/` | `%LOCALAPPDATA%\RecAndCC\` |
+| Search index (`search.sqlite3`: a copy of the transcript text, owner-only) | `~/Library/Application Support/RecAndCC/` | `%LOCALAPPDATA%\RecAndCC\` |
 | Logs (events, app names, file paths) | `~/Library/Logs/RecAndCC/` | `%LOCALAPPDATA%\RecAndCC\Logs\` |
 | Speaker-diarization model | `~/Library/Caches/RecAndCC/models/` | `%LOCALAPPDATA%\RecAndCC\Cache\models\` |
 | Whisper models (shared Hugging Face cache) | `~/.cache/huggingface/hub/models--*whisper*` | `%USERPROFILE%\.cache\huggingface\hub\` |
@@ -265,6 +269,10 @@ recordings must stay on this computer only.
 - `audio_retention_days = N` (menu → **Delete audio after**: Never / 1 / 7 / 30 / 90 days)
   deletes the audio N days after transcription; `0` keeps it forever.
 - Transcripts are never deleted automatically. Delete a session by deleting its folder.
+  Its text leaves the search index at the next search, the next app start, or the app's
+  hourly check, whichever comes first. Removed or replaced text is overwritten in
+  `search.sqlite3`, so it can't be recovered from the file. To remove the whole index at
+  once, delete `search.sqlite3`; it is rebuilt from the transcripts on the next search.
 
 ### Delete everything
 
@@ -273,7 +281,8 @@ macOS:
 
 ```bash
 rm -rf ~/Documents/Transcribes                    # recordings + transcripts (or your output_dir)
-rm -rf ~/Library/Application\ Support/RecAndCC    # settings
+rm -f  ~/Library/Application\ Support/RecAndCC/search.sqlite3  # search index
+rm -rf ~/Library/Application\ Support/RecAndCC    # settings (and the search index)
 rm -rf ~/Library/Logs/RecAndCC                    # logs
 rm -rf ~/Library/Caches/RecAndCC                  # speaker model
 rm -rf ~/.cache/huggingface/hub/models--*whisper* # Whisper models (if no other app uses them)
