@@ -140,6 +140,7 @@ class RoomMonitor:
         self._last_frame_clock = clock()
         self._q: SimpleQueue = SimpleQueue()
         self._worker: threading.Thread | None = None
+        self._closed = False
 
     # ------------------------------------------------------------------ lifecycle
     @property
@@ -150,6 +151,8 @@ class RoomMonitor:
         """Open the mic and start listening (no-op while running). False if the mic can't be
         opened (logged)."""
         with self._lock:
+            if self._closed:
+                return False
             if self._source is not None:
                 return True
             if self._worker is None or not self._worker.is_alive():
@@ -177,6 +180,12 @@ class RoomMonitor:
         log.info("room listening: microphone open")
         return True
 
+    def reset(self) -> None:
+        """Forget the pre-roll and the speech heard so far (an app is doing audio)."""
+        with self._lock:
+            if self._ring or self._steps or self._processed:
+                self._reset_locked()
+
     def close_mic(self) -> None:
         """Close the mic (the orange indicator goes off); ``start()`` reopens it."""
         with self._lock:
@@ -188,7 +197,9 @@ class RoomMonitor:
             log.info("room listening: microphone closed")
 
     def close(self) -> None:
-        """Close the mic and end the worker (shutdown)."""
+        """Close the mic and end the worker (shutdown); ``start()`` won't reopen it."""
+        with self._lock:
+            self._closed = True
         self.close_mic()
         with self._lock:
             worker, q = self._worker, self._q

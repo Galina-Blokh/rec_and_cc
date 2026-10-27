@@ -110,8 +110,10 @@ Menu items:
 - **Listen for conversations in the room** (off by default): while nothing records, the mic
   stays on (macOS shows the orange dot the whole time; it costs some battery, and Bluetooth
   headsets switch to their call profile) and about 6 s of speech within 15 s near the laptop
-  starts a recording, as in Auto/Ask mode, including the 15 s before it. It stops after 90 s
-  without speech. Apps take precedence. Tell the people in the room: recording them may need
+  starts a recording, as in Auto/Ask mode, including the 15 s before it (system audio is
+  recorded too, as for calls). It stops after 90 s without speech. Apps take precedence:
+  nothing starts while an app plays or uses the mic, and a room recording stops if an app
+  you switched off or stopped starts. Tell the people in the room: recording them may need
   their consent.
 - **Open live transcript**: opens the current (or last) live session's `transcript.md`.
 - **Recent transcripts**: the last 10, click to open.
