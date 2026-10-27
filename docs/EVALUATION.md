@@ -60,6 +60,13 @@ example on an encrypted disk.
 Aim for 10–20 minutes overall: en and ru, code-switching within a call, a few accents, 2–6
 speakers, and speaker-phone echo. Hebrew goes in later (#6).
 
+**Synthetic interim set.** Until the consented set exists, `scripts/make_synthetic_evalset.py`
+(macOS only) renders 7 clips (~2.7 min) of fixed, neutral sentences with `say` voices: en, ru
+and he alone, en+ru, en+he and ru+he code-switching, and a 3-speaker English dialogue. It
+writes the WAVs and `manifest.json` to the system temp folder (never the repo or ~/Documents)
+and skips clips whose voice is not installed. Studio TTS is far cleaner than a call, so these
+scores overstate real-world accuracy; use them to catch regressions, not to choose models.
+
 **Consent.** Only record people who agreed to the recording being used to test this app.
 Note who agreed and when, next to the set (not in the repo). Don't use clips from real calls
 without everyone's consent.
@@ -73,11 +80,12 @@ uv run python scripts/eval.py ~/RecAndCC-eval --no-diarize          # skip DER
 uv run python scripts/eval.py ~/RecAndCC-eval --live                # + live caption latency
 uv run python scripts/eval.py ~/RecAndCC-eval --backend mlx         # force MLX on the GPU
 uv run python scripts/eval.py ~/RecAndCC-eval --backend cpu         # force faster-whisper, CPU
+uv run python scripts/eval.py ~/RecAndCC-eval --languages en,ru,he  # detect among these
 uv run python scripts/eval.py ~/RecAndCC-eval --hypotheses ~/RecAndCC-eval/whisper-cpp
 ```
 
-`--backend` changes the transcription settings in memory for that run only; the config on
-disk is never written. `mlx` fails at once if MLX is not available (not Apple silicon, or
+`--backend` and `--languages` change the transcription settings in memory for that run only;
+the config on disk is never written. The languages used are stored as `languages`. `mlx` fails at once if MLX is not available (not Apple silicon, or
 mlx-whisper not installed). `auto` (the default) uses the config's `backend` and `device`.
 The chosen backend is printed and stored in `eval-results.json` as `backend`, with
 `wall_s`, `peak_memory_mb` and, on MLX, `gpu_peak_memory_mb`. Run one backend per process,
@@ -148,18 +156,35 @@ messages name the clip and segment, never a value from the file.
 One machine, same set, models cached, network blocked, on AC power (ADR 0011, follow-up 1;
 the switching gate is in [ADR 0011](adr/0011-stack-and-packaging-after-v0-1.md)). Scores only.
 
-| Engine | How | WER en | WER ru | LID | RTF | Live p90 | Wall s | Peak MB |
-|---|---|---|---|---|---|---|---|---|
-| MLX (GPU) | `--backend mlx` | | | | | | | |
-| faster-whisper (CPU) | `--backend cpu` | | | | | | | |
-| whisper.cpp (Metal) | `--hypotheses` | | | | | n/a | | |
-| WhisperKit | `--hypotheses` | | | | | n/a | | |
+**The filled rows (†) are synthetic TTS (macOS say), not the consented set: interim,
+overstates real-world accuracy.** 2026-10-27, `large-v3-turbo`, languages en,ru,he, Apple M5
+Max (36 GB, macOS 26.7.1, AC power), models cached, `HF_HUB_OFFLINE=1`, diarizer on. Wall
+and peak memory come from the runs without `--live`; the MLX run went first, with a cold
+model load. Peak MB is the process RSS; MLX's own GPU peak was 2449 MB. Live p90 is from a
+separate `--live` MLX run; live was not run on the CPU backend.
+
+| Engine | How | WER en | WER ru | WER he | LID | RTF | Live p90 | Wall s | Peak MB |
+|---|---|---|---|---|---|---|---|---|---|
+| MLX (GPU) † | `--backend mlx` | 0.000 | 0.025 | 0.030 | 1.00 | 0.040 | 1.24 s | 24.3 | 2747 |
+| faster-whisper (CPU) † | `--backend cpu` | 0.000 | 0.025 | 0.030 | 1.00 | 0.263 | not run | 43.4 | 5468 |
+| whisper.cpp (Metal) | `--hypotheses` | | | | | | n/a | | |
+| WhisperKit | `--hypotheses` | | | | | | n/a | | |
 
 ## Baseline
 
 Re-run after changing the model, VAD or diarization settings, and add a row here (results only,
 never audio or text):
 
-| Date | Model | Set | WER en | WER ru | LID | DER | RTF | Live p90 |
-|---|---|---|---|---|---|---|---|---|
-| (none yet: needs the consented set) | | | | | | | | |
+| Date | Model | Set | WER en | WER ru | WER he | LID | DER | RTF | Live p50 / p90 |
+|---|---|---|---|---|---|---|---|---|---|
+| 2026-10-27 | large-v3-turbo, MLX, M5 Max | **synthetic TTS (macOS say), not the consented set: interim, overstates real-world accuracy** (7 clips, 331 words) | 0.000 | 0.025 | 0.030 | 1.00 | 0.240 | 0.040 | 1.12 / 1.24 s |
+| (consented set: none yet) | | | | | | | | | |
+
+On the synthetic set, all DER is false alarm (~2.2–2.7 s per clip, the pauses between
+sentences counted as speech) except on ru+he: Milena and Carmit, two female voices, merge
+into one speaker (DER 0.64 there; 0.13 on the other three `others` clips). Diarization takes
+~0.08 s per clip. Both backends give the same WER and language ID on this set.
+
+To regenerate: `uv run python scripts/make_synthetic_evalset.py "$TMPDIR/rcc-synth"`, then
+`uv run python scripts/eval.py "$TMPDIR/rcc-synth" --languages en,ru,he --backend mlx --json
+"$TMPDIR/mlx.json"` (and `--backend cpu`, and `--backend mlx --live`).

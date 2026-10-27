@@ -19,3 +19,4 @@ eval-results.json
 report-data.json
 # PyInstaller spike output
 /build/
+*.aiff
