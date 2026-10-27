@@ -7,10 +7,17 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from recandcc import retention
 from recandcc.models import SessionInfo, Track, TriggerKind
 from recandcc.retention import purge_old_audio, purge_transcribed_audio
 
 NOW = datetime(2026, 10, 26, 12, 0).astimezone()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_outside_warnings(monkeypatch):
+    """The once-per-folder warning set lives for the app run: start each test with none."""
+    monkeypatch.setattr(retention, "_warned_outside", set())
 
 
 def make_session(root, name, ended_days_ago, transcribed=True):
