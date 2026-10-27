@@ -25,7 +25,7 @@ import rumps  # pyright: ignore[reportMissingImports] - macOS-only dependency
 
 from .. import autostart
 from ..config import CONFIG_PATH
-from ..engine import RECORDING
+from ..engine import IDLE, RECORDING
 from ..models import Mode, TriggerKind
 from ..retention import RETENTION_CHOICES
 from . import notes as notes_ui
@@ -267,6 +267,8 @@ class MacApp(rumps.App):
 
     def _render(self) -> None:
         st = self.ctrl.engine.state
+        if st.status != IDLE:
+            self._sampler.stop()  # a session began: never record a speaker sample
         title = self.ctrl.title(st)
         if self.title != title:
             self.title = title

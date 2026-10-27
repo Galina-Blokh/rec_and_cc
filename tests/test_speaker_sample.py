@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import threading
 import wave
 from datetime import datetime
@@ -203,7 +204,8 @@ class FakeProc:
         self.killed = False
 
     def wait(self, timeout=None):
-        self.done.wait(5)
+        if not self.done.wait(5 if timeout is None else timeout):
+            raise subprocess.TimeoutExpired(self.args, timeout or 5)
         return 0
 
     def poll(self):
@@ -294,6 +296,45 @@ def test_quick_plays_leave_one_player_and_close_kills_it(tmp_path):
         assert not t.is_alive()
     assert not list(tmp_path.glob("rcc-sample-*"))
     assert player.play(clip) is None  # closed
+
+
+def _wait_for(cond) -> None:
+    for _ in range(500):
+        if cond():
+            return
+        threading.Event().wait(0.01)
+    raise AssertionError("timed out")
+
+
+def test_a_session_starting_during_playback_kills_the_sample(tmp_path):
+    d = _session(tmp_path, [(0, 3, "Speaker 1")])
+    clip = sample.find_clip(d, "Speaker 1")
+    assert clip is not None
+    idle = [True]
+    procs: list[FakeProc] = []
+
+    def popen(args, **kw):
+        procs.append(FakeProc(args, block=True))
+        return procs[-1]
+
+    player = sample.SamplePlayer(popen=popen, allowed=lambda: idle[0], root=tmp_path)
+    t = _start(player, clip)
+    _wait_for(lambda: len(procs) == 1)
+    idle[0] = False  # the engine starts recording: the player's own poll kills afplay
+    t.join(5)
+    assert not t.is_alive() and procs[0].killed
+    assert player.play(clip) is None  # no new sample while recording
+
+    idle[0] = True  # the menu's stop() (main thread) kills without closing the player
+    t = _start(player, clip)
+    _wait_for(lambda: len(procs) == 2)
+    player.stop()
+    t.join(5)
+    assert not t.is_alive() and procs[1].killed
+    _start(player, clip)
+    _wait_for(lambda: len(procs) == 3)  # later plays still work
+    player.close()
+    assert procs[2].killed
 
 
 def test_stale_sample_folders_are_swept_at_start(tmp_path):

@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import wave
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ log = logging.getLogger(__name__)
 MIN_S = 2.0  # the first segment at least this long is used, else the longest one
 MAX_S = 6.0  # a clip never runs past this, nor past its segment
 PLAY_TIMEOUT_S = MAX_S + 10.0
+POLL_S = 0.25  # how often a playing sample re-checks that nothing records
 
 
 @dataclass(frozen=True)
@@ -188,11 +190,7 @@ class SamplePlayer:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-            try:
-                proc.wait(timeout=PLAY_TIMEOUT_S)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
+            self._watch(proc)
             log.debug("played a speaker sample of %.1f s", clip.end - clip.start)
         except Exception as e:  # noqa: BLE001 - a missing sample is never fatal
             log.debug(
@@ -201,6 +199,29 @@ class SamplePlayer:
         finally:
             if path is not None:
                 path.unlink(missing_ok=True)
+
+    def _watch(self, proc: subprocess.Popen) -> None:
+        """Wait for the player; kill it once a session starts recording (it would record
+        the sample) or after ``PLAY_TIMEOUT_S``."""
+        deadline = time.monotonic() + PLAY_TIMEOUT_S
+        while True:
+            try:
+                proc.wait(timeout=POLL_S)
+                return
+            except subprocess.TimeoutExpired:
+                if not self._allowed() or time.monotonic() > deadline:
+                    with contextlib.suppress(OSError):
+                        proc.kill()
+                    proc.wait()
+                    return
+
+    def stop(self) -> None:
+        """Kill the sample playing now, if any; later plays still work. Never blocks (the
+        menu calls it on the main thread when a session starts)."""
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            with contextlib.suppress(OSError):
+                proc.kill()
 
     def _kill(self) -> None:
         proc, self._proc = self._proc, None
