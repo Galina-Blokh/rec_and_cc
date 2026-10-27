@@ -24,12 +24,13 @@ LOCAL = 0x1000
 
 @pytest.fixture(autouse=True)
 def _no_realpath(monkeypatch):
-    """Fake paths (UNC, /mnt/...) must not be resolved against the host filesystem."""
-    monkeypatch.setattr(cs.os.path, "realpath", lambda p: str(p))
+    """Fake paths (UNC, /mnt/...) must not be resolved against the host filesystem. The
+    stub replaces os.path.realpath for everyone: Path.resolve() passes strict= on Windows."""
+    monkeypatch.setattr(cs.os.path, "realpath", lambda p, **_: str(p))
 
 
 def test_links_to_shares_are_resolved(tmp_path, monkeypatch):
-    monkeypatch.setattr(cs.os.path, "realpath", lambda p: "/mnt/nas/rec")
+    monkeypatch.setattr(cs.os.path, "realpath", lambda p, **_: "/mnt/nas/rec")
     mounts = "srv:/x /mnt/nas nfs rw 0 0\n"
     assert cs.linux_network_volume(tmp_path / "link", mounts) == "NFS"
 
