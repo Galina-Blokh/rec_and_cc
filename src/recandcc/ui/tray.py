@@ -47,6 +47,7 @@ from .captions import (
     header_text,
     should_auto_hide,
     text_area_width,
+    tk_label_tag,
     tk_parts,
 )
 from .common import (
@@ -157,7 +158,7 @@ class TkCaptions:
         )
         text.tag_configure("Me", foreground="#8cdc9e", font=("Segoe UI", 10, "bold"))
         text.tag_configure("Others", foreground="#85bdff", font=("Segoe UI", 10, "bold"))
-        text.tag_configure("other", foreground="#d9bf80", font=("Segoe UI", 10, "bold"))
+        tags: set[str] = set()
         text.tag_configure("line", lmargin2=64, tabs=(64,))
         # Right-to-left (Hebrew) lines: right-justified; tk_parts() reorders the text to visual
         # order and puts the label last, because Tk does not apply the bidi algorithm itself.
@@ -204,7 +205,8 @@ class TkCaptions:
             text.configure(state="normal")
             text.delete("1.0", "end")
             for i, ln in enumerate(buf.lines):
-                tag = ln.label if ln.label in ("Me", "Others") else "other"
+                # one Tk tag per colour, created on this (the Tk) thread
+                tag = tk_label_tag(text, tags, ln.label, ("Segoe UI", 10, "bold"))
                 para = ("rtl",) if ln.rtl else ("line",)
                 key = (ln, width)
                 if key not in wrapped:

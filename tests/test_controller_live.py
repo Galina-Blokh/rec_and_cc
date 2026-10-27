@@ -6,6 +6,7 @@ Stories: US-03, US-11.
 from __future__ import annotations
 
 import queue
+import threading
 import time
 
 import numpy as np
@@ -182,6 +183,32 @@ def test_cli_record_prints_live_lines(tmp_path, monkeypatch, capsys):
     assert "Transcript: " in out and "transcript.md" in out
     (md,) = (tmp_path / "out").glob("*/*/transcript.md")
     assert phrase(4) in md.read_text(encoding="utf-8")
+
+
+def test_speaker_model_warmup_is_off_main_thread_and_never_downloads(tmp_path, monkeypatch):
+    """Stories: US-33. Controller startup warms the extractor in the background, no download."""
+    from recandcc.transcribe import diarize
+
+    calls, done = [], threading.Event()
+
+    def fake(download=True):
+        calls.append((download, threading.current_thread() is threading.main_thread()))
+        done.set()
+
+    monkeypatch.setattr(diarize, "shared_extractor", fake)
+    ctrl, _, _ = make_ctrl(tmp_path, live=True)
+    ctrl.cfg.transcription.live_speaker_labels = True
+    ctrl._warm_speaker_model()
+    assert done.wait(5)
+    assert calls == [(False, False)]
+    done.clear()
+    ctrl.cfg.transcription.live_speaker_labels = False
+    ctrl._warm_speaker_model()
+    assert not done.wait(0.3) and len(calls) == 1
+    ctrl.cfg.transcription.live_speaker_labels = True
+    ctrl.cfg.transcription.diarize = False  # the labeler needs the diarize model setting
+    ctrl._warm_speaker_model()
+    assert not done.wait(0.3) and len(calls) == 1
 
 
 def test_a_session_still_being_written_skips_the_live_flush(tmp_path):

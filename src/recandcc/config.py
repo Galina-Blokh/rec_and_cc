@@ -161,8 +161,12 @@ class TranscriptionConfig:
     # Transcripts are never deleted. Also settable from the menu: "Delete audio after".
     audio_retention_days: int = 0
     # Split "Others" into "Speaker 1", "Speaker 2", ... in the final transcript (offline
-    # speaker diarization). Live captions keep showing "Others".
+    # speaker diarization).
     diarize: bool = True
+    # Live captions show "Speaker N" instead of "Others" (display only: the final
+    # transcript keeps the offline diarization). Needs the speaker model on disk and
+    # never downloads it.
+    live_speaker_labels: bool = True
     # Split an "Others" segment at the word where the diarized speaker changes. Opt-in: it needs
     # word timestamps (extra time), so it applies to batch transcription only, not to live
     # sessions (on MLX: with mlx-whisper 0.4.3, whose word aligner RecAndCC ports to numpy).

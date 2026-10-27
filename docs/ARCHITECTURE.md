@@ -45,7 +45,7 @@ across platforms.
 | `transcribe/output.py` | Writes `transcript.md` / `.srt` / `.json` (right-to-left marks for Hebrew) |
 | `transcribe/queue.py` | Background transcription queue: one session at a time, in order |
 | `transcribe/_align_np.py` | Pure-numpy word-alignment kernels (DTW, median filter) for the MLX path, replacing mlx-whisper's numba/scipy ones (wired in a follow-up) |
-| `transcribe/diarize.py` | Offline speaker diarization of the `Others` track (speaker embeddings + clustering) and `Others` → `Speaker N` relabelling of the final transcript; one-time, checksum-verified model download |
+| `transcribe/diarize.py` | Offline speaker diarization of the `Others` track (the `Me` track too in room sessions: `engine.diarized_tracks`) (speaker embeddings + clustering) and `Others` → `Speaker N` relabelling of the final transcript; owns the CAM++ extractor shared with the live labels (`shared_extractor`); one-time, checksum-verified model download |
 | `hotkey.py` | Global start/stop shortcut: parses `hotkey`, runs `rcc-audiotap hotkey` (macOS) or `RegisterHotKey` (Windows) |
 | `cloudsync.py` | Is `output_dir` synced to iCloud / OneDrive / File Provider, or on a network volume (`statfs` / `GetDriveTypeW` / UNC)? Local checks only; the controller warns once per folder |
 | `participants.py` | Opt-in sampler of the call app's participant list via `rcc-audiotap participants` (macOS Accessibility) |
@@ -303,9 +303,9 @@ and has similar text (`difflib` ratio ≥ 0.6).
 
 ### Speaker diarization: `Others` → `Speaker 1`, `Speaker 2`, …
 The system-audio track mixes everyone else on the call. Only the **final** transcript splits
-it; live captions keep `Others`, and `Me` is never touched (`diarize.py`), except in a
-room session, where the `Me` track is the one split (both tracks, numbered one after the
-other, when a call upgraded the room session):
+it, and `Me` is never touched (`diarize.py`), except in a room session, where the `Me`
+track is the one split (both tracks, numbered one after the other, when a call upgraded the
+room session). Live captions are labelled separately (below):
 
 1. Silero VAD (the one used for chunking) finds speech in `others.wav`. With the opt-in
    `diarize_overlap` ([ADR 0014](adr/0014-overlap-aware-segmentation.md)), pyannote
@@ -326,6 +326,30 @@ other, when a call upgraded the room session):
 4. Each `Others` segment takes the speaker it overlaps most (nearest one if none), numbered by
    first appearance. If only one speaker is found the label stays `Others`. A segment with
    ≥ 0.5 s of overlapped speech gets `"overlap": true` in `transcript.json` (only there).
+
+**Live labels** (`live_speakers.py`, display only): after Whisper, the pool thread asks a
+dedicated embedding thread (bounded queue of 8, dropped when full; same CAM++ model, loaded
+only if already on disk, never downloaded) for the embedding of each `Others` segment ≥ 1 s.
+The live worker then clusters them in time order: cosine ≥ 0.5 to a running-mean centroid,
+else a new speaker, at most 8. Only the copies sent to the captions are relabelled; stored
+segments, `transcript.md` and the final transcript are unchanged. Without the model, or for
+segments without an embedding, captions keep `Others` (or the previous label, inherited only if
+the previous segment ended within 1.5 s, else `Others`). One CAM++ extractor
+is shared with the offline Diarizer (`diarize.shared_extractor`, loaded once per process;
+live failures are remembered, no lock is held across `compute`, so a compute orphaned by a
+closed session blocks nobody); requests past their 0.5 s deadline are skipped, where the
+cold model load is not counted (at most 1.5 s, `LOAD_GRACE_S`), and a finished embedding wakes the live worker. Live numbers are
+provisional: they come from incremental clustering and can differ from the final transcript's
+labels (the offline diarization), e.g. one other voice is `Speaker 1` live but `Others` in
+the final transcript. The captions colour each `Speaker N` from a fixed palette. Room sessions (and calls that started as a room) show no live
+`Speaker N`, only `Me` / `Others`: the final transcript numbers `Me`'s speakers first, so live
+numbers would not match; this is decided at session start, so a call upgraded to a room
+mid-way keeps its live labels (and the final numbering may then differ from them). When the
+session stops, the live worker does not wait for pending embeddings: it uses the ones already
+done and shows `Others` / the previous label for the rest, so finishing is never delayed by
+display labels. The shared
+speaker model (~28 MB) stays loaded for the app's life, by design (it was already kept until
+quit before); there is no idle unloading.
 
 Why not sherpa-onnx's own pyannote pipeline (segmentation-3.0 + embeddings per 10 s window):
 on the same synthetic en/ru voices it took **20 s for 13 min** of audio and got 141/170

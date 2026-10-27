@@ -7,6 +7,9 @@ All notable changes to RecAndCC are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Live captions label other speakers `Speaker 1`, `Speaker 2`, … within a session instead of
+  `Others` (`diarize.live_speaker_labels`, on by default; display only, uses the downloaded
+  speaker model) (#1).
 - Custom DOCX/PDF export templates (`[export] template`): title format, section order and
   headings, header/footer line, from a local TOML file; unchanged without one (US-25, #4). `###` headings in `summary.md` now parse as their own level (`h3`) so they no longer start the action items.
 - Windows tray: "Recent transcripts → Name speakers…" (with `speaker_names = true`) and

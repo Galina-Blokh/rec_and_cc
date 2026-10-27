@@ -40,6 +40,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-28 | Browse past meetings | 🟡 Windows window untested on Windows hardware (none available) |
 | US-32 | Find transcripts by meaning | 🟡 opt-in; no accuracy measurement on real transcripts yet (#4) |
 | US-29 | Right-to-left text readable in the Windows captions | 🟡 unit-tested, no hardware check (#6) |
+| US-33 | Live captions name the speakers | 🟡 no accuracy measurement on real speech (#1) |
 | US-30 | Change common settings in a window | 🟡 macOS settings window shipped (#86), not on Windows |
 | US-34 | Warn when recordings go to a network volume | 🟡 shipped (#110): detection is fake-tested, no real share or Windows drive checked |
 
@@ -562,6 +563,23 @@ correctly, even though Tk does no bidi.*
   in logical order first and each piece is reordered on its own (label on the first line,
   right-justified), so wrapped lines read in order; very long single words are hard-split.
 - **Not yet:** a visual check on Windows hardware (#6).
+
+### US-33 Live captions name the speakers
+*As the owner, I want live captions to say `Speaker 1` / `Speaker 2` instead of `Others`, so
+that I can follow who says what during the call.*
+
+- **Given** `live_speaker_labels = true` (default) and the speaker model on disk, **when** a
+  finished `Others` caption is shown, **then** it says `Speaker N`, the same N for the same
+  voice for the whole session; a clearly different voice gets a new number (at most 8
+  speakers). `Me` stays `Me`.
+- **Given** a room session, or a call that started as a room, **then** captions keep `Me` /
+  `Others` (the final transcript numbers `Me`'s speakers first, so live numbers would clash);
+  decided at session start, so a call upgraded to a room mid-way keeps its live labels.
+- **Then** the labels are display only: the final transcript keeps the offline diarization.
+- **Given** the model is not on disk, **then** captions keep `Others`, nothing is downloaded
+  and nothing is logged above DEBUG.
+- **Then** the work never runs on a capture callback or the UI thread, and when it falls
+  behind, requests are dropped rather than queued without limit.
 
 ### US-30 Change common settings in a window
 *As the owner, I want a settings window with the options I change most, so that I don't have

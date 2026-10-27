@@ -40,5 +40,6 @@ Paths are relative to `src/recandcc/`.
 | US-28 | `ui/notes.py`, `ui/common.py`, `ui/mac.py`, `ui/tray.py`, `models.py` | `test_notes.py::*`, `test_ui_tray.py::test_notes_menu_item_and_events_reach_the_notes_window`, `test_ui_tray.py::test_notes_window_actions` |
 | US-32 | `semantic.py`, `search.py`, `config.py`, `ui/common.py`, `cli.py` | `test_semantic.py::*`, `test_semantic_cache.py::*` |
 | US-29 | `ui/bidi.py`, `ui/captions.py`, `ui/tray.py` | `test_bidi.py::*`, `test_bidi_wrap.py::*` |
+| US-33 | `transcribe/live_speakers.py`, `transcribe/live.py`, `transcribe/diarize.py`, `config.py` | `test_live_speakers.py::*`, `test_diarize_integration.py::test_live_speaker_labels_distinguish_voices` |
 | US-30 | `settings_window.py`, `config.py`, `ui/common.py`, `ui/mac.py`, `transcribe/revisions.py`, `native/macos/AudioTap/Sources/rcc-audiotap/Settings.swift` | `test_settings_window.py::*` |
 | US-34 | `cloudsync.py`, `ui/common.py`, `cli.py` | `test_network_volume.py::*` |

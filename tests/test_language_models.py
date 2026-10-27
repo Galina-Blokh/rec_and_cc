@@ -30,6 +30,7 @@ IVRIT = "ivrit-ai/whisper-large-v3-turbo-ct2"
 def _cfg(**kw) -> TranscriptionConfig:
     kw.setdefault("languages", ["en", "ru", "he"])
     kw.setdefault("language_models", {"he": IVRIT})
+    kw.setdefault("live_speaker_labels", False)  # no embedding wait in these live tests
     return TranscriptionConfig(model="fake", workers=2, **kw)
 
 
