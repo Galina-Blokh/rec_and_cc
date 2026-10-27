@@ -409,3 +409,28 @@ def test_turning_off_keep_audio_deletes_nothing_until_startup(tmp_path, monkeypa
     assert len(list(d.glob("*.wav"))) == 2  # saving the setting deletes no recording
     ctrl._purge_leftover_audio()  # the startup purge is unchanged: it does
     assert not list(d.glob("*.wav"))
+
+
+@mac_only
+def test_engine_save_keeps_always_choices(tmp_path, monkeypatch):
+    ctrl, path = make_ctrl(tmp_path, monkeypatch)
+    ctrl.cfg.detection.app_modes["us.zoom"] = Mode.AUTO  # what "Always" does
+    ctrl.engine._save_config()
+    join_threads("save-config")
+    assert load_config(path).detection.app_modes == {"us.zoom": Mode.AUTO}
+    assert "unknown = 1" in path.read_text()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+def test_new_empty_folder_from_the_picker_becomes_owner_only(tmp_path):
+    from recandcc.ui.common import _privatize_new_folder
+
+    fresh, used = tmp_path / "fresh", tmp_path / "used"
+    fresh.mkdir(mode=0o755)
+    used.mkdir(mode=0o755)
+    (used / "x.txt").write_text("keep")
+    fresh.chmod(0o755)
+    _privatize_new_folder(fresh)
+    _privatize_new_folder(used)
+    assert fresh.stat().st_mode & 0o777 == 0o700
+    assert used.stat().st_mode & 0o777 == 0o755  # a folder with content is left alone

@@ -245,6 +245,18 @@ def as_str(text: str) -> str:
 
 
 # ----------------------------------------------------------------------- controller
+def _privatize_new_folder(path: Path) -> None:
+    """The folder picker can create a folder (0755 under the usual umask) just before Save.
+    An empty folder of ours is made owner-only; a folder with content is never touched."""
+    if os.name != "posix":
+        return
+    try:
+        if path.is_dir() and path.stat().st_uid == os.getuid() and not any(path.iterdir()):
+            path.chmod(0o700)
+    except OSError:
+        log.debug("could not make the new transcripts folder private")
+
+
 class Controller:
     _summaries_lock = threading.Lock()  # creating the SummaryQueue (class-wide: test fakes)
 
@@ -308,7 +320,9 @@ class Controller:
             monitor,
             recorder,
             _LiveAwareQueue(self),
-            save_config=lambda: self.save_settings("detection.mode", title="Mode"),
+            save_config=lambda: self.save_settings(
+                "detection.mode", "detection.app_modes", title="Mode"
+            ),
             on_prompt=self._on_prompt,
             on_notice=self.post_notice,
             on_state_change=lambda st: self.events.put(("state", st)),
@@ -846,6 +860,7 @@ class Controller:
                     return
                 updates = validate_settings(raw)
                 if "output_dir" in updates:
+                    _privatize_new_folder(updates["output_dir"])
                     make_private_dir(updates["output_dir"])
                 fields = {k: v for k, v in updates.items() if k != "mode"}
                 with self._save_lock:
