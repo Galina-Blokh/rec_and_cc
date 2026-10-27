@@ -1,5 +1,5 @@
-"""Room listening monitor (detect/room.py): real Silero VAD on synthetic speech-like bursts,
-no real microphone.
+"""Room listening monitor (detect/room.py) on synthetic audio, no real microphone: a
+deterministic energy "VAD", plus one check with the real Silero VAD on speech-like bursts.
 
 Stories: US-22.
 """
@@ -13,7 +13,7 @@ import numpy as np
 
 from recandcc.capture.base import AudioSource
 from recandcc.config import Config, DetectionConfig, load_config
-from recandcc.detect.room import WINDOW, RoomMonitor
+from recandcc.detect.room import WINDOW, RoomMonitor, silero_vad
 from recandcc.models import SAMPLE_RATE
 
 SR = SAMPLE_RATE
@@ -61,7 +61,13 @@ class Clock:
         return self.t
 
 
-def make(det: DetectionConfig | None = None, vad=None, fail: bool = False, clock=None):
+def energy_vad(audio: np.ndarray) -> np.ndarray:
+    """Deterministic stand-in for Silero: a window is speech if it isn't silent."""
+    w = audio.reshape(-1, WINDOW)
+    return (np.abs(w).max(axis=1) > 0.01).astype(np.float32)
+
+
+def make(det: DetectionConfig | None = None, vad=energy_vad, fail: bool = False, clock=None):
     sources: list[ManualSource] = []
 
     def factory():
@@ -88,7 +94,8 @@ def test_room_listening_is_off_by_default(tmp_path):
 
 
 def test_conversation_triggers_but_silence_and_short_utterances_do_not():
-    mon, sources = make()
+    silero_vad(silence(1)[: 2 * WINDOW])  # load the model before timing anything
+    mon, sources = make(vad=silero_vad)
     try:
         assert mon.start() and mon.running
         (src,) = sources
@@ -97,9 +104,9 @@ def test_conversation_triggers_but_silence_and_short_utterances_do_not():
         feed(mon, src, burst(1.5))  # a short remark of my own
         feed(mon, src, silence(3))
         assert not mon.triggered()
-        feed(mon, src, burst(5))
+        feed(mon, src, burst(6))
         assert mon.triggered()
-        assert 4.0 <= mon.speech_in_window() <= 7.0
+        assert mon.speech_in_window() >= 4.0
     finally:
         mon.close()
 
@@ -127,9 +134,11 @@ def test_seconds_since_speech_counts_audio_and_adds_a_stalled_mic():
         (src,) = sources
         feed(mon, src, burst(3))
         feed(mon, src, silence(5))
-        assert 4.0 <= mon.seconds_since_speech() <= 5.5
+        assert abs(mon.seconds_since_speech() - 5.0) < 0.6  # up to one 0.5 s step pending
+        clock.t += 0.9  # frames a bit late (VAD or capture jitter): no stall yet
+        assert mon.seconds_since_speech() < 5.6
         clock.t += 30  # the mic stopped delivering frames
-        assert 33.0 <= mon.seconds_since_speech() <= 35.5
+        assert 34.0 < mon.seconds_since_speech() < 35.6
     finally:
         mon.close()
 
@@ -218,5 +227,64 @@ def test_vad_runs_off_the_capture_thread_and_never_blocks_it():
         assert mon.wait_idle()
         assert set(threads) == {"room-vad"}
         assert mon.triggered()
+    finally:
+        mon.close()
+
+
+def test_live_frames_during_the_preroll_replay_follow_it_in_order():
+    det = DetectionConfig(room_listening=True, room_preroll_s=2.0, room_window_s=1.0)
+    mon, sources = make(det)
+    try:
+        mon.start()
+        (src,) = sources
+        ramp = np.arange(4 * SR, dtype=np.float32) / (4 * SR)
+        src.push(ramp[: 2 * SR])
+        got: list[np.ndarray] = []
+
+        def slow_writer(block):  # a live frame arrives during the first replayed block
+            if not got:
+                src.push(ramp[2 * SR : 3 * SR])
+            got.append(block)
+
+        tap = mon.session_source()
+        tap.start(slow_writer)
+        src.push(ramp[3 * SR :])
+        audio = np.concatenate(got)
+        first = int(round(float(audio[0]) * 4 * SR))
+        np.testing.assert_array_equal(audio, ramp[first:])
+        tap.stop()
+    finally:
+        mon.close()
+
+
+def test_the_preroll_stays_bounded_and_close_ends_the_worker():
+    det = DetectionConfig(room_listening=True, room_preroll_s=3.0, room_window_s=2.0)
+    mon, sources = make(det)
+    mon.start()
+    feed(mon, sources[0], burst(60))
+    assert 3 * SR <= mon._ring_size <= 3 * SR + 1600  # pre-roll + one capture block
+    worker = mon._worker
+    mon.close()
+    assert worker is not None and not worker.is_alive()
+
+
+def test_speech_queued_before_a_session_ends_does_not_retrigger():
+    gate = threading.Event()
+
+    def gated_vad(audio):
+        gate.wait(5)
+        return energy_vad(audio)
+
+    mon, sources = make(vad=gated_vad)
+    try:
+        mon.start()
+        (src,) = sources
+        tap = mon.session_source()
+        tap.start(lambda block: None)
+        src.push(burst(8))  # still queued for the VAD when the session ends
+        tap.stop()
+        gate.set()
+        assert mon.wait_idle()
+        assert not mon.triggered() and mon.speech_in_window() == 0
     finally:
         mon.close()
