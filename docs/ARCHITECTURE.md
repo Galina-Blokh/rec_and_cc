@@ -39,6 +39,7 @@ across platforms.
 | `recorder.py` | One session: sources → queues → WAV writer threads, live levels, silence tracking, frame tap for live transcription |
 | `engine.py` | Detection state machine: classify apps, debounce, ask/auto/off, stop conditions |
 | `transcribe/` | VAD chunking, language ID, parallel Whisper, merge + echo removal, md/srt/json output, background queue, live transcription (`live.py`) |
+| `transcribe/_align_np.py` | Pure-numpy word-alignment kernels (DTW, median filter) for the MLX path, replacing mlx-whisper's numba/scipy ones (wired in a follow-up) |
 | `transcribe/diarize.py` | Offline speaker diarization of the `Others` track (speaker embeddings + clustering) and `Others` → `Speaker N` relabelling of the final transcript; one-time, checksum-verified model download |
 | `hotkey.py` | Global start/stop shortcut: parses `hotkey`, runs `rcc-audiotap hotkey` (macOS) or `RegisterHotKey` (Windows) |
 | `cloudsync.py` | Is `output_dir` synced to iCloud / OneDrive / File Provider? Local path checks only; the controller warns once per folder |

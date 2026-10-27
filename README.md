@@ -134,6 +134,8 @@ Menu items:
   any language); pick a match to open its transcript. Same as `recandcc search`. On
   Windows the tray item opens a small window: type the words, press Enter, and
   double-click a match (time, speaker, snippet) to open it.
+- **Export latest transcript (DOCX + PDF)**: writes `transcript.docx` and `transcript.pdf`
+  next to the newest transcript. Same as `recandcc export`.
 - **Meeting notes…**: your past sessions, newest first, with title (the app that triggered
   it, or one you gave it), date and time, duration, speakers, languages and whether it is
   transcribed. Pick one to open its transcript or `summary.md` (if there is one; its first
@@ -270,6 +272,7 @@ repo):
 | `recandcc transcribe <session_dir>` | (Re-)transcribe a recorded session |
 | `recandcc summarize <session_dir>` | Write the session's `summary.md` (summary + action items) with the local model |
 | `recandcc monitor` | Live view of which apps do audio and how the rules classify them. Use it to tune the app lists |
+| `recandcc export <session-folder> [--format docx\|pdf\|both]` | Write `transcript.docx` and/or `transcript.pdf` next to the session's transcript (speakers, timestamps, Hebrew right to left); the PDF needs a system font with Latin, Cyrillic and Hebrew (Arial or DejaVu Sans) |
 | `recandcc search "<words>" [--limit N]` | Search all transcripts; prints each match's date, time in the recording, speaker, the text and the transcript path |
 | `recandcc devices` | List audio devices |
 | `recandcc autostart on\|off\|status` | Launch at login |
