@@ -3,7 +3,9 @@
 A non-activating HUD ``NSPanel``: it floats above other windows, joins every Space (so it
 shows over full-screen video/Zoom), never takes focus from the app you're using, and
 remembers where you put it. The text logic lives in ``captions.py``; this module only
-renders a ``CaptionBuffer`` into an ``NSTextView``.
+renders a ``CaptionBuffer`` into an ``NSTextView``. Right-to-left (Hebrew) lines get their own
+paragraph style: right-aligned with RTL base direction, so the label sits on the right and
+the text (with any embedded English) reads right to left.
 
 Lifecycle: ``show(title)`` (new session) → ``append(segments)``… → ``end()`` (text stays,
 title says the transcript is saved, auto-hides after ~10 s) / ``hide()``. Call ``tick()``
@@ -37,6 +39,8 @@ from AppKit import (
     NSParagraphStyleAttributeName,
     NSScreen,
     NSScrollView,
+    NSTextAlignmentNatural,
+    NSTextAlignmentRight,
     NSTextTab,
     NSTextView,
     NSViewHeightSizable,
@@ -49,6 +53,7 @@ from AppKit import (
     NSWindowStyleMaskResizable,
     NSWindowStyleMaskTitled,
     NSWindowStyleMaskUtilityWindow,
+    NSWritingDirectionRightToLeft,
 )
 from Foundation import NSObject
 
@@ -283,14 +288,25 @@ class CaptionsPanel:
         doc = self._text.frame()
         return is_at_bottom(clip.origin.y + clip.size.height, doc.size.height)
 
-    def _attributed(self):
+    @staticmethod
+    def _paragraph(rtl: bool = False):
+        """Label column + hanging indent. TextKit measures tab stops and the head indent from
+        the leading edge, so the RTL style mirrors the layout (label at the right edge)."""
         para = NSMutableParagraphStyle.alloc().init()
+        align = NSTextAlignmentNatural if rtl else 0  # 0 = left, as before
         para.setTabStops_(
-            [NSTextTab.alloc().initWithTextAlignment_location_options_(0, LABEL_COLUMN_PT, {})]
+            [NSTextTab.alloc().initWithTextAlignment_location_options_(align, LABEL_COLUMN_PT, {})]
         )
         para.setDefaultTabInterval_(LABEL_COLUMN_PT)
         para.setHeadIndent_(LABEL_COLUMN_PT)
         para.setParagraphSpacing_(5.0)
+        if rtl:
+            para.setBaseWritingDirection_(NSWritingDirectionRightToLeft)
+            para.setAlignment_(NSTextAlignmentRight)
+        return para
+
+    def _attributed(self):
+        para, rtl_para = self._paragraph(), self._paragraph(rtl=True)
         text_font = NSFont.systemFontOfSize_weight_(TEXT_PT, NSFontWeightRegular)
         label_font = NSFont.systemFontOfSize_weight_(LABEL_PT, NSFontWeightSemibold)
         text_color = NSColor.colorWithCalibratedWhite_alpha_(0.96, 1.0)
@@ -304,14 +320,15 @@ class CaptionsPanel:
                 {FONT: text_font, COLOR: dim, PARA: para},
             )
         for i, ln in enumerate(lines):
+            p = rtl_para if ln.rtl else para
             color = _rgb(SPEAKER_RGB.get(ln.label, OTHER_RGB), 0.85)
             label = NSMutableAttributedString.alloc().initWithString_attributes_(
                 ln.label + "\t",
-                {FONT: label_font, COLOR: color, PARA: para},
+                {FONT: label_font, COLOR: color, PARA: p},
             )
             body = NSMutableAttributedString.alloc().initWithString_attributes_(
                 ln.text + ("\n" if i < len(lines) - 1 else ""),
-                {FONT: text_font, COLOR: text_color, PARA: para},
+                {FONT: text_font, COLOR: text_color, PARA: p},
             )
             out.appendAttributedString_(label)
             out.appendAttributedString_(body)

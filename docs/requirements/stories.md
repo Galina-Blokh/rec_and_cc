@@ -27,6 +27,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-16 | Permissions set up from the app | ✅ |
 | US-17 | Always on, visible state | ✅ |
 | US-18 | Runs on Windows | 🟡 untested on hardware (#5) |
+| US-19 | Hebrew transcripts and right-to-left captions | 🟡 stock model, no Hebrew test set (#6) |
 
 ---
 
@@ -171,3 +172,18 @@ while I decide.*
 - **Then** WASAPI loopback capture, pycaw detection, a tray icon and registry autostart
   implement the same interfaces; CI runs the fast suite on Windows.
 - **Not yet:** a real-hardware test pass, per-app capture, installer (#5).
+
+### US-19 Hebrew transcripts and right-to-left captions
+- **Given** `languages = ["en", "ru", "he"]`, **then** each speech region gets one of the
+  three languages (never Arabic or Yiddish), and Hebrew regions are transcribed in Hebrew.
+- **Given** a Hebrew line, **when** it is shown in the live captions, **then** it is
+  right-aligned and reads right to left, with the speaker label on the right; English words
+  inside it stay readable.
+- **Given** a Hebrew segment, **then** `transcript.md` wraps its text in a right-to-left
+  isolate and `transcript.srt` starts its line with RLM, so editors and players render mixed
+  Hebrew/English correctly; en/ru lines and `transcript.json` are unchanged.
+- **Given** `"iw"` or an unknown code in `languages`, **then** it is mapped to `he` or
+  dropped with a log warning.
+- **Not yet:** a Hebrew-tuned model (ivrit.ai) and per-language model routing, language
+  checkboxes in the menu, a Hebrew evaluation set and WER, and a check of the Windows
+  captions on real hardware (#6).
