@@ -23,6 +23,8 @@ RETENTION_CHOICES = (0, 1, 7, 30, 90)
 def _transcribed_sessions(output_dir: Path) -> Iterator[SessionInfo]:
     """Finished, transcribed sessions under ``output_dir`` (unreadable ones are skipped)."""
     for meta in output_dir.glob(f"*/*/{SessionInfo.FILENAME}"):
+        if (meta.parent / SessionInfo.DISCARD_MARKER).exists():
+            continue  # being deleted whole by purge_discarded_sessions
         try:
             session = SessionInfo.load(meta.parent)
         except Exception:

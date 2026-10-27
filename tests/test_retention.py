@@ -168,3 +168,10 @@ def test_purge_never_leaves_the_session_folder(tmp_path):
         s.save()
         assert purge_transcribed_audio(tmp_path) == []
     assert outside.exists() and (d / "notes.txt").exists()
+
+
+def test_startup_purge_skips_discarded_sessions(tmp_path):
+    d = make_session(tmp_path, "gone", 1)
+    (d / SessionInfo.DISCARD_MARKER).write_bytes(b"")  # owned by purge_discarded_sessions
+    assert purge_transcribed_audio(tmp_path) == []
+    assert len(list(d.glob("*.wav"))) == 2
