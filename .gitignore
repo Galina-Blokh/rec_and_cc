@@ -14,3 +14,6 @@ dist/
 eval/
 RecAndCC-eval/
 eval-results.json
+# build report output (scripts/report)
+.report/
+report-data.json

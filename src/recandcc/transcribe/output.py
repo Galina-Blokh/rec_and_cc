@@ -6,10 +6,12 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
-from ..models import Segment, SessionInfo
+from ..models import Segment, SessionInfo, is_rtl
 
 PARAGRAPH_GAP_S = 2.0
 MD_NAME, JSON_NAME, SRT_NAME = "transcript.md", "transcript.json", "transcript.srt"
+# Unicode bidi controls for right-to-left (Hebrew) segments. transcript.json keeps the raw text.
+RLI, PDI, RLM = "\u2067", "\u2069", "\u200f"
 
 
 def fmt_hms(t: float) -> str:
@@ -32,12 +34,34 @@ def languages_of(segments: list[Segment]) -> list[str]:
     return list(dict.fromkeys(s.language for s in segments if s.language))
 
 
+def md_text(seg: Segment) -> str:
+    """Markdown body of a segment: right-to-left text goes in a right-to-left isolate (RLI ..
+    PDI), so the LTR "[time] Speaker:" prefix stays put and the line's punctuation and
+    embedded English words land on the correct side."""
+    text = seg.text.strip()
+    return f"{RLI}{text}{PDI}" if text and is_rtl(seg.language, text) else text
+
+
+def srt_text(seg: Segment) -> str:
+    """SRT line of a segment. A right-to-left one starts with RLM, so players lay the whole
+    subtitle out right to left (label on the right, trailing punctuation on the left); RLM is
+    understood by older players that don't know isolates."""
+    line = f"{seg.speaker}: {seg.text.strip()}"
+    return RLM + line if is_rtl(seg.language, seg.text) else line
+
+
 def paragraphs(segments: list[Segment], gap_s: float = PARAGRAPH_GAP_S) -> list[Segment]:
-    """Join consecutive same-speaker segments separated by less than `gap_s`."""
+    """Join consecutive same-speaker segments separated by less than `gap_s` (but not across a
+    change of writing direction, so each paragraph reads one way)."""
     out: list[Segment] = []
     for s in segments:
         p = out[-1] if out else None
-        if p and p.speaker == s.speaker and s.start - p.end < gap_s:
+        if (
+            p
+            and p.speaker == s.speaker
+            and s.start - p.end < gap_s
+            and is_rtl(p.language, p.text) == is_rtl(s.language, s.text)
+        ):
             out[-1] = Segment(
                 p.start, max(p.end, s.end), f"{p.text} {s.text}".strip(), p.speaker, p.language
             )
@@ -66,13 +90,13 @@ def format_markdown(
     if not segments and not live:
         lines.append("_No speech detected._")
     for p in paragraphs(segments):
-        lines += [f"**[{fmt_hms(p.start)}] {p.speaker}:** {p.text}", ""]
+        lines += [f"**[{fmt_hms(p.start)}] {p.speaker}:** {md_text(p)}", ""]
     return "\n".join(lines).rstrip() + "\n"
 
 
 def format_srt(segments: list[Segment]) -> str:
     blocks = [
-        f"{i}\n{fmt_srt_time(s.start)} --> {fmt_srt_time(s.end)}\n{s.speaker}: {s.text.strip()}\n"
+        f"{i}\n{fmt_srt_time(s.start)} --> {fmt_srt_time(s.end)}\n{srt_text(s)}\n"
         for i, s in enumerate(segments, 1)
     ]
     return "\n".join(blocks)

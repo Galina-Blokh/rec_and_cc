@@ -2,7 +2,8 @@
 
 The macOS panel (``captions_mac.py``) and the Windows window (``tray.py``) both keep a
 ``CaptionBuffer`` and render its lines; everything that can be tested without a window
-lives here: line formatting, ordering, trimming, header text and the auto-hide timer.
+lives here: line formatting, ordering, trimming, header text, the auto-hide timer and the
+writing direction of each line (Hebrew lines are right-aligned and laid out right to left).
 """
 
 from __future__ import annotations
@@ -11,11 +12,13 @@ import bisect
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from ..models import Segment
+from ..models import Segment, is_rtl
 
 MAX_LINES = 200
 AUTO_HIDE_AFTER_S = 10.0
 FINISHED_TEXT = "Recording finished — transcript saved"
+# Unicode right-to-left isolate (RLI .. PDI) for plain-text renderings of RTL lines.
+RLI, PDI = "\u2067", "\u2069"
 # Within this many points of the bottom counts as "at the bottom" (keep auto-scrolling).
 SCROLL_SLACK_PT = 24.0
 
@@ -31,6 +34,16 @@ class CaptionLine:
     def label(self) -> str:
         return speaker_label(self.speaker)
 
+    @property
+    def rtl(self) -> bool:
+        """Right-to-left line (Hebrew): the window right-aligns it with RTL base direction."""
+        return is_rtl(self.language, self.text)
+
+    @property
+    def alignment(self) -> str:
+        """``"right"`` for RTL lines, else ``"left"`` (the widget-neutral justification)."""
+        return "right" if self.rtl else "left"
+
 
 def speaker_label(speaker: str) -> str:
     return (speaker or "").strip() or "?"
@@ -42,8 +55,10 @@ def clean_text(text: str) -> str:
 
 
 def format_line(line: CaptionLine, width: int = 7) -> str:
-    """Plain-text form: ``'Others  Hello team'`` (label padded to ``width``)."""
-    return f"{line.label:<{width}} {line.text}"
+    """Plain-text form: ``'Others  Hello team'`` (label padded to ``width``). An RTL text is
+    wrapped in a right-to-left isolate so it doesn't reorder the label next to it."""
+    text = f"{RLI}{line.text}{PDI}" if line.rtl else line.text
+    return f"{line.label:<{width}} {text}"
 
 
 def fmt_mmss(seconds: float) -> str:
