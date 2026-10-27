@@ -63,4 +63,7 @@ def current_preset(det: DetectionConfig) -> str | None:
 
 
 def apply_preset(det: DetectionConfig, name: str) -> None:
+    # Two plain assignments, no lock: each consumer reads only one of them (the engine reads
+    # inside_sensitivity, the room monitor outside_sensitivity), so a moment where one is
+    # already the new preset and the other still the old one is harmless.
     det.outside_sensitivity, det.inside_sensitivity = PRESETS[name]

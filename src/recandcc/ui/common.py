@@ -898,11 +898,18 @@ class Controller:
                 return
             self._shut = True
         log.info("shutting down")
-        with self._hotkey_lock:
-            hk, self._hotkey = self._hotkey, None
-        if hk is not None:
-            with contextlib.suppress(Exception):
-                hk.close()
+        # Wait for an apply_hotkey in progress (a listener it is creating would leak), then
+        # close what is registered; later applies see _shut and register nothing.
+        got = self._apply_hotkey_lock.acquire(timeout=5)
+        try:
+            with self._hotkey_lock:
+                hk, self._hotkey = self._hotkey, None
+            if hk is not None:
+                with contextlib.suppress(Exception):
+                    hk.close()
+        finally:
+            if got:
+                self._apply_hotkey_lock.release()
         self.engine.shutdown()
         try:
             self.tq.shutdown(wait=False)

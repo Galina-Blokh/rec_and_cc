@@ -215,7 +215,9 @@ class Config:
         raw = getattr(tr, "_raw_languages", None)
         if raw is not None and normalize_languages(raw) == tr.languages:
             data["transcription"]["languages"] = raw
-        for section in ("detection", "transcription"):  # TOML has no null: unset = omitted
+        # TOML has no null: unset (None) values are omitted. Only these sections have Optional
+        # fields today; add any new section with an Optional field here.
+        for section in ("detection", "transcription"):
             data[section] = {k: v for k, v in data[section].items() if v is not None}
         path.write_bytes(tomli_w.dumps(data).encode())
 
@@ -279,24 +281,48 @@ def normalize_language_models(value) -> dict[str, str]:
 def save_keys(path: Path, updates: dict[str, Any]) -> float:
     """Write only the dotted keys in ``updates`` ("transcription.languages": [...]) into
     config.toml, leaving every other key's value exactly as it is on disk (it may have been
-    edited by hand since the app loaded it). Like every save, it drops TOML comments and
-    rewrites the file in tomli_w's key order. Returns the new file's mtime. Raises
-    FileNotFoundError if there is no file yet, ValueError if it is not valid TOML or a key's
-    parent is not a table."""
+    edited by hand since the app loaded it). A value of None removes the key (TOML has no
+    null); a table left empty by that is removed too, and removing a key that isn't there
+    changes nothing. Like every save, it drops TOML comments and rewrites the file in
+    tomli_w's key order. Returns the new file's mtime. Raises FileNotFoundError if there is
+    no file yet, ValueError if it is not valid TOML or a key's parent is not a table."""
     path = path.resolve()  # a symlinked config.toml stays a symlink
     data = tomllib.loads(path.read_text(encoding="utf-8"))
+    changed = False
     for dotted, value in updates.items():
         *parents, leaf = dotted.split(".")
+        if value is None:
+            changed |= _remove_key(data, parents, leaf)
+            continue
         table = data
         for name in parents:
             table = table.setdefault(name, {})
             if not isinstance(table, dict):
                 raise ValueError(f"{name} in {path} is not a table")
-        if value is None:  # unset (TOML has no null): drop the key
-            table.pop(leaf, None)
-        else:
-            table[leaf] = value
+        table[leaf] = value
+        changed = True
+    if not changed:  # only absent keys were removed: leave the file as it is
+        return path.stat().st_mtime
     return _write_atomic(path, tomli_w.dumps(data).encode())
+
+
+def _remove_key(data: dict, parents: list[str], leaf: str) -> bool:
+    """Remove ``parents...leaf`` without creating tables; drop tables it leaves empty.
+    Returns whether anything was removed."""
+    chain = [data]
+    for name in parents:
+        table = chain[-1].get(name)
+        if not isinstance(table, dict):
+            return False  # no such table: nothing to remove
+        chain.append(table)
+    if leaf not in chain[-1]:
+        return False
+    del chain[-1][leaf]
+    for i in reversed(range(len(parents))):  # innermost first
+        if chain[i + 1]:
+            break
+        del chain[i][parents[i]]
+    return True
 
 
 def _write_atomic(path: Path, payload: bytes) -> float:
