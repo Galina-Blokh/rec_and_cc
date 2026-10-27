@@ -1,6 +1,8 @@
-"""Stories: US-01, US-02, US-03, US-04, US-05, US-06, US-07, US-08, US-16, US-17."""
+"""Stories: US-01, US-02, US-03, US-04, US-05, US-06, US-07, US-08, US-13, US-16, US-17."""
 
 import shutil
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -22,12 +24,18 @@ class FakeMonitor:
     def __init__(self):
         self.procs: list[AudioProcess] = []
         self.closed = False
+        self.threads = {"snapshot": set(), "release": [], "close": []}
 
     def snapshot(self):
+        self.threads["snapshot"].add(threading.current_thread().name)
         return list(self.procs)
+
+    def release_thread(self):
+        self.threads["release"].append(threading.current_thread().name)
 
     def close(self):
         self.closed = True
+        self.threads["close"].append(threading.current_thread().name)
 
 
 class FakeRecorder:
@@ -73,6 +81,10 @@ class FakeRecorder:
 
     def silent_tracks(self):
         return self.silent
+
+    def privacy_notice(self):
+        notice, self.privacy = getattr(self, "privacy", None), None
+        return notice
 
 
 class FakeQueue:
@@ -422,6 +434,20 @@ def test_permission_notices():
     assert h.notices[-1] == "Recording was completely silent"
 
 
+def test_folder_not_private_notice_and_recording_goes_on():
+    h = Harness(Mode.AUTO)
+    h.rec.privacy = ("Recordings may be readable by other users", "details")
+    h.eng.start_manual()
+    h.eng.tick()
+    assert h.status == RECORDING  # #37: never fail closed
+    assert h.notices == ["Recordings may be readable by other users"]
+    h.eng.stop()
+    h.eng.tick()
+    h.eng.start_manual()
+    h.eng.tick()
+    assert h.notices == ["Recordings may be readable by other users"]  # once
+
+
 def test_thread_and_shutdown():
     import time
 
@@ -437,6 +463,22 @@ def test_thread_and_shutdown():
     h.eng.shutdown()
     assert h.status == IDLE and h.rec.stops == 1 and len(h.q.submitted) == 1
     assert h.mon.closed
+
+
+def test_monitor_closed_on_the_engine_thread():
+    """Per-thread monitor resources (Windows COM) are released by the thread that polled."""
+    h = Harness(Mode.AUTO)  # fake clock: no recording starts, only polling
+    h.cfg.detection.poll_interval_s = 0.01
+    h.eng.start()
+    deadline = time.monotonic() + 2
+    while not h.mon.threads["snapshot"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    h.eng.shutdown()
+    assert h.mon.threads["snapshot"] == {"engine"}
+    assert h.mon.threads["release"] == ["engine"]
+    # The full close() runs on shutdown()'s caller, outside the join budget.
+    assert h.mon.threads["close"] == [threading.current_thread().name]
+    h.eng.shutdown()  # a second shutdown is harmless
 
 
 # --- a call starting during a media recording -------------------------------------------

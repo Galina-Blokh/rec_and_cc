@@ -302,13 +302,21 @@ class Engine:
         self._wake.set()
 
     def _run(self) -> None:
-        while not self._stop_evt.is_set():
+        try:
+            while not self._stop_evt.is_set():
+                try:
+                    self.tick()
+                except Exception:
+                    log.exception("engine tick failed")
+                self._wake.wait(max(0.05, float(self.det.poll_interval_s)))
+                self._wake.clear()
+        finally:
+            # Per-thread resources (Windows COM) must be released by the thread that polled.
+            # Only that, so shutdown()'s join budget isn't spent on the full close().
             try:
-                self.tick()
+                self.monitor.release_thread()
             except Exception:
-                log.exception("engine tick failed")
-            self._wake.wait(max(0.05, float(self.det.poll_interval_s)))
-            self._wake.clear()
+                log.exception("monitor thread release failed")
 
     def _state_locked(self) -> EngineState:
         mode = Mode(self.det.mode)
@@ -544,13 +552,16 @@ class Engine:
                 log.exception("on_prompt callback failed")
         self._notify()
 
-    def _notice(self, title: str, message: str) -> None:
+    def _notice(self, title: str, message: str) -> bool:
+        """Log and show a notice; False if the UI callback failed."""
         log.warning("%s: %s", title, message)
         if self.on_notice:
             try:
                 self.on_notice(title, message)
             except Exception:
                 log.exception("on_notice callback failed")
+                return False
+        return True
 
     def _preflight(self) -> None:
         if self.permission_status is None:
@@ -570,6 +581,19 @@ class Engine:
                 "Your microphone won't be recorded",
                 "RecAndCC has no microphone access — grant it in the Permissions menu.",
             )
+
+    def _check_private_folder(self) -> None:
+        # Recording goes on (#37) but the user should know the folder isn't private.
+        take = getattr(self.recorder, "privacy_notice", None)
+        try:
+            notice = take() if take is not None else None
+        except Exception:
+            log.debug("privacy_notice failed", exc_info=True)
+            return
+        if notice and self._notice(*notice):  # a failed UI callback retries next session
+            done = getattr(self.recorder, "privacy_noticed", None)
+            if done is not None:
+                done()
 
     def _check_silent_tracks(self) -> None:
         silent = getattr(self.recorder, "silent_tracks", None)
@@ -618,6 +642,7 @@ class Engine:
             if self._rec is not None:
                 self._rec.session = session
                 self._rec.started = self.clock()
+        self._check_private_folder()
         if self.on_session_start:
             try:
                 self.on_session_start(session)
