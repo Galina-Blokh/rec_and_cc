@@ -22,7 +22,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import shutil
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -627,9 +626,16 @@ class Engine:
             self._session_end(None, False)
             return
         self._session_end(session, False)
-        if session is not None:
-            shutil.rmtree(session.directory, ignore_errors=True)
+        if session is None:
+            return
+        if session.discard():
             log.info("discarded recording %s", session.directory)
+        else:
+            self._notice(
+                "Recording not fully deleted",
+                f"Some files in {session.directory} are in use; "
+                "they will be deleted at the next start",
+            )
 
     def _do_stop(self) -> None:
         with self._lock:

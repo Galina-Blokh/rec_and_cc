@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
+import shutil
 import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -12,6 +15,8 @@ from pathlib import Path
 # All captured audio is normalised to this format before it leaves a capture backend:
 # float32, mono, 16 kHz (what Whisper expects).
 SAMPLE_RATE = 16_000
+
+log = logging.getLogger(__name__)
 
 # Guards SessionInfo.metrics updates against a concurrent save (several pipeline threads).
 _METRICS_LOCK = threading.RLock()
@@ -70,6 +75,8 @@ class SessionInfo:
     # Pipeline measurements, by stage ("recording", "live", "transcription", ...): plain
     # JSON values. Absent in session.json files written before it existed.
     metrics: dict[str, dict] = field(default_factory=dict)
+    # The user chose not to keep it: never transcribe; delete whatever is left (see discard).
+    discarded: bool = False
 
     FILENAME = "session.json"
 
@@ -102,4 +109,30 @@ class SessionInfo:
             tracks={Track(k): v for k, v in data.get("tracks", {}).items()},
             transcribed=data.get("transcribed", False),
             metrics=data.get("metrics") or {},
+            discarded=data.get("discarded", False),
         )
+
+    def discard(self) -> bool:
+        """Delete this session's folder for good; True once it is gone.
+
+        session.json is marked ``discarded`` first and deleted last, so if the deletion fails
+        (e.g. Windows still locks a WAV) the leftover is never transcribed and is deleted
+        again at the next start."""
+        self.discarded = True
+        # Folder already gone, or unwritable: the deletion below decides.
+        with contextlib.suppress(OSError):
+            self.save()
+        try:
+            for p in self.directory.iterdir():
+                if p.name == self.FILENAME:
+                    continue
+                if p.is_dir() and not p.is_symlink():
+                    shutil.rmtree(p)
+                else:
+                    p.unlink()
+            shutil.rmtree(self.directory)
+        except OSError as e:
+            if self.directory.exists():
+                log.warning("could not delete discarded session %s: %s", self.directory, e)
+                return False
+        return True

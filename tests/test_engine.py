@@ -600,3 +600,66 @@ def test_failing_session_callbacks_do_not_break_engine():
     h.eng.stop()
     h.eng.tick()
     assert h.status == IDLE and len(h.q.submitted) == 1
+
+
+class LockedWavRecorder(DiscardingRecorder):
+    """Sessions like the real Recorder's: finished, with a WAV and session.json on disk."""
+
+    def stop(self):
+        from datetime import datetime
+
+        s = super().stop()
+        s.ended_at = datetime.now()
+        s.tracks = {Track.OTHERS: "others.wav"}
+        (s.directory / "others.wav").write_bytes(b"RIFF")
+        s.save()
+        return s
+
+
+def _lock_wavs(monkeypatch):
+    """Make WAV deletion fail the way Windows does while a file is still open."""
+    real_unlink = Path.unlink
+
+    def unlink(self, *a, **kw):
+        if self.suffix == ".wav":
+            raise PermissionError(13, "file in use", str(self))
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+
+def _discard_one(tmp_path):
+    h = Harness(Mode.ASK)
+    h.rec = h.eng.recorder = LockedWavRecorder(tmp_path / "2026-10-27")
+    h.mon.procs = [CHROME]
+    h.run(4)
+    h.eng.respond("ignore")
+    h.eng.tick()
+    return h
+
+
+def test_failed_discard_is_marked_and_never_transcribed(tmp_path, monkeypatch):
+    from recandcc.ui.common import untranscribed_sessions
+
+    _lock_wavs(monkeypatch)
+    h = _discard_one(tmp_path)
+    d = h.rec.dirs[0]
+    assert (d / "others.wav").exists() and h.q.submitted == []
+    assert SessionInfo.load(d).discarded
+    assert h.notices == ["Recording not fully deleted"]
+    assert untranscribed_sessions(tmp_path) == []  # startup recovery skips it
+
+
+def test_startup_retry_deletes_leftover_discarded_session(tmp_path, monkeypatch):
+    from recandcc.ui.common import purge_discarded_sessions, untranscribed_sessions
+
+    with monkeypatch.context() as m:
+        _lock_wavs(m)
+        h = _discard_one(tmp_path)
+        assert purge_discarded_sessions(tmp_path) == 1  # still locked: left for next time
+    kept = LockedWavRecorder(tmp_path / "2026-10-27")
+    kept.stops = 5
+    kept.stop()  # an ordinary unfinished session must survive the purge
+    assert purge_discarded_sessions(tmp_path) == 0
+    assert not h.rec.dirs[0].exists()
+    assert [s.id for s in untranscribed_sessions(tmp_path)] == ["s6"]

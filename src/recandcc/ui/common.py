@@ -126,9 +126,23 @@ def untranscribed_sessions(output_dir: Path) -> list[SessionInfo]:
             s = SessionInfo.load(f.parent)
         except Exception:
             continue
-        if s.ended_at is not None and not s.transcribed and s.tracks:
+        if s.ended_at is not None and not s.transcribed and s.tracks and not s.discarded:
             out.append(s)
     return out
+
+
+def purge_discarded_sessions(output_dir: Path) -> int:
+    """Retry deleting sessions the user discarded but whose files were in use; returns how
+    many are still left."""
+    left = 0
+    for f in sorted(Path(output_dir).glob(f"*/*/{SessionInfo.FILENAME}")):
+        try:
+            s = SessionInfo.load(f.parent)
+        except Exception:
+            continue
+        if s.discarded and not s.discard():
+            left += 1
+    return left
 
 
 def permissions_module():
@@ -401,6 +415,10 @@ class Controller:
             log.exception("audio retention failed")
 
     def _resubmit_unfinished(self) -> None:
+        try:
+            purge_discarded_sessions(self.cfg.output_dir)
+        except Exception:
+            log.exception("deleting discarded sessions failed")
         try:
             for s in untranscribed_sessions(self.cfg.output_dir):
                 log.info("re-queueing untranscribed session %s", s.directory)
