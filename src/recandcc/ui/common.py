@@ -236,6 +236,22 @@ def as_str(text: str) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def chooser_script(labels: list[str], prompt: str, button: str) -> str:
+    """AppleScript for a list chooser; every text is quoted by ``as_str``."""
+    items = ", ".join(map(as_str, labels))
+    return (
+        f'choose from list {{{items}}} with title "RecAndCC" '
+        f"with prompt {as_str(prompt)} OK button name {as_str(button)}"
+    )
+
+
+def name_dialog_script(label: str) -> str:
+    return (
+        f'display dialog {as_str(f"Name for {label}:")} default answer "" '
+        'with title "RecAndCC" buttons {"Cancel", "Save"} default button "Save"'
+    )
+
+
 # ----------------------------------------------------------------------- controller
 class Controller:
     def __init__(

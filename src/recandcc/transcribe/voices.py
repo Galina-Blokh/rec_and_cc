@@ -17,6 +17,7 @@ if their cosine similarity is >= ``MATCH_SIMILARITY`` and beats the second-best 
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import hashlib
 import json
@@ -92,12 +93,52 @@ LOCK = threading.RLock()
 # Held by name_speaker for its whole run, before LOCK; "forget all" never takes it, so a slow
 # transcript folder (cloud sync) can't stall a forget or the diarizer's voice writes.
 NAMING_LOCK = threading.Lock()
-_forgets = 0
+GENERATION_FILE = "generation"  # in the voices folder: shared with the CLI and other processes
+LOCK_FILE = "lock"
 
 
-def forget_generation() -> int:
-    """Changes every time all voices are deleted; see ``write_session_voices(since=)``."""
-    return _forgets
+def forget_generation(voices_dir: Path | None = None) -> int:
+    """Changes every time all voices are deleted, by this process or another (the CLI);
+    see ``write_session_voices(since=)``."""
+    try:
+        return int(json.loads((_dir(voices_dir) / GENERATION_FILE).read_text("utf-8"))["n"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0
+
+
+@contextlib.contextmanager
+def _file_lock(voices_dir: Path | None = None):
+    """Exclusive lock on the voices folder across processes (and threads, with LOCK).
+    Never nested: a second handle on the same file would block this very thread."""
+    d = _dir(voices_dir)
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with LOCK, open(d / LOCK_FILE, "a+b") as f:
+        if os.name == "nt":
+            import msvcrt
+
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                import msvcrt
+
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            # POSIX: closing the file releases the flock
+
+
+def profiles_if_current(since: int | None, voices_dir: Path | None = None) -> list[Profile]:
+    """The profiles, or none when all voices were deleted since generation `since`."""
+    with _file_lock(voices_dir):
+        if since is not None and since != forget_generation(voices_dir):
+            return []
+        return load_profiles(voices_dir)
 
 
 def _locked(fn):
@@ -231,18 +272,24 @@ def delete_profile(name: str, voices_dir: Path | None = None) -> bool:
     return existed
 
 
-@_locked
 def delete_all_profiles(voices_dir: Path | None = None) -> int:
     """Every profile, every session's speaker voices and any temp file left by a crash
-    (they hold voice data too); returns the number of profiles."""
+    (they hold voice data too); returns the number of profiles. Keeps deleting after a
+    failure and raises OSError at the end if something is left."""
     d = _dir(voices_dir)
-    profiles = list(d.glob("*.json")) if d.is_dir() else []
-    stale = [*d.glob(".*.tmp"), *d.glob("sessions/.*.tmp")] if d.is_dir() else []
-    global _forgets
-    _forgets += 1
-    for f in [*profiles, *_session_files(voices_dir), *stale]:
-        f.unlink(missing_ok=True)
-    return len(profiles)
+    with _file_lock(voices_dir):
+        _write_private(d / GENERATION_FILE, {"n": forget_generation(voices_dir) + 1})
+        profiles = list(d.glob("*.json"))
+        stale = [*d.glob(".*.tmp"), *d.glob("sessions/.*.tmp")]
+        left = 0
+        for f in [*profiles, *_session_files(voices_dir), *stale]:
+            try:
+                _retry(lambda f=f: f.unlink(missing_ok=True))
+            except OSError:
+                left += 1
+        if left:
+            raise OSError(f"{left} voice file(s) could not be deleted")
+        return len(profiles)
 
 
 # --------------------------------------------------------------------------- matching
@@ -313,7 +360,6 @@ def prune_session_voices(voices_dir: Path | None = None) -> int:
     return n
 
 
-@_locked
 def write_session_voices(
     session: SessionInfo,
     speakers: Mapping[str, np.ndarray],
@@ -325,8 +371,21 @@ def write_session_voices(
     added to (so naming it again doesn't count the same session twice). `since`: the
     ``forget_generation()`` when the work began; if all voices were deleted since, nothing
     is written."""
-    if since is not None and since != _forgets:
+    if since is None:
+        with LOCK:
+            _store_session_voices(session, speakers, folded, voices_dir)
         return
+    with _file_lock(voices_dir):  # check and write together: a forget can't land between
+        if since == forget_generation(voices_dir):
+            _store_session_voices(session, speakers, folded, voices_dir)
+
+
+def _store_session_voices(
+    session: SessionInfo,
+    speakers: Mapping[str, np.ndarray],
+    folded: Mapping[str, str] | None,
+    voices_dir: Path | None,
+) -> None:
     folded = folded or {}
     entries = {
         label: {"centroid": _vector(c), "profile": folded.get(label)}
@@ -428,6 +487,8 @@ def _name_speaker(directory: Path, label: str, name: str, voices_dir: Path | Non
 
 __all__ = [
     "LOCK",
+    "forget_generation",
+    "profiles_if_current",
     "MATCH_MARGIN",
     "NAMING_LOCK",
     "MATCH_SIMILARITY",

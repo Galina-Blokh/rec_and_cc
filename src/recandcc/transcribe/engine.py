@@ -515,9 +515,8 @@ class Transcriber:
         names: dict[int, str] = {}
         if centroids:
             try:
-                with voices.LOCK:  # check and load together: a forget can't land between
-                    if gen is None or gen == voices.forget_generation():
-                        names = voices.match_profiles(centroids, voices.load_profiles())
+                known = voices.profiles_if_current(gen)  # none after a forget since `gen`
+                names = voices.match_profiles(centroids, known)
             except Exception:  # noqa: BLE001 - names are optional; numbers still work
                 log.exception("session %s: could not match voice profiles", session.id)
         out, labels = label_speakers(segments, turns or [], names=names)
@@ -551,10 +550,16 @@ class Transcriber:
         """Done-callback of a slow diarization: rewrite the transcript with speaker labels."""
         try:
             turns = None if future.cancelled() else future.result()
-            labelled = self._labelled(session, segments, turns, gen)
-            if labelled != segments and Path(session.directory).exists():
-                write_outputs(session, labelled, duration, self.cfg.model)
-                log.info("session %s: transcript rewritten with speaker labels", session.id)
+            with voices.NAMING_LOCK:  # voices and transcript change together, not mid-naming
+                if any(v["profile"] for v in voices.read_session_voices(session.id).values()):
+                    # the user named a speaker of this session already: keep their names
+                    log.info("session %s: speakers already named; labels kept", session.id)
+                    labelled = segments
+                else:
+                    labelled = self._labelled(session, segments, turns, gen)
+                if labelled != segments and Path(session.directory).exists():
+                    write_outputs(session, labelled, duration, self.cfg.model)
+                    log.info("session %s: transcript rewritten with speaker labels", session.id)
             if getattr(future, "timing", None) and Path(session.directory).exists():
                 self._diarization_metrics(session, future)
                 session.save()
