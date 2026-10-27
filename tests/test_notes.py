@@ -287,8 +287,8 @@ def test_shfileop_struct_matches_shellapi():
     op = notes.shfileop_struct()
     wide = ctypes.sizeof(ctypes.c_void_p) == 8
     assert ctypes.sizeof(op) == (56 if wide else 30)
-    assert op.fFlags.offset == (24 if wide else 16)  # pyright: ignore[reportAttributeAccessIssue]
-    assert op.fAnyOperationsAborted.offset == (28 if wide else 18)  # pyright: ignore[reportAttributeAccessIssue]
+    assert op.fFlags.offset == (32 if wide else 16)  # pyright: ignore[reportAttributeAccessIssue]
+    assert op.fAnyOperationsAborted.offset == (36 if wide else 18)  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def test_broken_session_json_is_skipped_and_odd_titles_ignored(tmp_path):
