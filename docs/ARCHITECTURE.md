@@ -267,6 +267,9 @@ by session id, with the session folder: pruned once it is deleted) live in the o
 to a cloud drive. A transcript written without labels or with the option off deletes its
 session's centroids. `name-speaker` marks the session as folded into the profile before it
 changes the profile, so a failure partway can't count one session twice. All of it runs on the diarizer / writer threads, after the audio threads.
+`intro_hints.py` only reads a transcript: `recandcc speakers` suggests a name for a
+`Speaker N` who introduces themself in their first 2 minutes ("I'm Anna", "Меня зовут Анна",
+"קוראים לי דנה"); strict patterns, nothing stored, renamed or logged.
 
 ### Mixed English/Russian
 Whisper normally detects one language per 30 s window. Instead:
