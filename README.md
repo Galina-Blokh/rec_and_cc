@@ -13,7 +13,8 @@ account, nothing uploaded.
   `speaker_names` and name a speaker once (`recandcc name-speaker`): later sessions
   recognize that voice and write `Anna` instead of `Speaker 2`.
 - 🌍 **English and Russian** are detected automatically, even when the language switches
-  mid-meeting.
+  mid-meeting. **Hebrew** can be added (`languages = ["en", "ru", "he"]`): captions and
+  transcripts show it right to left. Hebrew accuracy with the stock model is not yet tuned.
 - 🧠 Local Whisper (`large-v3-turbo`) on the **Apple-silicon GPU** (MLX), with CPU threads
   working alongside: a 1-hour meeting transcribes in about 2–3 minutes. Windows uses the CPU.
   and the final transcript is ready a moment after the recording stops.
@@ -194,7 +195,7 @@ record_mic = "calls"         # always | calls | never
 
 [transcription]
 model = "large-v3-turbo"     # tiny | base | small | medium | large-v3 | large-v3-turbo
-languages = ["en", "ru"]     # auto-detect among these ([] = any language)
+languages = ["en", "ru"]     # auto-detect among these, e.g. ["en", "ru", "he"] ([] = any)
 keep_audio = true            # false = delete WAVs after transcription (~115 MB per track-hour)
 live = true                  # transcribe while recording (false = after the session stops)
 ```
@@ -266,7 +267,8 @@ recordings must stay on this computer only.
 
 ### Retention
 
-- `keep_audio = false` deletes a session's WAVs as soon as it is transcribed.
+- `keep_audio = false` deletes a session's WAVs as soon as it is transcribed (any left behind
+  by a quit are deleted at the next startup).
 - `audio_retention_days = N` (menu → **Delete audio after**: Never / 1 / 7 / 30 / 90 days)
   deletes the audio N days after transcription; `0` keeps it forever.
 - Transcripts are never deleted automatically. Delete a session by deleting its folder.

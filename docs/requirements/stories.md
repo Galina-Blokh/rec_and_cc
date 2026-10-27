@@ -23,10 +23,11 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-12 | Speaker labels for the other side | ✅ |
 | US-13 | Readable transcripts in private folders | 🟡 owner-only not enforced on Windows (#37) |
 | US-14 | Works offline, nothing leaves the device | 🟡 no warning for synced folders yet (#41) |
-| US-15 | Delete old audio automatically | 🟡 `keep_audio = false` can miss a crash (#38) |
+| US-15 | Delete old audio automatically | ✅ |
 | US-16 | Permissions set up from the app | ✅ |
 | US-17 | Always on, visible state | ✅ |
 | US-18 | Runs on Windows | 🟡 untested on hardware (#5) |
+| US-19 | Hebrew transcripts and right-to-left captions | 🟡 stock model, no Hebrew test set (#6) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
 
 ---
@@ -151,9 +152,9 @@ while I decide.*
 ### US-15 Delete old audio automatically
 - **Given** `audio_retention_days = N` (menu: Never / 1 / 7 / 30 / 90), **then** WAVs of
   transcribed sessions older than N days are deleted; transcripts are always kept.
-- **Given** `keep_audio = false`, **then** WAVs are deleted right after transcription.
-- **Not yet:** when diarization is slow, deletion waits for it in memory; if the app quits
-  or crashes first, the WAVs stay (until `audio_retention_days` removes them, if set) (#38).
+- **Given** `keep_audio = false`, **then** WAVs are deleted right after transcription. WAVs
+  left behind (the app quit before a slow diarization finished, or a delete failed) are
+  deleted at the next startup; audio of sessions not yet transcribed is never deleted.
 
 ### US-16 Permissions set up from the app
 - **Given** first run on macOS, **then** a setup dialog requests Microphone and System audio.
@@ -173,6 +174,23 @@ while I decide.*
 - **Then** WASAPI loopback capture, pycaw detection, a tray icon and registry autostart
   implement the same interfaces; CI runs the fast suite on Windows.
 - **Not yet:** a real-hardware test pass, per-app capture, installer (#5).
+
+### US-19 Hebrew transcripts and right-to-left captions
+- **Given** `languages = ["en", "ru", "he"]`, **then** each speech region gets one of the
+  three languages (never Arabic or Yiddish), and Hebrew regions are transcribed in Hebrew.
+- **Given** a Hebrew line, **when** it is shown in the live captions, **then** it is
+  right-aligned and reads right to left, with the speaker label on the right; English words
+  inside it stay readable.
+- **Given** a Hebrew segment, **then** `transcript.md` wraps its text in a right-to-left
+  isolate and `transcript.srt` starts its line with RLM, so editors and players render mixed
+  Hebrew/English correctly; en/ru lines and `transcript.json` are unchanged.
+- **Given** `"iw"` or an unknown code in `languages`, **then** it is mapped to `he` or
+  dropped with a log warning.
+- **Not yet:** a Hebrew-tuned model (ivrit.ai) and per-language model routing, language
+  checkboxes in the menu, a Hebrew evaluation set and WER (#6).
+- **Not yet:** the Windows (Tk) captions only right-justify Hebrew lines; Tk does no bidi
+  reordering, so the label stays left of the Hebrew text and the glyph order is unverified
+  on real hardware (#6).
 
 ### US-21 Speaker names remembered across sessions
 *As the owner, I want to name a speaker once and see that name in later transcripts, so that

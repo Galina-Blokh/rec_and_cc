@@ -1,6 +1,6 @@
 """Unit tests for recandcc.transcribe (no Whisper model needed).
 
-Stories: US-08, US-09, US-10, US-13.
+Stories: US-08, US-09, US-10, US-13, US-19.
 """
 
 from __future__ import annotations
@@ -13,18 +13,22 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from recandcc.config import TranscriptionConfig
-from recandcc.models import SAMPLE_RATE, Segment, SessionInfo, Track, TriggerKind
+from recandcc.config import TranscriptionConfig, load_config, normalize_languages
+from recandcc.models import SAMPLE_RATE, Segment, SessionInfo, Track, TriggerKind, is_rtl
 from recandcc.transcribe import Transcriber, TranscriptionQueue, auto_parallelism
 from recandcc.transcribe.chunking import find_speech, load_track, merge_labelled, merge_regions
 from recandcc.transcribe.merge import (
     dedupe_echo,
+    language_confidence,
     merge_tracks,
     pick_language,
     similarity,
     smooth_languages,
 )
 from recandcc.transcribe.output import (
+    PDI,
+    RLI,
+    RLM,
     fmt_srt_time,
     format_markdown,
     format_srt,
@@ -159,6 +163,73 @@ def test_format_srt():
     assert fmt_srt_time(0) == "00:00:00,000"
 
 
+# -- Hebrew / right to left ------------------------------------------------------------------
+
+
+def test_normalize_languages_accepts_hebrew_and_cleans_up():
+    assert normalize_languages(["en", "RU", " he "]) == ["en", "ru", "he"]
+    assert normalize_languages(["iw", "Hebrew", "he"]) == ["he"]  # aliases, no duplicates
+    assert normalize_languages("he") == ["he"]
+    assert normalize_languages(["en", "xx"]) == ["en"]  # unknown code dropped
+    assert normalize_languages(["xx"]) == ["en", "ru"]  # nothing valid -> defaults
+    assert normalize_languages([]) == []  # [] still means any language
+
+
+def test_load_config_validates_languages(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[transcription]\nlanguages = ["en", "ru", "iw"]\n', encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.transcription.languages == ["en", "ru", "he"]
+    cfg.live_captions = False  # e.g. a menu toggle saves the config
+    cfg.save(path)
+    assert load_config(path).transcription.languages == ["en", "ru", "he"]
+    assert '"iw"' in path.read_text(encoding="utf-8")  # the user's spelling is kept
+    cfg.transcription.languages = ["he"]  # an actual change is saved as is
+    cfg.save(path)
+    assert '"iw"' not in path.read_text(encoding="utf-8")
+    assert load_config(path).transcription.languages == ["he"]
+
+
+def test_languages_that_are_not_a_list_fall_back_to_defaults(tmp_path):
+    assert normalize_languages(5) == ["en", "ru"]
+    assert normalize_languages(None) == []
+    path = tmp_path / "config.toml"
+    path.write_text("[transcription]\nlanguages = 5\n", encoding="utf-8")
+    assert load_config(path).transcription.languages == ["en", "ru"]
+
+
+def test_language_id_restricted_to_three_languages():
+    # Hebrew is often confused with Arabic / Yiddish; only the configured list counts.
+    probs = [("ar", 0.5), ("yi", 0.1), ("he", 0.3), ("en", 0.05), ("ru", 0.02)]
+    lang, conf = language_confidence(probs, ["en", "ru", "he"])
+    assert lang == "he" and conf == pytest.approx(0.3 / 0.37)
+
+
+def test_is_rtl_by_language_or_text():
+    assert is_rtl("he") and not is_rtl("en", "שלום")  # the language wins when known
+    assert is_rtl("", "  «שלום» Zoom") and not is_rtl("", "Zoom שלום") and not is_rtl("", "")
+
+
+def test_markdown_isolates_hebrew_only_and_splits_direction(tmp_path):
+    s = make_session(tmp_path)
+    segs = [
+        seg(1, 2, "Hello.", "Me"),
+        seg(2.5, 4, "שלום, אני ב-Zoom.", "Me", "he"),  # same speaker, short gap: new paragraph
+        seg(4.5, 5, "Привет.", "Me", "ru"),
+    ]
+    md = format_markdown(s, segs, 10.0)
+    assert "**[00:00:01] Me:** Hello.\n" in md
+    assert f"**[00:00:02] Me:** {RLI}שלום, אני ב-Zoom.{PDI}\n" in md
+    assert "**[00:00:04] Me:** Привет.\n" in md and "en, he, ru" in md
+    assert md.count(RLI) == 1 and RLM not in md
+
+
+def test_srt_marks_hebrew_lines_with_rlm():
+    srt = format_srt([seg(0, 1, "Hi"), seg(1, 2, "שלום Zoom.", "Me", "he")])
+    assert "\nOthers: Hi\n" in srt
+    assert f"\n{RLM}Me: שלום Zoom.\n" in srt and srt.count(RLM) == 1
+
+
 # -- orchestration with a fake model ----------------------------------------------------------
 
 
@@ -246,6 +317,45 @@ def test_transcribe_session_main_model_detection(tmp_path, monkeypatch):
     # no LID model: regions merged by gap only -> (1-8) and (20-22) per track, detect per chunk
     assert model.detects == 4 and len(model.calls) == 4
     assert {c["language"] for c in model.calls} <= {"en", "ru"}
+
+
+class HebrewFakeModel(FakeModel):
+    """Quiet audio "en", loud audio "he"; ranks "ar" first (a typical Hebrew confusion)."""
+
+    def detect_language(self, audio):
+        with self.lock:
+            self.detects += 1
+        loud = float(np.abs(audio).mean()) > 0.1
+        second = ("he", 0.4) if loud else ("en", 0.4)
+        return "ar", 0.55, [("ar", 0.55), second, ("ru", 0.05)]
+
+    def transcribe(self, audio, **kw):
+        with self.lock:
+            self.calls.append(kw)
+        text = "שלום" if kw["language"] == "he" else "word"
+        dur = len(audio) / SAMPLE_RATE
+        return iter([type("S", (), {"start": 0.0, "end": dur, "text": f" {text} "})()]), None
+
+
+def test_transcribe_session_with_hebrew(tmp_path, monkeypatch):
+    import recandcc.transcribe.engine as eng
+
+    regions = _write_tracks(tmp_path)
+    monkeypatch.setattr(eng, "find_speech", lambda a: regions)
+    s = make_session(tmp_path, {Track.ME: "me.wav", Track.OTHERS: "others.wav"})
+    cfg = TranscriptionConfig(model="fake", workers=2, languages=["en", "ru", "he"])
+    t = Transcriber(cfg)
+    model, lid = HebrewFakeModel(), HebrewFakeModel()
+    monkeypatch.setattr(t, "_ensure_loaded", lambda: _install(t, model, lid))
+    segs = t.transcribe_session(s)
+    t.close()
+    assert [(x.start, x.language) for x in segs] == [(1.0, "en"), (5.0, "he"), (20.0, "en")]
+    assert {c["language"] for c in model.calls} == {"en", "he"}
+    data = json.loads((tmp_path / "transcript.json").read_text(encoding="utf-8"))
+    assert data["languages"] == ["en", "he"] and data["segments"][1]["text"] == "שלום"
+    md = (tmp_path / "transcript.md").read_text(encoding="utf-8")
+    assert f"**[00:00:05] Others:** {RLI}שלום{PDI}" in md
+    assert f"{RLM}Others: שלום" in (tmp_path / "transcript.srt").read_text(encoding="utf-8")
 
 
 def test_smooth_languages_short_uncertain_inherits():
