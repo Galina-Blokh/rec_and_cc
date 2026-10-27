@@ -250,7 +250,10 @@ With `[summary] enabled = true` (Apple silicon), each finished transcript also g
 Hebrew). A small local model (Qwen2.5 3B, 4-bit, ~1.7 GB) does it in the background after
 the transcript is final, and waits while you are recording, so captions are never slowed; it is downloaded once, pinned to an exact version, and nothing is
 sent anywhere. It is a draft: check names and dates against the transcript. On Windows, or
-offline before the model is downloaded, the summary is skipped with a notice.
+offline before the model is downloaded, the summary is skipped with a notice. It waits for
+the speaker labels (a slow diarization delays it), a summary cut short by quitting is redone
+at the next start (a `.summary-pending` marker in the session folder), and after
+`recandcc name-speaker` the app redoes an existing `summary.md` with the new name once idle.
 
 ## Command line
 

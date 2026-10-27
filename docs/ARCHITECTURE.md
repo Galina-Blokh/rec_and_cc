@@ -76,7 +76,7 @@ The app is built around one rule: **real-time audio threads never block**. Every
 | UI main thread | rumps/AppKit; drains an event queue every 0.5 s | event queue |
 | UI workers | Permission checks, recent-transcript scan, `osascript` dialogs, transcript search (syncs the index, posts a `search` event), meeting notes scan / rename / delete (post a `notes` event; a delete also drops the session from the index) | event queue |
 | search indexer (per finished transcript) | `TranscriptIndex.index_session` after `on_done`; errors logged | own SQLite connection |
-| summary (1, only with `summary.enabled`) | Loads the summary LLM, writes `summary.md`, frees the model (and MLX's buffer cache); one session at a time. It never competes with a recording: while the engine is not idle (recording or asking) it waits before a session and pauses between model calls (chunk notes, summary, action items). Each call holds `gpu.MLX_LOCK`, which every MLX Whisper call also holds, for its prompt prefill (≤ 8,000 characters, ~1–2 s, in 512-token steps) and then per generated token, so the GPU is never driven from two threads at once and a post-session Whisper pass waits at most one prefill | `SummaryQueue` |
+| summary (1, only with `summary.enabled`) | Loads the summary LLM, writes `summary.md`, frees the model (and MLX's buffer cache); one session at a time, queued only once the transcript has its final speaker labels (`Transcriber.after_labels`: after a slow diarization's rewrite). A `.summary-pending` marker in the session folder lives from queueing until the summary is written or skipped; startup and idle UI refreshes queue marked sessions (not in flight, not waiting for labels; a session already queued is not queued twice). It never competes with a recording: while the engine is not idle (recording or asking) it waits before a session and pauses between model calls (chunk notes, summary, action items). Each call holds `gpu.MLX_LOCK`, which every MLX Whisper call also holds, for its prompt prefill (≤ 8,000 characters, ~1–2 s, in 512-token steps) and then per generated token, so the GPU is never driven from two threads at once and a post-session Whisper pass waits at most one prefill | `SummaryQueue` |
 
 - The engine holds one lock and never makes a blocking call while holding it. UI actions
   (`start_manual`, `stop`, `respond`) are queued as commands, so only the engine thread
@@ -209,8 +209,11 @@ The system-audio track mixes everyone else on the call. Only the **final** trans
 it; live captions keep `Others`, and `Me` is never touched (`diarize.py`), except in a
 room session, where the `Me` track is the one split:
 
-1. Silero VAD (the one used for chunking) finds speech in `others.wav`; regions are cut into
-   ~2 s windows.
+1. Silero VAD (the one used for chunking) finds speech in `others.wav`. With the opt-in
+   `diarize_overlap` ([ADR 0014](adr/0014-overlap-aware-segmentation.md)), pyannote
+   segmentation-3.0 (6 MB ONNX, ONNX Runtime, 10 s chunks every 5 s over the speech) finds
+   speaker-change points, where the regions are cut, and overlapped speech. Then ~2 s
+   windows; without the segmentation model, fixed ~2 s windows of the regions.
 2. One 192-d speaker embedding per window with **3D-Speaker CAM++** (zh+en "advanced",
    28 MB ONNX, Apache-2.0) through **sherpa-onnx**, on `min(6, cores // 2)` threads (ONNX
    Runtime releases the GIL).
@@ -219,10 +222,12 @@ room session, where the `Me` track is the one split:
    the k ≤ 20 with the best cluster silhouette (read off the linkage matrix as it merges),
    one speaker if no split scores ≥ 0.3, within the optional `min_speakers` / `max_speakers`
    hints; with fewer than 10 windows the fixed threshold 0.5 decides. Clusters with < 2 s of
-   speech and shorter windows join the nearest speaker. Clustering 3000 windows (the
+   speech, shorter windows and overlapped windows join the nearest speaker (for an overlap:
+   the dominant voice); overlapped windows are also left out of the voice centroids. Clustering 3000 windows (the
    subsample cap; an hour is ~1800) takes ~0.15 s.
 4. Each `Others` segment takes the speaker it overlaps most (nearest one if none), numbered by
-   first appearance. If only one speaker is found the label stays `Others`.
+   first appearance. If only one speaker is found the label stays `Others`. A segment with
+   ≥ 0.5 s of overlapped speech gets `"overlap": true` in `transcript.json` (only there).
 
 Why not sherpa-onnx's own pyannote pipeline (segmentation-3.0 + embeddings per 10 s window):
 on the same synthetic en/ru voices it took **20 s for 13 min** of audio and got 141/170
@@ -231,12 +236,12 @@ without a pause and overlapping speech, which this window approach resolves only
 pyannote's own HF models need an account/token, so they are out.
 
 Timing (M5 Max, 6 threads): 2 min of audio 0.5 s, 10 min 1.5 s, 60 min 8.5 s (about half
-of it VAD). It runs on the CPU and overlaps other work: the batch pass starts it together
+of it VAD); segmentation adds ~4 s per hour. It runs on the CPU and overlaps other work: the batch pass starts it together
 with Whisper; a live session starts it at `flush()`, while the tail phrase is transcribed.
 `write_final` waits up to `DIARIZE_WAIT_S` (5 s) for it; after that, the transcript is
 written with `Others` straight away and rewritten with labels when diarization ends (WAVs
 are deleted only after that, if `keep_audio = false`). No WAV (deleted) or `diarize = false`
-→ skipped. The model is downloaded once (sha256-checked) to
+→ skipped. The models are downloaded once (sha256-checked) to
 `platformdirs.user_cache_dir("RecAndCC")/models`; if that fails (offline) diarization is
 skipped, retried at most every 10 minutes, and transcripts keep `Others`. Once it is on
 disk, nothing touches the network (tested with all network access blocked).

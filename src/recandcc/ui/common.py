@@ -37,7 +37,7 @@ from ..config import (
     Config,
     load_config,
     normalize_languages,
-    save_languages,
+    save_keys,
 )
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind, discard_session
@@ -238,6 +238,8 @@ def as_str(text: str) -> str:
 
 # ----------------------------------------------------------------------- controller
 class Controller:
+    _summaries_lock = threading.Lock()  # creating the SummaryQueue (class-wide: test fakes)
+
     def __init__(
         self,
         cfg: Config,
@@ -401,19 +403,54 @@ class Controller:
                 target=self._index_session, args=(session.directory,), daemon=True, name="search"
             ).start()
             if self.cfg.summary.enabled:
-                self._summarize(session.directory)
+                self._summarize_when_labelled(Path(session.directory))
+
+    def _summarize_when_labelled(self, directory: Path) -> None:
+        """Summarise once the transcript has its final speaker labels (a slow diarization
+        rewrites it later), so action items aren't credited to "Others"."""
+        from ..transcribe.summary import mark_pending
+
+        mark_pending(directory)  # owed from now on, even if we quit before diarization ends
+        transcriber = getattr(self, "transcriber", None)
+        after_labels = getattr(transcriber, "after_labels", None)  # None: test fakes
+        if after_labels is None:
+            self._summarize(directory)
+        else:
+            after_labels(directory, lambda: self._summarize(directory))
+
+    def _resubmit_summaries(self) -> None:
+        """summary.enabled: queue summaries still owed (cut short by quitting, or stale after
+        `name-speaker`): at startup and on idle refreshes. Skips sessions still in flight or
+        waiting for speaker labels; SummaryQueue drops repeats of queued ones."""
+        if not self.cfg.summary.enabled:
+            return
+        try:
+            from ..transcribe.summary import pending_summaries
+
+            labels_pending = getattr(getattr(self, "transcriber", None), "labels_pending", None)
+            with self._lock:
+                busy = set(getattr(self, "_in_flight", ()))
+            in_flight = {d.resolve() for d in busy}  # resolve() may touch the disk
+            for d in pending_summaries(self.cfg.output_dir):
+                if d.resolve() in in_flight or (labels_pending and labels_pending(d)):
+                    continue
+                log.info("queueing the pending summary of %s", d.name)
+                self._summarize(d)
+        except Exception:
+            log.exception("scanning for pending summaries failed")
 
     def _summarize(self, directory: Path) -> None:
         """Queue summary.md for a final transcript (local LLM, own background thread)."""
-        summaries = getattr(self, "_summaries", None)
-        if summaries is None:
-            from ..transcribe.summary import SummaryQueue
+        with self._summaries_lock:  # called from the transcription and diarizer threads
+            summaries = getattr(self, "_summaries", None)
+            if summaries is None:
+                from ..transcribe.summary import SummaryQueue
 
-            summaries = self._summaries = SummaryQueue(
-                self.cfg,
-                notify=self.post_notice,
-                busy=lambda: self.engine.state.status != IDLE,  # never during a recording
-            )
+                summaries = self._summaries = SummaryQueue(
+                    self.cfg,
+                    notify=self.post_notice,
+                    busy=lambda: self.engine.state.status != IDLE,  # never during a recording
+                )
         summaries.submit(directory)
 
     # --- transcript search (worker threads; results arrive as a "search" event)
@@ -623,6 +660,7 @@ class Controller:
             log.exception("scanning for untranscribed sessions failed")
         finally:
             self._resubmitting = False
+        self._resubmit_summaries()
         try:  # after re-queueing, so deleting big WAVs doesn't delay recovery
             purge_discarded_sessions(self.cfg.output_dir)
         except Exception:
@@ -658,6 +696,8 @@ class Controller:
             recent = recent_transcripts(self.cfg.output_dir)
             with self._lock:
                 self._perm, self._recent = perm, recent
+            if self.engine.state.status == IDLE:  # e.g. marked stale by `name-speaker`
+                self._resubmit_summaries()
         finally:
             with self._lock:
                 self._refreshing = False
@@ -736,30 +776,50 @@ class Controller:
         if new is None:
             self.post_notice("Languages", LANGUAGES_KEEP_ONE)
             return
-        threading.Thread(target=self._save_languages, daemon=True, name="save-config").start()
+        self.save_settings("transcription.languages", title="Languages")
 
-    def _save_languages(self) -> None:
-        """Write the menu's languages into config.toml, changing nothing else in the file: a
-        hand edit made since the last reload is kept, and picked up by the next refresh."""
-        tr = self.cfg.transcription
+    def save_settings(self, *keys: str, title: str = "Settings") -> None:
+        """Save the in-memory value of each dotted key ("live_captions",
+        "transcription.audio_retention_days") to config.toml on a worker thread. Menu
+        callbacks use this instead of ``cfg.save()``, which would overwrite hand edits."""
+        kw = {"title": title}
+        t = threading.Thread(target=self.write_settings, args=keys, kwargs=kw, name="save-config")
+        t.daemon = True
+        t.start()
+
+    def write_settings(self, *keys: str, title: str = "Settings") -> None:
+        """Blocking part of ``save_settings``: a read-modify-write of only ``keys``, so a hand
+        edit made since the last reload is kept (and picked up by the next refresh). The values
+        are read under ``_save_lock``: of two quick menu saves, the last one wins."""
         with self._save_lock:
-            with self._lang_lock:
-                raw = getattr(tr, "_raw_languages", None)
-                value = list(raw) if raw is not None else list(tr.languages)
+            values = {key: self._setting(key) for key in keys}
             edited = self._mtime() != self._config_mtime  # changed on disk, not reloaded yet
             try:
                 try:
-                    save_languages(value, CONFIG_PATH)
+                    mtime = save_keys(CONFIG_PATH, values)
                 except FileNotFoundError:
-                    self.cfg.save(CONFIG_PATH)
+                    self.cfg.save(CONFIG_PATH)  # no file yet: write a fresh one
+                    mtime = self._mtime()
                 if not edited:
-                    self._config_mtime = self._mtime()  # our own write: nothing to reload
+                    self._config_mtime = mtime  # our own write: nothing to reload
             except ValueError:  # invalid TOML (mid-edit?): don't overwrite the user's file
-                log.warning("config.toml could not be parsed; languages not saved")
-                self.post_notice("Languages not saved", "config.toml could not be parsed")
+                log.warning("config.toml could not be parsed; %s not saved", ", ".join(keys))
+                self.post_notice(f"{title} not saved", "config.toml could not be parsed")
             except Exception:
                 log.exception("saving settings failed")
                 self.post_notice("Settings not saved", "config.toml could not be written")
+
+    def _setting(self, key: str):
+        """The TOML value of a dotted config key, as the menu last set it."""
+        if key == "transcription.languages":  # keep the user's own spelling ("iw")
+            tr = self.cfg.transcription
+            with self._lang_lock:
+                raw = getattr(tr, "_raw_languages", None)
+                return list(raw) if raw is not None else list(tr.languages)
+        value = self.cfg
+        for name in key.split("."):
+            value = getattr(value, name)
+        return value
 
     @property
     def permissions(self) -> dict[str, str]:
@@ -821,14 +881,9 @@ class Controller:
     def set_room_listening(self, on: bool) -> None:
         """Menu toggle: the engine opens or closes the room mic (and stops a room session) on
         its next tick. Turning it on explains the always-on mic indicator and the consent
-        question. Saves in place, like the other toggles, so quick toggles can't race."""
-        with self._save_lock:  # never interleaves with a reload of config.toml
-            self.cfg.detection.room_listening = bool(on)
-            try:
-                self.cfg.save()
-                self._config_mtime = self._mtime()  # our own write: nothing to reload
-            except Exception:
-                log.exception("saving settings failed")
+        question. Saves only this key, like the other toggles (the last toggle wins)."""
+        self.cfg.detection.room_listening = bool(on)
+        self.save_settings("detection.room_listening")
         if on:
             self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
             if self.permissions.get("microphone") == "denied":
