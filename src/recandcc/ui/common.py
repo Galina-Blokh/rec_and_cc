@@ -1125,7 +1125,9 @@ class Controller:
         try:
             from ..search import default_index
 
-            default_index(self.cfg.search.semantic, self._recording_busy).sync(self.cfg.output_dir)
+            idx = default_index(self.cfg.search.semantic, self._recording_busy)
+            idx.sync(self.cfg.output_dir)
+            idx.release_idle_cache()  # hourly, off the main thread: free an unused vector cache
         except Exception:  # noqa: BLE001 - search is optional
             log.exception("could not sync the search index")
 
