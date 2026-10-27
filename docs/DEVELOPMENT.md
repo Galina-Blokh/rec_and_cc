@@ -100,6 +100,7 @@ uv run pytest                    # fast suite (~11 s): no models, no network
 uv run pytest -m slow            # + real Whisper integration test (en/ru speech made with `say`)
 RECANDCC_TEST_MODEL=large-v3-turbo uv run pytest -m slow   # same with the production model
 uv run ruff check . && uv run ruff format --check src tests
+uv run pyright                   # type check src/ (basic mode; CI runs it in the lint job)
 ```
 
 - **Engine tests** use a fake monitor, fake recorder and fake clock, so detection scenarios
@@ -108,6 +109,10 @@ uv run ruff check . && uv run ruff format --check src tests
 - **Transcription unit tests** use a fake model. The `slow` test runs real inference.
 - **`test_mac_native.py`** runs only on macOS when `bin/rcc-audiotap` exists. It plays
   audio with `afplay`/`say` and checks that it is detected and captured.
+- **Type checking**: `pyright` in basic mode over `src/` (config in `pyproject.toml`). CI runs it
+  on Linux, so Windows- and macOS-only imports carry narrow `# pyright: ignore[...]` comments
+  (file-level for the PyObjC modules, which have no stubs). Fix real errors; suppress only
+  with a rule name and a reason.
 
 CI (`.github/workflows/ci.yml`) runs lint on Linux and the fast suite on macOS and Windows.
 It uses `--locked`, so commit `uv.lock` with every dependency change (`uv add` / `uv lock`);

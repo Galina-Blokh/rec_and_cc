@@ -328,7 +328,9 @@ class LiveTranscriber:
             self._safe_scan(tb, final=flush)
         self._collect(final=False)
         if flush:
-            futures_wait([j.future for tb in self._tracks.values() for j in tb.jobs])
+            futures_wait(
+                [j.future for tb in self._tracks.values() for j in tb.jobs if j.future is not None]
+            )
             self._collect(final=True)
             self._write_final()
             return True
@@ -411,9 +413,9 @@ class LiveTranscriber:
         tb.last_job = job
 
     # --- pool side (runs on a Transcriber worker thread) -------------------------------
-    def _language(self, job: _Job) -> str:
+    def _language(self, job: _Job, audio: np.ndarray) -> str:
         t = self.transcriber
-        lang, conf = t.detect_language(job.audio)
+        lang, conf = t.detect_language(audio)
         if conf >= MIN_LANGUAGE_CONFIDENCE:
             return lang
         prev = job.prev
@@ -426,17 +428,18 @@ class LiveTranscriber:
             if prev.language:
                 return prev.language
         if t.has_language_model:
-            lang, conf2 = t.detect_language(job.audio, main=True)
+            lang, conf2 = t.detect_language(audio, main=True)
             log.debug(
                 "live %s %.1fs: main-model language %s (%.2f)", job.track, job.start, lang, conf2
             )
         return lang
 
     def _work(self, job: _Job) -> list[Segment]:
+        audio = job.audio  # set at submit, released (None) only at the end of this call
         try:
-            if self._cancelled:
+            if self._cancelled or audio is None:
                 return []
-            job.language = self._language(job)
+            job.language = self._language(job, audio)
         finally:
             job.lang_ready.set()
             job.prev = None  # don't keep a chain of old jobs (and their audio) alive
@@ -444,7 +447,7 @@ class LiveTranscriber:
             return []
         try:
             return self.transcriber.transcribe_audio(
-                job.audio,
+                audio,
                 job.start,
                 SPEAKERS[job.track],
                 job.language,
@@ -460,10 +463,10 @@ class LiveTranscriber:
         new_others: list[Segment] = []
         now = self.clock()
         for tb in self._tracks.values():
-            while tb.jobs and tb.jobs[0].future is not None and tb.jobs[0].future.done():
+            while tb.jobs and (fut := tb.jobs[0].future) is not None and fut.done():
                 job = tb.jobs.popleft()
                 try:
-                    segs = job.future.result()
+                    segs = fut.result()
                     self._ok_jobs += 1
                 except BaseException:  # noqa: BLE001 - one bad region must not stop live
                     log.exception("live region %s %.1f-%.1fs failed", job.track, job.start, job.end)

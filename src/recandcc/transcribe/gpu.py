@@ -18,6 +18,7 @@ import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 
@@ -88,7 +89,8 @@ class MlxWhisper:
         self._model = None
 
     def _get_model(self):
-        import mlx.core as mx
+        # mlx / mlx_whisper are installed only on Apple Silicon (see pyproject.toml).
+        import mlx.core as mx  # pyright: ignore[reportMissingImports]
 
         holder = importlib.import_module("mlx_whisper.transcribe").ModelHolder
         # Same cache mlx_whisper.transcribe() uses, so the weights are loaded once.
@@ -107,7 +109,7 @@ class MlxWhisper:
         """(start, end, text) per segment, relative to the start of ``audio``."""
 
         def run():
-            import mlx_whisper
+            import mlx_whisper  # pyright: ignore[reportMissingImports]
 
             result = mlx_whisper.transcribe(
                 np.ascontiguousarray(audio, dtype=np.float32),
@@ -116,7 +118,8 @@ class MlxWhisper:
                 condition_on_previous_text=False,
                 verbose=None,
             )
-            return [(s["start"], s["end"], s["text"]) for s in result["segments"]]
+            segments = cast(list[dict[str, Any]], result["segments"])  # untyped in mlx_whisper
+            return [(s["start"], s["end"], s["text"]) for s in segments]
 
         return self._thread.submit(run).result()
 
@@ -124,8 +127,13 @@ class MlxWhisper:
         """Most likely language among ``allowed`` and its renormalised confidence."""
 
         def run():
-            import mlx.core as mx
-            from mlx_whisper.audio import N_FRAMES, N_SAMPLES, log_mel_spectrogram, pad_or_trim
+            import mlx.core as mx  # pyright: ignore[reportMissingImports]
+            from mlx_whisper.audio import (  # pyright: ignore[reportMissingImports]
+                N_FRAMES,
+                N_SAMPLES,
+                log_mel_spectrogram,
+                pad_or_trim,
+            )
 
             model = self._model or self._get_model()
             mel = log_mel_spectrogram(

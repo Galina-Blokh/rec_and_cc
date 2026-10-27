@@ -21,6 +21,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -93,7 +94,7 @@ class Transcriber:
         from faster_whisper import WhisperModel
 
         t0 = time.monotonic()
-        kwargs = dict(
+        kwargs: dict[str, Any] = dict(
             device=self.cfg.device,
             compute_type=self.cfg.compute_type,
             num_workers=self.num_workers,
@@ -139,6 +140,12 @@ class Transcriber:
                     self._model = model
         return self._model
 
+    def _require_pool(self) -> ThreadPoolExecutor:
+        """The worker pool; only valid after _ensure_loaded() and before close()."""
+        if self._pool is None:
+            raise RuntimeError("Transcriber is closed")
+        return self._pool
+
     def _needs_detection(self) -> bool:
         return len(self.cfg.languages) != 1
 
@@ -171,7 +178,7 @@ class Transcriber:
         if self._lid_model is None:
             return [(None, 0.0)] * len(regions)  # decided per chunk by the main model
         det = list(
-            self._pool.map(
+            self._require_pool().map(
                 lambda r: self._detect(
                     self._lid_model, audio[int(r[0] * SAMPLE_RATE) : int(r[1] * SAMPLE_RATE)]
                 ),
@@ -226,7 +233,7 @@ class Transcriber:
     def submit(self, fn: Callable, *args) -> Future:
         """Run ``fn(*args)`` on the shared worker pool (loads the model first if needed)."""
         self._ensure_loaded()
-        return self._pool.submit(fn, *args)
+        return self._require_pool().submit(fn, *args)
 
     @property
     def has_language_model(self) -> bool:
@@ -316,7 +323,7 @@ class Transcriber:
         if audio:
             self._ensure_loaded()
             t0 = time.monotonic()
-            pool = self._pool
+            pool = self._require_pool()
             tracks = list(audio)
             regions = dict(
                 zip(tracks, pool.map(lambda t: find_speech(audio[t]), tracks), strict=True)
@@ -391,7 +398,9 @@ class Transcriber:
             diarizer = self._diarizer
         timing: dict = {}
         future = diarizer.submit(path, timing)
-        future.timing = timing  # filled in before the result is set (see Diarizer._safe)
+        # Ad-hoc attribute, read back with getattr. Filled in before the result is set
+        # (see Diarizer._safe).
+        future.timing = timing  # pyright: ignore[reportAttributeAccessIssue]
         return future
 
     def write_final(

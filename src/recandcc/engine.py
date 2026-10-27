@@ -400,7 +400,7 @@ class Engine:
                     if choice == "always":
                         det.app_modes[p.key] = Mode.AUTO
                         save = True
-                    if pending:
+                    if pending and r is not None:
                         r.provisional = False  # recording since the prompt appeared: keep it
                     elif r is None:
                         self._rec = _Rec(p.key, p.name, p.kind, now, manual=False)
@@ -427,6 +427,7 @@ class Engine:
             r = self._rec
             if (
                 r is not None
+                and r.key is not None  # always set for non-manual sessions
                 and not r.manual
                 and start_req is None
                 and not (stop_req or discard_req)

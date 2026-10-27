@@ -32,6 +32,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "pyright>=1.1.414",
     "pytest>=9.1.1",
     "ruff>=0.17.2",
 ]
@@ -56,6 +57,11 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "S"]
 "src/recandcc/ui/common.py" = ["S603", "S606", "S607", "S112"]
 "src/recandcc/ui/mac.py" = ["S603", "S607"]
 "src/recandcc/ui/tray.py" = ["S606", "S607"]
+
+[tool.pyright]
+typeCheckingMode = "basic"
+pythonVersion = "3.12"
+include = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
