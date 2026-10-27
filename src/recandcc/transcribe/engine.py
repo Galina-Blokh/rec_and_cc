@@ -29,7 +29,7 @@ from ..metrics import log_session_metrics, rounded
 from ..models import SAMPLE_RATE, Segment, SessionInfo, Track
 from .chunking import Chunk, find_speech, load_track, merge_labelled, slice_chunk
 from .diarize import Diarizer, Turn, assign_speakers
-from .gpu import MlxWhisper, use_gpu
+from .gpu import MlxWhisper, hf_cache_folder, use_gpu
 from .merge import ME, OTHERS, language_confidence, merge_tracks, smooth_languages
 from .output import write_outputs
 from .revisions import faster_whisper_revision
@@ -89,27 +89,51 @@ class Transcriber:
 
     # -- models ------------------------------------------------------------------------------
 
+    def _model_dir(self, name: str) -> tuple[Path, str]:
+        """Local folder of faster-whisper model ``name`` and the fix to log if it is broken.
+
+        Offline first: once downloaded, a model resolves without contacting Hugging Face. A
+        missing or partial snapshot (LocalEntryNotFoundError, incl. IncompleteSnapshotError,
+        both FileNotFoundErrors) is downloaded at its pinned commit (revisions.py); a snapshot
+        that is present but unreadable or corrupt is raised without going online.
+        """
+        if Path(name).is_dir():  # the user's own model folder: never download over it
+            return Path(name), "fix or replace that folder"
+        from faster_whisper import utils
+
+        rev = faster_whisper_revision(name)
+        cache = hf_cache_folder(getattr(utils, "_MODELS", {}).get(name, name))
+        remedy = f"delete {cache} to download the model again"
+        try:
+            path = utils.download_model(name, local_files_only=True, revision=rev)
+        except FileNotFoundError:
+            log.info("model %s not on disk yet; downloading it once", name)
+            path = utils.download_model(name, revision=rev)
+        except Exception:
+            log.warning("model %s failed to load from the local cache; %s", name, remedy)
+            raise
+        return Path(path), remedy
+
     def _load(self, name: str):
         from faster_whisper import WhisperModel
 
         t0 = time.monotonic()
-        kwargs = dict(
-            device=self.cfg.device,
-            compute_type=self.cfg.compute_type,
-            num_workers=self.num_workers,
-            cpu_threads=self.cpu_threads,
-            revision=faster_whisper_revision(name),  # pinned commit (revisions.py)
-        )
-        # Offline first: once downloaded, a model loads without contacting Hugging Face. Only
-        # a cache miss (huggingface_hub's LocalEntryNotFoundError, a FileNotFoundError) goes
-        # online; any other failure (corrupt cache, permissions, ...) is raised as is.
+        path, remedy = self._model_dir(name)
+        # Without tokenizer.json faster-whisper fetches a tokenizer from Hugging Face (even
+        # with local_files_only), so treat such a folder as corrupt instead.
+        if not (path / "tokenizer.json").is_file():
+            raise RuntimeError(f"model {name}: tokenizer.json missing in {path}; {remedy}")
         try:
-            model = WhisperModel(name, local_files_only=True, **kwargs)
-        except FileNotFoundError:
-            log.info("model %s not on disk yet; downloading it once", name)
-            model = WhisperModel(name, **kwargs)
+            # A local folder: WhisperModel loads it without any network access.
+            model = WhisperModel(
+                str(path),
+                device=self.cfg.device,
+                compute_type=self.cfg.compute_type,
+                num_workers=self.num_workers,
+                cpu_threads=self.cpu_threads,
+            )
         except Exception:
-            log.warning("model %s failed to load from the local cache", name)
+            log.warning("model %s failed to load from %s; %s", name, path, remedy)
             raise
         elapsed = time.monotonic() - t0
         self._load_times[name] = rounded(elapsed, 2)

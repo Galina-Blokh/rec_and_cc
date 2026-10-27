@@ -37,10 +37,14 @@ Resolve every model from the local cache first and download only when it is miss
 - Risks: cached Whisper models are never updated automatically and are not pinned to a
   revision or checksum (only the diarization model is sha256-checked). Pinned model revisions are
   [#14](https://github.com/Galina-Blokh/rec_and_cc/issues/14).
-- Only a genuine cache miss (`FileNotFoundError`, which includes huggingface_hub's
-  `LocalEntryNotFoundError`) falls back to a download. Any other local-load failure (corrupt
-  cache entry, permission error, init failure) is raised without contacting the network;
-  delete the model's cache folder to force a fresh download.
+- Only a genuine cache miss goes online: a missing or partial snapshot
+  (`LocalEntryNotFoundError`, incl. `IncompleteSnapshotError` from an interrupted download;
+  both are `FileNotFoundError`s) is downloaded. A snapshot that is present but unreadable or
+  corrupt (permission error, broken weights, init failure) is raised without contacting the
+  network, and the WARNING names the model's cache folder: delete it to download the model
+  again. faster-whisper models load from their resolved local folder, and a folder without
+  `tokenizer.json` counts as corrupt, since faster-whisper would otherwise fetch a tokenizer
+  from Hugging Face.
 
 ## Links
 - `src/recandcc/transcribe/engine.py` (`_load`), `src/recandcc/transcribe/gpu.py`
