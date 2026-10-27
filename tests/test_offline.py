@@ -1,6 +1,6 @@
 """Models load from disk without contacting Hugging Face once downloaded.
 
-Stories: US-14.
+Stories: US-14, US-19.
 """
 
 import sys
@@ -106,6 +106,18 @@ def test_faster_whisper_names_map_to_pinned_revisions():
     )
     assert revisions.faster_whisper_revision("someone/custom-ct2") is None
     assert revisions.faster_whisper_revision("/some/local/dir") is None
+
+
+def test_ivrit_hebrew_models_are_pinned_in_both_formats(monkeypatch):
+    for ct2, mlx in revisions.IVRIT_MLX_REPOS.items():
+        assert revisions.faster_whisper_revision(ct2) == revisions.HF_REVISIONS[ct2]
+        assert gpu.mlx_repo(ct2) == mlx and revisions.revision(mlx) is not None
+        assert revisions.ct2_repo(mlx) == ct2 and revisions.ct2_repo(ct2) == ct2
+    revs = []
+    _fake_hub(monkeypatch, cached=False, revs=revs)
+    gpu.local_model_path(gpu.mlx_repo("ivrit-ai/whisper-large-v3-turbo-ct2"))
+    pinned = revisions.HF_REVISIONS["mlx-community/ivrit-ai-whisper-large-v3-turbo-mlx"]
+    assert revs == [pinned, pinned]  # on disk first, then the one pinned download
 
 
 def _fake_faster_whisper(monkeypatch, tmp_path, local_error=None, tokenizer=True):

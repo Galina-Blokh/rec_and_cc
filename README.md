@@ -15,7 +15,13 @@ account, nothing uploaded.
 - 🌍 **English and Russian** are detected automatically, even when the language switches
   mid-meeting. **Hebrew** can be added (`languages = ["en", "ru", "he"]`): captions and
   transcripts show it right to left (Windows captions reorder RTL text themselves, as Tk does no
-  bidi; verified by unit tests only, no hardware check yet). Hebrew accuracy with the stock model is not yet tuned.
+  bidi; verified by unit tests only, no hardware check yet). Hebrew accuracy with the stock model
+  is not yet tuned; for better Hebrew, opt in to the Hebrew-tuned
+  [ivrit.ai](https://huggingface.co/ivrit-ai) Whisper: with
+  `language_models = { he = "ivrit-ai/whisper-large-v3-turbo-ct2" }` Hebrew regions are
+  transcribed by it (its MLX build on the Apple-silicon GPU), English and Russian by the
+  default model. It is downloaded once, pinned, in the background when a session starts, and needs about
+  as much memory again as the default model.
 - 🧠 Local Whisper (`large-v3-turbo`) on the **Apple-silicon GPU** (MLX), with CPU threads
   working alongside: a 1-hour meeting transcribes in about 2–3 minutes. Windows uses the CPU.
   and the final transcript is ready a moment after the recording stops.
@@ -117,6 +123,13 @@ Menu items:
   any language); pick a match to open its transcript. Same as `recandcc search`. On
   Windows the tray item opens a small window: type the words, press Enter, and
   double-click a match (time, speaker, snippet) to open it.
+- **Meeting notes…**: your past sessions, newest first, with title (the app that triggered
+  it, or one you gave it), date and time, duration, speakers, languages and whether it is
+  transcribed. Pick one to open its transcript or `summary.md` (if there is one; its first
+  lines show as an excerpt), reveal its folder, rename it (the title is kept in
+  `session.json`) or delete it. Delete moves the folder to the Trash / Recycle Bin and drops
+  it from the search index; a session still recording or waiting to be transcribed can't be
+  changed. On macOS it is a pair of dialogs; on Windows a small window with buttons.
 - **Open transcripts folder**
 - **Permissions**: status and "Grant…" actions.
 - **Launch at login**: starts RecAndCC every time you log in. Turn it on once.
@@ -216,6 +229,7 @@ record_mic = "calls"         # always | calls | never
 [transcription]
 model = "large-v3-turbo"     # tiny | base | small | medium | large-v3 | large-v3-turbo
 languages = ["en", "ru"]     # auto-detect among these, e.g. ["en", "ru", "he"] ([] = any)
+language_models = {}         # per-language model, e.g. { he = "ivrit-ai/whisper-large-v3-turbo-ct2" }
 keep_audio = true            # false = delete WAVs after transcription (~115 MB per track-hour)
 live = true                  # transcribe while recording (false = after the session stops)
 
@@ -321,13 +335,17 @@ local folder (for example `~/Transcribes`) if recordings must stay on this devic
   by a quit are deleted at the next startup).
 - `audio_retention_days = N` (menu → **Delete audio after**: Never / 1 / 7 / 30 / 90 days)
   deletes the audio N days after transcription; `0` keeps it forever.
-- Transcripts are never deleted automatically. Delete a session by deleting its folder.
-  Its text leaves the search index at the next search, the next app start, or the app's
-  hourly check, whichever comes first. Removed or replaced text is overwritten in
+- Transcripts are never deleted automatically. Delete a session from **Meeting notes…**
+  (it goes to the Trash, where audio and transcript stay recoverable until you empty it;
+  its stored speaker voices are deleted at once and don't come back with "Put Back"; in a
+  cloud-synced folder the provider's own recycle bin keeps a copy too; where Windows can't
+  recycle it, it asks before deleting for good) or by deleting its folder. Deleted from Meeting notes, its text leaves the search index at
+  once; deleted by hand, at the next search, the next app start, or the app's hourly check,
+  whichever comes first. Removed or replaced text is overwritten in
   `search.sqlite3`, so it can't be recovered from the file. To remove the whole index at
   once, delete `search.sqlite3`; it is rebuilt from the transcripts on the next search.
-  With `speaker_names` on, its stored speaker voices are deleted the next time a transcript
-  is written or a `recandcc voices` command runs.
+  With `speaker_names` on, its stored speaker voices are deleted at once (from Meeting
+  notes) or the next time a transcript is written or a `recandcc voices` command runs.
 - `recandcc voices delete <name>` deletes that profile and removes the named voice from every
   session's stored voices too; renaming a speaker (`Anna` → `Bob`) takes that session's voice
   out of Anna's profile.

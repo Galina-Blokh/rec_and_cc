@@ -287,6 +287,7 @@ class LiveTranscriber:
     def _run(self) -> None:
         try:
             self.transcriber.ensure_loaded()
+            self.transcriber.start_prefetch()  # cfg.language_models, on their own thread
         except BaseException as e:  # noqa: BLE001
             log.exception("live transcription unavailable: model failed to load")
             self._error = e
@@ -453,6 +454,7 @@ class LiveTranscriber:
                 job.language,
                 beam_size=self.beam_size,
                 max_end=job.end,
+                wait_for_model=False,  # a routed model still loading: the main model meanwhile
             )
         finally:
             job.audio = None
