@@ -172,8 +172,11 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   a day old). Any number of days can be set as `audio_retention_days` in the settings.
   Session folders that are links (symlinks, junctions) to somewhere else are skipped (logged once per folder).
 - **Settings…** (*macOS only*; needs the rebuilt helper, `./native/macos/build.sh`): a window for mode,
-  transcripts folder, languages, keep audio, live captions and speaker names. Saved values
-  apply at once. Without it, the app opens `config.toml` instead.
+  transcripts folder, languages, keep audio, live transcription, the live captions window,
+  speaker names and the Whisper model (only the pinned models listed in
+  [CONFIGURATION.md](docs/CONFIGURATION.md)). Saved values apply at once, live transcription
+  from the next session, and a model change after the app restarts (a model not on disk yet
+  is downloaded once then). Without it, the app opens `config.toml` instead.
 - **Edit config.toml** (**Edit settings** in the Windows tray): opens `config.toml` (changes
   to detection settings, `hotkey` and `languages` apply live).
 - **Reveal logs**: shows the log folder in Finder / Explorer.
