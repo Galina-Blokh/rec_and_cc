@@ -34,7 +34,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-31 | Speaker names from the call app's participant list | 🟡 shipped (#80, #1 A.3): opt-in, macOS, one-to-one only |
 | US-35 | Call-app names in a room recording a call joined | 🟡 claimed (#1): fake-tested; older transcripts stay unnamed |
 | US-25 | Export a transcript to DOCX and PDF | 🟡 CLI, macOS menu and Windows tray, custom templates (#4) |
-| US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon (MLX) and Windows/Linux (CPU, onnxruntime-genai); no quality evaluation yet (#4) |
+| US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon (MLX) and Windows/Linux (CPU, ONNX Runtime); no quality evaluation yet (#4) |
 | US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
 | US-23 | Sensitivity: room vs system audio | 🟡 presets and keys shipped (#7, #102); live level meters not yet |
 | US-28 | Browse past meetings | 🟡 Windows window untested on Windows hardware (none available) |

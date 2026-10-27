@@ -46,7 +46,7 @@ acceptance criteria.
       (keep the Python core, package it properly, switch engines only past a benchmark gate).
 - [ ] **Summaries, action items, search, export** ([#4](https://github.com/Galina-Blokh/rec_and_cc/issues/4)): local LLM (e.g. Qwen via
       MLX / llama.cpp), SQLite FTS search, DOCX/PDF export. Done: search, summaries (Apple
-      silicon; Windows/Linux on the CPU through onnxruntime-genai), the meeting notes view and
+      silicon; Windows/Linux on the CPU through ONNX Runtime), the meeting notes view and
       DOCX/PDF export (#75; CLI, macOS menu and Windows tray).
 - ~~**Windows for real**~~ ([#5](https://github.com/Galina-Blokh/rec_and_cc/issues/5)): hardware test pass, per-app capture, installer,
       signing. Not planned: closed, no Windows hardware available; the Windows backends stay

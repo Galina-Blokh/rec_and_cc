@@ -302,12 +302,14 @@ before that, and older settings files hold it the same way, so it is replaced by
 3B as well; only that line is rewritten, so comments stay). If the 3B is already downloaded and
 the new default isn't, it is kept for now, so offline summaries keep working. On Windows (and
 Linux) there is no MLX, so the CPU runs a pinned, checksum-verified int4 ONNX build of the Qwen2.5
-1.5B Instruct through onnxruntime-genai (~1.8 GB, downloaded once). The default 4B and the old 1.5B
-both map to it, because the 4B has no CPU build; that mapping is logged once at INFO. That 1.5B is
-a smaller model, weaker than the 4B, especially for Hebrew and Russian and for action items. Other
-models are skipped there. It is much slower than on Apple silicon: about 10 minutes for an
-hour-long meeting, measured on an Apple M-series CPU (Windows laptops may be slower). Offline
-before the model is downloaded, or on an Intel Mac, the summary is skipped with a notice.
+1.5B Instruct through ONNX Runtime (the `onnxruntime` package the app already installs; ~1.8 GB,
+downloaded once). The default 4B and the old 1.5B both map to it, because the 4B has no CPU build;
+that mapping is logged once at INFO. That 1.5B is a smaller model, weaker than the 4B, especially
+for Hebrew and Russian and for action items. Other models are skipped there. It is much slower
+than on Apple silicon: about 25 tokens a second on an Apple M5 Max CPU. An 826-word meeting took
+about 18 seconds, and a transcript of about 9,000 words (an hour of talk) about 2.5 minutes
+(laptop CPUs may be slower). Offline before the model is downloaded, or on an Intel Mac (ONNX
+Runtime has no wheel for those), the summary is skipped with a notice.
 It waits for
 the speaker labels (a slow diarization delays it), a summary cut short by quitting is redone
 at the next start (a `.summary-pending` marker in the session folder; a `.summary-source` file records a fingerprint of the transcript text the summary was made from), and after
@@ -396,7 +398,8 @@ recognized voice or `Me` is never overridden.
 
 Audio and transcripts never leave your computer. The only network access is the one-time
 model download: Whisper (and, with summaries on, the summary model) from Hugging Face, pinned to exact repo commits
-([`revisions.py`](src/recandcc/transcribe/revisions.py); unpinned custom repos are refused
+([`revisions.py`](src/recandcc/transcribe/revisions.py), and the Windows and Linux CPU summary model
+in [`summary_cpu.py`](src/recandcc/transcribe/summary_cpu.py); unpinned custom repos are refused
 unless you opt in), and the 28 MB speaker model from the
 sherpa-onnx GitHub releases, verified by its SHA-256. After that the app works fully offline:
 models load from disk without contacting anything (tested with all network access blocked).

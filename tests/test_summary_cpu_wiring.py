@@ -1,5 +1,5 @@
 """Wiring of the CPU summary backend: create_generator, the download notice and the model
-fallbacks, with a fake onnxruntime-genai and a fake hub. Issue #4.
+fallbacks, with a fake ONNX Runtime and a fake hub. Issue #4.
 
 Stories: US-27.
 """
@@ -11,7 +11,7 @@ import logging
 
 import pytest
 from test_summary import SPOKEN, make_session, seg
-from test_summary_cpu import _fake_model, hub, og  # noqa: F401
+from test_summary_cpu import _fake_model, hub, runtime  # noqa: F401
 
 from recandcc.config import DEFAULT_SUMMARY_MODEL, PREVIOUS_DEFAULT_SUMMARY_MODEL, Config
 from recandcc.transcribe import summary, summary_cpu
@@ -34,7 +34,7 @@ def test_generator_is_chosen_per_platform(monkeypatch, mlx, cpu, expected):
 
 
 def test_missing_model_offline_skips_the_summary_without_logging_text(
-    hub, og, tmp_path, monkeypatch, caplog
+    hub, runtime, tmp_path, monkeypatch, caplog
 ):
     hub.state["online"] = False
     monkeypatch.setattr(summary, "mlx_lm_available", lambda: False)
@@ -51,7 +51,7 @@ def test_missing_model_offline_skips_the_summary_without_logging_text(
     assert SPOKEN not in caplog.text
 
 
-def test_cpu_summary_is_written_without_logging_text(hub, og, tmp_path, monkeypatch, caplog):
+def test_cpu_summary_is_written_without_logging_text(hub, runtime, tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(summary, "mlx_lm_available", lambda: False)
     monkeypatch.setattr(summary_cpu, "CPU_MODELS", {Config().summary.model: _fake_model()})
     d = make_session(tmp_path, [seg(SPOKEN)])
@@ -77,7 +77,7 @@ def test_download_notice_names_the_size_of_the_build_downloaded_here(monkeypatch
 @pytest.mark.parametrize("name", [DEFAULT_SUMMARY_MODEL, PREVIOUS_DEFAULT_SUMMARY_MODEL])
 def test_default_and_old_1p5b_both_run_the_pinned_1p5b_onnx_build(
     hub,
-    og,
+    runtime,
     tmp_path,
     monkeypatch,
     caplog,
@@ -102,7 +102,7 @@ def test_default_and_old_1p5b_both_run_the_pinned_1p5b_onnx_build(
 
 def test_other_model_without_cpu_build_falls_back_to_summary_model(
     hub,
-    og,
+    runtime,
     tmp_path,
     monkeypatch,
     caplog,
@@ -136,7 +136,7 @@ def test_the_pause_hook_reaches_the_cpu_generator_only(monkeypatch):
     assert type(mlx) is summary.MlxGenerator and not hasattr(mlx, "pause")
 
 
-def test_summarize_session_hands_its_before_call_to_the_generator(hub, og, tmp_path, monkeypatch):
+def test_summarize_session_hands_its_before_call_to_the_generator(hub, runtime, tmp_path, monkeypatch):
     monkeypatch.setattr(summary, "mlx_lm_available", lambda: False)
     monkeypatch.setattr(summary_cpu, "CPU_MODELS", {Config().summary.model: _fake_model()})
     d = make_session(tmp_path, [seg(SPOKEN)])

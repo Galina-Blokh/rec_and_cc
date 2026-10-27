@@ -1,7 +1,7 @@
 """Local meeting summaries: ``summary.md`` (short summary + action items) next to a transcript.
 
 Opt-in (``summary.enabled``). A small instruct model runs through mlx-lm on Apple silicon
-(elsewhere on the CPU through onnxruntime-genai, see summary_cpu.py and create_generator),
+(elsewhere on the CPU through ONNX Runtime, see summary_cpu.py and create_generator),
 pinned in revisions.py and loaded offline-first like Whisper (gpu.local_model_path); with
 ``summary.language_models`` the transcript's main spoken language picks it. Long
 transcripts are summarised map-reduce: notes per chunk, then the summary and the action list
@@ -393,7 +393,7 @@ def create_generator(
     pause: Callable[[], None] | None = None,
 ) -> ModelGenerator:
     """The summary model's generator on this machine: mlx-lm on Apple silicon, else the CPU
-    one (onnxruntime-genai, summary_cpu.py, imported only here). With neither, MlxGenerator,
+    one (ONNX Runtime, summary_cpu.py, imported only here). With neither, MlxGenerator,
     whose load() says why summaries can't run. ``pause`` goes to the CPU generator only, which
     runs it before each token (MLX waits between model calls instead)."""
     if not mlx_lm_available():
