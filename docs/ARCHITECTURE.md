@@ -95,7 +95,7 @@ The app is built around one rule: **real-time audio threads never block**. Every
 | UI main thread | rumps/AppKit; drains an event queue every 0.5 s | event queue |
 | UI workers | Permission checks, recent-transcript scan, `osascript` dialogs, transcript search (syncs the index, posts a `search` event), meeting notes scan / rename / delete (post a `notes` event; a delete also drops the session from the index) | event queue |
 | search indexer (per finished transcript) | `TranscriptIndex.index_session` after `on_done`; with semantic search it wakes the single background `search-embed` worker per index (non-blocking guard; embeds outside the write lock in chunks of 64 segments, pausing while the engine is recording or asking (the `busy` signal, as for summaries), re-checks the transcript stamp and the setting before each insert; `search` never waits for it); errors logged | own SQLite connection |
-| summary (1, only with `summary.enabled`) | Loads the summary LLM, writes `summary.md`, frees the model (and MLX's buffer cache); one session at a time, queued only once the transcript has its final speaker labels (`Transcriber.after_labels`: after a slow diarization's rewrite). A `.summary-pending` marker in the session folder lives from queueing until the summary is written or skipped; startup and idle UI refreshes queue marked sessions (not in flight, not waiting for labels; a session already queued is not queued twice). It never competes with a recording: while the engine is not idle (recording or asking) it waits before a session and pauses between model calls (chunk notes, summary, action items). Each call holds `gpu.MLX_LOCK`, which every MLX Whisper call also holds, for its prompt prefill (≤ 8,000 characters, ~1–2 s, in 512-token steps) and then per generated token, so the GPU is never driven from two threads at once and a post-session Whisper pass waits at most one prefill | `SummaryQueue` |
+| summary (1, only with `summary.enabled`) | Loads the summary LLM, writes `summary.md`, frees the model (and MLX's buffer cache); one session at a time, queued only once the transcript has its final speaker labels (`Transcriber.after_labels`: after a slow diarization's rewrite). A `.summary-pending` marker in the session folder lives from queueing until the summary is written or skipped; startup and idle UI refreshes queue marked sessions (not in flight, not waiting for labels; a session already queued is not queued twice). A `.summary-source` file holds a hash of the transcript's start/end/text (speaker labels excluded), written after `summary.md` (the old one is deleted first); exports show the summary only while it matches, so renames keep it, and without the file the summary-vs-transcript mtime rule applies. It never competes with a recording: while the engine is not idle (recording or asking) it waits before a session and pauses between model calls (chunk notes, summary, action items). Each call holds `gpu.MLX_LOCK`, which every MLX Whisper call also holds, for its prompt prefill (≤ 8,000 characters, ~1–2 s, in 512-token steps) and then per generated token, so the GPU is never driven from two threads at once and a post-session Whisper pass waits at most one prefill | `SummaryQueue` |
 
 - The engine holds one lock and never makes a blocking call while holding it. UI actions
   (`start_manual`, `stop`, `respond`) are queued as commands, so only the engine thread
@@ -156,7 +156,13 @@ EOF ends it, so it never outlives the app. The Windows backend uses `RegisterHot
 
 ### Settings window: a helper subcommand, validation stays in Python
 `rcc-audiotap settings --config <snapshot.json>` shows a small SwiftUI window (mode, output
-folder, languages, keep audio, live captions, speaker names; the hotkey is shown read-only).
+folder, languages, keep audio, live transcription, live captions, speaker names, Whisper
+model; the hotkey is shown read-only). The model picker offers only
+`transcribe/revisions.OFFERED_MODELS` (every name pinned), passed in the snapshot as `models`;
+`validate_settings` rejects any other name, so the helper can't introduce an unpinned repo.
+The saved model is written to `config.toml` but not loaded: the shared `Transcriber` keeps
+its model until the app restarts, when the usual lazy load (and, if missing, the one-time
+pinned download) runs on a transcription worker, never on the UI thread. A notice says so.
 `--config` is a JSON snapshot that Python writes to a private temp file, **not** `config.toml`:
 Swift would need a TOML parser, and an unvalidated second writer. On close the helper prints
 one line, `{"settings":"saved","values":{...}}` or `{"settings":"cancelled"}`. Python
