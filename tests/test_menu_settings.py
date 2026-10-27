@@ -364,6 +364,25 @@ def test_retention_is_not_purged_when_the_save_fails(tmp_path, monkeypatch):
     assert events[-1] == ("retention_changed",)  # after the revert: the menus re-render
 
 
+def test_two_failed_retention_clicks_leave_the_value_on_disk(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    path.write_text(path.read_text() + "[transcription]\naudio_retention_days = 90\n")
+    ctrl.cfg.transcription.audio_retention_days = 90
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda: [])
+    go = threading.Event()
+
+    def failing_save(*_keys, **_kw):  # e.g. config.toml not writable; both workers wait
+        assert go.wait(5)
+        return False
+
+    monkeypatch.setattr(ctrl, "write_settings", failing_save)
+    ctrl.set_retention(7)
+    ctrl.set_retention(30)  # its "previous" is the unsaved 7
+    go.set()
+    _join("retention-set")  # both workers
+    assert ctrl.cfg.transcription.audio_retention_days == 90  # what config.toml holds
+
+
 def test_menu_purge_posts_a_count_only_notice(tmp_path, monkeypatch):
     ctrl, _path = _ctrl(tmp_path, monkeypatch)
     wavs = [tmp_path / "a" / "me.wav", tmp_path / "a" / "others.wav", tmp_path / "b" / "me.wav"]

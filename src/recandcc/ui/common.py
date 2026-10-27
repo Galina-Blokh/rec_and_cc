@@ -1412,9 +1412,9 @@ class Controller:
     def set_retention(self, days: int) -> None:
         """ "Delete audio after" menu (both shells): apply ``days`` in memory at once (the menu
         check reads it), then save only this key and purge expired audio on a worker. Audio
-        is deleted only once the choice is saved (a failed save restores the previous value,
-        as the next start would) and only if it is still the current choice (a quick second
-        click supersedes this one)."""
+        is deleted only once the choice is saved (a failed save restores the value config.toml
+        holds, which the next start would use) and only if it is still the current choice (a
+        quick second click supersedes this one)."""
         days, key = int(days), "transcription.audio_retention_days"
         self._mark_dirty((key,), 1)  # a config reload before the write must not undo the click
         previous = self.cfg.transcription.audio_retention_days
@@ -1436,7 +1436,7 @@ class Controller:
                     return
                 # not in config.toml: show what the next start will use; the shells re-render
                 # the submenu on the UI thread (the tray's native menu is cached)
-                self.cfg.transcription.audio_retention_days = previous
+                self.cfg.transcription.audio_retention_days = self._saved_retention(previous)
             self.events.put(("retention_changed",))
 
         try:
@@ -1444,6 +1444,18 @@ class Controller:
         except Exception:
             self._mark_dirty((key,), -1)
             raise
+
+    def _saved_retention(self, fallback: int) -> int:
+        """``audio_retention_days`` as config.toml holds it (a plain read: no lock, and no
+        default file is created), or ``fallback`` when there is no readable file."""
+        try:
+            if CONFIG_PATH.exists():
+                return int(load_config().transcription.audio_retention_days)
+        except Exception as e:  # mid-edit TOML, unreadable file
+            log.warning(
+                "config.toml unreadable (%s); keeping the previous retention", type(e).__name__
+            )
+        return fallback
 
     def sensitivity_preset(self) -> str | None:
         return current_preset(self.cfg.detection)
