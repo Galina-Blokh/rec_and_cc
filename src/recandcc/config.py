@@ -209,6 +209,13 @@ class SummaryConfig:
 
 
 @dataclass
+class SearchConfig:
+    # Rank transcript search by meaning as well as by words (a small local multilingual
+    # model, downloaded once when switched on). Off by default; see semantic.py.
+    semantic: bool = False
+
+
+@dataclass
 class Config:
     output_dir: Path = field(default_factory=lambda: DEFAULT_OUTPUT_DIR)
     autostart: bool = False
@@ -219,6 +226,7 @@ class Config:
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
     summary: SummaryConfig = field(default_factory=SummaryConfig)
+    search: SearchConfig = field(default_factory=SearchConfig)
 
     def save(self, path: Path | None = None) -> None:
         # Resolve first: os.replace on a symlinked config.toml (dotfiles) would swap the link
@@ -554,7 +562,9 @@ def load_config(path: Path | None = None) -> Config:
                 code,
             )
     summary = _build(SummaryConfig, data.pop("summary", {}))
+    search = _build(SearchConfig, data.pop("search", {}))
     cfg = _build(Config, data)
+    cfg.search = search
     cfg.output_dir = Path(cfg.output_dir).expanduser()
     cfg.detection, cfg.transcription, cfg.summary = det, tr, summary
     return cfg
