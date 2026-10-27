@@ -67,6 +67,8 @@ All notable changes to RecAndCC are documented here. The format is based on
   (#36, #54, #55).
 
 ### Fixed
+- PDF export no longer silently drops characters its font lacks: bidi controls are stripped
+  and emoji or other uncovered glyphs become a visible placeholder (part of #4).
 - With `keep_audio = false`, audio left behind by a quit during slow diarization or a failed
   delete is removed at the next start (#45).
 - A discarded session is never transcribed later, even if deleting it failed; the delete is

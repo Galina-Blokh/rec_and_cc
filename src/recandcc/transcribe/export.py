@@ -237,6 +237,34 @@ def find_font() -> Path:
     )
 
 
+# Bidi controls and invisible joiners/selectors: dropped, they have no glyph and the PDF
+# lays direction out itself (the DOCX keeps them, they are invisible there).
+_INVISIBLE = dict.fromkeys(
+    [0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0xFEFF, 0xFE0E, 0xFE0F]
+    + list(range(0x202A, 0x202F))
+    + list(range(0x2066, 0x206A))
+)
+
+
+@functools.lru_cache(maxsize=4)
+def _font_cmap(path: Path) -> frozenset[int]:
+    from fontTools.ttLib import TTFont
+
+    with TTFont(str(path), lazy=True, fontNumber=0) as f:
+        return frozenset(f.getBestCmap() or {})
+
+
+def pdf_safe_text(text: str, path: Path) -> str:
+    """Strip bidi controls and swap characters the font lacks (emoji, ...) for a visible
+    placeholder, so the PDF never silently loses text the DOCX has."""
+    cmap = _font_cmap(path)
+    mark = "�" if 0xFFFD in cmap else "?"
+    text = text.translate(_INVISIBLE)
+    return "".join(
+        c if c in "\n\t" or not c.isprintable() or ord(c) in cmap else mark for c in text
+    )
+
+
 @_type_only
 def export_pdf(folder: Path, loaded=None) -> Path:
     from fpdf import FPDF
@@ -254,6 +282,7 @@ def export_pdf(folder: Path, loaded=None) -> Path:
     width = pdf.w - pdf.l_margin - pdf.r_margin
 
     def para(text: str, size: int, rtl: bool = False, gap: float = 2) -> None:
+        text = pdf_safe_text(text, font)
         pdf.set_font("body", size=size)
         pdf.set_text_shaping(True, direction="rtl" if rtl else "ltr")
         pdf.set_x(pdf.l_margin)

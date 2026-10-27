@@ -487,3 +487,19 @@ def test_a_session_folder_swapped_for_a_link_is_not_written_through(tmp_path):
     with pytest.raises(export.ExportError, match="link"):
         export._write(link / "x.bin", b"data")
     assert not list(real.iterdir())
+
+
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_pdf_safe_text_placeholder_bidi_and_scripts():
+    font = export.find_font()
+    out = export.pdf_safe_text("a\U0001f600b‏‫c⁦d‎", font)
+    assert out.startswith("a") and out[1] in "?�" and out[2:] == "bcd"
+    kept = "Привет שלום\n"
+    assert export.pdf_safe_text(kept, font) == kept
+
+
+@pytest.mark.skipif(not have_font(), reason="no Latin+Cyrillic+Hebrew system font")
+def test_pdf_with_emoji_and_bidi_marks_still_exports(tmp_path):
+    seg = {"start": 0, "end": 1, "text": "hi \U0001f600‏ there", "speaker": "Me"}
+    (tmp_path / "transcript.json").write_text(json.dumps({"segments": [seg]}), "utf-8")
+    assert export.export_pdf(tmp_path).read_bytes().startswith(b"%PDF")
