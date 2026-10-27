@@ -217,7 +217,9 @@ The DOCX/PDF export (`recandcc export`, #4) adds these dependencies, all importe
 
 fpdf2 is LGPL-3.0: it is imported dynamically and used unmodified. When the app is
 distributed (for example as a frozen bundle), users must be able to replace fpdf2 with their
-own build of it, so keep it a separate, replaceable package and don't patch it. Owner
+own build of it, so keep it a separate, replaceable package and don't patch it. Any packaged
+build (e.g. PyInstaller) must keep fpdf2 replaceable the same way: a one-dir bundle with fpdf2
+as a separate package, not statically merged into the app, per LGPL-3.0 section 4. Owner
 decision 2026-10-27: keep fpdf2.
 
 ## Conventions
