@@ -16,8 +16,10 @@ is embedded, stored or fused, and results are exactly the full-text ones; vector
 an earlier opt-in are deleted at the next ``sync``.
 
 The index is a derived cache: a corrupt file (a crash, a full disk) is deleted and recreated,
-and the next ``sync`` rebuilds it. A missing or unlistable ``output_dir`` (an unmounted drive,
-an offline share) drops nothing.
+and the next ``sync`` rebuilds it; so is a file deleted by hand or by another process. An
+unreachable ``output_dir`` (an unmounted drive, an offline share: unlistable, gone together
+with its parent, or an empty mount stub on another device) drops nothing; a folder deleted
+while its parent is still there drops its sessions.
 
 Every call opens its own connection, so any thread may use an index; writes are serialised
 by a lock (and by SQLite's file lock across processes, e.g. the app and the CLI). Transcript
@@ -101,19 +103,38 @@ def _is_corrupt(e: sqlite3.Error) -> bool:
     return "file is not a database" in msg or "disk image is malformed" in msg
 
 
+_TABLES = ("sessions", "seg_fts", "seg_plain", "seg_vec", "sem_sessions", "roots")
+
+
+def _is_missing_schema(e: sqlite3.Error) -> bool:
+    """A file without our tables: deleted and recreated empty behind this instance's back."""
+    msg = str(e)
+    return isinstance(e, sqlite3.OperationalError) and any(
+        msg == f"no such table: {t}" or msg.startswith(f"no such table: {t} ") for t in _TABLES
+    )
+
+
+class _ResetBlocked(PermissionError):
+    """A corrupt index that can't be deleted now (Windows: another connection has it open)."""
+
+
 def _recovering[**P, R](
     method: Callable[Concatenate[TranscriptIndex, P], R],
 ) -> Callable[Concatenate[TranscriptIndex, P], R]:
-    """Run ``method``; if the index file turns out corrupt, recreate it and run it once more."""
+    """Run ``method``; if the index file turns out corrupt, recreate it and run it once more.
+    Same when its tables are gone (another process or the user deleted the file)."""
 
     @wraps(method)
     def run(self: TranscriptIndex, *args: P.args, **kwargs: P.kwargs) -> R:
         try:
             return method(self, *args, **kwargs)
         except sqlite3.DatabaseError as e:
-            if not _is_corrupt(e):
+            if _is_missing_schema(e):
+                self._ready = False  # the next connection recreates the schema, owner-only
+            elif _is_corrupt(e):
+                self._recover()
+            else:
                 raise
-            self._recover()
             return method(self, *args, **kwargs)
 
     return run
@@ -153,6 +174,8 @@ class TranscriptIndex:
 
     # ------------------------------------------------------------------ storage
     def _connect(self) -> sqlite3.Connection:
+        if self._ready and not self.path.exists():
+            self._ready = False  # deleted by hand, or recovered by another process
         if not self._ready:
             with self._init_lock:
                 if not self._ready:
@@ -209,6 +232,8 @@ class TranscriptIndex:
                     self.path.name,
                     type(e).__name__,
                 )
+                if isinstance(e, PermissionError):
+                    raise _ResetBlocked(*e.args) from e  # tried again by the next call
                 raise
             self._ready = False
             log.warning(
@@ -229,7 +254,7 @@ class TranscriptIndex:
 
     def _create(self, db: sqlite3.Connection) -> None:
         if db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
-            for table in ("sessions", "seg_fts", "seg_plain", "seg_vec", "sem_sessions"):
+            for table in _TABLES:
                 db.execute(f"DROP TABLE IF EXISTS {table}")
             db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         db.execute(
@@ -262,6 +287,8 @@ class TranscriptIndex:
             "CREATE TABLE IF NOT EXISTS sem_sessions "
             "(folder TEXT PRIMARY KEY, stamp TEXT, model TEXT)"
         )
+        # the device each synced output_dir was on: tells an unmounted volume from a deletion
+        db.execute("CREATE TABLE IF NOT EXISTS roots (dir TEXT PRIMARY KEY, dev INTEGER)")
         db.commit()
 
     @property
@@ -308,16 +335,15 @@ class TranscriptIndex:
                     found[str(f.parent)] = _stamp(f)
             except OSError:
                 continue
-        try:  # listed after the glob: going offline during it also counts
-            os.listdir(output_dir)
-            reachable = True
-        except OSError:  # missing, not a directory, or unreadable
-            reachable = False
+        root = str(output_dir)
         with contextlib.closing(self._connect()) as db:
             known = {
                 folder: (stamp, fts)
                 for folder, stamp, fts in db.execute("SELECT folder, stamp, fts FROM sessions")
             }
+            row = db.execute("SELECT dev FROM roots WHERE dir = ?", (root,)).fetchone()
+        # checked after the glob: going offline during it also counts
+        reachable, dev = _reachable(Path(output_dir), row[0] if row else None)
         todo = [f for f, stamp in found.items() if known.get(f) != (stamp, int(self.fts))]
         # Read and parse outside the write lock, so a big first sync doesn't block indexing.
         parsed = {f: _read(Path(f)) for f in todo}
@@ -328,6 +354,8 @@ class TranscriptIndex:
                 log.info("search: output folder unreachable; keeping %d sessions", len(known))
             for folder in known.keys() - found.keys() if reachable else ():
                 removed += self._drop(db, folder)
+            if dev is not None:
+                db.execute("INSERT OR REPLACE INTO roots VALUES (?, ?)", (root, dev))
             for folder in todo:
                 removed += self._drop(db, folder)
                 self._write(db, Path(folder), found[folder], parsed[folder])
@@ -578,10 +606,15 @@ class TranscriptIndex:
     # ------------------------------------------------------------------ queries
     def search(self, query: str, limit: int = 20) -> list[Hit]:
         """Full-text matches (``_lexical``); with an embedder, fused by reciprocal rank with
-        the segments closest in meaning. A failing embedder falls back to the full-text hits."""
-        if self.embedder is None or limit <= 0 or not _TOKEN.search(query):
-            return self._lexical(query, limit)
-        lexical = self._lexical(query, limit * POOL)
+        the segments closest in meaning. A failing embedder falls back to the full-text hits.
+        A corrupt index that can't be reset yet gives no hits (the next search retries)."""
+        plain = self.embedder is None or limit <= 0 or not _TOKEN.search(query)
+        try:
+            lexical = self._lexical(query, limit if plain else limit * POOL)
+        except _ResetBlocked:
+            return []
+        if plain:
+            return lexical
         if self.busy is not None and self.busy():  # a call is live: no ONNX, no O(n) scan
             return lexical[:limit]
         try:
@@ -653,6 +686,35 @@ def rrf(rankings: Sequence[Sequence[Hit]]) -> list[Hit]:
             score[key] = score.get(key, 0.0) + 1.0 / (RRF_K + rank + 1)
             first.setdefault(key, h)
     return [first[k] for k in sorted(score, key=lambda k: -score[k])]
+
+
+def _dev(path: Path) -> int:
+    return os.stat(path).st_dev
+
+
+def _reachable(output_dir: Path, known_dev: int | None) -> tuple[bool, int | None]:
+    """(may sessions missing from ``output_dir`` be dropped, its device to record).
+
+    A folder that lists is reachable, unless it is empty and on another device than the one
+    indexed (the stub of an unmounted mount point). A missing folder whose parent lists is a
+    deletion (``rm -rf``) when the parent is on the device the folder was on; otherwise (the
+    parent is gone too, or the folder was a mount point of its own) it is an unmounted volume.
+    Not a directory, unreadable, or never synced before while missing: unreachable."""
+    try:
+        empty = not os.listdir(output_dir)
+        dev = _dev(output_dir)
+    except FileNotFoundError:
+        try:
+            os.listdir(output_dir.parent)
+            parent = _dev(output_dir.parent)
+        except OSError:
+            return False, None
+        return known_dev is not None and parent == known_dev, None
+    except OSError:
+        return False, None
+    if empty and known_dev is not None and dev != known_dev:
+        return False, None
+    return True, dev
 
 
 def _plain_snippet(text: str, width: int = 120) -> str:

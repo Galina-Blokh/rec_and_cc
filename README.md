@@ -404,7 +404,11 @@ Linux). It never blocks recording, and the log names the kind of share, not the 
   `search.sqlite3`, so it can't be recovered from the file. To remove the whole index at
   once, delete `search.sqlite3`; it is rebuilt from the transcripts on the next search
   (a damaged file is reset and rebuilt the same way). While the transcripts folder is
-  unreachable (an unmounted drive, an offline share) nothing is dropped from the index.
+  unreachable (an unmounted drive, an offline share) nothing is dropped from the index;
+  deleting the whole folder (its parent folder still there) drops all of it. An empty
+  folder is taken as an unmounted share only if it is on another volume than the one
+  indexed, so after emptying a share that came back on a new volume ID, delete
+  `search.sqlite3` too.
   With `speaker_names` on, its stored speaker voices are deleted at once (from Meeting
   notes) or the next time a transcript is written or a `recandcc voices` command runs.
 - `recandcc voices delete <name>` deletes that profile and removes the named voice from every

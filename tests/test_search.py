@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import shutil
 import sqlite3
 import stat
 import sys
@@ -400,20 +401,101 @@ def test_locked_index_is_not_mistaken_for_a_corrupt_one(tmp_path, out, monkeypat
     assert idx.path.exists() and idx.path.stat().st_size > 0
 
 
-@pytest.mark.parametrize("gone", ["missing", "file"])
-def test_unreachable_output_dir_keeps_the_index(tmp_path, out, gone):
+@pytest.mark.parametrize("how", ["recovered", "deleted", "emptied"])
+def test_index_survives_another_process_resetting_the_file(tmp_path, out, how):
+    """The app's index keeps working after the CLI recovered (deleted) the file, after the
+    user deleted it by hand, or when a racing connect left an empty file without tables."""
+    a = make_session(out, 1, [seg(0, "the quarterly budget")])
+    app = index(tmp_path, True)
+    app.sync(out)
+    assert len(app.search("budget")) == 1
+    if how == "recovered":
+        _corrupt(app.path, "garbage")
+        assert TranscriptIndex(app.path, fts=True)._recover()  # the CLI deletes it, exits
+    else:
+        app.path.unlink()
+        if how == "emptied":
+            sqlite3.connect(app.path).close()  # an empty database, 0644, no tables
+    assert app.search("budget") == []  # empty until the next sync, not an error
+    assert stat.S_IMODE(app.path.stat().st_mode) == 0o600 or sys.platform == "win32"
+    assert app.sync(out) == 1
+    assert [h.folder for h in app.search("budget")] == [a]
+    app.index_session(a)
+    assert [h.folder for h in app.search("budget")] == [a]
+
+
+def test_search_returns_nothing_while_a_corrupt_file_cant_be_reset(tmp_path, out, monkeypatch):
+    """Windows: an open reader keeps the file from being deleted; the search is empty and the
+    next one tries again."""
+    make_session(out, 1, [seg(0, "the quarterly budget")])
+    idx = index(tmp_path, True)
+    idx.sync(out)
+    _corrupt(idx.path, "garbage")
+    real_unlink = Path.unlink
+
+    def in_use(self, *a, **k):
+        if self == idx.path:
+            raise PermissionError(13, "in use")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", in_use)
+    assert idx.search("budget") == []
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    assert idx.search("budget") == []  # reset now
+    idx.sync(out)
+    assert len(idx.search("budget")) == 1
+
+
+def test_deleted_output_folder_drops_its_sessions(tmp_path, out):
+    """``rm -rf`` of the transcripts folder (its parent still there) is a deletion: no text
+    of it stays searchable."""
+    make_session(out, 1, [seg(0, "the quarterly budget")])
+    idx = index(tmp_path, True)
+    assert idx.sync(out) == 1
+    shutil.rmtree(out)
+    assert idx.sync(out) == 0
+    assert idx.search("budget") == []
+
+
+@pytest.mark.parametrize("gone", ["volume", "file"])
+def test_unreachable_output_dir_keeps_the_index(tmp_path, gone):
+    vol = tmp_path / "Volumes" / "Drive"
+    out = vol / "out" if gone == "volume" else tmp_path / "out"
     a = make_session(out, 1, [seg(0, "the quarterly budget")])
     make_session(out, 2, [seg(0, "the travel plan")])
     idx = index(tmp_path, True)
     assert idx.sync(out) == 2
+    moved = vol if gone == "volume" else out
     away = tmp_path / "unmounted"
-    out.rename(away)  # an unmounted drive or an offline share
+    moved.rename(away)  # an unmounted drive (its folder gone too) or an offline share
     if gone == "file":
         out.write_text("")  # not a directory
     assert idx.sync(out) == 0
     assert [h.folder for h in idx.search("budget")] == [a]
     if gone == "file":
         out.unlink()
-    away.rename(out)  # back online: nothing to re-read
+    away.rename(moved)  # back online: nothing to re-read
+    assert idx.sync(out) == 0
+    assert [h.folder for h in idx.search("budget")] == [a]
+
+
+@pytest.mark.parametrize("stub", ["missing", "empty"])
+def test_unmounted_mount_point_keeps_the_index(tmp_path, out, monkeypatch, stub):
+    """``output_dir`` is itself a mount point: unmounted, it is gone (its parent stays) or an
+    empty stub folder (autofs) on another device than the one indexed."""
+    a = make_session(out, 1, [seg(0, "the quarterly budget")])
+    real_dev = search._dev
+    mounted = {"on": True}
+
+    def dev(p):
+        return 4242 if Path(p) == out and mounted["on"] else real_dev(p)
+
+    monkeypatch.setattr(search, "_dev", dev)
+    idx = index(tmp_path, True)
+    assert idx.sync(out) == 1
+    mounted["on"] = False
+    shutil.rmtree(out)
+    if stub == "empty":
+        out.mkdir()
     assert idx.sync(out) == 0
     assert [h.folder for h in idx.search("budget")] == [a]
