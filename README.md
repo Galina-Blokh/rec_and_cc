@@ -15,7 +15,13 @@ account, nothing uploaded.
 - 🌍 **English and Russian** are detected automatically, even when the language switches
   mid-meeting. **Hebrew** can be added (`languages = ["en", "ru", "he"]`): captions and
   transcripts show it right to left (Windows captions reorder RTL text themselves, as Tk does no
-  bidi; verified by unit tests only, no hardware check yet). Hebrew accuracy with the stock model is not yet tuned.
+  bidi; verified by unit tests only, no hardware check yet). Hebrew accuracy with the stock model
+  is not yet tuned; for better Hebrew, opt in to the Hebrew-tuned
+  [ivrit.ai](https://huggingface.co/ivrit-ai) Whisper: with
+  `language_models = { he = "ivrit-ai/whisper-large-v3-turbo-ct2" }` Hebrew regions are
+  transcribed by it (its MLX build on the Apple-silicon GPU), English and Russian by the
+  default model. It is downloaded once, pinned, in the background when a session starts, and needs about
+  as much memory again as the default model.
 - 🧠 Local Whisper (`large-v3-turbo`) on the **Apple-silicon GPU** (MLX), with CPU threads
   working alongside: a 1-hour meeting transcribes in about 2–3 minutes. Windows uses the CPU.
   and the final transcript is ready a moment after the recording stops.
@@ -220,6 +226,7 @@ record_mic = "calls"         # always | calls | never
 [transcription]
 model = "large-v3-turbo"     # tiny | base | small | medium | large-v3 | large-v3-turbo
 languages = ["en", "ru"]     # auto-detect among these, e.g. ["en", "ru", "he"] ([] = any)
+language_models = {}         # per-language model, e.g. { he = "ivrit-ai/whisper-large-v3-turbo-ct2" }
 keep_audio = true            # false = delete WAVs after transcription (~115 MB per track-hour)
 live = true                  # transcribe while recording (false = after the session stops)
 

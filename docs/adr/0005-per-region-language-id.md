@@ -20,6 +20,13 @@ dropped. Unrestricted detection also confuses Russian with Ukrainian or Bulgaria
 4. Same-language regions are merged into chunks of ≤ 30 s (gaps ≤ 2 s) and transcribed with
    a fixed language. Live transcription applies the same rules per phrase.
 
+5. Optionally, the region's language also picks the model that transcribes it
+   (`transcription.language_models`, e.g. Hebrew → the ivrit.ai Whisper): the routed model
+   loads in the background when a session starts, through the same pinned, offline-first loader
+   ([0010](0010-offline-first-model-loading.md)); on MLX it shares the main model's GPU
+   thread. Until it is ready, live captions use the main model; a load failure falls back to
+   the main model (with a notice) and is retried after 5 minutes.
+
 ## Alternatives considered
 - **Whisper's own per-window detection with the main model**: 2.5 s per detection versus
   0.14 s with `base` on the CPU, and it mislabelled English sentences in mixed audio.
