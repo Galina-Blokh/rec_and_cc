@@ -60,3 +60,31 @@ def test_writers_go_to_the_private_path(tmp_path):
     config.Config().save()
     config.save_languages(["ru"])
     assert config.load_config().transcription.languages == ["ru"]
+
+
+def test_crash_handler_default_faults_file_is_read_at_call_time(tmp_path, monkeypatch):
+    import faulthandler
+
+    from conftest import _logging_state, _undo_setup_logging
+
+    from recandcc import logging_setup
+
+    faults = tmp_path / "private-logs" / "faults.log"
+    assert logging_setup.FAULTS_FILE.parent == faults.parent
+    before = _logging_state()
+    monkeypatch.setattr(logging_setup, "_faults_file", None)
+    monkeypatch.setattr(logging_setup, "_installed", False)
+    logging_setup.install_crash_handlers()
+    assert faults.exists()
+    assert logging_setup._faults_file is not None
+    _undo_setup_logging(before)
+    assert faulthandler.is_enabled() == before[-1]  # pytest's own faulthandler stays on
+
+
+def test_crash_handler_none_disables_faults_file(tmp_path, monkeypatch):
+    from recandcc import logging_setup
+
+    monkeypatch.setattr(logging_setup, "_faults_file", None)
+    logging_setup.install_crash_handlers(None)
+    assert logging_setup._faults_file is None
+    assert not logging_setup.FAULTS_FILE.exists()

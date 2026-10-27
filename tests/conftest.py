@@ -50,6 +50,7 @@ def _import_path_modules():
 
 
 def _logging_state():
+    import faulthandler
     import logging
     import sys
     import threading
@@ -61,12 +62,14 @@ def _logging_state():
         getattr(root, "_recandcc_configured", False),
         sys.excepthook,
         threading.excepthook,
+        faulthandler.is_enabled(),
     )
 
 
 def _undo_setup_logging(before) -> None:
     """Undo what a test's `setup_logging` left behind: root handlers (and the open log file),
-    the configured flag, faulthandler and the excepthooks."""
+    the configured flag, our faults file and the excepthooks. faulthandler is restored to its
+    previous state, never switched off under pytest's own plugin."""
     import faulthandler
     import logging
     import sys
@@ -74,7 +77,7 @@ def _undo_setup_logging(before) -> None:
 
     from recandcc import logging_setup
 
-    handlers, level, configured, excepthook, thread_hook = before
+    handlers, level, configured, excepthook, thread_hook, fault_enabled = before
     root = logging.getLogger()
     for handler in list(root.handlers):
         if handler not in handlers:
@@ -85,7 +88,12 @@ def _undo_setup_logging(before) -> None:
     sys.excepthook = excepthook
     threading.excepthook = thread_hook
     if logging_setup._faults_file is not None:
-        faulthandler.disable()
+        # pytest's own faulthandler plugin enables it process-wide: keep it on (pointed at
+        # stderr) rather than disabling it, and close only the file our code opened.
+        if fault_enabled:
+            faulthandler.enable(file=sys.__stderr__, all_threads=True)
+        else:
+            faulthandler.disable()
         logging_setup._faults_file.close()
         logging_setup._faults_file = None
     logging_setup._installed = False
