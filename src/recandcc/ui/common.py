@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .. import hotkey as hotkey_mod
-from ..cloudsync import cloud_sync_provider, warning_text
+from ..cloudsync import cloud_sync_provider, network_volume, network_warning_text, warning_text
 from ..config import (
     CONFIG_PATH,
     LOG_DIR,
@@ -308,6 +308,7 @@ class Controller:
         self._lang_lock = threading.Lock()  # transcription.languages + its raw spelling
         self._summaries = None  # SummaryQueue, created on the first summary
         self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
+        self._net_warned: set[Path] = set()  # network-volume output dirs already warned about
         # global shortcut
         self._hotkey_lock = threading.Lock()
         self._hotkey = None  # HotkeyListener / WinHotkeyListener
@@ -786,6 +787,7 @@ class Controller:
     def _refresh(self) -> None:
         try:
             self._maybe_reload_config()
+            self._check_network_volume()
             self._check_cloud_sync()  # before listing output_dir, which may stall on a cloud mount
             perm = permission_status()
             recent = recent_transcripts(self.cfg.output_dir)
@@ -797,6 +799,25 @@ class Controller:
             with self._lock:
                 self._refreshing = False
         self.events.put(("refreshed",))
+
+    def _check_network_volume(self) -> None:
+        """Warn once per output folder on a network share (SMB/NFS/UNC...): audio and
+        transcripts would leave the device. The path is in the notice, never in the log."""
+        out = Path(self.cfg.output_dir)
+        with self._lock:
+            if out in self._net_warned:
+                return
+        kind = network_volume(out)
+        if kind is None:
+            return
+        with self._lock:
+            if out in self._net_warned:
+                return
+            self._net_warned.add(out)
+        log.warning("output folder is on %s; use a local folder to keep it", kind)
+        self.events.put(
+            ("notice", "Transcripts folder is on the network", network_warning_text(out, kind))
+        )
 
     def _check_cloud_sync(self) -> None:
         """Warn once per output folder if it is synced to iCloud / OneDrive / ...: recordings
