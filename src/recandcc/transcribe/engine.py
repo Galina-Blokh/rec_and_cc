@@ -732,6 +732,11 @@ class Transcriber:
         background as soon as they are ready (WAVs are deleted only after that). Returns the
         segments written now.
         """
+        # A "forget all" after this drops our voice writes; it counts from when the session
+        # was recorded, so one recorded or queued before a forget keeps no voice data either.
+        gen = session.voices_generation
+        if gen is None:
+            gen = voices.forget_generation()
         if diarization is None:
             diarization = self.start_diarization(session)
         with self._init_lock:
@@ -743,29 +748,35 @@ class Transcriber:
                 turns = diarization.result(timeout=self.diarize_wait_s)
             except TimeoutError:
                 log.info("session %s: speaker labels follow when diarization ends", session.id)
-                self._write(session, segments, duration)
+                with voices.NAMING_LOCK:
+                    self._write(session, segments, duration)
                 with self._init_lock:  # before the callback, which may run right away
                     self._label_waiters[_dir_key(session.directory)] = (self.clock(), [])
                 diarization.add_done_callback(
-                    lambda f: self._relabel_later(session, segments, duration, f)
+                    lambda f: self._relabel_later(session, segments, duration, f, gen)
                 )
                 return segments
             except Exception:  # noqa: BLE001 - cancelled; diarization is optional
                 turns = None
             self._diarization_metrics(session, diarization)
-            segments = self._labelled(session, segments, turns)
-        self._write(session, segments, duration)
-        self._name_from_call_app(session)
+            with voices.NAMING_LOCK:  # voices and transcript change together, not mid-naming
+                segments = self._labelled_now(session, segments, turns, gen)
+                self._write(session, segments, duration)
+            self._prune_voices()
+        else:
+            with voices.NAMING_LOCK:
+                self._write(session, segments, duration)
+        self._name_from_call_app(session, gen)
         self._drop_audio(session)
         return segments
 
-    def _name_from_call_app(self, session: SessionInfo) -> None:
+    def _name_from_call_app(self, session: SessionInfo, gen: int | None = None) -> None:
         """Opt-in: name the one unknown speaker after the one free call-app participant."""
         if not (self.cfg.speaker_names and self.cfg.names_from_call_app):
             callnames.forget(session.id)  # switched off since the call: don't keep the names
             return
         try:
-            callnames.apply(Path(session.directory))
+            callnames.apply(Path(session.directory), since=gen)  # takes NAMING_LOCK
         except Exception as e:  # noqa: BLE001 - optional; the numbered label stays
             # The exception text or traceback could quote a name: type at WARNING, rest at DEBUG
             log.warning(
@@ -824,45 +835,58 @@ class Transcriber:
         session: SessionInfo,
         segments: list[Segment],
         turns: list[Turn] | dict[Track, list[Turn] | None] | None,
+        gen: int | None = None,
+        use_names: bool = True,
     ) -> list[Segment]:
         """Number (or name) the speakers of each diarized track independently; a later
-        track's numbers continue after the earlier ones' ("Speaker 3" after 1 and 2)."""
+        track's numbers continue after the earlier ones' ("Speaker 3" after 1 and 2).
+        `use_names=False`: numbers only, no voice-profile names."""
         by_track = turns if isinstance(turns, dict) else {diarized_tracks(session)[0]: turns}
         out, n_labels, n_named = list(segments), 0, 0
         speakers: dict[str, np.ndarray] = {}
-        for track, track_turns in by_track.items():
-            centroids = getattr(track_turns, "centroids", {}) if self.cfg.speaker_names else {}
-            names: dict[int, str] = {}
-            if track_turns and centroids:
-                try:
-                    names = voices.match_profiles(centroids, voices.load_profiles())
-                except Exception:  # noqa: BLE001 - names are optional; numbers still work
-                    log.exception("session %s: could not match voice profiles", session.id)
-            taken = {s.speaker for s in out} - {ME, OTHERS}
-            # One person, one name: a profile already given on an earlier track numbers this
-            # track's cluster instead (and its stored voice can't overwrite the first one).
-            folded = {t.casefold() for t in taken}
-            names = {k: n for k, n in names.items() if n.casefold() not in folded}
-            if track_turns and self.cfg.split_on_speaker_change:
-                # this track's segments still carry "Me"/"Others": split them at speaker changes
-                out = split_on_speaker_change(out, track_turns, SPEAKERS[track])
-            out, labels = label_speakers(
-                out, track_turns or [], SPEAKERS[track], names=names, reserved=taken
-            )
-            # A lone speaker in a room session keeps "Me", which is never renamed: no voice.
-            speakers |= {
-                lbl: centroids[k] for k, lbl in labels.items() if k in centroids and lbl != ME
-            }
-            n_labels += len(labels)
-            n_named += len(names.keys() & labels.keys())
-        try:  # opt-in only, in the private voices folder: lets `name-speaker` name them later
-            if speakers and Path(session.directory).exists():
-                voices.write_session_voices(session, speakers)
-            else:  # never leave voices of an older transcript of this session behind
-                voices.delete_session_voices(session.id)
-            voices.prune_session_voices()  # of sessions whose folder was deleted
-        except OSError:
-            log.exception("session %s: could not update speaker voices", session.id)
+        folder_exists = Path(session.directory).exists()  # outside the voice lock: may be slow
+        # Names, the generation check and the voice writes are one step against a forget.
+        # If another process holds the store past LOCK_WAIT_S: numbers only, no voice work.
+        with voices.store_lock_best_effort() as locked:
+            for track, track_turns in by_track.items():
+                centroids = getattr(track_turns, "centroids", {}) if self.cfg.speaker_names else {}
+                names: dict[int, str] = {}
+                if track_turns and centroids and locked and use_names:
+                    try:
+                        known = voices.profiles_if_current(gen)  # none after a forget since `gen`
+                        names = voices.match_profiles(centroids, known)
+                    except Exception:  # noqa: BLE001 - names are optional; numbers still work
+                        log.exception("session %s: could not match voice profiles", session.id)
+                taken = {s.speaker for s in out} - {ME, OTHERS}
+                # One person, one name: a profile already given on an earlier track numbers this
+                # track's cluster instead (and its stored voice can't overwrite the first one).
+                folded = {t.casefold() for t in taken}
+                names = {k: n for k, n in names.items() if n.casefold() not in folded}
+                if names and gen is not None and gen != voices.forget_generation():
+                    names = {}  # all voices were deleted meanwhile: no remembered names in the text
+                if track_turns and self.cfg.split_on_speaker_change:
+                    # this track's segments still carry "Me"/"Others": split them at speaker changes
+                    out = split_on_speaker_change(out, track_turns, SPEAKERS[track])
+                out, labels = label_speakers(
+                    out, track_turns or [], SPEAKERS[track], names=names, reserved=taken
+                )
+                # A lone speaker in a room session keeps "Me", which is never renamed: no voice.
+                speakers |= {
+                    lbl: centroids[k] for k, lbl in labels.items() if k in centroids and lbl != ME
+                }
+                n_labels += len(labels)
+                n_named += len(names.keys() & labels.keys())
+            try:  # opt-in only, in the private voices folder: lets `name-speaker` name them later
+                if not locked:
+                    pass  # the store is busy: leave its voices as they are
+                elif speakers and folder_exists:
+                    voices.write_session_voices(session, speakers, since=gen)
+                elif gen is None or gen == voices.forget_generation():
+                    # never leave voices of an older transcript of this session behind (but not
+                    # those stored after a forget that this run began before)
+                    voices.delete_session_voices(session.id)
+            except OSError:
+                log.exception("session %s: could not update speaker voices", session.id)
         if not any(by_track.values()):
             return segments
         log.info(  # counts only: names are personal data
@@ -873,18 +897,54 @@ class Transcriber:
         )
         return out
 
+    def _labelled_now(
+        self,
+        session: SessionInfo,
+        segments: list[Segment],
+        turns: list[Turn] | dict[Track, list[Turn] | None] | None,
+        gen: int | None,
+    ) -> list[Segment]:
+        """``_labelled``, re-checked just before the caller writes the transcript (under
+        NAMING_LOCK): if all voices were forgotten meanwhile (by another process: this one's
+        forget waits for NAMING_LOCK), the text gets numbers, never a forgotten name."""
+        out = self._labelled(session, segments, turns, gen)
+        if gen is not None and gen != voices.forget_generation():
+            log.info("session %s: voices were forgotten meanwhile; numbers only", session.id)
+            out = self._labelled(session, segments, turns, gen, use_names=False)
+        return out
+
+    @staticmethod
+    def _prune_voices() -> None:
+        """Drop the voices of deleted sessions; outside NAMING_LOCK: it walks session folders."""
+        try:
+            voices.prune_session_voices()
+        except OSError:
+            log.exception("could not prune speaker voices")
+
     def _relabel_later(
-        self, session: SessionInfo, segments: list[Segment], duration: float, future: Future
+        self,
+        session: SessionInfo,
+        segments: list[Segment],
+        duration: float,
+        future: Future,
+        gen: int | None = None,
     ) -> None:
         """Done-callback of a slow diarization: rewrite the transcript with speaker labels."""
         try:
             turns = None if future.cancelled() else future.result()
-            labelled = self._labelled(session, segments, turns)
-            if labelled != segments and Path(session.directory).exists():
-                write_outputs(session, labelled, duration, self.cfg.model)
-                log.info("session %s: transcript rewritten with speaker labels", session.id)
+            with voices.NAMING_LOCK:  # voices and transcript change together, not mid-naming
+                if voices.has_user_names(session.directory):
+                    # a speaker was named meanwhile (here or by the CLI): keep their names
+                    log.info("session %s: speakers already named; labels kept", session.id)
+                    labelled = segments
+                else:
+                    labelled = self._labelled_now(session, segments, turns, gen)
+                if labelled != segments and Path(session.directory).exists():
+                    write_outputs(session, labelled, duration, self.cfg.model)
+                    log.info("session %s: transcript rewritten with speaker labels", session.id)
+            self._prune_voices()
             if Path(session.directory).exists():
-                self._name_from_call_app(session)
+                self._name_from_call_app(session, gen)
             if getattr(future, "timing", None) and Path(session.directory).exists():
                 self._diarization_metrics(session, future)
                 session.save()

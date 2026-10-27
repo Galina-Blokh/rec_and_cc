@@ -139,6 +139,12 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   any language); pick a match to open its transcript. Same as `recandcc search`. On
   Windows the tray item opens a small window: type the words, press Enter, and
   double-click a match (time, speaker, snippet) to open it.
+- **Recent transcripts → Name speakers…** (only with `speaker_names = true`): pick a session
+  and a `Speaker N` (their first lines are shown to help), type a name. Same as
+  `recandcc name-speaker`.
+- **Forget all voices…**: after a confirmation, deletes every voice profile and all saved
+  session voices (`recandcc voices delete --all`), including those of sessions still waiting
+  to be transcribed. macOS menu only for now.
 - **Export latest transcript (DOCX + PDF)** (*macOS only*; on Windows use `recandcc export`): writes `transcript.docx` and `transcript.pdf`
   next to the newest transcript. Same as `recandcc export`. If the session has a
   `summary.md`, the summary and action items come first. The export renders the summary's
