@@ -11,7 +11,9 @@ account, nothing uploaded.
   `Speaker 1`, `Speaker 2`, … in the final transcript (offline speaker diarization, a few
   seconds per hour of audio). Live captions keep showing `Others`. Opt in to
   `speaker_names` and name a speaker once (`recandcc name-speaker`): later sessions
-  recognize that voice and write `Anna` instead of `Speaker 2`.
+  recognize that voice and write `Anna` instead of `Speaker 2`. Optionally (macOS,
+  `names_from_call_app`, off by default) the name shown in the call app's open participants
+  panel can be used when it is unambiguous; see [Names from the call app](#names-from-the-call-app).
 - 🌍 **English and Russian** are detected automatically, even when the language switches
   mid-meeting. **Hebrew** can be added (`languages = ["en", "ru", "he"]`): captions and
   transcripts show it right to left (Windows captions reorder RTL text themselves, as Tk does no
@@ -137,6 +139,8 @@ Menu items:
   `recandcc name-speaker`.
 - **Forget all voices…**: after a confirmation, deletes every voice profile and all saved
   session voices (`recandcc voices delete --all`). macOS menu only for now.
+- **Export latest transcript (DOCX + PDF)**: writes `transcript.docx` and `transcript.pdf`
+  next to the newest transcript. Same as `recandcc export`.
 - **Meeting notes…**: your past sessions, newest first, with title (the app that triggered
   it, or one you gave it), date and time, duration, speakers, languages and whether it is
   transcribed. Pick one to open its transcript or `summary.md` (if there is one; its first
@@ -154,7 +158,10 @@ Menu items:
 - **Delete audio after**: Never / 1 / 7 / 30 / 90 days. Audio of transcribed recordings is
   deleted after that many days; transcripts are always kept. Any number of days can be set as
   `audio_retention_days` in the settings.
-- **Edit settings**: opens `config.toml` (changes to detection settings, `hotkey` and
+- **Settings…** (needs the rebuilt helper, `./native/macos/build.sh`): a window for mode,
+  transcripts folder, languages, keep audio, live captions and speaker names. Saved values
+  apply at once. Without it, the app opens `config.toml` instead.
+- **Edit config.toml**: opens `config.toml` (changes to detection settings, `hotkey` and
   `languages` apply live).
 - **Quit RecAndCC**
 
@@ -273,6 +280,7 @@ repo):
 | `recandcc transcribe <session_dir>` | (Re-)transcribe a recorded session |
 | `recandcc summarize <session_dir>` | Write the session's `summary.md` (summary + action items) with the local model |
 | `recandcc monitor` | Live view of which apps do audio and how the rules classify them. Use it to tune the app lists |
+| `recandcc export <session-folder> [--format docx\|pdf\|both]` | Write `transcript.docx` and/or `transcript.pdf` next to the session's transcript (speakers, timestamps, Hebrew right to left); the PDF needs a system font with Latin, Cyrillic and Hebrew (Arial or DejaVu Sans) |
 | `recandcc search "<words>" [--limit N]` | Search all transcripts; prints each match's date, time in the recording, speaker, the text and the transcript path |
 | `recandcc devices` | List audio devices |
 | `recandcc autostart on\|off\|status` | Launch at login |
@@ -280,6 +288,29 @@ repo):
 | `recandcc speakers <session_dir>` | List a transcript's speakers with their first lines. A speaker who introduces themself in their first 2 minutes ("I'm Anna", "Меня зовут Анна", "קוראים לי דנה") gets a hint, `suggested: Anna (said: …)`. Only a hint: nothing is renamed or saved until you run `name-speaker` |
 | `recandcc name-speaker <session_dir> "Speaker 2" "Anna"` | Name a speaker: rewrites that transcript and saves Anna's voice profile, so later sessions say `Anna` (needs `speaker_names = true`) |
 | `recandcc voices list\|delete <name>\|delete --all` | List or delete saved voice profiles |
+
+## Names from the call app
+
+Off by default, macOS only, and only together with `transcription.speaker_names`. Switch it on
+with **menu → Use names from the call app** (or `names_from_call_app = true`). While a call is
+recorded, RecAndCC reads the names in the call app's **participants panel, if you have it
+open**, through the macOS Accessibility API: it only reads what is on screen and never clicks,
+opens or changes anything; only the Zoom and Teams apps and, in a browser, a window showing a Meet/Teams/Zoom call page are read (never Slack, Discord, WhatsApp, FaceTime, Telegram and the like). A name counts only if it is in two samples in a row.
+A speaker is named only when it is certain: the panel shows exactly as many people as there
+are speakers besides `Me`, every speaker recognized by voice matches one of them, and one
+`Speaker N` and one name are left (a self-introduction that disagrees wins). Otherwise nothing
+is guessed (`recandcc speakers` lists the names). This only relabels the transcript: no voice
+profile is saved from it (confirm with `recandcc name-speaker` to remember the voice). A
+recognized voice or `Me` is never overridden.
+
+- **Permission:** it needs **Accessibility**. RecAndCC never triggers the system prompt by
+  itself; the menu item explains why and opens System Settings > Privacy & Security >
+  Accessibility, where you add RecAndCC yourself. Without it nothing is read.
+- **Privacy:** the names stay on your Mac, in the owner-only app-data `voices/` folder (not in
+  the transcripts folder, which may sync to a cloud); they are removed when the session is
+  deleted, once they are used, and by `recandcc voices delete --all`. Names that were not used
+  stay there until the session is deleted. They are personal data of the other people on the
+  call (see below) and are never logged. Once a name is in a transcript it is part of it.
 
 ## Privacy & consent
 

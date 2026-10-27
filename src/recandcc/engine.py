@@ -303,7 +303,7 @@ class Engine:
             choice = "ignore"
         self._command(("respond", choice, prompt_id))
 
-    def set_mode(self, mode: Mode | str) -> None:
+    def set_mode(self, mode: Mode | str, *, save: bool = True) -> None:
         mode = Mode(mode)
         with self._lock:
             self.det.mode = mode
@@ -313,7 +313,8 @@ class Engine:
                     self._prompt = None
                 if self._rec is not None and not self._rec.manual:
                     self._commands.append(("stop",))
-        self._safe_save()
+        if save:
+            self._safe_save()
         self._wake.set()
         self._notify()
 
@@ -805,6 +806,10 @@ class Engine:
         self._session_end(session, False)
         # Also when stop() failed or dropped it as too short: whatever it wrote must go.
         session = session or started
+        if session is not None:  # a discarded call must not leave its participants' names behind
+            from . import participants
+
+            participants.forget(session.id)
         # Already gone (stop() dropped it as too short): don't schedule a delete, as the next
         # session may reuse the name. Only the engine thread creates folders, so no race here.
         if session is None or not session.directory.exists():

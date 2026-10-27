@@ -31,10 +31,13 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-20 | Search my transcripts | 🟡 search only; summaries, export planned (#4) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
 | US-26 | Name speakers and forget voices from the menu | 🟡 macOS menu, first lines instead of an audio sample; Windows tray not yet (#1) |
+| US-31 | Speaker names from the call app's participant list | 🟡 claimed (#1 A.3): opt-in, macOS, one-to-one only |
+| US-25 | Export a transcript to DOCX and PDF | 🟡 CLI and macOS menu; Windows tray, templates planned (#4) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
 | US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
 | US-28 | Browse past meetings | 🟡 Windows window untested on hardware (#5) |
 | US-29 | Right-to-left text readable in the Windows captions | 🟡 unit-tested, no hardware check (#6) |
+| US-30 | Change common settings in a window | 🟡 claimed (#3): macOS spike, not on Windows |
 
 ---
 
@@ -285,6 +288,44 @@ don't need the command line for it.*
 - **Not yet:** a short audio sample (the first lines are shown instead), the Windows tray
   items (#1).
 
+### US-31 Speaker names from the call app's participant list
+*As the owner, I want `Speaker 2` named after the person shown in Zoom/Teams/Meet, so that I
+don't have to name them myself, without the app ever asking for more permission on its own.*
+
+- **Given** `names_from_call_app = false` (default) or `speaker_names = false` or Windows,
+  **then** nothing is read from any other app.
+- **Given** it is on and Accessibility is granted, **when** a call is recorded and the call
+  app's participants panel is open, **then** the visible names are sampled every ~15 s on a
+  worker thread and kept in the owner-only voices store (not in the session folder); in a
+  only Zoom, Teams and browser call windows are read, and a name must be in two samples in a row; the panel is never opened or clicked for me.
+- **Given** Accessibility is not granted, **then** nothing is read and macOS never shows its
+  prompt because of RecAndCC: trust is only checked silently. Only **menu → Use names from the
+  call app** explains why and opens System Settings > Accessibility.
+- **Given** the participant names are exactly as many as the speakers besides `Me`, every
+  voice-matched speaker matches one of them, and one `Speaker N` and one name remain,
+  **then** that speaker is relabelled in the transcript (no voice profile is created from it).
+  Otherwise (several unknowns, mismatched spellings such as "Robert" vs "Bob Smith", extra
+  names, a disagreeing self-introduction) nothing is assigned and `recandcc speakers` lists the
+  names. `Me` is never renamed.
+- **Then** names appear nowhere in logs at INFO or above and nowhere outside the owner-only
+  voices store (and a transcript they were used in).
+- **Not yet:** matching several speakers to several names (needs active-speaker highlighting),
+  self-introductions (A.4), tested layouts for each app version (see ARCHITECTURE).
+
+### US-25 Export a transcript to DOCX and PDF
+*As the owner, I want a transcript as a Word or PDF file, so that I can share or print it.*
+
+- **Given** a session with a `transcript.json`, **when** I run `recandcc export <session>
+  [--format docx|pdf|both]` (or choose **Export latest transcript** on macOS), **then**
+  `transcript.docx` and/or `transcript.pdf` are written next to it: title, date, speakers,
+  and one paragraph per segment with its timestamp.
+- **Given** English, Russian and Hebrew segments, **then** all are readable; Hebrew segments
+  are right to left (bidi paragraphs in DOCX, shaped and reordered text in the PDF).
+- **Then** export needs no network, the files are owner-only and logs never contain the
+  transcript text.
+- **Not yet:** the Windows tray entry, custom templates; the PDF needs a system font with
+  Latin, Cyrillic and Hebrew (Arial, DejaVu Sans), otherwise only DOCX is produced (#4).
+
 ### US-27 Meeting summaries and action items
 *As the owner, I want a short summary and the action items of each meeting written next to
 its transcript, so that I know what was decided and who does what without rereading it.*
@@ -380,3 +421,21 @@ correctly, even though Tk does no bidi.*
   captions and the transcript files are unchanged.
 - **Not yet:** a visual check on Windows hardware (#6); long RTL lines that wrap are reordered
   as one line, so the wrap point may read oddly.
+
+### US-30 Change common settings in a window
+*As the owner, I want a settings window with the options I change most, so that I don't have
+to edit `config.toml` by hand.*
+
+- **Given** macOS and a helper that has the `settings` subcommand, **when** I choose
+  **Settings…** in the menu, **then** a window shows mode (off/ask/auto), transcripts folder,
+  languages (English, Russian, Hebrew), keep audio, live captions, speaker names and the
+  shortcut (read-only), without blocking the menu bar.
+- **When** I press Save, **then** the values are validated by the app and written to
+  `config.toml` (other keys are kept) and applied at once; **when** I cancel or close the
+  window, **then** nothing changes.
+- **Given** invalid values, **then** nothing is written and a notice says so.
+- **Given** a missing or older helper, **then** the app says so and opens `config.toml`
+  instead.
+- **Then** the window shows no transcript or audio content, uses no network and asks for no
+  new permission.
+- **Not yet:** Windows, the other keys (detection tuning, hotkey editing), a two-way protocol.

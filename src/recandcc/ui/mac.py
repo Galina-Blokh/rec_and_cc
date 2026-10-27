@@ -139,6 +139,10 @@ class MacApp(rumps.App):
         self.room_item = rumps.MenuItem(ROOM_ITEM, callback=self._toggle_room)
         self.room_item.state = check(self.cfg.detection.room_listening)
         self.live_open_item = rumps.MenuItem("Open live transcript")
+        self.call_names_item = rumps.MenuItem(
+            "Use names from the call app", callback=self._toggle_call_names
+        )
+        self.call_names_item.state = check(self.cfg.transcription.names_from_call_app)
 
         self.menu = [
             self.status_item,
@@ -153,13 +157,16 @@ class MacApp(rumps.App):
             self.recent_menu,
             rumps.MenuItem("Search transcripts…", callback=self._search),
             rumps.MenuItem("Forget all voices…", callback=self._forget_voices),
+            rumps.MenuItem("Export latest transcript (DOCX + PDF)", callback=self._export),
             rumps.MenuItem("Meeting notes…", callback=lambda _: ctrl.notes_async()),
             None,
             self.perm_menu,
             self.login_item,
             self.lang_menu,
+            self.call_names_item,
             self.retention_menu,
-            rumps.MenuItem("Edit settings", callback=lambda _: open_path(CONFIG_PATH, True)),
+            rumps.MenuItem("Settings…", callback=lambda _: self.ctrl.open_settings_async()),
+            rumps.MenuItem("Edit config.toml", callback=lambda _: open_path(CONFIG_PATH, True)),
             rumps.MenuItem("Reveal logs", callback=lambda _: reveal_logs()),
             None,
             rumps.MenuItem("Quit RecAndCC", callback=self._quit),
@@ -218,6 +225,16 @@ class MacApp(rumps.App):
                     self._live_id = None
                     if self.captions is not None:
                         self.captions.end()
+            elif kind == "call_names_confirm":
+                self._confirm_call_names()
+            elif kind == "settings_saved":
+                self.captions_item.state = check(self.cfg.live_captions)
+                if "live_captions" in ev[1]:
+                    self._apply_captions()
+                self._notify("Settings saved", "Applied")
+            elif kind == "settings_fallback":
+                self._notify("Settings window unavailable", "Opening config.toml instead")
+                open_path(CONFIG_PATH, True)
             elif kind == "search":
                 self._show_hits(ev[1], ev[2])
             elif kind == "speakers":
@@ -248,6 +265,7 @@ class MacApp(rumps.App):
         self.login_item.state = check(autostart.is_enabled())
         self.room_item.state = check(self.cfg.detection.room_listening)  # hand edits too
         self._render_languages()
+        self.call_names_item.state = check(self.cfg.transcription.names_from_call_app)
         self._render_live(st)
         # close a stale prompt dialog (answered elsewhere, expired, mode changed, ...)
         with self._dialog_lock:
@@ -328,6 +346,27 @@ class MacApp(rumps.App):
 
         return cb
 
+    def _toggle_call_names(self, _sender) -> None:
+        self.ctrl.toggle_call_app_names()  # the item's check mark follows the setting in _render
+
+    def _confirm_call_names(self) -> None:
+        """Main thread, after the worker found Accessibility not granted: explain, then open
+        the settings pane if the user agrees. Nothing here asks macOS for the permission."""
+        agreed = rumps.alert(
+            title="Use names from the call app",
+            message=(
+                "RecAndCC can read the names in your call app's participants panel (Zoom, "
+                "Teams, Meet) to name speakers. This needs the Accessibility permission, which "
+                "macOS only lets you grant in System Settings. RecAndCC only reads the visible "
+                "list, never clicks, and keeps the names on this Mac. Open Accessibility "
+                "settings now?"
+            ),
+            ok="Open Settings",
+            cancel="Not now",
+        )
+        if agreed:
+            self.ctrl.confirm_call_app_names()
+
     def _toggle_rec(self, _sender) -> None:
         self.ctrl.toggle_recording()
 
@@ -383,6 +422,10 @@ class MacApp(rumps.App):
         self.cfg.live_captions = not self.cfg.live_captions
         sender.state = 1 if self.cfg.live_captions else 0
         self.ctrl.save_settings("live_captions")
+        self._apply_captions()
+
+    def _apply_captions(self) -> None:
+        """Show or hide the captions panel to match ``cfg.live_captions`` (main thread)."""
         if self.captions is None:
             return
         if self.cfg.live_captions:
@@ -403,6 +446,9 @@ class MacApp(rumps.App):
     def _open_folder(self, _sender) -> None:
         if err := open_output_folder(self.cfg.output_dir):
             self._notify("Can't open transcripts folder", err)
+
+    def _export(self, _sender) -> None:
+        self.ctrl.export_async()  # picks the newest finished session on a worker
 
     def _open_recent(self, sender) -> None:
         open_path(sender.path)
