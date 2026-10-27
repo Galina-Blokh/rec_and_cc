@@ -334,3 +334,20 @@ def test_probe_failed_result_backs_off_like_an_error(tmp_path, monkeypatch):
     ctrl._check_network_volume()
     ctrl._net_probes[tmp_path].join(5)
     assert len(calls) == 2
+
+
+def test_local_cache_expires_after_the_ttl(tmp_path, monkeypatch):
+    calls = []
+    now = [1000.0]
+    monkeypatch.setattr(common.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(common, "network_volume", lambda p: calls.append(p))
+    ctrl = _ctrl(tmp_path)
+    ctrl._check_network_volume()
+    ctrl._net_probes[tmp_path].join(5)
+    now[0] += common.NET_LOCAL_TTL_S - 1
+    ctrl._check_network_volume()
+    assert len(calls) == 1
+    now[0] += 2
+    ctrl._check_network_volume()
+    ctrl._net_probes[tmp_path].join(5)
+    assert len(calls) == 2

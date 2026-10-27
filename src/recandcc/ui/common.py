@@ -78,6 +78,7 @@ SEARCH_LIMIT = 20
 HOTKEY_DEBOUNCE_S = 0.5
 NET_PROBE_WAIT_S = 2.0  # how long a refresh waits for the network-volume probe
 NET_PROBE_RETRY_S = 300.0  # after a hung or failed probe
+NET_LOCAL_TTL_S = 600.0  # a folder probed as local is re-probed after this long
 NET_PROBE_MAX_THREADS = 4  # stuck probes (one per folder) allowed at once
 REFRESH_EVERY_S = 10.0
 PERM_KINDS = ("microphone", "system_audio")
@@ -354,7 +355,7 @@ class Controller:
         self._summaries = None  # SummaryQueue, created on the first summary
         self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
         self._net_probes: dict[Path, threading.Thread] = {}  # one in-flight probe per folder
-        self._net_local: set[Path] = set()  # folders already probed as local: skip the statfs
+        self._net_local: dict[Path, float] = {}  # local folder -> when to re-probe (monotonic)
         self._net_retry: dict[Path, float] = {}  # folder -> earliest next probe (monotonic)
         self._net_warned: set[Path] = set()  # network-volume output dirs already warned about
         # global shortcut
@@ -952,13 +953,13 @@ class Controller:
         transcripts would leave the device. The path is in the notice, never in the log.
         The probe (stat/statfs) can hang forever on a dead hard mount, so it runs on its own
         daemon thread and is waited for briefly; a late answer still posts the notice.
-        Local results are cached per path for the life of the process (not invalidated: a
-        share mounted over that path later is noticed after a restart)."""
+        Local results are cached per path for NET_LOCAL_TTL_S, so a share mounted over that
+        path later (or a retargeted symlink) is noticed after the TTL."""
         out = Path(self.cfg.output_dir)
         with self._lock:
             if out in self._net_warned:
                 return
-            if out in self._net_local:
+            if time.monotonic() < self._net_local.get(out, 0.0):
                 return  # known local: no thread, no statfs on every refresh
             prev = self._net_probes.get(out)
             if prev is not None and prev.is_alive():
@@ -982,7 +983,7 @@ class Controller:
         try:
             if cloud_sync_provider(out) is not None:
                 with self._lock:
-                    self._net_local.add(out)  # nothing more to probe for this folder
+                    self._net_local[out] = time.monotonic() + NET_LOCAL_TTL_S
                 return  # the cloud-sync notice already covers it
             kind = network_volume(out)
         except Exception:  # noqa: BLE001 - best effort
@@ -993,9 +994,11 @@ class Controller:
             with self._lock:
                 self._net_retry[out] = time.monotonic() + NET_PROBE_RETRY_S
             return
-        if not isinstance(kind, str):
+        if kind is None:  # genuinely local (never PROBE_FAILED, which backs off above)
             with self._lock:
-                self._net_local.add(out)
+                self._net_local[out] = time.monotonic() + NET_LOCAL_TTL_S
+            return
+        if not isinstance(kind, str):
             return
         with self._lock:
             if out in self._net_warned:
