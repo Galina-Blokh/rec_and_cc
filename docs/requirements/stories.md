@@ -22,7 +22,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-11 | Live captions and live transcript | ✅ |
 | US-12 | Speaker labels for the other side | ✅ |
 | US-13 | Readable transcripts in private folders | 🟡 owner-only not enforced on Windows (#37) |
-| US-14 | Works offline, nothing leaves the device | 🟡 no warning for synced folders yet (#41) |
+| US-14 | Works offline, nothing leaves the device | ✅ |
 | US-15 | Delete old audio automatically | ✅ |
 | US-16 | Permissions set up from the app | ✅ |
 | US-17 | Always on, visible state | ✅ |
@@ -149,7 +149,8 @@ while I decide.*
   checksum is rejected). A custom repo without a pin is refused unless
   `allow_unpinned_models = true`.
 - **Then** RecAndCC uploads nothing itself. The default output folder may still be synced
-  by iCloud or OneDrive; the README warns, the app doesn't yet (#41).
+  by iCloud or OneDrive; the app detects that locally and warns once (log, notification,
+  `recandcc config`), suggesting a local folder.
 - **Then** this is enforced end to end: `test_offline_e2e.py` records and transcribes a
   session (live and batch) with sockets and DNS blocked; only the speaker-model download
   is attempted, and it fails fast, leaving "Others".
