@@ -309,6 +309,11 @@ def cmd_speakers(args) -> int:
             print(f"    {line[:100]}")
     if not speakers:
         print("No other speakers in this transcript.")
+    else:
+        from .transcribe import callnames
+
+        if free := callnames.suggestions(directory):  # from the call app, never auto-assigned
+            print(f"Names in the call app (not matched to a speaker): {', '.join(free)}")
     return 0
 
 

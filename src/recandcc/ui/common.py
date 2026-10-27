@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import fields
 from datetime import datetime
 from pathlib import Path
@@ -609,6 +610,30 @@ class Controller:
             self.post_notice("Languages", LANGUAGES_KEEP_ONE)
             return
         threading.Thread(target=self._save_languages, daemon=True, name="save-config").start()
+
+    def toggle_call_app_names(self, confirm: Callable[[], bool]) -> bool:
+        """Menu "Use names from the call app" (macOS). Returns the new state. Switching it on
+        without Accessibility trust calls ``confirm()`` (a dialog saying why) and, if the user
+        agrees, opens System Settings > Accessibility: the only way the user is ever pointed to
+        that permission. Trust is only checked silently, never requested."""
+        from .. import participants
+
+        tr = self.cfg.transcription
+        if tr.names_from_call_app:
+            tr.names_from_call_app = False
+        elif not tr.speaker_names:
+            self.post_notice(
+                "Names from the call app", "Turn on transcription.speaker_names first."
+            )
+            return False
+        else:
+            if not participants.ax_trusted():
+                if not confirm():
+                    return False
+                participants.open_accessibility_settings()
+            tr.names_from_call_app = True
+        threading.Thread(target=self.cfg.save, daemon=True, name="save-config").start()
+        return tr.names_from_call_app
 
     def _save_languages(self) -> None:
         """Write the menu's languages into config.toml, changing nothing else in the file: a

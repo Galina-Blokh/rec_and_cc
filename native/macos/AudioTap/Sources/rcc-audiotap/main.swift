@@ -12,6 +12,9 @@
 //   rcc-audiotap open-settings microphone|system_audio
 //                                               open the matching System Settings privacy pane
 //   rcc-audiotap hotkey "<cmd>+<shift>+r"       register a global shortcut, JSON line per press
+//   rcc-audiotap ax-status                      JSON: is Accessibility trusted (never prompts)
+//   rcc-audiotap participants [--pid PID]... [--match TEXT]...
+//                                               JSON: names in the app's visible participant list
 
 import Foundation
 
@@ -23,7 +26,9 @@ usage:
   rcc-audiotap permissions
   rcc-audiotap request microphone|system_audio [--timeout SECONDS]
   rcc-audiotap open-settings microphone|system_audio
-  rcc-audiotap hotkey COMBO        (e.g. "<cmd>+<shift>+r")
+  rcc-audiotap ax-status
+  rcc-audiotap participants [--pid PID ...] [--match TEXT ...]
+  rcc-audiotap hotkey COMBO       (e.g. "<cmd>+<shift>+r")
 
 """
 
@@ -106,6 +111,23 @@ do {
         let kind = value(after: "open-settings") { PermissionKind(rawValue: $0) }
         guard args.isEmpty else { fail("unexpected argument \(args[0])") }
         runOpenSettings(kind)
+
+    case "ax-status":
+        guard args.isEmpty else { fail("ax-status takes no options") }
+        runAXStatus()
+
+    case "participants":
+        var pids: [pid_t] = []
+        var matches: [String] = []
+        while let flag = args.first {
+            args.removeFirst()
+            switch flag {
+            case "--pid": pids.append(value(after: flag) { pid_t($0) })
+            case "--match": matches.append(value(after: flag) { $0.isEmpty ? nil : $0 })
+            default: fail("unknown option \(flag)")
+            }
+        }
+        runParticipants(pids: pids, matches: matches)
 
     case "hotkey":
         guard args.count == 1 else { fail("hotkey takes exactly one combo, e.g. \"<cmd>+<shift>+r\"") }

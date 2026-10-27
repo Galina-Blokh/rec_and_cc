@@ -125,6 +125,10 @@ class MacApp(rumps.App):
         self.captions_item = rumps.MenuItem("Show live captions", callback=self._toggle_captions)
         self.captions_item.state = check(self.cfg.live_captions)
         self.live_open_item = rumps.MenuItem("Open live transcript")
+        self.call_names_item = rumps.MenuItem(
+            "Use names from the call app", callback=self._toggle_call_names
+        )
+        self.call_names_item.state = check(self.cfg.transcription.names_from_call_app)
 
         self.menu = [
             self.status_item,
@@ -141,6 +145,7 @@ class MacApp(rumps.App):
             self.perm_menu,
             self.login_item,
             self.lang_menu,
+            self.call_names_item,
             self.retention_menu,
             rumps.MenuItem("Edit settings", callback=lambda _: open_path(CONFIG_PATH, True)),
             rumps.MenuItem("Reveal logs", callback=lambda _: reveal_logs()),
@@ -294,6 +299,25 @@ class MacApp(rumps.App):
             self._render()
 
         return cb
+
+    def _toggle_call_names(self, sender) -> None:
+        def confirm() -> bool:
+            return bool(
+                rumps.alert(
+                    title="Use names from the call app",
+                    message=(
+                        "RecAndCC can read the names in your call app's participants panel "
+                        "(Zoom, Teams, Meet) to name speakers. This needs the Accessibility "
+                        "permission, which macOS only lets you grant in System Settings. "
+                        "RecAndCC only reads the visible list, never clicks, and keeps the "
+                        "names on this Mac. Open Accessibility settings now?"
+                    ),
+                    ok="Open Settings",
+                    cancel="Not now",
+                )
+            )
+
+        sender.state = check(self.ctrl.toggle_call_app_names(confirm))
 
     def _toggle_rec(self, _sender) -> None:
         self.ctrl.toggle_recording()

@@ -11,7 +11,9 @@ account, nothing uploaded.
   `Speaker 1`, `Speaker 2`, … in the final transcript (offline speaker diarization, a few
   seconds per hour of audio). Live captions keep showing `Others`. Opt in to
   `speaker_names` and name a speaker once (`recandcc name-speaker`): later sessions
-  recognize that voice and write `Anna` instead of `Speaker 2`.
+  recognize that voice and write `Anna` instead of `Speaker 2`. Optionally (macOS,
+  `names_from_call_app`, off by default) the name shown in the call app's open participants
+  panel can be used when it is unambiguous; see [Names from the call app](#names-from-the-call-app).
 - 🌍 **English and Russian** are detected automatically, even when the language switches
   mid-meeting. **Hebrew** can be added (`languages = ["en", "ru", "he"]`): captions and
   transcripts show it right to left. Hebrew accuracy with the stock model is not yet tuned.
@@ -234,6 +236,23 @@ repo):
 | `recandcc speakers <session_dir>` | List a transcript's speakers with their first lines |
 | `recandcc name-speaker <session_dir> "Speaker 2" "Anna"` | Name a speaker: rewrites that transcript and saves Anna's voice profile, so later sessions say `Anna` (needs `speaker_names = true`) |
 | `recandcc voices list\|delete <name>\|delete --all` | List or delete saved voice profiles |
+
+## Names from the call app
+
+Off by default, macOS only, and only together with `transcription.speaker_names`. Switch it on
+with **menu → Use names from the call app** (or `names_from_call_app = true`). While a call is
+recorded, RecAndCC reads the names in the call app's **participants panel, if you have it
+open**, through the macOS Accessibility API: it only reads what is on screen and never clicks,
+opens or changes anything. If exactly one speaker is unnamed and exactly one participant name
+is unused, that speaker gets the name; if it is ambiguous nothing is guessed (`recandcc
+speakers` lists the names). A recognized voice or `Me` is never overridden.
+
+- **Permission:** it needs **Accessibility**. RecAndCC never triggers the system prompt by
+  itself; the menu item explains why and opens System Settings > Privacy & Security >
+  Accessibility, where you add RecAndCC yourself. Without it nothing is read.
+- **Privacy:** the names stay on your Mac, in that session's folder (`session.json`) and, once
+  you or this feature name a speaker, in the owner-only voices folder. They are personal data
+  of the other people on the call (see below) and are never logged.
 
 ## Privacy & consent
 

@@ -222,6 +222,37 @@ plus ~0.16 s of language ID. CPU-only machines (Windows, `backend = "faster-whis
 elsewhere; CPU numbers for other worker splits are in git history (docs/ARCHITECTURE.md
 before the GPU backend).
 
+### Names from the call app (opt-in, macOS)
+
+`participants.py` + `transcribe/callnames.py`, helper subcommands `ax-status` and
+`participants` (`Accessibility.swift`). Concurrency: one daemon thread per recorded call session
+(started by the recorder only for call sessions with `names_from_call_app` and
+`speaker_names`; never on audio or engine threads, never under the engine lock), one helper
+process per ~15 s sample, stopped by `Recorder.stop()` which saves the union of names to
+`session.json`. After the transcript is written, the transcriber assigns a name only in the
+one-unknown-speaker / one-free-name case, via `voices.name_speaker`.
+
+Accessibility is only ever *checked* (`AXIsProcessTrusted`); the prompting API is never
+called (a test greps the Swift sources for it). The sole entry point towards the permission is
+the menu action, which shows a dialog and opens the Accessibility pane.
+
+Investigation (what the tree exposes). Read-only, from the Accessibility hierarchy of the
+app's windows; **not verified against live Zoom/Teams/Meet in this change** (no call app was
+available to the author), so treat the details as expected behaviour to confirm:
+
+| App | Where the names are | Needs open | Reliability |
+|---|---|---|---|
+| Zoom (native) | A separate "Participants" window (also a panel in the main window): an `AXTable`/`AXOutline` with one `AXRow` per person; the row's text is "Name" or "Name, Computer audio muted…" | the Participants panel | good; names can be shortened or carry "(Host)", "(Me)" suffixes |
+| Microsoft Teams (new Teams, WebView2) | The "People" pane: an `AXList` of `AXListItem`s inside web content; only exposed when Teams' accessibility is on (it is usually when VoiceOver/AX clients are active) | the People pane | medium; the web tree is virtualized and labels change between releases |
+| Google Meet (Chrome, Safari) | "People" side panel: `AXList` named "Participants" of `AXListItem`/`AXGroup` with `AXStaticText`; Chrome builds its web accessibility tree only after an AX client appears, so the first sample may be empty | the People panel | medium; same virtualization caveat, long lists show only visible rows |
+
+The helper therefore uses no app-specific selectors: it looks for a list-like element whose
+title/description mentions participants/people/attendees (also ru/he words) and reads the first
+text of each row (bounded: 4000 nodes, 3 s). No list means no names. The list does not say
+who is speaking, so several unknown speakers cannot be matched to several names; active-speaker
+highlighting could be a follow-up. The user's own entry ("(Me)", "(You)") and role suffixes are
+dropped; names also never override `Me`.
+
 ## Session lifecycle
 
 ```

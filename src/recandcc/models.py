@@ -109,6 +109,9 @@ class SessionInfo:
     # Pipeline measurements, by stage ("recording", "live", "transcription", ...): plain
     # JSON values. Absent in session.json files written before it existed.
     metrics: dict[str, dict] = field(default_factory=dict)
+    # Display names seen in the call app's participant list (opt-in, personal data; see
+    # participants.py). Stays in session.json.
+    participants: list[str] = field(default_factory=list)
 
     FILENAME = "session.json"
     # Present in a folder the user discarded: never transcribe or list it (discard_session).
@@ -159,6 +162,7 @@ class SessionInfo:
             tracks={Track(k): v for k, v in data.get("tracks", {}).items()},
             transcribed=data.get("transcribed", False),
             metrics=data.get("metrics") or {},
+            participants=[str(n) for n in data.get("participants") or []],
         )
 
 

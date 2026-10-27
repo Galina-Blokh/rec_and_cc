@@ -27,7 +27,7 @@ import numpy as np
 from ..config import TranscriptionConfig
 from ..metrics import log_session_metrics, rounded
 from ..models import SAMPLE_RATE, Segment, SessionInfo, Track
-from . import voices
+from . import callnames, voices
 from .chunking import Chunk, find_speech, load_track, merge_labelled, slice_chunk
 from .diarize import Diarizer, Turn, label_speakers
 from .gpu import MlxWhisper, hf_cache_folder, use_gpu
@@ -484,8 +484,18 @@ class Transcriber:
             self._diarization_metrics(session, diarization)
             segments = self._labelled(session, segments, turns)
         self._write(session, segments, duration)
+        self._name_from_call_app(session)
         self._drop_audio(session)
         return segments
+
+    def _name_from_call_app(self, session: SessionInfo) -> None:
+        """Opt-in: name the one unknown speaker after the one free call-app participant."""
+        if not (self.cfg.speaker_names and self.cfg.names_from_call_app):
+            return
+        try:
+            callnames.apply(Path(session.directory))
+        except Exception:  # noqa: BLE001 - optional; the numbered label stays
+            log.exception("session %s: could not use call-app names", session.id)
 
     def _write(self, session: SessionInfo, segments: list[Segment], duration: float) -> None:
         write_outputs(session, segments, duration, self.cfg.model)
@@ -543,6 +553,8 @@ class Transcriber:
             if labelled != segments and Path(session.directory).exists():
                 write_outputs(session, labelled, duration, self.cfg.model)
                 log.info("session %s: transcript rewritten with speaker labels", session.id)
+            if Path(session.directory).exists():
+                self._name_from_call_app(session)
             if getattr(future, "timing", None) and Path(session.directory).exists():
                 self._diarization_metrics(session, future)
                 session.save()
