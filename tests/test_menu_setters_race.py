@@ -40,24 +40,28 @@ def _ctrl(tmp_path, monkeypatch, body: str = ""):
 
 
 def _race(ctrl, path, monkeypatch, click, hand_edit: str) -> None:
-    """Block the click's save at write_settings, hand-edit the file, reload, then release."""
+    """Block the click's save at _write_settings, hand-edit the file, reload, then release."""
     in_save, go = threading.Event(), threading.Event()
-    real = ctrl.write_settings
+    real = ctrl._write_settings
 
     def slow_save(*keys, **kw):
         in_save.set()
         assert go.wait(5)
         return real(*keys, **kw)
 
-    monkeypatch.setattr(ctrl, "write_settings", slow_save)
+    monkeypatch.setattr(ctrl, "_write_settings", slow_save)
     click()
     assert in_save.wait(5)  # memory changed, the save is not written yet
     path.write_text(hand_edit)
     ctrl._config_mtime = -1.0
     ctrl._maybe_reload_config()  # reads the hand edit while the click is not on disk
     go.set()
+    _join_saves()
+
+
+def _join_saves() -> None:
     for t in threading.enumerate():
-        if t.name == "save-config":
+        if t.name in ("save-config", "retention-set"):
             t.join(5)
 
 
@@ -70,7 +74,7 @@ def test_mac_retention_click_survives_a_reload_while_its_save_is_blocked(tmp_pat
     app.ctrl, app.cfg = ctrl, ctrl.cfg
     app._render_retention = lambda: None
     purged = []
-    monkeypatch.setattr(ctrl, "purge_audio_now", lambda: purged.append(1))
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda days=None: purged.append(days))
     hand = "[transcription]\naudio_retention_days = 9\nkeep_audio = false\n"
     _race(
         ctrl,
@@ -84,7 +88,7 @@ def test_mac_retention_click_survives_a_reload_while_its_save_is_blocked(tmp_pat
     assert tr.keep_audio is False  # the rest of the hand edit still reloads
     saved = load_config(path).transcription
     assert saved.audio_retention_days == 30 and saved.keep_audio is False
-    assert purged == [1]  # the purge ran after the write
+    assert purged == [30]  # the purge ran after the write, with the saved value
     assert not ctrl._dirty
 
 
@@ -194,19 +198,26 @@ def test_reload_waits_for_a_click_between_its_mark_and_its_set(tmp_path, monkeyp
     assert not ctrl._dirty
 
 
-def test_a_failing_then_step_is_logged_and_leaves_no_mark(tmp_path, monkeypatch, caplog):
+def test_failed_retention_thread_unmarks_once_keeping_a_concurrent_click(tmp_path, monkeypatch):
+    ctrl, _ = _ctrl(tmp_path, monkeypatch)
+    ctrl._mark_dirty((common.RETENTION_KEY,), 1)  # another click's save is still pending
+
+    def boom(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", boom)
+    with pytest.raises(RuntimeError):
+        ctrl.set_retention(30)
+    assert ctrl._dirty == {common.RETENTION_KEY: 1}  # 2 -> 1, not 2 -> 0
+
+
+def test_retention_click_leaves_no_mark_after_its_save(tmp_path, monkeypatch):
     ctrl, path = _ctrl(tmp_path, monkeypatch)
-
-    def boom():
-        raise RuntimeError("purge failed")
-
-    ctrl.menu_set("live_captions", False, title="Captions", then=boom)
-    for t in threading.enumerate():
-        if t.name == "save-config":
-            t.join(5)
-    assert "live_captions = false" in path.read_text()
+    monkeypatch.setattr(common, "purge_old_audio", lambda *_a: None)
+    ctrl.set_retention(30)
+    _join_saves()
+    assert load_config(path).transcription.audio_retention_days == 30
     assert not ctrl._dirty
-    assert "after-save step for live_captions failed" in caplog.text
 
 
 def test_mode_click_survives_a_reload_while_its_save_is_blocked(tmp_path, monkeypatch):

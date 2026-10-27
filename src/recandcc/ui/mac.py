@@ -425,12 +425,9 @@ class MacApp(rumps.App):
         self._render_languages()
 
     def _set_retention(self, sender) -> None:
-        # marked dirty before memory changes; the purge runs on the save thread after the write
-        self.ctrl.menu_set(
-            "transcription.audio_retention_days",
-            sender.retention_days,
-            then=self.ctrl.purge_audio_now,
-        )
+        # marked dirty with the memory change; saves on a worker, then purges with the saved
+        # value only if the save succeeded
+        self.ctrl.set_retention(sender.retention_days)
         self._render_retention()
 
     def _toggle_captions(self, sender) -> None:

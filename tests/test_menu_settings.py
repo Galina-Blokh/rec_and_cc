@@ -17,6 +17,7 @@ import pytest
 
 from recandcc import config
 from recandcc.config import Config, load_config, save_keys
+from recandcc.models import Mode
 from recandcc.ui import common
 from recandcc.ui.common import Controller
 
@@ -279,8 +280,8 @@ def test_write_error_does_not_overwrite_hand_edits(tmp_path, monkeypatch):
     ctrl.cfg.live_captions = False
     ctrl.write_settings("live_captions")
     assert path.read_text() == before  # no full cfg.save over the user's file
-    notice = ("notice", "Settings not saved", "config.toml could not be written")
-    assert ctrl.events.get_nowait() == notice
+    reason = f"config.toml could not be written. {common.UNSAVED_NOTE}"  # captions: kept
+    assert ctrl.events.get_nowait() == ("notice", "Settings not saved", reason)
 
 
 def test_cli_autostart_keeps_hand_edits(tmp_path, monkeypatch):
@@ -324,8 +325,8 @@ def test_unparseable_config_is_left_alone_with_a_notice(tmp_path, monkeypatch):
     ctrl.save_settings("live_captions")
     _join()
     assert path.read_text() == "[summary\n"
-    notice = ("notice", "Settings not saved", "config.toml could not be parsed")
-    assert ctrl.events.get_nowait() == notice
+    reason = f"config.toml could not be parsed. {common.UNSAVED_NOTE}"  # captions: kept
+    assert ctrl.events.get_nowait() == ("notice", "Settings not saved", reason)
 
 
 def test_missing_config_is_created(tmp_path, monkeypatch):
@@ -377,14 +378,14 @@ def test_mac_toggles_keep_hand_edits(tmp_path, monkeypatch):
     app = mac.MacApp.__new__(mac.MacApp)
     app.ctrl, app.cfg, app.captions = ctrl, ctrl.cfg, None
     app._render_retention = lambda: None
-    monkeypatch.setattr(ctrl, "purge_audio_now", lambda: None)
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda *_a: None)
     _fake_autostart(monkeypatch, mac)
     app._toggle_captions(types.SimpleNamespace(state=1))
     _join()
     app._toggle_login(types.SimpleNamespace(state=0))
     _join()
     app._set_retention(types.SimpleNamespace(retention_days=30))
-    _join()
+    _join("retention-set")
     data = _kept(path)
     assert data["live_captions"] is False and data["autostart"] is True
     assert data["transcription"]["audio_retention_days"] == 30
@@ -553,13 +554,347 @@ def test_failed_menu_save_restores_the_old_value(tmp_path, monkeypatch, caplog, 
         raise exc
 
     monkeypatch.setattr(common, "save_keys", fail)
-    assert ctrl.cfg.live_captions is True
-    ctrl.cfg.live_captions = False  # the click
-    ctrl.save_settings("live_captions")
+    tr = ctrl.cfg.transcription
+    assert tr.audio_retention_days == 0
+    tr.audio_retention_days = 7  # the click
+    ctrl.save_settings("transcription.audio_retention_days")
     _join()
-    assert ctrl.cfg.live_captions is True  # back to what config.toml says
+    assert tr.audio_retention_days == 0  # back to what config.toml says
     assert path.read_text() == before
     assert ctrl.events.get_nowait() == ("notice", "Settings not saved", message)
     assert not ctrl._dirty  # dirty mark cleared
     if isinstance(exc, config.ConfigLockTimeout):
         assert all(r.exc_info is None for r in caplog.records)
+
+
+def _join_all() -> None:
+    for _ in range(3):  # a save may start another save's thread while it runs
+        _join()
+
+
+def test_a_failed_save_keeps_a_newer_queued_click(tmp_path, monkeypatch):
+    """Click 1's save times out while click 2's save waits on _save_lock: the rollback of
+    save 1 must not put the old value back, or save 2 would write it and lose click 2."""
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    tr = ctrl.cfg.transcription
+    real = common.save_keys
+    calls = []
+
+    def first_fails(p, values):
+        calls.append(dict(values))
+        if len(calls) == 1:
+            tr.audio_retention_days = 30  # click 2, while save 1 waits on the file lock
+            ctrl.save_settings("transcription.audio_retention_days")  # queued on _save_lock
+            raise config.ConfigLockTimeout("locked")
+        return real(p, values)
+
+    monkeypatch.setattr(common, "save_keys", first_fails)
+    tr.audio_retention_days = 7  # click 1
+    ctrl.save_settings("transcription.audio_retention_days")
+    _join_all()
+    assert calls == [
+        {"transcription.audio_retention_days": 7},
+        {"transcription.audio_retention_days": 30},
+    ]
+    assert tr.audio_retention_days == 30  # the latest click survives in memory ...
+    assert _kept(path)["transcription"]["audio_retention_days"] == 30  # ... and on disk
+    assert not ctrl._dirty
+
+
+def test_a_failed_save_restores_only_when_no_other_save_is_pending(tmp_path, monkeypatch):
+    """Toggled away and back: memory equals what save 1 tried, but save 2 is still pending."""
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    tr = ctrl.cfg.transcription
+    real = common.save_keys
+    calls = []
+
+    def first_fails(p, values):
+        calls.append(dict(values))
+        if len(calls) == 1:
+            ctrl.save_settings("transcription.audio_retention_days")  # same value, queued
+            raise config.ConfigLockTimeout("locked")
+        return real(p, values)
+
+    monkeypatch.setattr(common, "save_keys", first_fails)
+    tr.audio_retention_days = 7
+    ctrl.save_settings("transcription.audio_retention_days")
+    _join_all()
+    assert len(calls) == 2
+    assert tr.audio_retention_days == 7
+    assert _kept(path)["transcription"]["audio_retention_days"] == 7
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("live_captions", False),
+        ("autostart", True),
+        ("detection.room_listening", True),
+        ("detection.mode", "auto"),
+        ("detection.app_modes", {"us.zoom.xos": "off"}),
+        ("transcription.names_from_call_app", True),
+    ],
+)
+def test_a_failed_save_keeps_keys_whose_effect_already_happened(tmp_path, monkeypatch, key, value):
+    """The login item / captions panel / recording / room mic already followed the click:
+    putting the old value back would undo it only on paper, or resume recording."""
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    before = path.read_text()
+
+    def fail(*_a):
+        raise config.ConfigLockTimeout("locked")
+
+    monkeypatch.setattr(common, "save_keys", fail)
+    *parents, leaf = key.split(".")
+    owner = ctrl.cfg
+    for name in parents:
+        owner = getattr(owner, name)
+    setattr(owner, leaf, value)
+    ctrl.save_settings(key)
+    _join()
+    assert getattr(owner, leaf) == value
+    assert path.read_text() == before
+    assert ctrl.events.get_nowait()[:2] == ("notice", "Settings not saved")
+
+
+def test_cli_autostart_changes_nothing_when_the_save_fails(tmp_path, monkeypatch, capsys):
+    from recandcc import autostart, cli
+
+    path = tmp_path / "config.toml"  # missing: load_config creates it, under the lock
+    monkeypatch.setattr(cli, "CONFIG_PATH", path)
+    calls = _fake_login_item(monkeypatch, autostart)
+
+    def locked(*_a, **_k):
+        raise config.ConfigLockTimeout("locked")
+
+    monkeypatch.setattr(config.Config, "save", locked)
+    assert cli.cmd_autostart(types.SimpleNamespace(action="on")) == 1
+    assert calls == []  # the login item follows only a saved config.toml
+    assert "launch at login not changed" in capsys.readouterr().err
+
+
+def _fake_login_item(monkeypatch, autostart, on: bool = False) -> list:
+    """Never touch the real LaunchAgent / Run key: every login-item call is faked."""
+    calls: list = []
+    state = {"on": on}
+    monkeypatch.setattr(autostart, "enable", lambda: (calls.append("on"), state.update(on=True)))
+    monkeypatch.setattr(autostart, "disable", lambda: (calls.append("off"), state.update(on=False)))
+    monkeypatch.setattr(autostart, "is_enabled", lambda: state["on"])
+    monkeypatch.setattr(autostart, "describe", lambda: "faked")
+    return calls
+
+
+@pytest.mark.parametrize("action", ["on", "off"])
+@pytest.mark.parametrize("broken", ["locked", "invalid"])
+def test_cli_autostart_failed_save_leaves_the_file_and_login_item(
+    tmp_path, monkeypatch, capsys, action, broken
+):
+    from recandcc import autostart, cli
+
+    path = tmp_path / "config.toml"
+    path.write_text("[summary\n" if broken == "invalid" else "autostart = false\n")
+    before = path.read_bytes()
+    monkeypatch.setattr(cli, "CONFIG_PATH", path)
+    calls = _fake_login_item(monkeypatch, autostart, on=action == "off")
+    if broken == "locked":
+
+        def locked(*_a, **_k):
+            raise config.ConfigLockTimeout("locked")
+
+        monkeypatch.setattr(cli, "save_keys", locked)
+    assert cli.cmd_autostart(types.SimpleNamespace(action=action)) == 1
+    assert calls == []
+    assert path.read_bytes() == before
+    assert "launch at login not changed" in capsys.readouterr().err
+
+
+def test_cli_autostart_reverts_the_config_when_the_login_item_fails(tmp_path, monkeypatch, capsys):
+    from recandcc import autostart, cli
+
+    path = tmp_path / "config.toml"
+    path.write_text("autostart = false\n")
+    monkeypatch.setattr(cli, "CONFIG_PATH", path)
+    _fake_login_item(monkeypatch, autostart)
+
+    def broken():
+        raise OSError("launchctl failed")
+
+    monkeypatch.setattr(autostart, "enable", broken)
+    assert cli.cmd_autostart(types.SimpleNamespace(action="on")) == 1
+    assert tomllib.loads(path.read_text())["autostart"] is False  # still matches the OS
+    assert "Can't change launch at login" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("action", "text"),
+    [("on", "autostart = false\n"), ("off", "autostart = true\n"), ("on", HAND_EDIT)],
+)
+def test_cli_autostart_revert_restores_the_previous_config_value(
+    tmp_path, monkeypatch, capsys, action, text
+):
+    """The login item can't be changed: config.toml goes back to exactly what it said
+    (no key at all stays no key), not to the opposite of the action."""
+    from recandcc import autostart, cli
+
+    path = tmp_path / "config.toml"
+    path.write_text(text)
+    monkeypatch.setattr(cli, "CONFIG_PATH", path)
+    _fake_login_item(monkeypatch, autostart, on=action == "off")
+
+    def broken():
+        raise PermissionError("login item")
+
+    monkeypatch.setattr(autostart, "enable" if action == "on" else "disable", broken)
+    assert cli.cmd_autostart(types.SimpleNamespace(action=action)) == 1
+    assert tomllib.loads(path.read_text()) == tomllib.loads(text)
+    assert "Can't change launch at login" in capsys.readouterr().err
+
+
+def test_a_failed_save_keeps_a_newer_unsaved_click(tmp_path, monkeypatch):
+    """The value check on its own: memory changed while save 1 waited (the macOS retention
+    menu marks the key only when its worker thread starts), no other save pending yet."""
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    tr = ctrl.cfg.transcription
+
+    def first_fails(p, values):
+        tr.audio_retention_days = 30  # click 2: memory only, its save not started yet
+        raise config.ConfigLockTimeout("locked")
+
+    monkeypatch.setattr(common, "save_keys", first_fails)
+    tr.audio_retention_days = 7
+    ctrl.save_settings("transcription.audio_retention_days")
+    _join()
+    assert tr.audio_retention_days == 30
+
+
+def test_a_failed_mode_save_keeps_both_mode_keys(tmp_path, monkeypatch):
+    """The engine saves detection.mode and detection.app_modes together."""
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    det = ctrl.cfg.detection
+
+    def fail(*_a):
+        raise config.ConfigLockTimeout("locked")
+
+    monkeypatch.setattr(common, "save_keys", fail)
+    det.mode, det.app_modes = Mode.AUTO, {"us.zoom.xos": Mode.OFF}
+    ctrl.save_settings("detection.mode", "detection.app_modes")
+    _join()
+    assert (det.mode, det.app_modes) == (Mode.AUTO, {"us.zoom.xos": Mode.OFF})
+    assert ctrl._unsaved == {"detection.mode", "detection.app_modes"}
+
+
+def _toml(value) -> str:
+    return f'"{value}"' if isinstance(value, str) else str(value).lower()
+
+
+@pytest.mark.parametrize(
+    ("key", "on_disk", "click"),
+    [
+        ("detection.mode", Mode.AUTO, Mode.OFF),
+        ("detection.room_listening", True, False),
+        ("live_captions", True, False),
+        ("transcription.names_from_call_app", True, False),
+    ],
+)
+def test_an_unsaved_click_survives_a_reload_and_is_saved_later(
+    tmp_path, monkeypatch, key, on_disk, click
+):
+    """Mode -> Off, the save times out because the CLI holds the lock; the CLI then writes
+    config.toml. The reload must not bring auto-recording (or the room mic) back, and a
+    later refresh writes Off once the lock is free."""
+    *parents, leaf = key.split(".")
+    line = f"{leaf} = {_toml(on_disk)}\n"
+    path = tmp_path / "config.toml"
+    path.write_text(f"[{parents[0]}]\n{line}" if parents else line)
+    monkeypatch.setattr(common, "CONFIG_PATH", path)
+    monkeypatch.setattr(common, "load_config", lambda: load_config(path))
+    cfg = load_config(path)
+    ctrl = Controller(cfg, monitor=Monitor(), recorder=object(), tq=Q(), start_threads=False)
+    owner = cfg
+    for name in parents:
+        owner = getattr(owner, name)
+    real = common.save_keys
+
+    def locked(*_a):
+        raise config.ConfigLockTimeout("locked")
+
+    monkeypatch.setattr(common, "save_keys", locked)
+    setattr(owner, leaf, click)  # the click; its effect already happened
+    ctrl.save_settings(key)
+    _join()
+    ev = ctrl.events.get_nowait()
+    assert ev[:2] == ("notice", "Settings not saved") and common.UNSAVED_NOTE in ev[2]
+    # the CLI that held the lock writes config.toml: its mtime changes
+    path.write_text(path.read_text() + "[summary]\nenabled = true\n")
+    os.utime(path, (ctrl._config_mtime + 5, ctrl._config_mtime + 5))
+    ctrl._retry_unsaved()  # still locked: quiet, no second notice
+    assert ctrl.events.empty()
+    ctrl._maybe_reload_config()
+    assert cfg.summary.enabled is True  # the reload ran ...
+    assert getattr(owner, leaf) == click  # ... and kept the unsaved click
+    monkeypatch.setattr(common, "save_keys", real)  # lock released
+    ctrl._refresh()  # the next refresh retries the save
+    assert ctrl._unsaved == set()
+    data = tomllib.loads(path.read_text())
+    for name in parents:
+        data = data[name]
+    assert data[leaf] == click and data.get("enabled", True)  # written, hand edit kept
+    path.write_text(path.read_text())
+    os.utime(path, (ctrl._config_mtime + 10, ctrl._config_mtime + 10))
+    ctrl._maybe_reload_config()
+    assert getattr(owner, leaf) == click  # memory and disk agree
+
+
+def test_a_successful_click_save_clears_the_unsaved_mark(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    real = common.save_keys
+
+    def locked(*_a):
+        raise config.ConfigLockTimeout("locked")
+
+    monkeypatch.setattr(common, "save_keys", locked)
+    ctrl.cfg.detection.room_listening = True
+    ctrl.save_settings("detection.room_listening")
+    _join()
+    assert ctrl._unsaved == {"detection.room_listening"}
+    monkeypatch.setattr(common, "save_keys", real)
+    ctrl.cfg.detection.room_listening = False
+    ctrl.save_settings("detection.room_listening")
+    _join()
+    assert ctrl._unsaved == set()
+    assert _kept(path)["detection"]["room_listening"] is False
+
+
+def test_retention_purges_only_after_a_successful_save(tmp_path, monkeypatch):
+    """A retention value whose save failed must never delete audio."""
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    purged = []
+    monkeypatch.setattr(common, "purge_old_audio", lambda _out, days: purged.append(days))
+    real = common.save_keys
+
+    def locked(*_a):
+        raise config.ConfigLockTimeout("locked")
+
+    monkeypatch.setattr(common, "save_keys", locked)
+    tr = ctrl.cfg.transcription
+    tr.audio_retention_days = 1
+    ctrl.save_retention()
+    assert purged == [] and tr.audio_retention_days == 0  # not saved: rolled back, no purge
+    monkeypatch.setattr(common, "save_keys", real)
+    tr.audio_retention_days = 7
+    ctrl.save_retention()
+    assert purged == [7]
+    assert _kept(path)["transcription"]["audio_retention_days"] == 7
+
+
+def test_hourly_purge_waits_while_a_retention_save_is_pending(tmp_path, monkeypatch):
+    ctrl, _ = _ctrl(tmp_path, monkeypatch)
+    purged = []
+    monkeypatch.setattr(common, "purge_old_audio", lambda _out, days: purged.append(days))
+    ctrl.cfg.transcription.audio_retention_days = 1
+    ctrl._mark_dirty([common.RETENTION_KEY], 1)  # clicked, save still waiting on the lock
+    ctrl.purge_audio_now()
+    assert purged == []
+    ctrl._mark_dirty([common.RETENTION_KEY], -1)
+    ctrl.purge_audio_now()
+    assert purged == [1]
