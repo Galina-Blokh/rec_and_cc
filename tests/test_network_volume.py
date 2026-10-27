@@ -91,12 +91,23 @@ def test_dispatch_and_failures_are_quiet(tmp_path, monkeypatch):
     assert res is cs.PROBE_FAILED and not res  # distinct from "not a network volume" (None)
 
 
-def test_fuse_mounts_are_not_network_unless_known():
-    local = cs._MNT_LOCAL
-    assert cs.mac_network_volume("/Volumes/v", lambda p: ("macfuse", 0)) is None
-    assert cs.mac_network_volume("/Volumes/v", lambda p: ("fuse-t", 0)) is None
-    assert cs.mac_network_volume("/Volumes/v", lambda p: ("smbfs", local)) == "SMB"
-    assert cs.mac_network_volume("/Volumes/v", lambda p: ("weirdfs", 0)) == "a network volume"
+def test_fuse_mounts_are_judged_by_their_source():
+    def fuse(t, src, flags=0):
+        return lambda p: (t, flags, src)
+
+    nv = cs.mac_network_volume
+    # network FUSE keeps the privacy warning
+    assert nv("/V/x", fuse("macfuse", "me@host:/data")) == "a network volume"
+    assert nv("/V/x", fuse("fuse-t", "remote:bucket")) == "a network volume"
+    assert nv("/V/x", fuse("osxfuse", "//nas/share")) == "a network volume"
+    assert nv("/V/x", fuse("macfuse", "rclone")) == "a network volume"
+    assert nv("/V/x", fuse("macfuse", "smbnetfs")) == "a network volume"
+    assert nv("/V/x", fuse("macfuse", "mystery")) == "a network volume"  # unsure: warn
+    # known local vaults do not
+    assert nv("/V/x", fuse("macfuse", "Cryptomator@/Users/me/vault")) is None
+    assert nv("/V/x", fuse("fuse-t", "gocryptfs")) is None
+    assert nv("/V/x", fuse("macfuse", "veracrypt")) is None
+    assert nv("/V/x", lambda p: ("smbfs", cs._MNT_LOCAL)) == "SMB"
     mounts = "x /mnt/vault fuse.cryptomator rw 0 0\ns:/ /mnt/s fuse.sshfs rw 0 0\n"
     assert cs.linux_network_volume("/mnt/vault/a", mounts) is None
     assert cs.linux_network_volume("/mnt/s/a", mounts) == "SSHFS"

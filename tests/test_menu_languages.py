@@ -3,6 +3,7 @@
 Stories: US-19.
 """
 
+import contextlib
 import os
 import threading
 import tomllib
@@ -265,42 +266,57 @@ def test_menu_change_waiting_for_its_save_survives_a_reload(tmp_path, monkeypatc
     assert ctrl._dirty == {}
 
 
-def test_click_racing_a_reload_keeps_the_click_for_language_and_retention(tmp_path, monkeypatch):
+def _race(ctrl, path, monkeypatch, click, join_name):
+    """Block the save (before its lock), click, edit the file and reload, then release."""
+    in_save, go = threading.Event(), threading.Event()
+    real = ctrl.write_settings
+
+    def slow_save(*keys, **kw):  # blocked before the save lock: a reload can run meanwhile
+        in_save.set()
+        assert go.wait(5)
+        return real(*keys, **kw)
+
+    monkeypatch.setattr(ctrl, "write_settings", slow_save)
+    click()
+    assert in_save.wait(5)  # the save is queued/blocked, not written
+    path.write_text(path.read_text() + "\n# touched\n")  # a different mtime/content on disk
+    ctrl._config_mtime = -1.0
+    ctrl._maybe_reload_config()  # reload while the click is not on disk yet
+    go.set()
+    for t in threading.enumerate():
+        if t.name == join_name:
+            t.join(5)
+
+
+def test_language_click_survives_a_reload_while_the_save_is_blocked(tmp_path, monkeypatch):
     ctrl, path = _ctrl(tmp_path, monkeypatch, '["en"]')
-    seen = {}
-    real_set = Controller._mark_dirty
+    _race(ctrl, path, monkeypatch, lambda: ctrl.toggle_language("he"), "save-config")
+    assert ctrl.cfg.transcription.languages == ["en", "he"]
+    assert load_config(path).transcription.languages == ["en", "he"]
+    assert not ctrl._dirty
 
-    def spy(self, keys, delta):
-        # the key must already be dirty when memory changes, so record the order
-        seen.setdefault("order", []).append((tuple(keys), delta, self.cfg.transcription.languages))
-        return real_set(self, keys, delta)
 
-    monkeypatch.setattr(Controller, "_mark_dirty", spy)
-    ctrl.toggle_language("he")
-    first = seen["order"][0]
-    assert first[1] == 1 and first[2] == ["en"]  # marked while memory still old
-    for t in threading.enumerate():
-        if t.name == "save-config":
-            t.join(5)
-    monkeypatch.setattr(Controller, "_mark_dirty", real_set)
+def test_marks_are_released_if_the_save_thread_cannot_start(tmp_path, monkeypatch):
+    ctrl, _ = _ctrl(tmp_path, monkeypatch, '["en"]')
 
-    # retention: dirty before the value changes, so a reload at any point keeps it
-    ctrl.purge_audio_now = lambda: None  # type: ignore[method-assign]
-    key = "transcription.audio_retention_days"
-    marks = []
+    def boom(self):
+        raise RuntimeError("can't start new thread")
 
-    def spy2(self, keys, delta):
-        marks.append((delta, self.cfg.transcription.audio_retention_days))
-        return real_set(self, keys, delta)
+    monkeypatch.setattr(threading.Thread, "start", boom)
+    with contextlib.suppress(RuntimeError):
+        ctrl.toggle_language("he")
+    assert not ctrl._dirty
 
-    monkeypatch.setattr(Controller, "_mark_dirty", spy2)
-    old = ctrl.cfg.transcription.audio_retention_days
-    ctrl.set_retention_days(old + 7)
-    assert marks[0] == (1, old)
-    for t in threading.enumerate():
-        if t.name == "retention-set":
-            t.join(5)
-    monkeypatch.setattr(Controller, "_mark_dirty", real_set)
-    assert key not in ctrl._dirty  # balanced: no leaked mark
-    assert "transcription.languages" not in ctrl._dirty
-    assert load_config(path).transcription.audio_retention_days == old + 7
+
+def test_a_raising_toggle_leaves_no_dirty_mark(tmp_path, monkeypatch):
+    import recandcc.ui.present as present
+
+    ctrl, _ = _ctrl(tmp_path, monkeypatch, '["en"]')
+
+    def boom(*a, **k):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(present, "toggle_languages", boom)
+    with contextlib.suppress(ValueError):
+        ctrl.toggle_language("he")
+    assert not ctrl._dirty
