@@ -208,35 +208,65 @@ def test_word_times_are_clamped_to_the_chunk_end():
     assert out[0].words == [(10.0, 10.5, " a"), (10.5, 11.0, " b")]
 
 
-def _chunk_words(monkeypatch, present, cfg=None):
+def _session(kind=eng.TriggerKind.CALL, started_as_room=False, tmp_path=None):
+    from datetime import datetime
+    from pathlib import Path
+
+    from recandcc.models import SessionInfo
+
+    return SessionInfo(
+        "s", tmp_path or Path("."), datetime(2026, 10, 27), kind, started_as_room=started_as_room
+    )
+
+
+def _word_flags(monkeypatch, present, cfg=None, session=None, tracks=(eng.Track.OTHERS,)):
+    """word_timestamps of one chunk per track, with the tracks decided as _run does."""
     model = _Model()
-    t = eng.Transcriber(cfg or TranscriptionConfig(model="fake"))
+    t = eng.Transcriber(cfg or TranscriptionConfig(model="fake", split_on_speaker_change=True))
     t._model = model
     t._lid_model = None
     monkeypatch.setattr(eng, "model_path", lambda *a, **k: "/x" if present else None)
-    chunk = eng.Chunk("others", 0.0, 1.0, language="en")
-    t._transcribe_chunk(chunk, np.zeros(SAMPLE_RATE, np.float32))
-    return model.calls[0]["word_timestamps"]
+    word_tracks = t._word_tracks(session or _session())
+    for track in tracks:
+        chunk = eng.Chunk(track, 0.0, 1.0, language="en")
+        t._transcribe_chunk(chunk, np.zeros(SAMPLE_RATE, np.float32), word_tracks)
+    return [c["word_timestamps"] for c in model.calls]
 
 
-def test_words_only_requested_when_the_speaker_model_is_on_disk(monkeypatch):
-    assert _chunk_words(monkeypatch, True) is True
-    assert _chunk_words(monkeypatch, False) is False
+def test_words_only_requested_when_enabled_and_the_speaker_model_is_on_disk(monkeypatch):
+    assert _word_flags(monkeypatch, True) == [True]
+    assert _word_flags(monkeypatch, False) == [False]
     off = TranscriptionConfig(model="fake", split_on_speaker_change=False)
-    assert _chunk_words(monkeypatch, True, off) is False
+    assert _word_flags(monkeypatch, True, off) == [False]
+    assert TranscriptionConfig(model="fake").split_on_speaker_change is False  # opt-in
 
 
 def test_room_sessions_request_words_on_the_mic_track(monkeypatch):
     """In a room session the diarized track is "Me", so that is the one that needs words."""
+    room = _session(eng.TriggerKind.ROOM)
+    flags = _word_flags(monkeypatch, True, session=room, tracks=(eng.Track.ME, eng.Track.OTHERS))
+    assert flags == [True, False]
+    call = _word_flags(monkeypatch, True, tracks=(eng.Track.ME, eng.Track.OTHERS))
+    assert call == [False, True]  # call session: Me never split
+
+
+def test_word_timestamps_are_decided_once_per_session(tmp_path, monkeypatch):
+    """The speaker model appears mid-run (download finishing): every chunk of the session
+    still gets the same word_timestamps value, decided before the chunks run."""
     model = _Model()
-    t = eng.Transcriber(TranscriptionConfig(model="fake"))
+    t = eng.Transcriber(TranscriptionConfig(model="fake", split_on_speaker_change=True))
     t._model = model
     t._lid_model = None
-    monkeypatch.setattr(eng, "model_path", lambda *a, **k: "/x")
-    me = eng.Chunk(eng.Track.ME, 0.0, 1.0, language="en")
-    t._transcribe_chunk(me, np.zeros(SAMPLE_RATE, np.float32), (eng.Track.ME,))
-    t._transcribe_chunk(me, np.zeros(SAMPLE_RATE, np.float32))  # call session: Me never split
-    assert [c["word_timestamps"] for c in model.calls] == [True, False]
+    answers = iter([None, "/x", "/x", "/x"])
+    monkeypatch.setattr(eng, "model_path", lambda *a, **k: next(answers))
+    word_tracks = t._word_tracks(_session(tmp_path=tmp_path))  # the single check: None
+    for i in range(3):
+        chunk = eng.Chunk(eng.Track.OTHERS, float(i), i + 1.0, language="en")
+        t._transcribe_chunk(chunk, np.zeros(SAMPLE_RATE, np.float32), word_tracks)
+    assert [c["word_timestamps"] for c in model.calls] == [False, False, False]
+    # and a session decided once with the model present asks for words on all its chunks
+    word_tracks = t._word_tracks(_session(tmp_path=tmp_path))
+    assert word_tracks == (eng.Track.OTHERS,)
 
 
 def test_split_tracks_follow_diarized_tracks_for_room_and_upgraded_sessions(tmp_path, monkeypatch):
@@ -257,13 +287,13 @@ def test_split_tracks_follow_diarized_tracks_for_room_and_upgraded_sessions(tmp_
     assert set(eng.diarized_tracks(upgraded)) == {eng.Track.ME, eng.Track.OTHERS}
     # both tracks of an upgraded session ask for word timings
     model = _Model()
-    t = eng.Transcriber(TranscriptionConfig(model="fake"))
+    t = eng.Transcriber(TranscriptionConfig(model="fake", split_on_speaker_change=True))
     t._model = model
     t._lid_model = None
     monkeypatch.setattr(eng, "model_path", lambda *a, **k: "/x")
     for track in (eng.Track.ME, eng.Track.OTHERS):
         chunk = eng.Chunk(track, 0.0, 1.0, language="en")
-        t._transcribe_chunk(chunk, np.zeros(SAMPLE_RATE, np.float32), eng.diarized_tracks(upgraded))
+        t._transcribe_chunk(chunk, np.zeros(SAMPLE_RATE, np.float32), t._word_tracks(upgraded))
     assert [c["word_timestamps"] for c in model.calls] == [True, True]
 
 
@@ -285,7 +315,9 @@ def test_each_diarized_track_is_split_with_its_own_turns(tmp_path):
         eng.Track.ME: [Turn(0.0, 1.5, 0), Turn(1.5, 3.0, 1)],
         eng.Track.OTHERS: [Turn(10.0, 11.5, 0), Turn(11.5, 13.0, 1)],
     }
-    t = eng.Transcriber(TranscriptionConfig(model="fake", speaker_names=False))
+    t = eng.Transcriber(
+        TranscriptionConfig(model="fake", speaker_names=False, split_on_speaker_change=True)
+    )
     out = t._labelled(sess, [me, others], turns)
     assert len(out) == 4
     labels = [s.speaker for s in out]

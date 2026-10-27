@@ -422,7 +422,7 @@ class Transcriber:
         return chunks
 
     def _transcribe_chunk(
-        self, chunk: Chunk, audio: np.ndarray, split_tracks: tuple[Track, ...] = (Track.OTHERS,)
+        self, chunk: Chunk, audio: np.ndarray, word_tracks: tuple[Track, ...] = ()
     ) -> list[Segment]:
         piece = slice_chunk(audio, chunk)
         lang = chunk.language
@@ -437,13 +437,8 @@ class Transcriber:
                 chunk.language,
             )
         speaker = SPEAKERS[chunk.track]
-        # word timings only matter if a split can happen: needs the speaker model on disk
-        words = (
-            chunk.track in split_tracks  # the diarized tracks (see diarized_tracks)
-            and self.cfg.diarize
-            and self.cfg.split_on_speaker_change
-            and model_path(download=False) is not None
-        )
+        # decided once per session (see _word_tracks), so every chunk of it agrees
+        words = chunk.track in word_tracks
         return self.transcribe_audio(
             piece, chunk.start, speaker, lang, max_end=chunk.end, words=words
         )
@@ -544,6 +539,16 @@ class Transcriber:
         with self._run_lock:
             return self._run(session, progress)
 
+    def _word_tracks(self, session: SessionInfo) -> tuple[Track, ...]:
+        """Tracks whose chunks get word timestamps: the diarized ones, only if the split is
+        on and the speaker model is on disk. One model-present check per session, so a model
+        download finishing mid-run cannot make early and later chunks differ."""
+        if not (self.cfg.diarize and self.cfg.split_on_speaker_change):
+            return ()
+        if model_path(download=False) is None:
+            return ()
+        return diarized_tracks(session)
+
     def _run(self, session: SessionInfo, progress: ProgressCallback | None) -> list[Segment]:
         report = progress or (lambda _f: None)
         report(0.0)
@@ -579,11 +584,11 @@ class Transcriber:
             total = sum(c.duration for c in chunks) or 1.0
             done, lock = 0.0, threading.Lock()
 
-            split_tracks = diarized_tracks(session)
+            word_tracks = self._word_tracks(session)  # once: not per chunk
 
             def work(c: Chunk) -> list[Segment]:
                 nonlocal done
-                res = self._transcribe_chunk(c, audio[c.track], split_tracks)
+                res = self._transcribe_chunk(c, audio[c.track], word_tracks)
                 with lock:
                     done += c.duration
                     report(min(done / total, 0.999))
