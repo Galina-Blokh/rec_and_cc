@@ -17,10 +17,14 @@ an earlier opt-in are deleted at the next ``sync``.
 
 Repeated queries score an in-process cache of the vector matrix (built lazily by the first
 query once the embed worker is idle; at most ``CACHE_MAX_ROWS`` rows, about 1.5 KB of float32
-per 384-d segment plus its metadata). Every committed change of ``seg_vec`` writes a fresh
-random token into ``vec_version`` in the same transaction and, in this process, drops the
-cache; a query reuses the cache only while the token matches, so writes of another process
-(the CLI) are seen too. Without a fresh cache a query streams the vectors from SQLite.
+per 384-d segment plus ~0.3-0.5 KB of per-row metadata and text). Every committed change of
+``seg_vec`` writes a fresh random token into ``vec_version`` in the same transaction (an
+explicit update plus triggers on ``seg_vec``, so even an older build of the app or CLI that
+doesn't know the token invalidates it) and, in this process, drops the cache; a query reuses
+the cache only while the token matches, so writes of another process (the CLI) are seen too.
+Without a fresh cache a query streams the vectors from SQLite; an index that can't be cached
+(over the cap, a foreign model's vectors) is remembered per token, so each query streams once
+instead of attempting a build first.
 
 Every call opens its own connection, so any thread may use an index; writes are serialised
 by a lock (and by SQLite's file lock across processes, e.g. the app and the CLI). Transcript
@@ -61,7 +65,10 @@ SEMANTIC_MIN_SIM = 0.45  # cosine below this is not a semantic match (0.3 matche
 RRF_K = 60  # reciprocal rank fusion constant
 POOL = 4  # each ranking contributes up to POOL * limit candidates to the fusion
 SCAN_CHUNK = 2048  # vectors scored (or cached) per fetch
-CACHE_MAX_ROWS = 200_000  # vector cache cap: ~300 MB of 384-d float32 plus metadata; above: stream
+# Vector cache cap. Per row: 1,536 B of 384-d float32 plus ~300-500 B of Python metadata (the
+# 7-tuple, a float, the list slot and the segment text; folder/speaker strings are pooled), so
+# ~190 MB at the cap for an always-resident menu-bar app. Above it queries stream (as before).
+CACHE_MAX_ROWS = 100_000
 EMBED_CHUNK = 64  # segments embedded between two checks of ``busy``
 BUSY_POLL_S = 0.5
 NO_VECTORS = np.zeros((0, 0), dtype=np.float32)  # a session without segments
@@ -139,6 +146,9 @@ class TranscriptIndex:
         self._cache_gen = 0  # bumped after each committed vector change in this process
         self._cache_lock = threading.Lock()  # guards the two above; held only for assignments
         self._cache_build = threading.Lock()  # one cache builder at a time (never waited for)
+        # (token, model, dim, cap) for which a build can't succeed (over the cap, foreign
+        # vectors): skipped until the token changes. Guarded by ``_cache_lock``.
+        self._no_cache: tuple[str, str, int, int] | None = None
 
     # ------------------------------------------------------------------ storage
     def _connect(self) -> sqlite3.Connection:
@@ -208,6 +218,13 @@ class TranscriptIndex:
             "token TEXT)"
         )
         db.execute("INSERT OR IGNORE INTO vec_version VALUES (0, ?)", (secrets.token_hex(8),))
+        # Also bump it from SQLite itself, so a writer that doesn't know the token (an older
+        # app or CLI on the same file, same schema version) still invalidates every cache.
+        for event in ("INSERT", "DELETE", "UPDATE"):
+            db.execute(  # only the constant event names are interpolated
+                f"CREATE TRIGGER IF NOT EXISTS seg_vec_{event.lower()} AFTER {event} ON seg_vec "  # noqa: S608
+                "BEGIN UPDATE vec_version SET token = lower(hex(randomblob(8))) WHERE id = 0; END"
+            )
         db.commit()
 
     @property
@@ -231,6 +248,7 @@ class TranscriptIndex:
         with self._cache_lock:
             self._cache_gen += 1
             self._cache = None
+            self._no_cache = None
 
     def _purge(self, db: sqlite3.Connection) -> None:
         """After deletes, when FTS5 can't secure-delete: merge the index and rewrite the file
@@ -546,9 +564,11 @@ class TranscriptIndex:
     def _fresh_cache(self, model: str, dim: int) -> _VecCache | None:
         """The cached vectors if still current, else a new cache; None (stream instead) while
         the embed worker runs (it would invalidate it at once), while another query builds
-        one, above ``CACHE_MAX_ROWS``, or if the vectors changed during the build."""
+        one, above ``CACHE_MAX_ROWS``, or if the vectors changed during the build. A build that
+        can't succeed for this token (over the cap, foreign vectors) isn't retried until the
+        token changes, so such an index costs one streaming scan per query, not a build too."""
         with self._cache_lock:
-            cache, gen = self._cache, self._cache_gen
+            cache, gen, no_cache = self._cache, self._cache_gen, self._no_cache
         token = self._vec_token()
         if cache is not None and cache.token == token and cache.model == model:
             return cache if cache.matrix.shape[1] == dim else None
@@ -559,13 +579,20 @@ class TranscriptIndex:
         with self._embed_guard:
             if self._embed_thread is not None:
                 return None
-        if token is None or not self._cache_build.acquire(blocking=False):
+        if token is None:
+            return None
+        key = (token, model, dim, CACHE_MAX_ROWS)
+        if no_cache == key or not self._cache_build.acquire(blocking=False):
             return None
         try:
             built = self._build_cache(token, model, dim)
         finally:
             self._cache_build.release()
         if built is None:
+            if self._vec_token() == token:  # not a concurrent write: retrying won't help
+                with self._cache_lock:
+                    if self._cache_gen == gen:
+                        self._no_cache = key
             return None
         with self._cache_lock:
             if self._cache_gen != gen:
@@ -576,8 +603,14 @@ class TranscriptIndex:
 
     def _build_cache(self, token: str, model: str, dim: int) -> _VecCache | None:
         """Read the vectors in chunks (no long read lock, so writers aren't held up) and keep
-        them only if the token is unchanged afterwards: no change committed in between."""
-        parts: list[np.ndarray] = []
+        them only if the token is unchanged afterwards: no change committed in between. A
+        cheap count first keeps an over-cap index from reading anything; the matrix is filled
+        in place (no second copy at the end)."""
+        with contextlib.closing(self._connect()) as db:
+            total = db.execute("SELECT count(*) FROM seg_vec").fetchone()[0]  # >= this model's
+        if total > CACHE_MAX_ROWS:
+            return None
+        matrix = np.empty((total, dim), dtype=np.float32)
         meta: list[tuple[str, str, str, float, str, str, str]] = []
         pool: dict[str, str] = {}  # one string object per folder, speaker, ...
         last = 0
@@ -591,14 +624,15 @@ class TranscriptIndex:
                     "WHERE m.model = ? AND v.rowid > ? ORDER BY v.rowid LIMIT ?",
                     (model, last, SCAN_CHUNK),
                 ).fetchall()
-            if len(meta) + len(rows) > CACHE_MAX_ROWS:
+            if len(meta) + len(rows) > total:  # rows added since the count: token changed
                 return None
             if rows:
                 last = rows[-1][0]
                 blob = b"".join(r[1] for r in rows)
                 if len(blob) != len(rows) * dim * 4:  # another model's vectors
                     return None
-                parts.append(np.frombuffer(blob, dtype=np.float32).reshape(len(rows), dim))
+                n = len(meta)
+                matrix[n : n + len(rows)] = np.frombuffer(blob, dtype=np.float32).reshape(-1, dim)
                 p = pool.setdefault
                 meta.extend(
                     (p(r[2], r[2]), p(r[3], r[3]), p(r[4], r[4]), float(r[5]))
@@ -609,7 +643,8 @@ class TranscriptIndex:
                 break
         if self._vec_token() != token:
             return None
-        matrix = np.concatenate(parts) if parts else np.zeros((0, dim), dtype=np.float32)
+        if len(meta) < total:  # other models' rows were counted too: don't pin their space
+            matrix = matrix[: len(meta)].copy()
         return _VecCache(token, model, matrix, meta)
 
     # ------------------------------------------------------------------ queries

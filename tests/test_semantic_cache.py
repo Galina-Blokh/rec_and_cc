@@ -8,6 +8,7 @@ Stories: US-32.
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import threading
 
 import numpy as np
@@ -132,6 +133,7 @@ def test_a_deleted_session_leaves_no_vectors_in_memory(tmp_path, out, how):
         else:
             idx.index_session(gone)
     assert idx._cache is None
+    assert idx.wait_embedded(30)  # a running worker would make the next query stream
     assert {h.folder for h in idx.search("budget")} == {keep}
     assert all(m[0] != str(gone) for m in idx._cache.meta)  # type: ignore[union-attr]
 
@@ -229,6 +231,43 @@ def test_no_cache_while_the_embed_worker_runs_or_above_the_cap(tmp_path, out, mo
     finally:
         idx._embed_thread = None
     assert len(idx.search("budget")) == 2 and idx._cache is not None
+
+
+def test_an_uncacheable_index_is_not_rebuilt_on_every_query(tmp_path, out, monkeypatch):
+    make_session(out, 1, [seg(1, "the invoice"), seg(2, "payment")])
+    idx = make(tmp_path, FakeEmbedder())
+    sync(idx, out)
+    monkeypatch.setattr(search, "CACHE_MAX_ROWS", 1)
+    builds: list[str] = []
+    real = idx._build_cache
+
+    def counted(token, model, dim):
+        builds.append(token)
+        return real(token, model, dim)
+
+    monkeypatch.setattr(idx, "_build_cache", counted)
+    loads = count_vector_loads(idx)
+    first = idx.search("budget")
+    assert len(first) == 2 and idx._cache is None and len(builds) == 1
+    per_query = len(loads)  # the streaming scan only: the over-cap build read no vectors
+    for _ in range(5):
+        assert idx.search("budget") == first
+    assert len(builds) == 1 and len(loads) == 6 * per_query
+    make_session(out, 2, [seg(3, "budget review")])
+    sync(idx, out)  # a write: new token, so one new attempt
+    assert len(idx.search("budget")) == 3 and len(builds) == 2
+    idx.search("budget")
+    assert len(builds) == 2
+
+
+def test_a_writer_unaware_of_the_token_still_invalidates_the_cache(tmp_path, out):
+    make_session(out, 1, [seg(1, "the invoice")])
+    idx = make(tmp_path, FakeEmbedder())
+    sync(idx, out)
+    assert idx.search("payment") and idx._cache is not None
+    with sqlite3.connect(idx.path) as db:  # e.g. an older CLI build: no vec_version update
+        db.execute("DELETE FROM seg_vec")
+    assert idx.search("payment") == []
 
 
 def test_concurrent_search_and_embedding_never_return_wrong_rows(tmp_path, out):
