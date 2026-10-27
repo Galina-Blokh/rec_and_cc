@@ -26,6 +26,7 @@ import threading
 import time
 from dataclasses import fields
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .. import hotkey as hotkey_mod
 from ..config import CONFIG_PATH, LOG_DIR, Config, load_config
@@ -33,6 +34,9 @@ from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind, discard_session
 from ..recorder import make_private_dir
 from ..retention import purge_old_audio
+
+if TYPE_CHECKING:
+    from ..transcribe.live import LiveTranscriber
 
 log = logging.getLogger(__name__)
 
@@ -81,7 +85,7 @@ def open_path(path: Path | str, text_editor: bool = False) -> None:
             if text_editor:
                 subprocess.Popen(["notepad.exe", path])
             else:
-                os.startfile(path)  # type: ignore[attr-defined]
+                os.startfile(path)
         else:
             subprocess.Popen(["xdg-open", path])
     except Exception:
@@ -252,7 +256,7 @@ class Controller:
         self.transcriber = transcriber
         self.tq = tq
         self._live = None  # LiveTranscriber of the session being recorded (engine thread)
-        self._live_done: dict[str, object] = {}  # session id -> flushed LiveTranscriber
+        self._live_done: dict[str, LiveTranscriber] = {}  # session id -> flushed LiveTranscriber
         self.engine = Engine(
             cfg,
             monitor,

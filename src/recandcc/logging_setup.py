@@ -93,10 +93,12 @@ def _thread_excepthook(args: threading.ExceptHookArgs) -> None:
     if issubclass(args.exc_type, SystemExit):  # like the default hook
         return
     name = args.thread.name if args.thread is not None else "unknown thread"
+    # typeshed types exc_value as optional; for a raised exception it is always set
+    exc_info = (args.exc_type, args.exc_value, args.exc_traceback)
     log.error(
         "uncaught exception in thread %s",
         name,
-        exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        exc_info=exc_info,  # pyright: ignore[reportArgumentType]
     )
     notify_thread_crash(name, args.exc_type.__name__)
 

@@ -100,6 +100,7 @@ uv run pytest                    # fast suite (~11 s): no models, no network; co
 uv run pytest -m slow            # + real Whisper integration test (en/ru speech made with `say`)
 RECANDCC_TEST_MODEL=large-v3-turbo uv run pytest -m slow   # same with the production model
 uv run ruff check . && uv run ruff format --check src tests
+uv run pyright                   # type check src/ (basic mode; CI runs it in the lint job)
 ```
 
 - **Engine tests** use a fake monitor, fake recorder and fake clock, so detection scenarios
@@ -110,6 +111,10 @@ uv run ruff check . && uv run ruff format --check src tests
   `scripts/eval.py` on a local consented set; see [EVALUATION.md](EVALUATION.md).
 - **`test_mac_native.py`** runs only on macOS when `bin/rcc-audiotap` exists. It plays
   audio with `afplay`/`say` and checks that it is detected and captured.
+- **Type checking**: `pyright` in basic mode over `src/` (config in `pyproject.toml`). CI runs it
+  on Linux, so Windows- and macOS-only imports carry narrow `# pyright: ignore[...]` comments
+  (file-level for the PyObjC modules, which have no stubs). Fix real errors; suppress only
+  with a rule name and a reason.
 - **Traceability:** each test file's docstring names the user stories it covers
   (`Stories: US-03, US-06.`), matching [requirements/traceability.md](requirements/traceability.md).
   Every test file needs that line; tooling tests say `Stories: none.`.

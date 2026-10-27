@@ -15,9 +15,13 @@ with its close button hides it for the rest of that session only.
 
 from __future__ import annotations
 
+# PyObjC builds AppKit/Foundation symbols at runtime and ships no type stubs, and it is not
+# installed off macOS (CI type-checks on Linux), so its imports and attributes are unknown.
+# pyright: reportMissingImports=false, reportAttributeAccessIssue=false
 import logging
 import time
 from collections.abc import Iterable
+from typing import Any
 
 import objc
 from AppKit import (
@@ -111,9 +115,10 @@ class CaptionsPanel:
         self._ended: float | None = None  # monotonic, for auto-hide
         self._user_closed = False
         self._programmatic_close = False
-        self._panel = None
-        self._text = None
-        self._scroll = None
+        # PyObjC objects (untyped), created by _ensure_panel()
+        self._panel: Any = None
+        self._text: Any = None
+        self._scroll: Any = None
         self._delegate = None
         self._last_header = None
 
