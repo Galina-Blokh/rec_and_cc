@@ -923,3 +923,166 @@ def test_a_year_is_not_a_numbered_item(session):
         ("p", "2026. The budget was approved"),
         ("num", "12. real item"),
     ]
+
+
+def _summary_texts(session):
+    return [t for _, t in export.load_summary(session)]
+
+
+def _rewrite_transcript(session, edit):
+    path = session / "transcript.json"
+    data = json.loads(path.read_text("utf-8"))
+    edit(data["segments"])
+    path.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+    os.utime(path, (9e9, 9e9))  # a rewrite is always newer than the summary
+
+
+def _with_fingerprint(session):
+    from recandcc.transcribe.summary import SOURCE_NAME, transcript_fingerprint
+
+    segs = json.loads((session / "transcript.json").read_text("utf-8"))["segments"]
+    (session / SOURCE_NAME).write_text(transcript_fingerprint(segs), "utf-8")
+
+
+def test_summary_survives_a_speaker_rename_rewrite(session):
+    """Stories: US-25."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+
+    def rename(segs):
+        for s in segs:
+            s["speaker"] = "Anna"  # name-speaker / call-app names relabel in place
+
+    _rewrite_transcript(session, rename)
+    assert _summary_texts(session)
+
+
+def test_summary_is_dropped_when_the_text_changed(session):
+    """Stories: US-25."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    _rewrite_transcript(session, lambda segs: segs[0].update(text="something else entirely"))
+    assert _summary_texts(session) == []
+
+
+def test_summary_without_a_fingerprint_keeps_the_mtime_rule(session):
+    """Stories: US-25."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    os.utime(session / "summary.md", (9e9, 9e9))
+    assert _summary_texts(session)  # newer than the transcript
+    os.utime(session / "summary.md", (1, 1))
+    assert _summary_texts(session) == []
+
+
+def test_summarize_session_records_the_fingerprint(session):
+    """Stories: US-25."""
+    from recandcc.config import Config
+    from recandcc.transcribe import summary
+
+    gen = lambda messages, max_tokens: "- do it"  # noqa: E731
+    summary.summarize_session(session, Config(), gen)
+
+    def rename(segs):
+        segs[0]["speaker"] = "Zed"
+
+    _rewrite_transcript(session, rename)
+    assert _summary_texts(session)
+
+
+def test_a_null_segments_list_is_a_stale_fingerprint_not_a_crash(session):
+    """Stories: US-25. ``"segments": null`` makes the fingerprint raise TypeError."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    _rewrite_transcript_data(session, lambda d: d.update(segments=None))
+    os.utime(session / "summary.md", (9e9 + 1, 9e9 + 1))
+    assert _summary_texts(session)  # falls back to the mtime rule (summary is newer)
+
+
+def _rewrite_transcript_data(session, edit):
+    path = session / "transcript.json"
+    data = json.loads(path.read_text("utf-8"))
+    edit(data)
+    path.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+    os.utime(path, (9e9, 9e9))
+
+
+@pytest.mark.parametrize("garbage", [b"\xff\xfe\x00 not utf8", b"", b"deadbeef"])
+def test_an_unreadable_summary_source_falls_back_to_the_mtime_rule(session, garbage):
+    """Stories: US-25."""
+    from recandcc.transcribe.summary import SOURCE_NAME
+
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    (session / SOURCE_NAME).write_bytes(garbage)
+    if garbage == b"deadbeef":  # readable but wrong: the text "changed"
+        assert _summary_texts(session) == []
+        return
+    os.utime(session / "summary.md", (9e9, 9e9))
+    assert _summary_texts(session)
+    os.utime(session / "summary.md", (1, 1))
+    assert _summary_texts(session) == []
+
+
+def test_a_timing_only_change_makes_the_summary_stale(session):
+    """Stories: US-25."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    _rewrite_transcript(session, lambda segs: segs[1].update(start=3.5, end=5.5))
+    assert _summary_texts(session) == []
+
+
+def test_summary_survives_a_rename_through_write_outputs(session):
+    """Stories: US-25. The real rewrite path (what name-speaker and the menu use)."""
+    from dataclasses import replace
+    from datetime import datetime
+
+    from recandcc.models import TriggerKind
+    from recandcc.transcribe import output
+
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    info = SessionInfo(
+        id="x",
+        directory=session,
+        started_at=datetime(2026, 10, 26, 14, 3, 12),
+        trigger_kind=TriggerKind.CALL,
+        trigger_app="zoom-us",
+    )
+    segs = [replace(Segment(**s), speaker="Anna") for s in SEGS]
+    output.write_outputs(info, segs, 9.0, "test-model")
+    assert (
+        json.loads((session / "transcript.json").read_text("utf-8"))["segments"][0]["speaker"]
+        == "Anna"
+    )
+    os.utime(session / "transcript.json", (9e9, 9e9))  # newer than the summary
+    assert _summary_texts(session)
+
+
+def test_the_pending_marker_wins_over_a_matching_fingerprint(session):
+    """Stories: US-25."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    assert _summary_texts(session)
+    (session / ".summary-pending").touch()
+    assert _summary_texts(session) == []
+
+
+def test_a_failed_sidecar_write_leaves_no_old_fingerprint(session, monkeypatch):
+    """Stories: US-25. The old fingerprint must not drop the fresh summary."""
+    from recandcc.config import Config
+    from recandcc.transcribe import summary
+
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    _rewrite_transcript(session, lambda segs: segs[0].update(text="new words"))
+    real = summary.atomic_write
+
+    def fail_sidecar(path, text):
+        if path.name == summary.SOURCE_NAME:
+            raise OSError("disk full")
+        return real(path, text)
+
+    monkeypatch.setattr(summary, "atomic_write", fail_sidecar)
+    summary.summarize_session(session, Config(), lambda messages, max_tokens: "- do it")
+    assert not (session / summary.SOURCE_NAME).exists()
+    os.utime(session / "summary.md", (9e9 + 1, 9e9 + 1))  # fresh: newer than the transcript
+    assert _summary_texts(session)  # mtime rule
