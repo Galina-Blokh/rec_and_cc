@@ -25,7 +25,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
-from ..config import DEFAULT_SUMMARY_MODEL, QWEN_RESEARCH_SUMMARY_MODEL, Config
+from ..config import (
+    DEFAULT_SUMMARY_MODEL,
+    PREVIOUS_DEFAULT_SUMMARY_MODEL,
+    QWEN_RESEARCH_SUMMARY_MODEL,
+    Config,
+)
 from ..models import Segment, SessionInfo, is_rtl
 from .output import JSON_NAME, PDI, RLI, atomic_write, paragraphs
 
@@ -38,15 +43,15 @@ PENDING_MARKER = ".summary-pending"
 # Fingerprint of the transcript text a summary was made from. Unlike an mtime it survives a
 # speaker rename or call-app names (they rewrite transcript.json but not what was said).
 SOURCE_NAME = ".summary-source"
-# ~2-5k tokens (en..he): well inside Qwen2.5's 32k context, and each chunk's prompt prefill
-# (which holds gpu.MLX_LOCK) stays within ~1-2 s.
+# ~2-5k tokens (en..he): well inside the context of every offered model, and each chunk's
+# prompt prefill (which holds gpu.MLX_LOCK) stays within ~1-2 s.
 CHUNK_CHARS = 8_000
 PREFILL_STEP = 512  # prompt tokens per prefill step (lower peak memory than mlx-lm's 2048)
 # One-time download size of each offered (pinned) summary model, for the download notice.
 MODEL_SIZES = {
-    DEFAULT_SUMMARY_MODEL: "~0.9 GB",
+    DEFAULT_SUMMARY_MODEL: "~3.0 GB",
+    PREVIOUS_DEFAULT_SUMMARY_MODEL: "~0.9 GB",
     QWEN_RESEARCH_SUMMARY_MODEL: "~1.7 GB",
-    "mlx-community/Qwen3.5-4B-MLX-4bit": "~3.0 GB",
 }
 # Thought-block markers of thinking models (Qwen3/3.5; Gemma 4's channel). Summaries run
 # with thinking off; a thought block that still shows up is cut from every answer.
@@ -61,6 +66,8 @@ HEADINGS = {
     "he": ("סיכום", "משימות", "אין."),
 }
 NONE_MARK = "NONE"
+# A bullet made only of one of these (any case, no punctuation) says there is no task.
+NONE_WORDS = frozenset({NONE_MARK.casefold(), "nothing", "нет", "ничего"})
 
 Messages = list[dict[str, str]]
 
@@ -217,7 +224,12 @@ def action_items(answer: str) -> list[str]:
             items.append(line[1:].strip())
         elif line[:1].isdigit() and line.lstrip("0123456789")[:1] in ".)":
             items.append(line.lstrip("0123456789")[1:].strip())
-    return [i for i in items if i and i.upper() != NONE_MARK]
+    return [i for i in items if i and not _says_none(i)]
+
+
+def _says_none(item: str) -> bool:
+    """True if the bullet only says there is no task ("None.", "**NONE**", "Нет.", "Ничего")."""
+    return "".join(ch for ch in item if ch.isalnum()).casefold() in NONE_WORDS
 
 
 def summarize(

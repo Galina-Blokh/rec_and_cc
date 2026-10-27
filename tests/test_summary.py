@@ -20,8 +20,10 @@ from recandcc import cli
 from recandcc import config as config_mod
 from recandcc.config import (
     DEFAULT_SUMMARY_MODEL,
+    PREVIOUS_DEFAULT_SUMMARY_MODEL,
     QWEN_RESEARCH_SUMMARY_MODEL,
     SUMMARY_MODEL_KEPT,
+    SUMMARY_MODEL_KEPT_PREVIOUS,
     SUMMARY_MODEL_SWITCHED,
     Config,
     SummaryConfig,
@@ -127,15 +129,16 @@ def test_mixed_meeting_uses_one_language_for_model_prompt_and_headings(tmp_path,
 
     monkeypatch.setattr(summary, "MlxGenerator", Gen)
     cfg = Config()
-    cfg.summary.language_models = {"he": QWEN35}
+    cfg.summary.language_models = {"he": PREVIOUS_DEFAULT_SUMMARY_MODEL}  # not the default
     segs = [Segment(0, 30, "כן", "Me", "he"), seg("a much longer English sentence", t=40)]
     text = summary.summarize_session(make_session(tmp_path, segs), cfg).read_text("utf-8")
-    assert seen[0] == QWEN35 and "Always answer in Hebrew" in seen[1]
+    assert seen[0] == PREVIOUS_DEFAULT_SUMMARY_MODEL and "Always answer in Hebrew" in seen[1]
     assert text.startswith("# סיכום")
 
 
 def test_routed_model_unavailable_falls_back_to_the_default(tmp_path, monkeypatch, caplog):
     made = []
+    offline = {PREVIOUS_DEFAULT_SUMMARY_MODEL}
 
     class Gen(FakeGen):
         def __init__(self, model, allow_unpinned=False, on_download=None):
@@ -144,22 +147,24 @@ def test_routed_model_unavailable_falls_back_to_the_default(tmp_path, monkeypatc
             made.append(model)
 
         def __call__(self, messages, max_tokens):
-            if self.model == QWEN35:  # offline, or an mlx-lm without Qwen3.5
+            if self.model in offline:  # not on disk, or an mlx-lm that can't load it
                 raise summary.ModelUnavailable("the summary model is not on disk")
             return super().__call__(messages, max_tokens)
 
     monkeypatch.setattr(summary, "MlxGenerator", Gen)
     cfg = Config()
-    cfg.summary.language_models = {"he": QWEN35}
+    cfg.summary.language_models = {"he": PREVIOUS_DEFAULT_SUMMARY_MODEL}  # not the default
     d = make_session(tmp_path, [Segment(0, 20, SPOKEN, "Me", "he")])
     with caplog.at_level(logging.DEBUG, logger="recandcc"):
         text = summary.summarize_session(d, cfg).read_text("utf-8")
-    assert made == [QWEN35, DEFAULT_SUMMARY_MODEL]
+    assert made == [PREVIOUS_DEFAULT_SUMMARY_MODEL, DEFAULT_SUMMARY_MODEL]
     assert f"by {Path(DEFAULT_SUMMARY_MODEL).name};" in text
-    assert f"summary model {QWEN35} unavailable; using {DEFAULT_SUMMARY_MODEL}" in caplog.text
+    assert (
+        f"summary model {PREVIOUS_DEFAULT_SUMMARY_MODEL} unavailable; using {DEFAULT_SUMMARY_MODEL}"
+    ) in caplog.text
     assert SPOKEN not in caplog.text
     cfg.summary.language_models = {}  # the default itself unavailable: skipped as before
-    monkeypatch.setattr(cfg.summary, "model", QWEN35)
+    offline.add(DEFAULT_SUMMARY_MODEL)
     with pytest.raises(summary.ModelUnavailable):
         summary.summarize_session(d, cfg)
 
@@ -167,9 +172,10 @@ def test_routed_model_unavailable_falls_back_to_the_default(tmp_path, monkeypatc
 @pytest.mark.parametrize(
     ("models", "lang", "expected"),
     [
-        ({}, "he", DEFAULT_SUMMARY_MODEL),  # no routing: the old behaviour
-        ({"he": QWEN35}, "he", QWEN35),
-        ({"he": QWEN35}, "en", DEFAULT_SUMMARY_MODEL),
+        ({}, "he", DEFAULT_SUMMARY_MODEL),  # no routing: the default
+        ({"he": PREVIOUS_DEFAULT_SUMMARY_MODEL}, "he", PREVIOUS_DEFAULT_SUMMARY_MODEL),
+        ({"he": PREVIOUS_DEFAULT_SUMMARY_MODEL}, "en", DEFAULT_SUMMARY_MODEL),
+        ({"he": DEFAULT_SUMMARY_MODEL}, "he", DEFAULT_SUMMARY_MODEL),  # routed to it: no-op
     ],
 )
 def test_summary_model_is_routed_by_the_main_language(models, lang, expected):
@@ -194,13 +200,16 @@ def test_session_loads_only_the_routed_model_and_frees_it(tmp_path, monkeypatch)
 
     monkeypatch.setattr(summary, "MlxGenerator", Gen)
     cfg = Config()
-    cfg.summary.language_models = {"he": QWEN35}
+    cfg.summary.language_models = {"he": PREVIOUS_DEFAULT_SUMMARY_MODEL}
     he = make_session(tmp_path / "he", [Segment(0, 20, "שלום לכולם", "Me", "he")])
     text = summary.summarize_session(he, cfg).read_text("utf-8")
     en = make_session(tmp_path / "en", [seg("hello")])
     summary.summarize_session(en, cfg)
-    assert [(g.model, g.closed) for g in made] == [(QWEN35, True), (DEFAULT_SUMMARY_MODEL, True)]
-    assert "by Qwen3.5-4B-MLX-4bit;" in text
+    assert [(g.model, g.closed) for g in made] == [
+        (PREVIOUS_DEFAULT_SUMMARY_MODEL, True),
+        (DEFAULT_SUMMARY_MODEL, True),
+    ]
+    assert "by Qwen2.5-1.5B-Instruct-4bit;" in text
 
 
 @pytest.mark.parametrize(
@@ -252,9 +261,15 @@ def _fake_mlx_lm(monkeypatch, text: str, seen: list, thinking: bool | None):
 @pytest.mark.parametrize(
     ("model", "thinking", "raw", "seen"),
     [
-        # a thinking model (Qwen3.5) answers with thinking off, within max_tokens
-        (QWEN35, True, "<think>\n\n</think>\n\nAnswer.", [{"enable_thinking": False}, 400]),
-        (DEFAULT_SUMMARY_MODEL, False, "Answer.", [{}, 400]),  # Qwen2.5: prompt as before
+        # Qwen3.5 (the default) is a thinking model: thinking off, within max_tokens
+        (
+            DEFAULT_SUMMARY_MODEL,
+            True,
+            "<think>\n\n</think>\n\nAnswer.",
+            [{"enable_thinking": False}, 400],
+        ),
+        # an older model without thinking tokens (Qwen2.5): its prompt is unchanged
+        (PREVIOUS_DEFAULT_SUMMARY_MODEL, False, "Answer.", [{}, 400]),
         # no has_thinking (another mlx-lm): template defaults, but no thought reaches summary.md
         (QWEN35, None, "<think>\nplan\n</think>\nAnswer.", [{}, 400]),
         (QWEN35, None, "<|channel>thought\nplan<channel|>Answer.", [{}, 400]),
@@ -374,13 +389,30 @@ def test_action_items_are_parsed_and_none_means_empty():
     assert summary.action_items("NONE") == []
 
 
+@pytest.mark.parametrize(
+    "bullet",
+    ["- None", "* None.", "1. NONE!", "- **None**", "- nothing.", "- Нет", "- Нет.", "- ничего!"],
+)
+def test_a_bullet_that_only_says_none_is_no_action_item(bullet):
+    assert summary.action_items(f"Action items:\n{bullet}\n- Anna sends the deck") == [
+        "Anna sends the deck"
+    ]
+    assert summary.action_items(bullet) == []
+
+
+def test_a_task_that_mentions_none_is_kept():
+    assert summary.action_items("- Nothing new: Anna books the room") == [
+        "Nothing new: Anna books the room"
+    ]
+
+
 def test_summary_md_next_to_the_transcript(tmp_path):
     d = make_session(tmp_path, [seg("Привет, обсудим бюджет и сроки проекта.", "ru")])
     path = summary.summarize_session(d, Config(), FakeGen(actions="NONE"))
     assert path == d / "summary.md"
     text = path.read_text("utf-8")
     assert text.startswith("# Краткое содержание\n\nWe agreed on the plan.\n\n## Задачи\n\nНет.")
-    assert "Qwen2.5-1.5B-Instruct-4bit" in text
+    assert "by Qwen3.5-4B-MLX-4bit;" in text  # the footer names the model that wrote it
 
 
 def test_hebrew_summary_is_right_to_left(tmp_path):
@@ -412,6 +444,20 @@ def test_saved_old_default_model_follows_the_new_default(tmp_path):
     assert cfg.summary.model == DEFAULT_SUMMARY_MODEL
     cfg.save(path)
     assert load_config(path).summary.model == DEFAULT_SUMMARY_MODEL
+
+
+def test_saved_1_5b_default_moves_to_the_new_default(tmp_path):
+    # the 1.5B was the default until now: Config.save wrote it into configs nobody chose it for
+    path = tmp_path / "config.toml"
+    Config(summary=SummaryConfig(enabled=True, model=PREVIOUS_DEFAULT_SUMMARY_MODEL)).save(path)
+    assert load_config(path).summary.model == DEFAULT_SUMMARY_MODEL  # CLI: in memory only
+    assert load_config(path).summary.notice is None
+    cfg = load_config(path, migrate=True)
+    assert cfg.summary.model == DEFAULT_SUMMARY_MODEL
+    assert cfg.summary.notice == SUMMARY_MODEL_SWITCHED  # summaries on: told once
+    assert load_config(path, migrate=True).summary.notice is None
+    text = path.read_text("utf-8")
+    assert DEFAULT_SUMMARY_MODEL in text and PREVIOUS_DEFAULT_SUMMARY_MODEL not in text
 
 
 def test_accepted_qwen_research_licence_keeps_the_3b(tmp_path):
@@ -511,6 +557,8 @@ def test_cached_3b_is_kept_while_the_new_default_is_missing(tmp_path):
     assert cfg.summary.model == QWEN_RESEARCH_SUMMARY_MODEL
     assert cfg.summary.notice is None  # summaries off: nothing to say
     assert path.read_text("utf-8") == before
+    _cache_model(config_mod.HF_CACHE_DIR, PREVIOUS_DEFAULT_SUMMARY_MODEL)  # not the new default
+    assert load_config(path, migrate=True).summary.model == QWEN_RESEARCH_SUMMARY_MODEL
     _cache_model(config_mod.HF_CACHE_DIR, DEFAULT_SUMMARY_MODEL)  # both on disk: switch
     assert load_config(path, migrate=True).summary.model == DEFAULT_SUMMARY_MODEL
 
@@ -527,8 +575,24 @@ def test_kept_cached_3b_is_noticed_once(tmp_path):
     assert load_config(path, migrate=True).summary.notice is None  # once
 
 
-def test_unpinned_1_5b_snapshot_does_not_replace_a_cached_3b(tmp_path):
-    # another tool's copy of the 1.5B at a different commit wouldn't load offline
+def test_cached_1_5b_is_kept_and_noticed_once_while_the_new_default_is_missing(tmp_path):
+    # the previous default, offline-safe like the 3B: nothing downloads the 4B by surprise
+    _cache_model(config_mod.HF_CACHE_DIR, PREVIOUS_DEFAULT_SUMMARY_MODEL)
+    path = tmp_path / "config.toml"
+    Config(summary=SummaryConfig(enabled=True, model=PREVIOUS_DEFAULT_SUMMARY_MODEL)).save(path)
+    before = path.read_text("utf-8")
+    assert load_config(path).summary.notice is None  # CLI: no notice used up
+    cfg = load_config(path, migrate=True)
+    assert cfg.summary.model == PREVIOUS_DEFAULT_SUMMARY_MODEL
+    assert cfg.summary.notice == SUMMARY_MODEL_KEPT_PREVIOUS
+    assert load_config(path, migrate=True).summary.notice is None  # once
+    assert path.read_text("utf-8") == before  # kept: config.toml is not rewritten
+    _cache_model(config_mod.HF_CACHE_DIR, DEFAULT_SUMMARY_MODEL)  # now the new default is too
+    assert load_config(path, migrate=True).summary.model == DEFAULT_SUMMARY_MODEL
+
+
+def test_unpinned_4b_snapshot_does_not_replace_a_cached_3b(tmp_path):
+    # another tool's copy of the new default at a different commit wouldn't load offline
     _cache_model(config_mod.HF_CACHE_DIR, QWEN_RESEARCH_SUMMARY_MODEL)
     _cache_model(config_mod.HF_CACHE_DIR, DEFAULT_SUMMARY_MODEL, rev="2" * 40)
     path = tmp_path / "config.toml"
@@ -838,12 +902,14 @@ def test_first_download_posts_a_notice(tmp_path, monkeypatch):
     q = summary.SummaryQueue(Config(), notify=lambda *n: notices.append(n))
     q.submit(make_session(tmp_path, [seg("hello")]))
     q.join()
-    assert notices[0] == ("Summary model", "Downloading the summary model (~0.9 GB, once)")
+    assert notices[0] == ("Summary model", "Downloading the summary model (~3.0 GB, once)")
 
 
 @pytest.mark.parametrize(
     ("model", "notice"),
     [
+        (DEFAULT_SUMMARY_MODEL, "Downloading the summary model (~3.0 GB, once)"),
+        (PREVIOUS_DEFAULT_SUMMARY_MODEL, "Downloading the summary model (~0.9 GB, once)"),
         (QWEN_RESEARCH_SUMMARY_MODEL, "Downloading the summary model (~1.7 GB, once)"),
         ("me/custom-llm", "Downloading the summary model (once)"),
     ],
@@ -852,11 +918,15 @@ def test_download_notice_names_the_chosen_models_size(model, notice):
     assert summary.download_notice(model) == notice
 
 
-def test_default_summary_model_is_apache_and_the_3b_stays_pinned():
-    # Apache-2.0 default (#4); the non-commercial Qwen Research 3B is still selectable offline
-    assert DEFAULT_SUMMARY_MODEL == "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+def test_default_summary_model_is_apache_and_the_older_ones_stay_pinned():
+    # Apache-2.0 default (Qwen3.5 4B); the 1.5B and the non-commercial Qwen Research 3B stay
+    # selectable offline
+    assert DEFAULT_SUMMARY_MODEL == "mlx-community/Qwen3.5-4B-MLX-4bit"
     assert not Config().summary.enabled  # still opt-in
-    assert gpu.revision(DEFAULT_SUMMARY_MODEL) == "8b403126fc14f14cfc99bb4cfa72ecbc129ea677"
+    assert gpu.revision(DEFAULT_SUMMARY_MODEL) == "32f3e8ecf65426fc3306969496342d504bfa13f3"
+    assert gpu.revision(PREVIOUS_DEFAULT_SUMMARY_MODEL) == (
+        "8b403126fc14f14cfc99bb4cfa72ecbc129ea677"
+    )
     assert gpu.revision(QWEN_RESEARCH_SUMMARY_MODEL) == "4f83f8f146fdf28b512a06562b671d7af4fab457"
 
 

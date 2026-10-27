@@ -198,16 +198,24 @@ class TranscriptionConfig:
     allow_unpinned_models: bool = False
 
 
-# Apache-2.0 (commercial use allowed), ~0.9 GB download.
-DEFAULT_SUMMARY_MODEL = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
-# The previous default, still pinned and selectable: a larger model (~1.7 GB), but under the
+# Apache-2.0 (commercial use allowed), a ~3.0 GB download (vision weights included, which mlx-lm
+# doesn't load) and ~2.9 GB peak RAM while it runs. A thinking model: summaries run with
+# thinking off (transcribe/summary.py).
+DEFAULT_SUMMARY_MODEL = "mlx-community/Qwen3.5-4B-MLX-4bit"
+# The previous default (Apache-2.0, ~0.9 GB). Config.save wrote it into every config.toml, so an
+# unchosen one moves to the default like the 3B below, with the same offline guard.
+PREVIOUS_DEFAULT_SUMMARY_MODEL = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+# The default before that, still pinned and selectable: a larger model (~1.7 GB), but under the
 # Qwen Research licence, which allows non-commercial use only.
 QWEN_RESEARCH_SUMMARY_MODEL = "mlx-community/Qwen2.5-3B-Instruct-4bit"
 # Their pinned commits, part of transcribe/revisions.py's HF_REVISIONS. Kept here so the
 # load-time migration below can check the cache without config.py importing transcribe/.
 SUMMARY_MODEL_REVISIONS = {
+    # model.safetensors sha256 5fb9acd0246866381cf8c5c354c6db1019f6498eec4ccb4f5edcc71ffeacb2db
+    # (the LFS oid per the HF API, 3,034,300,695 B; for reference, the commit pins the content)
+    DEFAULT_SUMMARY_MODEL: "32f3e8ecf65426fc3306969496342d504bfa13f3",
     # model.safetensors sha256 0979f33d1bc58afcf696d13f57977644e7b11a6f0eec3e631d8e9463d18c0717
-    DEFAULT_SUMMARY_MODEL: "8b403126fc14f14cfc99bb4cfa72ecbc129ea677",
+    PREVIOUS_DEFAULT_SUMMARY_MODEL: "8b403126fc14f14cfc99bb4cfa72ecbc129ea677",
     # model.safetensors sha256 f212cf6fb9923281a09c135e05d43a052ee5ef7121f5b1dc0b0fb2de80f97cfd
     QWEN_RESEARCH_SUMMARY_MODEL: "4f83f8f146fdf28b512a06562b671d7af4fab457",
 }
@@ -215,16 +223,22 @@ SUMMARY_MODEL_REVISIONS = {
 # (HF_HUB_CACHE / HF_HOME). Tests point it at a tmp folder.
 HF_CACHE_DIR: Path | None = None
 SUMMARY_MODEL_SWITCHED = (
-    "Summary model switched to Qwen2.5 1.5B (Apache-2.0); to keep the 3B, set summary.model "
+    "Summary model switched to Qwen3.5 4B (Apache-2.0); to keep the 3B, set summary.model "
     f'= "{QWEN_RESEARCH_SUMMARY_MODEL}" and summary.accept_qwen_research_licence = true '
     "in config.toml"
 )
 SUMMARY_LICENCE_NOT_BOOL = "accept_qwen_research_licence must be a TOML boolean true, not {kind}"
-# Next to config.toml once the "kept the cached 3B" notice was shown.
+# Next to config.toml once the "kept the cached ..." notice was shown, one marker per model.
 SUMMARY_KEPT_MARKER = ".summary-3b-kept-noticed"
+PREVIOUS_KEPT_MARKER = ".summary-1.5b-kept-noticed"
 SUMMARY_MODEL_KEPT = (
     "Keeping the cached Qwen2.5 3B summary model, which is non-commercial; set summary.model "
-    f'= "{DEFAULT_SUMMARY_MODEL}" in config.toml to switch to the Apache-2.0 1.5B'
+    f'= "{DEFAULT_SUMMARY_MODEL}" in config.toml to switch to the Apache-2.0 Qwen3.5 4B'
+)
+SUMMARY_MODEL_KEPT_PREVIOUS = (
+    "Keeping the cached Qwen2.5 1.5B summary model; set summary.model "
+    f'= "{DEFAULT_SUMMARY_MODEL}" in config.toml to switch to the Apache-2.0 Qwen3.5 4B '
+    "(~3.0 GB, downloaded once)"
 )
 
 
@@ -243,7 +257,7 @@ def summary_model_on_disk(repo: str) -> bool:
     rev = SUMMARY_MODEL_REVISIONS.get(repo)
     try:
         # .exists() follows the symlink to the blob, so an interrupted download doesn't count
-        # Both pinned summary models ship their weights as one model.safetensors (no
+        # The pinned summary models ship their weights as one model.safetensors (no
         # sharded *.safetensors index). HF links a file into the snapshot only once its blob is
         # complete, and config.json is the other file a load needs first.
         if rev is not None:
@@ -260,8 +274,8 @@ def _snapshot_complete(snap: Path) -> bool:
 @dataclass
 class SummaryConfig:
     # Write summary.md (short summary + action items) after each final transcript, with a
-    # local LLM (mlx-lm, Apple silicon only). Off by default: it costs ~1.1-1.4 GB of RAM
-    # (measured peak) and a one-time ~0.9 GB model download.
+    # local LLM (mlx-lm, Apple silicon only). Off by default: it costs ~2.9 GB of RAM (peak
+    # while it runs) and a one-time ~3.0 GB model download.
     enabled: bool = False
     model: str = DEFAULT_SUMMARY_MODEL  # pinned in transcribe/revisions.py, or a local path
     # Keep `model = QWEN_RESEARCH_SUMMARY_MODEL` (non-commercial licence). Without it, that
@@ -719,49 +733,49 @@ def load_config(path: Path | None = None, *, migrate: bool = False) -> Config:
 
 
 def _migrate_summary_model(summary: SummaryConfig, path: Path, *, persist: bool) -> None:
-    """Replace the old default 3B (non-commercial; Config.save wrote it into every
-    config.toml) with the current default, unless its licence was accepted. Kept when the 3B
-    is on disk and the new default isn't, so an offline user's summaries keep working (and
-    nothing downloads the new default, so it stays until the user picks it). The switch
-    applies in memory; with ``persist`` (the app's startup load) it is also written to
-    config.toml (that key only), and with summaries on ``summary.notice`` is set for a
-    one-time notice (ui.common.Controller): after the switch, or the first time the 3B is
-    kept (remembered by a marker file next to config.toml)."""
+    """Replace the older defaults with the current one. Config.save wrote whichever was the
+    default into every config.toml, so an unchosen one reads as set: the 3B (non-commercial,
+    unless its licence was accepted) and the Apache-2.0 1.5B. Each is kept while it is on disk
+    and the new default isn't, so an offline user's summaries keep working and nothing
+    downloads the new default by surprise. Otherwise the switch applies in memory; with
+    ``persist`` (the app's startup load) it is also written to config.toml (that key only),
+    and with summaries on ``summary.notice`` is set for a one-time notice (ui.common.Controller):
+    after the switch, or the first time a model is kept (remembered by a marker file next to
+    config.toml)."""
     accepted = summary.accept_qwen_research_licence
     invalid = None
     if not isinstance(accepted, bool):  # e.g. "true" or 1: not consent, and say so
         invalid = SUMMARY_LICENCE_NOT_BOOL.format(kind=_toml_kind(accepted))
         log.warning("config: [summary] %s; using false", invalid)
         summary.accept_qwen_research_licence = False
-    if summary.model != QWEN_RESEARCH_SUMMARY_MODEL or summary.accept_qwen_research_licence:
+    old = summary.model
+    if old == QWEN_RESEARCH_SUMMARY_MODEL:
+        if summary.accept_qwen_research_licence:
+            return
+        kept_notice, marker_name = SUMMARY_MODEL_KEPT, SUMMARY_KEPT_MARKER
+    elif old == PREVIOUS_DEFAULT_SUMMARY_MODEL:
+        kept_notice, marker_name = SUMMARY_MODEL_KEPT_PREVIOUS, PREVIOUS_KEPT_MARKER
+    else:
         return
-    if summary_model_on_disk(QWEN_RESEARCH_SUMMARY_MODEL) and not summary_model_on_disk(
-        DEFAULT_SUMMARY_MODEL
-    ):
+    if summary_model_on_disk(old) and not summary_model_on_disk(DEFAULT_SUMMARY_MODEL):
         log.info(
-            "summary.model %s (non-commercial licence) kept: it is on disk and %s is not; "
-            "set summary.model to switch, or summary.accept_qwen_research_licence = true",
-            summary.model,
+            "summary.model %s kept: it is on disk and %s is not; set summary.model to switch",
+            old,
             DEFAULT_SUMMARY_MODEL,
         )
-        marker = path.with_name(SUMMARY_KEPT_MARKER)
+        marker = path.with_name(marker_name)
         if persist and summary.enabled and not marker.exists():
             try:
                 marker.touch()
             except OSError as e:
                 log.warning("could not write %s: %s", marker, type(e).__name__)
-            summary.notice = SUMMARY_MODEL_KEPT
+            summary.notice = kept_notice
         return
-    log.info(
-        "summary.model %s (the old default, non-commercial licence) -> %s; to keep it, set "
-        "summary.model back to it and summary.accept_qwen_research_licence = true",
-        summary.model,
-        DEFAULT_SUMMARY_MODEL,
-    )
+    log.info("summary.model %s (an older default) -> %s", old, DEFAULT_SUMMARY_MODEL)
     summary.model = DEFAULT_SUMMARY_MODEL
     if not persist:
         return
-    if invalid is not None:  # they meant to keep the 3B: tell them why it didn't count
+    if invalid is not None and old == QWEN_RESEARCH_SUMMARY_MODEL:  # they meant to keep the 3B
         summary.notice = f"{invalid}; {SUMMARY_MODEL_SWITCHED}"
     elif summary.enabled:
         summary.notice = SUMMARY_MODEL_SWITCHED
