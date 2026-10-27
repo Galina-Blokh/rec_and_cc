@@ -116,8 +116,10 @@ def import_mlx_whisper() -> Any:
     imports numba and scipy, but only ``word_timestamps=True`` calls it. RecAndCC never asks
     for word timestamps, so when numba or scipy is missing a stub ``mlx_whisper.timing`` is
     registered first; it raises a clear error if word timestamps are ever requested. With
-    both installed the real module is used. Every mlx_whisper import in RecAndCC goes
-    through here (tests/test_no_torch.py checks that neither library is imported).
+    both installed the real module is used. Every mlx_whisper import in RecAndCC must go
+    through here first, since a direct one fails on the missing numba
+    (tests/test_mlx_imports.py enforces that, tests/test_no_torch.py checks that neither
+    library is imported).
     """
     if "mlx_whisper.timing" not in sys.modules and (
         importlib.util.find_spec("numba") is None or importlib.util.find_spec("scipy") is None
