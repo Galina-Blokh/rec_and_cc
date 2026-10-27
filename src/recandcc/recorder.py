@@ -13,14 +13,18 @@ sends a sentinel to each writer, joins them, and persists session.json.
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import re
 import shutil
+import subprocess
+import sys
 import threading
 import time
 from collections import deque
 from collections.abc import Callable
 from datetime import datetime
+from functools import cache
 from pathlib import Path
 
 import numpy as np
@@ -32,14 +36,80 @@ from .models import SAMPLE_RATE, SessionInfo, Track, TriggerKind
 
 log = logging.getLogger(__name__)
 
-PRIVATE_DIR_MODE = 0o700  # owner-only (POSIX; ignored on Windows, where ACLs apply)
+PRIVATE_DIR_MODE = 0o700  # owner-only on POSIX; Windows gets an owner-only DACL instead
+SYSTEM_SID = "S-1-5-18"  # LocalSystem: keeps backup / indexing / AV working on Windows
+
+
+def _system32(exe: str) -> str:
+    """Absolute path of a Windows system tool, so a stray copy on PATH is never run."""
+    return str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / exe)
+
+
+def _no_window() -> int:
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0)  # no console flash from the tray app
+
+
+@cache
+def _current_user_sid() -> str:
+    """SID of the user running the app, e.g. ``S-1-5-21-...-1001`` (Windows only)."""
+    out = subprocess.run(  # noqa: S603 - fixed argv (absolute System32 path), no shell
+        [_system32("whoami.exe"), "/user", "/fo", "csv", "/nh"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+        creationflags=_no_window(),
+    ).stdout
+    # One CSV line: "DOMAIN\user","S-1-5-21-..."
+    sid = out.strip().rsplit(",", 1)[-1].strip().strip('"')
+    if not sid.startswith("S-1-"):
+        raise ValueError(f"unexpected whoami output: {out!r}")
+    return sid
+
+
+def icacls_owner_only_argv(path: Path, user_sid: str) -> list[str]:
+    """icacls argv that makes ``path`` accessible only to ``user_sid`` and SYSTEM.
+
+    ``/inheritance:r`` drops the ACEs inherited from the parent folder (e.g. ``Users: Read``
+    on a shared drive), ``/grant:r`` sets full control for the owner and SYSTEM, and
+    ``(OI)(CI)`` makes files and subfolders created inside inherit the same two entries.
+    """
+    return [
+        _system32("icacls.exe"),
+        str(path),
+        "/inheritance:r",
+        "/grant:r",
+        f"*{user_sid}:(OI)(CI)F",
+        f"*{SYSTEM_SID}:(OI)(CI)F",
+    ]
+
+
+def restrict_to_owner(path: Path) -> None:
+    """Make a folder this app just created private to the current user.
+
+    POSIX: ``chmod 0700``. Windows: an owner-only DACL (``chmod`` there only toggles the
+    read-only flag). A failure on Windows is logged, never raised: recording must go on.
+    """
+    path.chmod(PRIVATE_DIR_MODE)
+    if sys.platform != "win32":
+        return
+    try:
+        argv = icacls_owner_only_argv(path, _current_user_sid())
+        r = subprocess.run(  # noqa: S603 - fixed argv; the path is our own folder, no shell
+            argv, capture_output=True, text=True, timeout=30, creationflags=_no_window()
+        )
+        if r.returncode != 0:
+            raise OSError(f"icacls exited {r.returncode}: {(r.stderr or r.stdout).strip()}")
+    except Exception as e:  # keep recording, just warn
+        log.warning("could not restrict %s to the current user: %s", path, e)
 
 
 def make_private_dir(path: Path) -> None:
     """Create ``path`` (and missing parents) with owner-only permissions, if it doesn't exist.
 
     ``mkdir(mode=...)`` is filtered by the umask and only applies to the last component, so
-    each folder this creates is chmod-ed explicitly. Existing folders are left untouched.
+    each folder this creates is restricted explicitly (``restrict_to_owner``). Existing
+    folders are left untouched.
     """
     if path.is_dir():
         return
@@ -53,7 +123,7 @@ def make_private_dir(path: Path) -> None:
         if path.is_dir():
             return  # created concurrently
         raise  # a file (or dangling symlink) is in the way
-    path.chmod(PRIVATE_DIR_MODE)
+    restrict_to_owner(path)
 
 
 # Sessions with less audio than this (longest track) are deleted instead of transcribed.
@@ -278,11 +348,12 @@ class Recorder:
         while d.exists():
             d = day / f"{base}-{n}"
             n += 1
-        # Recordings and transcripts are private: owner-only folders (0700) at every level the
-        # recorder creates. An output folder that already exists keeps its permissions.
+        # Recordings and transcripts are private: owner-only folders (0700 / owner-only DACL)
+        # at every level the recorder creates. An existing output folder keeps its permissions.
         for p in (self.cfg.output_dir, day):
             make_private_dir(p)
         d.mkdir(mode=PRIVATE_DIR_MODE)
+        restrict_to_owner(d)
         return f"{now.strftime('%Y-%m-%d')}_{d.name}", d
 
     def start(

@@ -250,8 +250,12 @@ models load from disk without contacting anything (tested with all network acces
 | Launch at login | `~/Library/LaunchAgents/com.gblokh.recandcc.plist` | registry `HKCU\…\CurrentVersion\Run\RecAndCC` |
 
 The folders RecAndCC creates for recordings (the transcripts folder, each day and each
-session) are readable only by you (`0700` on macOS). A transcripts folder that already
-existed keeps its permissions; tighten it with `chmod 700 ~/Documents/Transcribes`.
+session) are readable only by you: `0700` on macOS; on Windows an access list with only your
+account and SYSTEM, set when the folder is created and not inherited from its parent. A
+transcripts folder that already existed keeps its permissions; tighten it with
+`chmod 700 ~/Documents/Transcribes`. On Windows, the simplest fix is to let RecAndCC create a
+new folder (point `output_dir` at a path that doesn't exist yet); `icacls <folder>` shows who
+has access.
 `~/Documents` may be synced by iCloud Drive ("Desktop & Documents Folders") on macOS, and
 `Documents` by OneDrive folder backup on Windows; set `output_dir` to a folder outside it if
 recordings must stay on this computer only.
