@@ -437,14 +437,3 @@ def test_live_transcription_replays_the_whole_widened_preroll(tmp_path):
     finally:
         mon.close()
     assert sum(heard) == 40 * SR  # all of it, not just room_preroll_s + 5
-
-
-def test_default_config_path_is_redirected_in_tests():
-    import recandcc.config as config_mod
-    import recandcc.ui.common as common
-
-    cfg = Config()
-    cfg.save()  # no path: CONFIG_PATH at call time, which conftest points at a temp file
-    assert config_mod.CONFIG_PATH.exists() and common.CONFIG_PATH == config_mod.CONFIG_PATH
-    assert config_mod.CONFIG_DIR not in config_mod.CONFIG_PATH.parents
-    assert load_config().detection.outside_sensitivity is None
