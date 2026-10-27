@@ -255,3 +255,56 @@ model is not on disk (it never downloads or silently falls back). The audio was 
 To regenerate: `uv run python scripts/make_synthetic_evalset.py --meetings "$TMPDIR/rcc-meetings"`,
 then `uv run python scripts/eval.py "$TMPDIR/rcc-meetings" --languages en [--diarize-overlap]
 --json "$TMPDIR/out.json"`.
+
+## Interim synthetic voice-profile recall
+
+For issue #1 ("A person named once is recognized by name in later sessions (≥ 90% of their
+segments on a test set)"), story US-21. **Synthetic TTS (macOS `say`), not the consented set:
+interim, overstates real-world recall.** Real consented recordings of the same people across
+calls (other microphones, rooms, codecs, moods) are still needed to close the criterion.
+
+Method (`scripts/voice_recall_eval.py`, slow test `tests/test_voice_recall.py`): four voices
+talk in session 1, Samantha ("Anna"), Milena (Russian, "Boris"), Daniel ("Carl") and Rishi
+("Dev"), three turns each. Each is named once with `voices.name_speaker` (what
+`recandcc name-speaker` runs). Three later sessions (10 turns each) use sentences that were
+not used before, other speaker mixes and orders, and two voices that were never named, Karen
+and Moira. Each named voice is in two later sessions and so is each unnamed one. Every session's
+`Others` track goes through the real `Diarizer` (`diarize_overlap` off, the default) and the
+transcriber's own labelling (`match_profiles` against the stored profiles,
+`MATCH_SIMILARITY` 0.6, `MATCH_MARGIN` 0.1). Transcript segments are the true sentences, one per
+turn, instead of Whisper's, so only diarization and matching are measured. 2026-10-27, Apple
+M5 Max, offline, cached `3dspeaker_speech_campplus_sv_zh_en_16k` embedding model. Everything
+(audio, transcripts, profiles) goes to a temp dir. Two runs gave identical numbers.
+
+| Voice | Named | Later segments with the right name | Seconds |
+|---|---|---|---|
+| Samantha | Anna | 5 / 5 | 19.1 / 19.1 |
+| Milena (ru) | Boris | 5 / 5 | 15.7 / 15.7 |
+| Daniel | Carl | 5 / 5 | 19.4 / 19.4 |
+| Rishi | Dev | 6 / 6 | 17.7 / 17.7 |
+| **Named voices** | | **21 / 21 (100%)** | **71.9 / 71.9 (100%)** |
+
+| Unnamed voice | Segments wrongly given a name | Seconds |
+|---|---|---|
+| Karen | 5 / 5 (all "Anna") | 10.0 / 10.0 |
+| Moira | 0 / 4 (stays `Speaker 1`) | 0.0 / 10.6 |
+| **Unnamed voices** | **5 / 9 (56%)** | **10.0 / 20.6 (49%)** |
+
+Reading it:
+
+- The recall criterion is met on this synthetic set (100% ≥ 90%). The test asserts ≥ 90%.
+- **False names are the open problem.** Karen is labelled "Anna" in both her later sessions,
+  for two different reasons. In session 2 (Samantha present) the diarizer put Karen and
+  Samantha into one cluster, so that cluster correctly took "Anna" and Karen came along. In
+  session 3 (Samantha absent) Karen's own cluster matched Anna's profile at cosine 0.68,
+  above `MATCH_SIMILARITY` 0.6 and 0.16 ahead of the next profile. That is a false match by
+  the profile matcher itself. Moira peaked at 0.56 and stayed unnamed. This PR does not tune
+  thresholds: the finding is for `transcribe/voices.py` (a stricter threshold, or a margin
+  over the unmatched session clusters too). The test only checks that the false-name rate
+  does not exceed 60%, as a regression guard.
+- Small set (21 + 9 segments, one run per configuration), clean studio voices, no overlap and
+  no Whisper segmentation: treat it as a regression check, not the acceptance result.
+
+To regenerate: `uv run python scripts/voice_recall_eval.py` (or
+`uv run pytest -m slow tests/test_voice_recall.py -s`). Both skip when not on macOS, when a
+`say` voice is missing or when the speaker model is not cached. Nothing is downloaded.
