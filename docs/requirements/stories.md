@@ -30,9 +30,11 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 no Hebrew test set, ivrit.ai routing not evaluated (#6) |
 | US-20 | Search my transcripts | 🟡 search only; summaries, export planned (#4) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
+| US-31 | Speaker names from the call app's participant list | 🟡 claimed (#1 A.3): opt-in, macOS, one-to-one only |
 | US-25 | Export a transcript to DOCX and PDF | 🟡 CLI and macOS menu; Windows tray, templates planned (#4) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
 | US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
+| US-23 | Sensitivity: room vs system audio | 🟡 presets only, no live meters (#7) |
 | US-28 | Browse past meetings | 🟡 Windows window untested on hardware (#5) |
 | US-29 | Right-to-left text readable in the Windows captions | 🟡 unit-tested, no hardware check (#6) |
 | US-30 | Change common settings in a window | 🟡 claimed (#3): macOS spike, not on Windows |
@@ -274,6 +276,30 @@ I don't have to work out who `Speaker 2` was every time.*
 - **Not yet:** naming from the menu with a voice sample, names from the call app, overlap
   handling and an accuracy measurement on real speech (#1, #13).
 
+### US-31 Speaker names from the call app's participant list
+*As the owner, I want `Speaker 2` named after the person shown in Zoom/Teams/Meet, so that I
+don't have to name them myself, without the app ever asking for more permission on its own.*
+
+- **Given** `names_from_call_app = false` (default) or `speaker_names = false` or Windows,
+  **then** nothing is read from any other app.
+- **Given** it is on and Accessibility is granted, **when** a call is recorded and the call
+  app's participants panel is open, **then** the visible names are sampled every ~15 s on a
+  worker thread and kept in the owner-only voices store (not in the session folder); in a
+  only Zoom, Teams and browser call windows are read, and a name must be in two samples in a row; the panel is never opened or clicked for me.
+- **Given** Accessibility is not granted, **then** nothing is read and macOS never shows its
+  prompt because of RecAndCC: trust is only checked silently. Only **menu → Use names from the
+  call app** explains why and opens System Settings > Accessibility.
+- **Given** the participant names are exactly as many as the speakers besides `Me`, every
+  voice-matched speaker matches one of them, and one `Speaker N` and one name remain,
+  **then** that speaker is relabelled in the transcript (no voice profile is created from it).
+  Otherwise (several unknowns, mismatched spellings such as "Robert" vs "Bob Smith", extra
+  names, a disagreeing self-introduction) nothing is assigned and `recandcc speakers` lists the
+  names. `Me` is never renamed.
+- **Then** names appear nowhere in logs at INFO or above and nowhere outside the owner-only
+  voices store (and a transcript they were used in).
+- **Not yet:** matching several speakers to several names (needs active-speaker highlighting),
+  self-introductions (A.4), tested layouts for each app version (see ARCHITECTURE).
+
 ### US-25 Export a transcript to DOCX and PDF
 *As the owner, I want a transcript as a Word or PDF file, so that I can share or print it.*
 
@@ -344,6 +370,48 @@ without pressing anything, like a call, and only when I have turned that on.* (#
 - **Then** speech detection runs on its own thread (the audio thread only copies frames);
   nothing about the room audio is logged beyond on/off states, and nothing leaves the device.
 - **Not yet:** verified with the screen locked; idle CPU and battery impact measured.
+
+### US-23 Sensitivity: room vs system audio
+*As the owner, I want to tell the app how readily the room (outside, microphone) and the
+laptop's own audio (inside, apps) start a recording, so that it fits a quiet office or a
+noisy café.* (#7)
+
+- **Given** `outside_sensitivity` and `inside_sensitivity` are unset (the default), **then**
+  detection behaves exactly as before: `min_active_s`, `room_speech_s`, no level gate.
+- **Given** *Normal* (50/50), **then** the thresholds are the plain ones, but unlike *Off* the
+  noise-floor gate and its ~3 s warm-up after each mic open apply.
+- **Given** a room session is recording, **then** the gate and floor are paused (frozen) and
+  plain voice detection decides when the talk has ended, so a long lecture never becomes
+  "background" and stops the session.
+- **Given** a sensitivity 0–100, **then** the threshold is scaled 4× at 0, 1× at 50 and
+  0.25× at 100: inside scales `min_active_s`; outside scales `room_speech_s` (the window widens
+  so speech is at most half of it, so even 0 triggers on a real conversation) and sets a
+  12–9 dB margin above the room's noise floor, judged per ~0.5 s step by its loud parts (so
+  the dips between syllables still count). A non-numeric value counts as unset.
+- **Given** inside low, **then** short app audio starts nothing yet; **given** inside favoured,
+  **then** app audio starts a recording within a second. Apps always take precedence over the
+  room: while any app does audio the room holds off (by design), and the outside setting only
+  changes how much room speech starts a recording when no app does.
+- **Given** a turn-taking conversation (1–3 s turns, 0.3–1.5 s pauses), **then** settings 0,
+  25, 50 and 75 all start a recording, in a quiet room and in a café with the voices 10 dB
+  (0, 25) or 8 dB (50, 75) over the babble; quieter voices are a known limit.
+- **Given** steady background noise (a fan, 2–8 talker café babble, even if the voice detector
+  calls it speech), **then** it becomes the noise floor (35th percentile of the last 20 s) and
+  Normal, Noisy place and Quiet room neither start nor, after a room session, restart a
+  recording; 100 is meant for quiet rooms. A mic opened mid-conversation still counts it.
+- **Given** the place changes with the mic open (carried into a café, or after sleep), **then**
+  the floor is relearnt (a level jump of the quieter moments, or a gap of over 5 s in the
+  audio) and the new background doesn't start a recording at 25, 50 or 75.
+- **Given** the laptop slept, **then** the speech and audio from before the gap are forgotten:
+  nothing triggers on them and a session never starts with pre-sleep audio. **Given** an app
+  played audio (the room holds off), **then** its playback never becomes the room's floor.
+- **Then** a room session's live transcript starts with the whole pre-roll, even when a low
+  outside sensitivity widened it beyond `room_preroll_s`.
+- **Given** the menu "Sensitivity" (Off / Quiet room / Normal / Noisy place), **then** the
+  preset applies at once and only its two keys are written to `config.toml`, so hand edits
+  to other keys are kept; "Off" removes them.
+- **Not yet:** a settings window with live level meters, a per-source speech score, caption
+  priority between the tracks.
 
 ### US-28 Browse past meetings
 *As the owner, I want to see my past meetings in one place and open, rename or delete them,
