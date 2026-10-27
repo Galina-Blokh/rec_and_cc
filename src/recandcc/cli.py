@@ -293,13 +293,23 @@ def cmd_autostart(args) -> int:
     return 0
 
 
+SEMANTIC_CLI_WAIT_S = 120.0  # `search` is one-shot: wait this long for meaning matches
+
+
 def cmd_search(args) -> int:
     setup_logging(to_file=False, level=logging.WARNING)
     cfg = load_config()
     from .search import search_transcripts
     from .transcribe.output import fmt_hms
 
-    hits = search_transcripts(cfg.output_dir, args.query, args.limit)
+    hits = search_transcripts(
+        cfg.output_dir,
+        args.query,
+        args.limit,
+        cfg.search.semantic,
+        wait_s=SEMANTIC_CLI_WAIT_S,
+        notify=lambda m: print(m, file=sys.stderr),
+    )
     if not hits:
         print(f"No matches for {args.query!r}.")
         return 1
@@ -339,7 +349,7 @@ def cmd_config(args) -> int:
     if provider:
         print(f"# WARNING: {warning_text(cfg.output_dir, provider)}")
     kind = network_volume(cfg.output_dir)
-    if kind:
+    if isinstance(kind, str):
         print(f"# WARNING: {network_warning_text(cfg.output_dir, kind)}")
     return 0
 
