@@ -30,7 +30,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from .. import hotkey as hotkey_mod
-from ..cloudsync import cloud_sync_provider, network_volume, network_warning_text, warning_text
+from ..cloudsync import (
+    PROBE_FAILED,
+    cloud_sync_provider,
+    network_volume,
+    network_warning_text,
+    warning_text,
+)
 from ..config import (
     CONFIG_PATH,
     LOG_DIR,
@@ -262,6 +268,9 @@ def grant_permission(kind: str) -> str | None:
         return None
 
 
+DIALOG_TIMEOUT_S = 300  # an abandoned chooser must not keep a flow "open" for ever
+
+
 def osascript(script: str, timeout: float | None = None) -> str:
     """Run AppleScript, return stdout ('' on error/cancel). The script goes in on stdin, not
     argv, so text in it (search results) isn't visible in the process list."""
@@ -278,6 +287,22 @@ def osascript(script: str, timeout: float | None = None) -> str:
 def as_str(text: str) -> str:
     """Quote a Python string as an AppleScript string literal."""
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def chooser_script(labels: list[str], prompt: str, button: str) -> str:
+    """AppleScript for a list chooser; every text is quoted by ``as_str``."""
+    items = ", ".join(map(as_str, labels))
+    return (
+        f'choose from list {{{items}}} with title "RecAndCC" '
+        f"with prompt {as_str(prompt)} OK button name {as_str(button)}"
+    )
+
+
+def name_dialog_script(label: str) -> str:
+    return (
+        f'display dialog {as_str(f"Name for {label}:")} default answer "" '
+        'with title "RecAndCC" buttons {"Cancel", "Save"} default button "Save"'
+    )
 
 
 # ----------------------------------------------------------------------- controller
@@ -323,7 +348,8 @@ class Controller:
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
         self._save_lock = threading.Lock()  # menu writes to config.toml
-        self._dirty_lock = threading.Lock()  # guards _dirty (a leaf lock: nothing nested)
+        # guards _dirty; also spans the reload's snapshot+apply (only _lang_lock nests)
+        self._dirty_lock = threading.Lock()
         self._dirty: dict[str, int] = {}  # dotted key -> menu saves not yet written
         self._settings_lock = threading.Lock()  # one settings window at a time
         self._lang_lock = threading.Lock()  # transcription.languages + its raw spelling
@@ -532,6 +558,15 @@ class Controller:
         except Exception:
             log.exception("scanning for pending summaries failed")
 
+    def _recording_busy(self) -> bool:
+        """Background indexing yields to a recording and to the transcription backlog."""
+        tq = getattr(self, "tq", None)
+        return (
+            self.engine.state.status != IDLE
+            or (tq is not None and tq.pending() > 0)
+            or bool(getattr(self, "_resubmitting", 0))
+        )
+
     def _summarize(self, directory: Path) -> None:
         """Queue summary.md for a final transcript (local LLM, own background thread)."""
         with self._summaries_lock:  # called from the transcription and diarizer threads
@@ -547,12 +582,11 @@ class Controller:
         summaries.submit(directory)
 
     # --- transcript search (worker threads; results arrive as a "search" event)
-    @staticmethod
-    def _index_session(directory: Path) -> None:
+    def _index_session(self, directory: Path) -> None:
         try:
             from ..search import default_index
 
-            default_index().index_session(directory)
+            default_index(self.cfg.search.semantic, self._recording_busy).index_session(directory)
         except Exception:  # noqa: BLE001 - search is optional; never break transcription
             log.exception("could not update the search index")
 
@@ -644,7 +678,13 @@ class Controller:
             try:
                 from ..search import search_transcripts
 
-                hits = search_transcripts(self.cfg.output_dir, query, SEARCH_LIMIT)
+                hits = search_transcripts(
+                    self.cfg.output_dir,
+                    query,
+                    SEARCH_LIMIT,
+                    self.cfg.search.semantic,
+                    busy=self._recording_busy,
+                )
             except Exception as e:  # noqa: BLE001
                 # the type only: an FTS5 syntax error quotes the query
                 log.error("transcript search failed: %s", type(e).__name__)
@@ -652,6 +692,71 @@ class Controller:
             self.events.put(("search", query, hits))
 
         threading.Thread(target=run, daemon=True, name="search").start()
+
+    # --- speaker names (opt-in; worker threads; results arrive as events)
+    @property
+    def speaker_names_enabled(self) -> bool:
+        return self.cfg.transcription.speaker_names
+
+    def speakers_async(self, directory: Path) -> None:
+        """List the session's speakers that have voice data, with their first lines; posts
+        ``("speakers", directory, [(label, lines)])`` (the exception if it failed)."""
+
+        def run() -> None:
+            try:
+                from ..models import SessionInfo
+                from ..transcribe import voices
+
+                # the transcript (maybe cloud-synced) is read outside any lock
+                lines = voices.session_speakers(directory)
+                known = voices.read_session_voices(SessionInfo.load(directory).id)
+                result = [(lbl, ln) for lbl, ln in lines if lbl in known]
+            except Exception as e:  # noqa: BLE001
+                log.error("could not list the speakers: %s", type(e).__name__)
+                result = e
+            self.events.put(("speakers", directory, result))
+
+        threading.Thread(target=run, daemon=True, name="speakers").start()
+
+    def name_speaker_async(self, directory: Path, label: str, name: str) -> None:
+        """Name a speaker through the same function as ``recandcc name-speaker``; posts
+        ``("named", label, name, error | None)``. Names are never logged."""
+
+        def run() -> None:
+            error = None
+            try:
+                if not self.speaker_names_enabled:
+                    error = "Voice profiles are off (transcription.speaker_names)."
+                else:
+                    from ..transcribe import voices
+
+                    voices.name_speaker(Path(directory), label, name)  # holds voices.LOCK
+            except Exception as e:  # noqa: BLE001 - always post an outcome
+                log.error("could not name a speaker: %s", type(e).__name__)
+                # fixed text: the library's messages quote the name, and notices may be logged
+                error = (
+                    "The name could not be saved: it may be reserved, used by another "
+                    "speaker of this session, or the voice data is gone."
+                )
+            self.events.put(("named", label, name, error))
+
+        threading.Thread(target=run, daemon=True, name="name-speaker").start()
+
+    def forget_voices_async(self) -> None:
+        """Delete every voice profile and all stored session voices; posts
+        ``("forgot", count | exception)``."""
+
+        def run() -> None:
+            try:
+                from ..transcribe import voices
+
+                result = voices.forget_all()  # after any naming or finalize in flight
+            except Exception as e:  # noqa: BLE001
+                log.error("could not delete the voices: %s", type(e).__name__)
+                result = e
+            self.events.put(("forgot", result))
+
+        threading.Thread(target=run, daemon=True, name="forget-voices").start()
 
     def export_async(self, transcript: Path | None = None, fmt: str = "both") -> None:
         """Export a session's transcript to DOCX + PDF off the UI thread; posts a ``notice``
@@ -812,7 +917,7 @@ class Controller:
         try:
             from ..search import default_index
 
-            default_index().sync(self.cfg.output_dir)
+            default_index(self.cfg.search.semantic, self._recording_busy).sync(self.cfg.output_dir)
         except Exception:  # noqa: BLE001 - search is optional
             log.exception("could not sync the search index")
 
@@ -874,7 +979,11 @@ class Controller:
             with self._lock:
                 self._net_retry[out] = time.monotonic() + NET_PROBE_RETRY_S
             return
-        if kind is None:
+        if kind is PROBE_FAILED:  # errored, not "local": back off like a hung probe
+            with self._lock:
+                self._net_retry[out] = time.monotonic() + NET_PROBE_RETRY_S
+            return
+        if not isinstance(kind, str):
             return
         with self._lock:
             if out in self._net_warned:
@@ -934,23 +1043,25 @@ class Controller:
             # "file read" and "memory updated", so it can't write half-applied values. A field
             # a menu click changed meanwhile keeps the click (its queued save writes it).
             was_listening = self.cfg.detection.room_listening
-            now = self._reloadable(self.cfg)
+            # _dirty_lock spans snapshot and apply: a click marks + sets under it too, so it
+            # lands either before the snapshot (seen) or after the apply (kept), never between.
             with self._dirty_lock:
+                now = self._reloadable(self.cfg)
                 dirty = set(self._dirty)  # changed in the menu, save not written yet
-            for key, value in self._reloadable(new).items():
-                if now[key] != before[key] or self._dotted(key) in dirty:
-                    continue
-                owner, name = key
-                if owner == "languages":
-                    tr = self.cfg.transcription
-                    with self._lang_lock:  # both together: save() pairs them
-                        if (getattr(tr, "_raw_languages", None), tr.languages) == before[key]:
-                            tr._raw_languages = value[0]  # type: ignore[attr-defined]
-                            tr.languages = value[1]
-                else:
-                    if key == ("top", "hotkey") and value != now[key]:
-                        hotkey_changed = True
-                    setattr(self._reload_target(owner), name, value)
+                for key, value in self._reloadable(new).items():
+                    if now[key] != before[key] or self._dotted(key) in dirty:
+                        continue
+                    owner, name = key
+                    if owner == "languages":
+                        tr = self.cfg.transcription
+                        with self._lang_lock:  # both together: save() pairs them
+                            if (getattr(tr, "_raw_languages", None), tr.languages) == before[key]:
+                                tr._raw_languages = value[0]  # type: ignore[attr-defined]
+                                tr.languages = value[1]
+                    else:
+                        if key == ("top", "hotkey") and value != now[key]:
+                            hotkey_changed = True
+                        setattr(self._reload_target(owner), name, value)
             if self.cfg.detection.room_listening and not was_listening:  # turned on by hand
                 self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
         if hotkey_changed:  # re-registering the listener may block: outside the lock
@@ -969,6 +1080,8 @@ class Controller:
             out[("detection", f.name)] = getattr(cfg.detection, f.name)
         for f in fields(cfg.summary):
             out[("summary", f.name)] = getattr(cfg.summary, f.name)
+        for f in fields(cfg.search):  # [search] semantic: applies from the next search
+            out[("search", f.name)] = getattr(cfg.search, f.name)
         for name in RELOADED_TRANSCRIPTION_KEYS:
             out[("transcription", name)] = getattr(cfg.transcription, name)
         tr = cfg.transcription
@@ -996,6 +1109,7 @@ class Controller:
             "top": self.cfg,
             "detection": self.cfg.detection,
             "summary": self.cfg.summary,
+            "search": self.cfg.search,
             "transcription": self.cfg.transcription,
         }[owner]
 
@@ -1006,16 +1120,25 @@ class Controller:
         from .present import LANGUAGES_KEEP_ONE, toggle_languages
 
         tr = self.cfg.transcription
-        with self._lang_lock:
-            new = toggle_languages(tr.languages, getattr(tr, "_raw_languages", None), code)
+        key = "transcription.languages"
+        try:
+            # mark + set together under _dirty_lock (a leaf lock; only _lang_lock nests in it)
+            with self._dirty_lock:
+                self._dirty[key] = self._dirty.get(key, 0) + 1
+                with self._lang_lock:
+                    new = toggle_languages(tr.languages, getattr(tr, "_raw_languages", None), code)
+                    if new is not None:
+                        langs = normalize_languages(new)
+                        tr._raw_languages = new if new != langs else None  # type: ignore[attr-defined]
+                        tr.languages = langs  # a new list: other threads never see it half-built
             if new is not None:
-                langs = normalize_languages(new)
-                tr._raw_languages = new if new != langs else None  # type: ignore[attr-defined]
-                tr.languages = langs  # a new list: other threads never see it half-built
+                self.save_settings(key, title="Languages", marked=True)
+        except BaseException:
+            self._mark_dirty((key,), -1)  # the save thread never started: don't leak the mark
+            raise
         if new is None:
+            self._mark_dirty((key,), -1)
             self.post_notice("Languages", LANGUAGES_KEEP_ONE)
-            return
-        self.save_settings("transcription.languages", title="Languages")
 
     def toggle_call_app_names(self) -> None:
         """Menu "Use names from the call app" (macOS), from the main thread; never blocks.
@@ -1056,12 +1179,14 @@ class Controller:
         self.cfg.transcription.names_from_call_app = on
         self.save_settings("transcription.names_from_call_app", title="Names from the call app")
 
-    def save_settings(self, *keys: str, title: str = "Settings") -> None:
+    def save_settings(self, *keys: str, title: str = "Settings", marked: bool = False) -> None:
         """Save the in-memory value of each dotted key ("live_captions",
         "transcription.audio_retention_days") to config.toml on a worker thread. Menu
-        callbacks use this instead of ``cfg.save()``, which would overwrite hand edits."""
+        callbacks use this instead of ``cfg.save()``, which would overwrite hand edits.
+        ``marked``: the caller already marked ``keys`` dirty (before changing memory)."""
         kw = {"title": title}
-        self._mark_dirty(keys, 1)  # a config reload before the write must not undo the change
+        if not marked:
+            self._mark_dirty(keys, 1)  # a config reload before the write must not undo the change
 
         def run() -> None:
             try:
@@ -1071,7 +1196,11 @@ class Controller:
 
         t = threading.Thread(target=run, name="save-config")
         t.daemon = True
-        t.start()
+        try:
+            t.start()
+        except BaseException:
+            self._mark_dirty(keys, -1)  # run() will never unmark
+            raise
 
     def write_settings(self, *keys: str, title: str = "Settings") -> None:
         """Blocking save of ``keys`` (see ``_write_settings``); marks them as pending so a

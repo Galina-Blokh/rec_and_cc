@@ -7,6 +7,8 @@ All notable changes to RecAndCC are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Opt-in semantic transcript search (`[search] semantic = true`): a pinned, checksum-verified
+  multilingual sentence model, downloaded once, merged with full-text results (#4).
 - RecAndCC is licensed under the Apache License 2.0 (`LICENSE`, `NOTICE`); completes #17.
 
 ### Security
@@ -51,7 +53,8 @@ All notable changes to RecAndCC are documented here. The format is based on
   `accept_qwen_research_licence = true`, otherwise a config saved while it was the default
   moves to the 1.5B, and the old ~1.7 GB cache can be deleted.
 - Speaker names that carry over between sessions, from opt-in local voice profiles; name a
-  speaker once from the CLI (#62).
+  speaker once from the CLI (#62), or from the macOS menu ("Name speakers…", "Forget all
+  voices…").
 - `recandcc speakers` suggests a name when a speaker introduces themself in their first
   2 minutes (English, Russian, Hebrew); only a hint, nothing is stored (#1).
 - Hebrew in `transcription.languages`, with right-to-left captions and transcripts (#60).
