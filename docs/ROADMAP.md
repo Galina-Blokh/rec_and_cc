@@ -37,12 +37,16 @@ acceptance criteria.
       (keep the Python core, package it properly, switch engines only past a benchmark gate).
 - [ ] **Summaries, action items, search, export** ([#4](https://github.com/Galina-Blokh/rec_and_cc/issues/4)): local LLM (e.g. Qwen via
       MLX / llama.cpp), SQLite FTS search, DOCX/PDF export. Done: search, summaries (Apple
-      silicon) and the meeting notes view; left: export, a Windows summary backend.
-- [ ] **Windows for real** ([#5](https://github.com/Galina-Blokh/rec_and_cc/issues/5)): hardware test pass, per-app capture, installer,
-      signing.
+      silicon), the meeting notes view and DOCX/PDF export (#75); left: export from the Windows
+      tray, a Windows summary backend.
+- ~~**Windows for real**~~ ([#5](https://github.com/Galina-Blokh/rec_and_cc/issues/5)): hardware test pass, per-app capture, installer,
+      signing. Not planned: closed, no Windows hardware available; the Windows backends stay
+      as they are and CI keeps running the fast suite on Windows.
 - [ ] **Hebrew** ([#6](https://github.com/Galina-Blokh/rec_and_cc/issues/6)): he/en/ru language ID, Hebrew-tuned Whisper (e.g. ivrit.ai),
       right-to-left captions and transcripts.
-- [ ] **Sensitivity slider** ([#7](https://github.com/Galina-Blokh/rec_and_cc/issues/7)): balance outside (room/mic) vs inside (system
+- [x] **Sensitivity slider** ([#7](https://github.com/Galina-Blokh/rec_and_cc/issues/7)): balance outside (room/mic) vs inside (system
       audio) and trigger recording on whichever side passes its threshold; live level meters.
+      Shipped in #102 as menu presets plus `outside_sensitivity` / `inside_sensitivity`; no
+      live level meters.
 - [x] Per-app (instead of global) system-audio tap on macOS, so only the call app is recorded
       (opt-in: `system_audio_scope = "app"`, [ADR 0012](adr/0012-per-app-system-audio-tap.md)).
