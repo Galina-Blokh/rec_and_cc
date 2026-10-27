@@ -46,9 +46,16 @@ def make_ctrl(tmp_path, live=True, sync=True):
     return ctrl, sources, tr
 
 
-# Generous: the first event can wait for a cold Silero VAD load (fresh venv, or several test
-# runs loading models at once). The happy path returns as soon as the event arrives.
-def events_until(ctrl, kind, timeout=45.0):
+@pytest.fixture(autouse=True, scope="module")
+def _warm_vad():
+    # Load Silero VAD (cached per process) before any timed wait: a cold load under CPU
+    # contention used to eat the event timeout and make these tests flaky.
+    from faster_whisper.vad import get_vad_model
+
+    get_vad_model()
+
+
+def events_until(ctrl, kind, timeout=10.0):
     out, deadline = [], time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
