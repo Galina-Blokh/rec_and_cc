@@ -422,6 +422,7 @@ def test_a_long_lecture_during_a_room_session_keeps_counting_as_speech():
     # The silence stop (room_stop_after_silence_s) reads this: still talking after 2 min.
     assert mon.seconds_since_speech() < 2
     tap.stop()
+    assert mon._taps == ()  # the session's tap is really gone: the gate is back on
     mon.close()
 
 

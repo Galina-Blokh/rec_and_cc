@@ -367,7 +367,8 @@ class RoomMonitor:
 
     def _detach(self, cb: FrameCallback) -> None:
         with self._lock:
-            self._taps = tuple(c for c in self._taps if c is not cb)
+            # ==, not `is`: each `tap._live` access is a new bound-method object.
+            self._taps = tuple(c for c in self._taps if c != cb)
             self._reset_locked()
 
     # ------------------------------------------------------------------ capture thread
