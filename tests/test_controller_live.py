@@ -1,4 +1,7 @@
-"""Controller wiring of live transcription: real Engine + Recorder + queue, fake model/audio."""
+"""Controller wiring of live transcription: real Engine + Recorder + queue, fake model/audio.
+
+Stories: US-03, US-11.
+"""
 
 from __future__ import annotations
 
@@ -111,6 +114,9 @@ def test_discard_cancels_live(tmp_path):
     ctrl.engine._do_discard()
     evs = events_until(ctrl, "live_end")
     assert evs[-1] == ("live_end", sid)
+    deadline = time.monotonic() + 5  # deleted on a background thread
+    while session_dir.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
     assert not session_dir.exists()
     time.sleep(0.5)
     assert not session_dir.exists()  # nothing written afterwards

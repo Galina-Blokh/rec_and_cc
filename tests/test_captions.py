@@ -1,4 +1,7 @@
-"""Live captions: platform-neutral logic (formatting, ordering, trimming, header, timers)."""
+"""Live captions: platform-neutral logic (formatting, ordering, trimming, header, timers).
+
+Stories: US-11.
+"""
 
 from recandcc.models import Segment
 from recandcc.ui.captions import (

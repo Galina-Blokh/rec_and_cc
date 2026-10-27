@@ -1,6 +1,9 @@
 """scripts/review_lanes.sh: lanes run in parallel, every lane is reported, and any failed
 reviewer makes the script exit 1 (so CI never shows a green check for a review that didn't
-happen). Uses a stub agent instead of the real Cursor CLI."""
+happen). Uses a stub agent instead of the real Cursor CLI.
+
+Stories: none.
+"""
 
 from __future__ import annotations
 
