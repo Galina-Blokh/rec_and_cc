@@ -31,6 +31,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-20 | Search my transcripts | 🟡 search only; summaries, export planned (#4) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
+| US-29 | Right-to-left text readable in the Windows captions | 🟡 unit-tested, no hardware check (#6) |
 | US-33 | Live captions name the speakers | 🟡 no accuracy measurement on real speech (#1) |
 
 ---
@@ -275,6 +276,20 @@ its transcript, so that I know what was decided and who does what without reread
   ~1–2 min, offline.
 - **Not yet:** Windows/CPU backend (llama.cpp), a quality evaluation on real meetings,
   summaries in the meeting-notes window (#4).
+
+### US-29 Right-to-left text readable in the Windows captions
+*As a Hebrew speaker on Windows, I want mixed Hebrew/English/number captions to read
+correctly, even though Tk does no bidi.*
+
+- **Given** a Hebrew line in the Tk captions, **then** its text is reordered to visual order
+  with the speaker label at the right edge, and the line is right-justified.
+- **Given** English words or numbers inside Hebrew, **then** they keep their reading order
+  (`3.5`, `1,000` stay whole), brackets are mirrored, and no Unicode control characters
+  reach Tk.
+- **Given** an English or Russian line, **then** it is unchanged (`label<TAB>text`); macOS
+  captions and the transcript files are unchanged.
+- **Not yet:** a visual check on Windows hardware (#6); long RTL lines that wrap are reordered
+  as one line, so the wrap point may read oddly.
 
 ### US-33 Live captions name the speakers
 *As the owner, I want live captions to say `Speaker 1` / `Speaker 2` instead of `Others`, so

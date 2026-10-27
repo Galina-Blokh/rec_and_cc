@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from ..models import Segment, is_rtl
+from .bidi import visual_rtl
 
 MAX_LINES = 200
 AUTO_HIDE_AFTER_S = 10.0
@@ -75,6 +76,18 @@ def format_line(line: CaptionLine, width: int = 7) -> str:
     wrapped in a right-to-left isolate so it doesn't reorder the label next to it."""
     text = f"{RLI}{line.text}{PDI}" if line.rtl else line.text
     return f"{line.label:<{width}} {text}"
+
+
+def tk_parts(line: CaptionLine) -> list[tuple[str, bool]]:
+    """What the Tk window inserts for one line, as ``(text, is_label)`` pieces, left to right.
+
+    Tk on Windows paints characters in the order given (no bidi), so an RTL line is reordered
+    here: the text in visual order, then the label at the right edge, and the widget
+    right-justifies it. LTR lines are ``label<TAB>text``, unchanged.
+    """
+    if not line.rtl:
+        return [(line.label + "\t", True), (line.text, False)]
+    return [(visual_rtl(line.text), False), ("  " + line.label, True)]
 
 
 def fmt_mmss(seconds: float) -> str:
