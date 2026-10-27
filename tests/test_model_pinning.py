@@ -130,5 +130,57 @@ def test_mlx_whisper_passes_opt_in_to_the_download(monkeypatch):
     seen = []
     monkeypatch.setattr(gpu, "local_model_path", lambda repo, allow: seen.append(allow) or repo)
     monkeypatch.setattr(gpu.MlxWhisper, "_get_model", lambda self: object())
-    gpu.MlxWhisper("someone/custom-mlx", allow_unpinned=True).load()
+    model = gpu.MlxWhisper("someone/custom-mlx", allow_unpinned=True)
+    model.load()
+    model.close()
     assert seen == [True]
+
+
+def test_cached_unpinned_faster_whisper_repo_still_loads(monkeypatch):
+    calls = _fake_whisper(monkeypatch, cached=True)
+    _transcriber()._load("someone/custom-ct2")
+    assert calls == [("someone/custom-ct2", None, True)]
+
+
+@pytest.mark.parametrize("allow", [False, True])
+def test_transcriber_passes_opt_in_to_mlx(monkeypatch, allow):
+    from recandcc.transcribe import engine
+
+    made = []
+
+    class FakeMlx:
+        def __init__(self, model, allow_unpinned=False):
+            made.append((model, allow_unpinned))
+
+        def load(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(engine, "MlxWhisper", FakeMlx)
+    t = Transcriber(
+        TranscriptionConfig(model="someone/custom-mlx", allow_unpinned_models=allow),
+        language_model=None,
+    )
+    t.gpu = True
+    t.ensure_loaded()
+    t._pool.shutdown()
+    assert made == [("someone/custom-mlx", allow)]
+
+
+def test_refused_mlx_model_frees_its_thread(monkeypatch):
+    _fake_hub(monkeypatch, cached=False)
+    closed = []
+    real_close = gpu.MlxWhisper.close
+
+    def close(self):
+        closed.append(self.repo)
+        real_close(self)
+
+    monkeypatch.setattr(gpu.MlxWhisper, "close", close)
+    t = Transcriber(TranscriptionConfig(model="someone/custom-mlx"), language_model=None)
+    t.gpu = True
+    with pytest.raises(UnpinnedModelError):
+        t.ensure_loaded()
+    assert closed == ["someone/custom-mlx"]

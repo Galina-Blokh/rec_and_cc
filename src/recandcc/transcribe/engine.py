@@ -154,14 +154,19 @@ class Transcriber:
         if self._model is None:
             with self._init_lock:
                 if self._model is None:
-                    if self.language_model and self._needs_detection():
+                    need_lid = self.language_model and self._needs_detection()
+                    if need_lid and self._lid_model is None:  # kept if the main load fails
                         self._lid_model = self._load(self.language_model)
                     if self.gpu:
                         t0 = time.monotonic()
                         model = MlxWhisper(
                             self.cfg.model, allow_unpinned=self.cfg.allow_unpinned_models
                         )
-                        model.load()
+                        try:
+                            model.load()
+                        except BaseException:
+                            model.close()  # e.g. an unpinned model refused: free its thread
+                            raise
                         self._load_times[f"{self.cfg.model} (gpu)"] = rounded(
                             time.monotonic() - t0, 2
                         )
