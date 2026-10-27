@@ -428,7 +428,10 @@ class Engine:
         if room is not None and room.running:
             # A clean snapshot after a busy one first: detection lags the audio by ~1-2 s.
             clean = not busy and not was_busy
-            room_active = self._room_wanted() and clean and room.triggered()
+            # A stalled mic's last speech never ages out of the window: it can't start a
+            # session (the idle stall check below closes and reopens it instead).
+            live = room.seconds_since_frame() < ROOM_STALL_S
+            room_active = self._room_wanted() and clean and live and room.triggered()
             room_quiet = room.seconds_since_speech()
 
         start_req: tuple[TriggerKind, str | None, AppTarget | None] | None = None

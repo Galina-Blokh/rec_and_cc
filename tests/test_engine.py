@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from recandcc.config import Config, DetectionConfig
-from recandcc.engine import IDLE, RECORDING, ROOM_RETRY_S, Engine
+from recandcc.engine import IDLE, RECORDING, ROOM_RETRY_S, ROOM_STALL_S, Engine
 from recandcc.models import AppTarget, AudioProcess, Mode, SessionInfo, Track, TriggerKind
 
 
@@ -1280,6 +1280,20 @@ def test_an_idle_room_mic_that_stalls_is_reopened_and_backs_off():
         assert h.status == IDLE
     finally:
         h.eng.shutdown()
+
+
+def test_a_stalled_room_mic_cannot_start_a_session():
+    """Speech heard just before the device went away stays in the window: it must not start
+    a session on a mic that delivers nothing."""
+    h = _room_harness()
+    h.run(1)
+    h.room.speech, h.room.stall = True, ROOM_STALL_S + 1
+    h.eng.tick()
+    assert h.rec.starts == [] and h.status == IDLE
+    assert h.room.running  # the stalled mic was closed and reopened instead
+    h.room.stall, h.room.speech = 0.0, True  # the reopened mic hears speech: it starts
+    h.eng.tick()
+    assert len(h.rec.starts) == 1
 
 
 def test_a_dead_room_mic_that_opens_slowly_still_backs_off():
