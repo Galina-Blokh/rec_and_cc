@@ -147,9 +147,9 @@ while I decide.*
   diarizes in seconds.
 - **Given** `split_on_speaker_change = true` (opt-in) and a batch transcription
   (`live = false`, `recandcc transcribe`, re-queued session; not live sessions) on the
-  faster-whisper backend, with a segment in which the speaker changes mid-way, **then** it is split at that word boundary and each part gets its
+  faster-whisper backend or the MLX backend (mlx-whisper 0.4.3), with a segment in which the speaker changes mid-way, **then** it is split at that word boundary and each part gets its
   own speaker label, with flicker under about 1 s / 3 words ignored, the text kept word for
-  word, `Me` never split, and segments without word timings (live, MLX backend, option off) unchanged.
+  word, `Me` never split, and segments without word timings (live, option off, another mlx-whisper version) unchanged.
 - **Given** `diarize_overlap = true` and a speaker change without a pause, or two speakers
   at once, **then** the turn
   boundary follows the change (segmentation model), overlapped speech gets the dominant
