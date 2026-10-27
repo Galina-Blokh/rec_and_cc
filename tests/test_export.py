@@ -547,3 +547,96 @@ def test_an_unreadable_summary_is_ignored(session):
     (session / "summary.md").write_bytes(b"\xff\xfe not utf-8 \x80")
     assert export.load_summary(session) == []
     assert export.export_docx(session).is_file()
+
+
+def test_summary_over_the_cap_is_skipped(session, caplog):
+    (session / "summary.md").write_text("# Summary\n" + "x" * export._MAX_SUMMARY_BYTES, "utf-8")
+    with caplog.at_level("DEBUG", logger="recandcc.transcribe.export"):
+        assert export.load_summary(session) == []
+    (session / "summary.md").write_text("# Summary\nbody\n", "utf-8")
+    assert export.load_summary(session)
+
+
+def test_a_malformed_summary_logs_only_the_error_type(session, caplog):
+    (session / "summary.md").write_bytes(b"\x80secret words")
+    with caplog.at_level("DEBUG", logger="recandcc.transcribe.export"):
+        assert export.load_summary(session) == []
+    assert "UnicodeDecodeError" in caplog.text and "secret" not in caplog.text
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_a_linked_summary_or_folder_is_refused(session, tmp_path):
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Summary\nsecret\n", "utf-8")
+    (session / "summary.md").symlink_to(outside)
+    assert export.load_summary(session) == []
+    link = tmp_path / "linked"
+    link.symlink_to(session)
+    (session / "summary.md").unlink()
+    (session / "summary.md").write_text("# Summary\nbody\n", "utf-8")
+    assert export.load_summary(link) == []
+
+
+def test_a_bom_does_not_hide_the_heading(session):
+    (session / "summary.md").write_bytes(b"\xef\xbb\xbf# Summary\n\nBody\n")
+    assert export.load_summary(session)[0] == ("h1", "Summary")
+
+
+def test_markdown_variants(session):
+    (session / "summary.md").write_text(
+        "-\n* star\n+ plus\n1. one\n2) two\n### Sub\n_a_b_c_\ntext\n", "utf-8"
+    )
+    assert export.load_summary(session) == [
+        ("bullet", "star"),
+        ("bullet", "plus"),
+        ("bullet", "one"),
+        ("bullet", "two"),
+        ("h2", "Sub"),
+        ("note", "a_b_c"),
+        ("p", "text"),
+    ]
+
+
+def test_docx_summary_bullet_and_note_directions(session):
+    (session / "summary.md").write_text(
+        "- Anna לשלוח הערות\n- Anna sends notes\n_נוצר במחשב_\n",
+        "utf-8",
+    )
+    paras = Document(str(export.export_docx(session))).paragraphs
+    he = next(p for p in paras if p.text.startswith("Anna ל"))  # mixed, Hebrew majority
+    en = next(p for p in paras if p.text == "Anna sends notes")
+    note = next(p for p in paras if p.text == "נוצר במחשב")
+    assert he._p.pPr.find(qn("w:bidi")) is not None
+    assert en._p.pPr is None or en._p.pPr.find(qn("w:bidi")) is None
+    rpr = note.runs[0]._r.rPr
+    assert rpr.find(qn("w:i")) is not None and rpr.find(qn("w:iCs")) is not None
+
+
+@pytest.mark.skipif(not have_font(), reason="no system font with Latin/Cyrillic/Hebrew")
+def test_pdf_hebrew_bullet_sits_at_the_right_margin(session):
+    import re
+
+    from pypdf import PdfReader
+    from pypdf.generic import ContentStream
+
+    (session / "summary.md").write_text(
+        "# s\n\n- \u05dc\u05e9\u05dc\u05d5\u05d7 \u05d4\u05e2\u05e8\u05d5\u05ea\n", "utf-8"
+    )
+    page = PdfReader(str(export.export_pdf(session))).pages[0]
+    font = next(iter(page["/Resources"]["/Font"].values())).get_object()
+    cmap = font["/ToUnicode"].get_object().get_data().decode("latin-1")
+    code = {int(c, 16): chr(int(u, 16)) for c, u in re.findall(r"<(\w{4})>\s*<(\w{4})>", cmap)}
+    glyphs: list[tuple[float, str]] = []  # (x, char), one per glyph the PDF draws
+    x = 0.0
+    for operands, op in ContentStream(page.get_contents(), page.pdf).operations:
+        if op == b"Td":
+            x = float(operands[0])
+        elif op == b"Tm":
+            x = float(operands[4])
+        elif op == b"Tj" and operands[0]:
+            glyphs.append(
+                (x, code.get(int.from_bytes(operands[0].encode("latin-1")[:2], "big"), ""))
+            )
+    row = [(gx, ch) for gx, ch in glyphs if ch == "\u2022" or "\u05d0" <= ch <= "\u05ea"]
+    assert any(ch == "\u2022" for _, ch in row)
+    assert max(row)[1] == "\u2022"  # the rightmost glyph on the line is the bullet

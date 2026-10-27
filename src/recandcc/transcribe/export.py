@@ -20,6 +20,7 @@ import io
 import json
 import logging
 import os
+import re
 import threading
 import time
 import unicodedata
@@ -81,6 +82,8 @@ def load_session(folder: Path) -> tuple[dict, list[Segment]]:
 _BIDI_ISOLATES = dict.fromkeys(map(ord, "\u2066\u2067\u2068\u2069"))  # summary.md's RLI/PDI
 TRANSCRIPT_HEADING = "Transcript"
 _MAX_SUMMARY_BYTES = 1_000_000
+_BULLET = re.compile(r"[-*+] +")
+_NUMBERED = re.compile(r"\d{1,3}[.)] +")
 
 
 def load_summary(folder: Path) -> list[tuple[str, str]]:
@@ -89,27 +92,55 @@ def load_summary(folder: Path) -> list[tuple[str, str]]:
     readable summary. Bidi isolates are dropped: the exports set the direction themselves."""
     path = Path(folder) / SUMMARY_NAME
     try:
-        if path.is_symlink() or path.stat().st_size > _MAX_SUMMARY_BYTES:
+        if path.parent.is_symlink():
             return []
-        raw = path.read_text("utf-8")
-    except (OSError, ValueError):
+        # O_NOFOLLOW refuses a linked summary.md atomically (absent on Windows: the
+        # is_symlink check there is the best available); read one byte past the cap.
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        if not hasattr(os, "O_NOFOLLOW") and path.is_symlink():
+            return []
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "rb") as f:
+            blob = f.read(_MAX_SUMMARY_BYTES + 1)
+        if len(blob) > _MAX_SUMMARY_BYTES:
+            return []
+        raw = blob.decode("utf-8-sig")  # a Notepad BOM must not hide "# Summary"
+    except (OSError, ValueError) as e:
+        if not isinstance(e, FileNotFoundError):
+            log.debug("summary skipped: %s", type(e).__name__)
         return []
     blocks: list[tuple[str, str]] = []
     for line in raw.splitlines():
         text = _clean(line.translate(_BIDI_ISOLATES))
-        if not text:
+        if not text or text in ("-", "*", "+", "#", "##", "###"):
             continue
-        if text.startswith("## "):
+        m = _BULLET.match(text) or _NUMBERED.match(text)
+        if text.startswith("### "):
+            blocks.append(("h2", text[4:].strip()))
+        elif text.startswith("## "):
             blocks.append(("h2", text[3:].strip()))
         elif text.startswith("# "):
             blocks.append(("h1", text[2:].strip()))
-        elif text.startswith("- "):
-            blocks.append(("bullet", text[2:].strip()))
+        elif m:
+            blocks.append(("bullet", text[m.end() :].strip()))
         elif len(text) > 2 and text[0] == text[-1] == "_":
-            blocks.append(("note", text.strip("_")))
+            blocks.append(("note", text[1:-1]))
         else:
             blocks.append(("p", text))
-    return blocks
+    return [b for b in blocks if b[1]]
+
+
+def _majority_rtl(text: str) -> bool:
+    """Right to left if strong RTL letters outnumber strong LTR ones (a Hebrew line that
+    starts with a Latin name is still Hebrew); ties fall back to the first strong letter."""
+    rtl = ltr = 0
+    for ch in text:
+        kind = unicodedata.bidirectional(ch)
+        if kind in ("R", "AL"):
+            rtl += 1
+        elif kind == "L":
+            ltr += 1
+    return rtl > ltr if rtl != ltr else is_rtl("", text)
 
 
 def _title(data: dict) -> str:
@@ -234,10 +265,13 @@ def export_docx(folder: Path, loaded=None) -> Path:
         else:
             p = doc.add_paragraph()
             p.add_run(text).italic = kind == "note"
-        if is_rtl("", text):
+        if _majority_rtl(text):
             p._p.get_or_add_pPr().append(OxmlElement("w:bidi"))
             for r in p.runs:
-                r._r.get_or_add_rPr().append(OxmlElement("w:rtl"))
+                rpr = r._r.get_or_add_rPr()
+                if r.italic:
+                    rpr.append(OxmlElement("w:iCs"))  # complex-script italic for RTL runs
+                rpr.append(OxmlElement("w:rtl"))
     if summary:
         doc.add_heading(TRANSCRIPT_HEADING, level=2)
     if not segments:
@@ -327,13 +361,13 @@ def export_pdf(folder: Path, loaded=None) -> Path:
     para(_meta(data, segments), 9, gap=5)
     summary = load_summary(folder)
     for kind, text in summary:
-        rtl = is_rtl("", text)
+        rtl = _majority_rtl(text)
         if kind == "h1":
             para(text, 13, rtl=rtl, gap=2)
         elif kind == "h2":
             para(text, 11, rtl=rtl, gap=1)
         elif kind == "bullet":
-            para(f"{text} \u2022" if rtl else f"\u2022 {text}", 11, rtl=rtl, gap=1)
+            para(f"\u2022 {text}", 11, rtl=rtl, gap=1)
         else:
             para(text, 9 if kind == "note" else 11, rtl=rtl, gap=3)
     if summary:
