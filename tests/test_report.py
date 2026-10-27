@@ -1,4 +1,7 @@
-"""Build-report scripts: metrics from a tiny fixture, rendering and price maths. No network."""
+"""Build-report scripts: metrics from a tiny fixture, rendering and price maths. No network.
+
+Stories: none.
+"""
 
 import importlib.util
 import json
@@ -21,7 +24,9 @@ render = _load("render")
 diff = _load("diff")
 
 
-def _pr(n, opened, merged=None, author="dev", branch=None, body="", commits=1, review=None):
+def _pr(
+    n, opened, merged=None, author="dev", branch=None, body="", commits=1, review=None, fix_at=None
+):
     p = {
         "number": n,
         "title": f"PR {n}",
@@ -44,6 +49,8 @@ def _pr(n, opened, merged=None, author="dev", branch=None, body="", commits=1, r
     comments = [{"body": review, "user": {"login": "github-actions[bot]"}}] if review else []
     msg = "feat: x\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     cs = [{"commit": {"message": msg, "committer": {"date": opened}}}]
+    if fix_at:
+        cs.append({"commit": {"message": "fix: y", "committer": {"date": fix_at}}})
     return {"pr": p, "commits": cs, "reviews": [], "comments": comments}
 
 
@@ -51,7 +58,12 @@ def _data():
     review = "## 🤖 Cursor review\n\n### Lane\n\n- **a.py:1** — bug\n- **b.py:2** — bug\n"
     detail = {
         "1": _pr(
-            1, "2026-10-26T10:00:00Z", "2026-10-26T10:30:00Z", body="Closes #5", review=review
+            1,
+            "2026-10-26T10:00:00Z",
+            "2026-10-26T10:30:00Z",
+            body="Closes #5",
+            review=review,
+            fix_at="2026-10-26T10:10:00Z",
         ),
         "2": _pr(2, "2026-10-26T11:00:00Z", "2026-10-26T13:00:00Z", author="dependabot[bot]"),
         "3": _pr(3, "2026-10-26T12:00:00Z"),
@@ -115,6 +127,7 @@ def test_pr_metrics_cycle_ci_and_review():
     assert prs[1]["ci_failures"] == 1 and not prs[1]["merged_red"]
     assert prs[1]["review_rounds"] == 1 and prs[1]["review_findings"] == 2
     assert prs[1]["closes"] == [5] and prs[1]["ai_commits"] == 1
+    assert prs[1]["fix_pushes"] == 1 and prs[1]["wait_after_green_min"] == 5
     assert prs[2]["bot"] and prs[3]["state"] == "open" and prs[3]["age_min"] == 120
 
 
@@ -250,3 +263,74 @@ def test_diff_lists_moved_headline_figures():
         "merged pull requests: 1 -> 3",
         "estimated Claude cost ($): 1.0 -> 2.0",
     ]
+
+
+def test_ci_commits_and_series():
+    raw = _data()
+    ci = collect.build_ci(
+        raw["runs"]
+        + [{**raw["runs"][1], "id": 3, "event": "dynamic", "name": "uv in /. - Update #1"}]
+    )
+    assert (ci["ci_runs"], ci["ci_passed"], ci["ci_failed"], ci["ci_rate"]) == (2, 1, 1, 0.5)
+    assert any(w["name"] == "Dependabot updates" for w in ci["workflows"])
+    ledger = [
+        {
+            "sha": "a",
+            "merge": False,
+            "author": "dev",
+            "email": "e",
+            "at": "2026-10-26T10:00:00+00:00",
+            "subject": "feat: x",
+            "ai": True,
+        },
+        {
+            "sha": "b",
+            "merge": False,
+            "author": "dev",
+            "email": "e",
+            "at": "2026-10-26T10:00:00+00:00",
+            "subject": "feat: x",
+            "ai": True,
+        },
+        {
+            "sha": "c",
+            "merge": True,
+            "author": "dev",
+            "email": "e",
+            "at": "2026-10-26T11:00:00+00:00",
+            "subject": "Merge",
+            "ai": False,
+        },
+        {
+            "sha": "d",
+            "merge": False,
+            "author": "dev",
+            "email": "e",
+            "at": "2026-10-26T12:00:00+00:00",
+            "subject": "fix(x): y",
+            "ai": False,
+        },
+    ]
+    cm = collect.build_commits(ledger)
+    assert (cm["authored"], cm["ai"], cm["merges"], cm["ai_floor"]) == (2, 1, 1, 0.5)
+    assert {t["type"] for t in cm["types"]} == {"feat", "fix"}
+    now = collect.ts("2026-10-26T14:00:00Z")
+    ser = collect.series(collect.build_prs(raw, raw["runs"], now), ledger)
+    assert ser["peak"]["n"] == 2 and [c["n"] for c in ser["cumulative"]] == [1, 2]
+
+
+def test_offline_makes_no_network_call(tmp_path, monkeypatch):
+    calls = []
+    real = collect.subprocess.run
+
+    def spy(args, *a, **k):
+        calls.append(args)
+        return real(args, *a, **k)
+
+    monkeypatch.setattr(collect.subprocess, "run", spy)
+    monkeypatch.setattr(
+        collect, "fetch_github", lambda gh: {"detail": {}, "issues": [], "runs": []}
+    )
+    monkeypatch.setattr(collect, "git_ledger", lambda root, ref: [])
+    collect.collect(tmp_path, "o/r", tmp_path / "cache", offline=True, logs=tmp_path / "logs")
+    assert not [c for c in calls if "fetch" in c or c[:2] == ["gh", "api"]]

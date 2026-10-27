@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -80,7 +81,7 @@ def merge_regions(
 
 def merge_labelled(
     regions: list[tuple[float, float]],
-    labels: list[str] | None = None,
+    labels: Sequence[str | None] | None = None,
     max_chunk_s: float = MAX_CHUNK_S,
     max_gap_s: float = MAX_MERGE_GAP_S,
 ) -> list[tuple[float, float, str | None]]:

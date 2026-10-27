@@ -8,7 +8,8 @@ Credentials: `gh` uses `GH_TOKEN` from the environment (falling back to `git_api
 The token is never printed, logged or written. Session logs contribute counts only: no
 prompt or transcript text leaves this script.
 
-Usage: python scripts/report/collect.py [--repo OWNER/NAME] [--out report-data.json]
+Usage: python scripts/report/collect.py [--repo OWNER/NAME] [--out .report/report-data.json]
+       [--offline]  (cache only: no gh call and no git fetch)
 """
 
 from __future__ import annotations
@@ -23,10 +24,14 @@ import sys
 from collections import Counter, defaultdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 REPO = "Galina-Blokh/rec_and_cc"
-UK = ZoneInfo("Europe/London")
+try:
+    UK = ZoneInfo("Europe/London")
+except ZoneInfoNotFoundError:  # Windows without the tzdata package: report in UTC
+    UK = UTC
+TIMEOUT = 120  # seconds for any one gh or git call
 CACHE = Path.home() / ".cache" / "recandcc-report"
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 REVIEW_MARK = "## 🤖 Cursor review"
@@ -136,7 +141,12 @@ class GitHub:
             args += ["--paginate", "--slurp"]
         env = dict(os.environ)
         env.setdefault("GH_TOKEN", env.get("git_api_key_0307", ""))
-        out = subprocess.run(args, capture_output=True, text=True, env=env, check=False)  # noqa: S603
+        try:
+            out = subprocess.run(  # noqa: S603
+                args, capture_output=True, text=True, env=env, check=False, timeout=TIMEOUT
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"gh api {endpoint} timed out after {TIMEOUT} s") from exc
         self.calls += 1
         if out.returncode != 0:
             # gh's stderr never contains the token; keep only its first line.
@@ -179,6 +189,7 @@ def git_ledger(root: Path, ref: str) -> list[dict]:
         capture_output=True,
         text=True,
         check=True,
+        timeout=TIMEOUT,
     ).stdout
     commits = []
     for rec in out.split("\x1e"):
@@ -228,6 +239,7 @@ def project_dirs(root: Path, base: Path) -> list[Path]:
         capture_output=True,
         text=True,
         check=False,
+        timeout=TIMEOUT,
     ).stdout
     paths = [line[9:] for line in out.splitlines() if line.startswith("worktree ")]
     wanted = {slug(p) for p in paths} or {slug(str(root.resolve()))}
@@ -756,7 +768,12 @@ def collect(
     gh = GitHub(repo, cache, offline=offline)
     raw = fetch_github(gh)
     ref = "origin/main"
-    subprocess.run(["git", "-C", str(root), "fetch", "-q", "origin", "main"], check=False)  # noqa: S603, S607
+    if not offline:
+        subprocess.run(  # noqa: S603
+            ["git", "-C", str(root), "fetch", "-q", "origin", "main"],  # noqa: S607
+            check=False,
+            timeout=TIMEOUT,
+        )
     ledger = git_ledger(root, ref)
     prs = build_prs(raw, raw["runs"], now)
     issues = build_issues(raw["issues"], prs)
@@ -788,10 +805,11 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--repo", default=REPO)
     ap.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
-    ap.add_argument("--out", type=Path, default=Path("report-data.json"))
+    ap.add_argument("--out", type=Path, default=Path(".report") / "report-data.json")
     ap.add_argument("--cache", type=Path, default=CACHE)
     ap.add_argument("--offline", action="store_true", help="use only the cache, no network")
     args = ap.parse_args(argv)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
     data = collect(args.root, args.repo, args.cache, offline=args.offline)
     args.out.write_text(json.dumps(data, indent=1, sort_keys=True, default=str))
     s = data["summary"]
