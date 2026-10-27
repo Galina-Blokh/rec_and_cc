@@ -22,8 +22,8 @@ import threading
 import time
 from pathlib import Path
 
-import pystray
-from PIL import Image, ImageDraw
+import pystray  # pyright: ignore[reportMissingImports] - Windows-only dependency
+from PIL import Image, ImageDraw  # pyright: ignore[reportMissingImports] - Windows-only dependency
 
 from .. import autostart
 from ..config import CONFIG_PATH
@@ -233,9 +233,9 @@ class TrayApp:
             items.append(
                 Item(
                     "Microphone privacy settings…",
-                    lambda: os.startfile("ms-settings:privacy-microphone"),
+                    lambda: os.startfile("ms-settings:privacy-microphone"),  # type: ignore[attr-defined]
                 )
-            )  # type: ignore[attr-defined]
+            )
             return items
 
         return pystray.Menu(

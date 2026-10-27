@@ -21,7 +21,7 @@ import subprocess
 import threading
 from pathlib import Path
 
-import rumps
+import rumps  # pyright: ignore[reportMissingImports] - macOS-only dependency
 
 from .. import autostart
 from ..config import CONFIG_PATH
@@ -57,10 +57,11 @@ TICK_S = 0.5
 
 class MacApp(rumps.App):
     def __init__(self, ctrl: Controller):
-        super().__init__("RecAndCC", title="🟡", quit_button=None)
+        # rumps infers quit_button: str from its default; None (documented) drops the Quit item
+        super().__init__("RecAndCC", title="🟡", quit_button=None)  # pyright: ignore[reportArgumentType]
         self.ctrl = ctrl
         self.cfg = ctrl.cfg
-        self._dialog: tuple[int, subprocess.Popen] | None = None  # (prompt_id, osascript)
+        self._dialog: tuple[int | None, subprocess.Popen] | None = None  # (prompt_id, osascript)
         self._dialog_lock = threading.Lock()
         self._onboarded = False
         self._delegate = None
@@ -102,7 +103,8 @@ class MacApp(rumps.App):
         for days in RETENTION_CHOICES:
             label = "Never (keep audio)" if days == 0 else f"{days} day" + ("s" if days > 1 else "")
             item = rumps.MenuItem(label, callback=self._set_retention)
-            item.retention_days = days
+            # ad-hoc attribute on rumps.MenuItem, read back by the menu callback
+            item.retention_days = days  # pyright: ignore[reportAttributeAccessIssue]
             self.retention_menu.add(item)
         self._render_retention()
         self.captions_item = rumps.MenuItem("Show live captions", callback=self._toggle_captions)
@@ -246,7 +248,7 @@ class MacApp(rumps.App):
             return
         for path in recent:
             item = rumps.MenuItem(transcript_label(path), callback=self._open_recent)
-            item.path = path
+            item.path = path  # pyright: ignore[reportAttributeAccessIssue] - read by _open_recent
             self.recent_menu.add(item)
 
     def _render_permissions(self) -> None:
@@ -260,7 +262,7 @@ class MacApp(rumps.App):
         if self._delegate is not None:
             return
         try:
-            from Foundation import NSObject
+            from Foundation import NSObject  # pyright: ignore[reportMissingImports, reportAttributeAccessIssue]
 
             ctrl = self.ctrl
 
@@ -446,7 +448,10 @@ class MacApp(rumps.App):
 def run_app(ctrl: Controller) -> None:
     import signal
 
-    from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+    from AppKit import (  # pyright: ignore[reportMissingImports]
+        NSApplication,  # pyright: ignore[reportAttributeAccessIssue]
+        NSApplicationActivationPolicyAccessory,  # pyright: ignore[reportAttributeAccessIssue]
+    )
 
     # The Python child of RecAndCC.app is not itself a bundle, so without this it would get a
     # Dock icon. Accessory = menu bar only (the equivalent of LSUIElement).

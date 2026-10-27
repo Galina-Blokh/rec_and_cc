@@ -11,7 +11,11 @@ Main thread only (the menu-bar app's 0.5 s timer calls ``tick``).
 
 from __future__ import annotations
 
+# PyObjC builds AppKit/Foundation symbols at runtime and ships no type stubs, and it is not
+# installed off macOS (CI type-checks on Linux), so its imports and attributes are unknown.
+# pyright: reportMissingImports=false, reportAttributeAccessIssue=false
 import time
+from typing import Any
 
 from AppKit import (
     NSBackingStoreBuffered,
@@ -37,9 +41,10 @@ SHOW_SECONDS = 6.0
 
 class ToastPanel:
     def __init__(self) -> None:
-        self._panel = None
-        self._title = None
-        self._message = None
+        # PyObjC objects (untyped), created on first use
+        self._panel: Any = None
+        self._title: Any = None
+        self._message: Any = None
         self._hide_at: float | None = None
 
     def _label(self, frame, font, color):
