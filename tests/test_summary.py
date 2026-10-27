@@ -193,6 +193,7 @@ def _cache_model(cache: Path, repo: str, rev: str | None = None) -> None:
     snap = root / "snapshots" / (rev or gpu.revision(repo) or "commit")
     snap.mkdir(parents=True)
     (snap / "model.safetensors").write_bytes(b"weights")  # a plain file: no symlink rights needed
+    (snap / "config.json").write_text("{}")
 
 
 def test_old_default_switch_is_saved_with_only_that_key(tmp_path):
@@ -214,10 +215,10 @@ def test_cli_loads_switch_in_memory_only(tmp_path):
     before = path.read_text("utf-8")
     cfg = load_config(path)
     assert cfg.summary.model == DEFAULT_SUMMARY_MODEL
-    assert not hasattr(cfg.summary, "_notice")
+    assert cfg.summary.notice is None
     assert path.read_text("utf-8") == before
-    assert load_config(path, migrate=True).summary._notice == SUMMARY_MODEL_SWITCHED
-    assert not hasattr(load_config(path, migrate=True).summary, "_notice")  # once
+    assert load_config(path, migrate=True).summary.notice == SUMMARY_MODEL_SWITCHED
+    assert load_config(path, migrate=True).summary.notice is None  # once
 
 
 def test_cached_3b_is_kept_while_the_new_default_is_missing(tmp_path):
@@ -228,7 +229,7 @@ def test_cached_3b_is_kept_while_the_new_default_is_missing(tmp_path):
     before = path.read_text("utf-8")
     cfg = load_config(path, migrate=True)
     assert cfg.summary.model == QWEN_RESEARCH_SUMMARY_MODEL
-    assert not hasattr(cfg.summary, "_notice")  # summaries off: nothing to say
+    assert cfg.summary.notice is None  # summaries off: nothing to say
     assert path.read_text("utf-8") == before
     _cache_model(config_mod.HF_CACHE_DIR, DEFAULT_SUMMARY_MODEL)  # both on disk: switch
     assert load_config(path, migrate=True).summary.model == DEFAULT_SUMMARY_MODEL
@@ -239,11 +240,11 @@ def test_kept_cached_3b_is_noticed_once(tmp_path):
     _cache_model(config_mod.HF_CACHE_DIR, QWEN_RESEARCH_SUMMARY_MODEL)
     path = tmp_path / "config.toml"
     Config(summary=SummaryConfig(enabled=True, model=QWEN_RESEARCH_SUMMARY_MODEL)).save(path)
-    assert not hasattr(load_config(path).summary, "_notice")  # CLI: no notice used up
+    assert load_config(path).summary.notice is None  # CLI: no notice used up
     cfg = load_config(path, migrate=True)
     assert cfg.summary.model == QWEN_RESEARCH_SUMMARY_MODEL
-    assert cfg.summary._notice == SUMMARY_MODEL_KEPT
-    assert not hasattr(load_config(path, migrate=True).summary, "_notice")  # once
+    assert cfg.summary.notice == SUMMARY_MODEL_KEPT
+    assert load_config(path, migrate=True).summary.notice is None  # once
 
 
 def test_unpinned_1_5b_snapshot_does_not_replace_a_cached_3b(tmp_path):
@@ -263,7 +264,7 @@ def test_config_does_not_import_transcribe():
         assert gpu.revision(model) == rev
 
 
-@pytest.mark.parametrize("value", ['"false"', '"yes"', "1"])
+@pytest.mark.parametrize("value", ['"true"', '"false"', '"yes"', "1", "1.0"])
 def test_non_boolean_licence_acceptance_is_not_consent(tmp_path, value):
     path = tmp_path / "config.toml"
     path.write_text(
@@ -274,6 +275,14 @@ def test_non_boolean_licence_acceptance_is_not_consent(tmp_path, value):
     cfg = load_config(path)
     assert cfg.summary.model == DEFAULT_SUMMARY_MODEL
     assert cfg.summary.accept_qwen_research_licence is False
+    assert cfg.summary.notice is None  # CLI loads: in memory only
+    cfg = load_config(path, migrate=True)  # summaries off, but they tried to keep the 3B
+    assert cfg.summary.notice is not None
+    assert cfg.summary.notice.startswith(
+        "accept_qwen_research_licence must be a TOML boolean true, not a "
+    )
+    assert cfg.summary.notice.endswith(SUMMARY_MODEL_SWITCHED)
+    assert "notice" not in path.read_text("utf-8")  # runtime only, never saved
 
 
 def test_only_the_pinned_snapshot_counts_for_a_pinned_repo():

@@ -50,8 +50,13 @@ All notable changes to RecAndCC are documented here. The format is based on
   Instruct model (Apache-2.0) via mlx-lm; `recandcc summarize <session_dir>` (#4). The
   larger Qwen2.5 3B is also pinned and selectable with `[summary] model`, but its Qwen
   Research licence allows non-commercial use only: it also needs
-  `accept_qwen_research_licence = true`, otherwise a config saved while it was the default
-  moves to the 1.5B, and the old ~1.7 GB cache can be deleted.
+  `accept_qwen_research_licence = true` (a TOML boolean). Because of that licence, any
+  config with the 3B and without that key, whether saved while it was the default or
+  chosen by hand, is migrated to the 1.5B: the app rewrites `summary.model` in
+  `config.toml` and shows a one-time notice. While only the pinned 3B is downloaded, the 3B is
+  kept (offline summaries keep working) and a one-time notice explains how to switch.
+  Afterwards the old ~1.7 GB cache can be deleted. Both models are pinned to a Hugging Face
+  commit (no separate checksum check).
 - Speaker names that carry over between sessions, from opt-in local voice profiles; name a
   speaker once from the CLI (#62), or from the macOS menu ("Name speakers…", "Forget all
   voices…").

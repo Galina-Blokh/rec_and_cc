@@ -211,6 +211,7 @@ SUMMARY_MODEL_SWITCHED = (
     "Summary model switched to Qwen2.5 1.5B (Apache-2.0); set "
     "summary.accept_qwen_research_licence = true to keep the 3B"
 )
+SUMMARY_LICENCE_NOT_BOOL = "accept_qwen_research_licence must be a TOML boolean true, not {kind}"
 # Next to config.toml once the "kept the cached 3B" notice was shown.
 SUMMARY_KEPT_MARKER = ".summary-3b-kept-noticed"
 SUMMARY_MODEL_KEPT = (
@@ -234,11 +235,18 @@ def summary_model_on_disk(repo: str) -> bool:
     rev = SUMMARY_MODEL_REVISIONS.get(repo)
     try:
         # .exists() follows the symlink to the blob, so an interrupted download doesn't count
+        # Both pinned summary models ship their weights as one model.safetensors (no
+        # sharded *.safetensors index). HF links a file into the snapshot only once its blob is
+        # complete, and config.json is the other file a load needs first.
         if rev is not None:
-            return (snapshots / rev / "model.safetensors").exists()
-        return any((snap / "model.safetensors").exists() for snap in snapshots.iterdir())
+            return _snapshot_complete(snapshots / rev)
+        return any(_snapshot_complete(snap) for snap in snapshots.iterdir())
     except OSError:
         return False
+
+
+def _snapshot_complete(snap: Path) -> bool:
+    return (snap / "model.safetensors").exists() and (snap / "config.json").exists()
 
 
 @dataclass
@@ -252,6 +260,9 @@ class SummaryConfig:
     # model is read as the old default that save() wrote to every config.toml, and replaced.
     accept_qwen_research_licence: bool = False
     max_tokens: int = 400  # longest generated answer (summary, action list, chunk notes)
+    # Set by load_config(migrate=True) for a one-time notice about the summary model (shown
+    # by ui.common.Controller). Runtime only: not read from or saved to config.toml.
+    notice: str | None = field(default=None, init=False, repr=False, compare=False)
 
 
 @dataclass
@@ -293,12 +304,13 @@ class Config:
         # fields today; add any new section with an Optional field here.
         for section in ("detection", "transcription"):
             data[section] = {k: v for k, v in data[section].items() if v is not None}
+        data["summary"].pop("notice", None)  # runtime only
         with _file_lock(path.with_name(f".{path.name}.lock")):  # shared with save_keys / CLI
             _write_atomic(path, tomli_w.dumps(data).encode())
 
 
 def _build(cls, data: dict):
-    known = {f.name for f in fields(cls)}
+    known = {f.name for f in fields(cls) if f.init}
     return cls(**{k: v for k, v in data.items() if k in known})
 
 
@@ -627,13 +639,14 @@ def _migrate_summary_model(summary: SummaryConfig, path: Path, *, persist: bool)
     is on disk and the new default isn't, so an offline user's summaries keep working (and
     nothing downloads the new default, so it stays until the user picks it). The switch
     applies in memory; with ``persist`` (the app's startup load) it is also written to
-    config.toml (that key only), and with summaries on ``summary._notice`` is set for a
+    config.toml (that key only), and with summaries on ``summary.notice`` is set for a
     one-time notice (ui.common.Controller): after the switch, or the first time the 3B is
     kept (remembered by a marker file next to config.toml)."""
-    if not isinstance(summary.accept_qwen_research_licence, bool):  # e.g. "false": not consent
-        log.warning(
-            "config: [summary] accept_qwen_research_licence must be true or false; using false"
-        )
+    accepted = summary.accept_qwen_research_licence
+    invalid = None
+    if not isinstance(accepted, bool):  # e.g. "true" or 1: not consent, and say so
+        invalid = SUMMARY_LICENCE_NOT_BOOL.format(kind=_toml_kind(accepted))
+        log.warning("config: [summary] %s; using false", invalid)
         summary.accept_qwen_research_licence = False
     if summary.model != QWEN_RESEARCH_SUMMARY_MODEL or summary.accept_qwen_research_licence:
         return
@@ -652,7 +665,7 @@ def _migrate_summary_model(summary: SummaryConfig, path: Path, *, persist: bool)
                 marker.touch()
             except OSError as e:
                 log.warning("could not write %s: %s", marker, type(e).__name__)
-            summary._notice = SUMMARY_MODEL_KEPT  # type: ignore[attr-defined]
+            summary.notice = SUMMARY_MODEL_KEPT
         return
     log.info(
         "summary.model %s (the old default, non-commercial licence) -> %s; set "
@@ -663,9 +676,19 @@ def _migrate_summary_model(summary: SummaryConfig, path: Path, *, persist: bool)
     summary.model = DEFAULT_SUMMARY_MODEL
     if not persist:
         return
-    if summary.enabled:
-        summary._notice = SUMMARY_MODEL_SWITCHED  # type: ignore[attr-defined]
+    if invalid is not None:  # they meant to keep the 3B: tell them why it didn't count
+        summary.notice = f"{invalid}; {SUMMARY_MODEL_SWITCHED}"
+    elif summary.enabled:
+        summary.notice = SUMMARY_MODEL_SWITCHED
     try:
         save_keys(path, {"summary.model": DEFAULT_SUMMARY_MODEL})
     except (OSError, ValueError) as e:
         log.warning("could not write summary.model to %s: %s", path, type(e).__name__)
+
+
+def _toml_kind(value: Any) -> str:
+    if isinstance(value, str):
+        return f"a string ({value!r})"
+    if isinstance(value, int | float):
+        return f"a number ({value!r})"
+    return f"a {type(value).__name__}"

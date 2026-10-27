@@ -337,7 +337,7 @@ class Controller:
     ):
         self.cfg = cfg
         self.events: queue.Queue[tuple] = queue.Queue()
-        notice = getattr(cfg.summary, "_notice", None)
+        notice = cfg.summary.notice
         if notice:  # load_config(migrate=True) switched or kept an old-default 3B: once
             self.post_notice("Summary model", notice)
         self._lock = threading.Lock()
