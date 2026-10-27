@@ -30,12 +30,14 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 no Hebrew test set, ivrit.ai routing not evaluated (#6) |
 | US-20 | Search my transcripts | ✅ search (summaries and export: see US-27, US-25) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
+| US-26 | Name speakers and forget voices from the menu | 🟡 macOS menu, first lines instead of an audio sample; Windows tray not yet (#1) |
 | US-31 | Speaker names from the call app's participant list | 🟡 claimed (#1 A.3): opt-in, macOS, one-to-one only |
 | US-25 | Export a transcript to DOCX and PDF | 🟡 CLI and macOS menu; Windows tray, templates planned (#4) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
 | US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
 | US-23 | Sensitivity: room vs system audio | 🟡 presets and keys shipped (#7, #102); live level meters not yet |
 | US-28 | Browse past meetings | 🟡 Windows window untested on Windows hardware (none available) |
+| US-32 | Find transcripts by meaning | 🟡 opt-in; no accuracy measurement on real transcripts yet (#4) |
 | US-29 | Right-to-left text readable in the Windows captions | 🟡 unit-tested, no hardware check (#6) |
 | US-30 | Change common settings in a window | 🟡 claimed (#3): macOS spike, not on Windows |
 | US-34 | Warn when recordings go to a network volume | 🟡 claimed (#3): detection is fake-tested, no real share or Windows drive checked |
@@ -147,9 +149,9 @@ while I decide.*
   diarizes in seconds.
 - **Given** `split_on_speaker_change = true` (opt-in) and a batch transcription
   (`live = false`, `recandcc transcribe`, re-queued session; not live sessions) on the
-  faster-whisper backend, with a segment in which the speaker changes mid-way, **then** it is split at that word boundary and each part gets its
+  faster-whisper backend or the MLX backend (mlx-whisper 0.4.3), with a segment in which the speaker changes mid-way, **then** it is split at that word boundary and each part gets its
   own speaker label, with flicker under about 1 s / 3 words ignored, the text kept word for
-  word, `Me` never split, and segments without word timings (live, MLX backend, option off) unchanged.
+  word, `Me` never split, and segments without word timings (live, option off, another mlx-whisper version) unchanged.
 - **Given** `diarize_overlap = true` and a speaker change without a pause, or two speakers
   at once, **then** the turn
   boundary follows the change (segmentation model), overlapped speech gets the dominant
@@ -278,6 +280,25 @@ I don't have to work out who `Speaker 2` was every time.*
 - **Not yet:** naming from the menu with a voice sample, names from the call app, overlap
   handling and an accuracy measurement on real speech (#1, #13).
 
+### US-26 Name speakers and forget voices from the menu
+*As the owner, I want to name a speaker and delete all voice data from the menu, so that I
+don't need the command line for it.*
+
+- **Given** `speaker_names = true`, **when** I choose "Recent transcripts → Name speakers…",
+  pick a session and a `Speaker N` (shown with their first lines), and type a name, **then**
+  the result is exactly that of `recandcc name-speaker` (same function): transcript files and
+  the voice profile are updated.
+- **Given** `speaker_names = false` (default), **then** "Name speakers…" is greyed out and
+  naming through the controller is refused.
+- **When** I choose "Forget all voices…" and confirm, **then** every voice profile and every
+  session's saved voices are deleted (like `voices delete --all`); cancelling (or leaving the
+  dialog unanswered until it times out) deletes nothing. A session recorded or queued before
+  the forget keeps no voices or call-app names either, even if it is transcribed after it.
+- **Then** dialogs run off the menu thread, disk work on worker threads, and neither names
+  nor transcript text are logged at INFO or above.
+- **Not yet:** a short audio sample (the first lines are shown instead), the Windows tray
+  items (#1).
+
 ### US-31 Speaker names from the call app's participant list
 *As the owner, I want `Speaker 2` named after the person shown in Zoom/Teams/Meet, so that I
 don't have to name them myself, without the app ever asking for more permission on its own.*
@@ -311,6 +332,9 @@ don't have to name them myself, without the app ever asking for more permission 
   and one paragraph per segment with its timestamp.
 - **Given** English, Russian and Hebrew segments, **then** all are readable; Hebrew segments
   are right to left (bidi paragraphs in DOCX, shaped and reordered text in the PDF).
+- **Given** the session folder also has a `summary.md` (US-27), **then** its summary and
+  action items come first in the DOCX and PDF, under their own headings and before a
+  "Transcript" heading (Hebrew right to left); without `summary.md` the files are unchanged.
 - **Then** export needs no network, the files are owner-only and logs never contain the
   transcript text.
 - **Not yet:** the Windows tray entry, custom templates; the PDF needs a system font with
@@ -446,6 +470,28 @@ so that I don't have to dig through dated folders.*
   delete are refused with a notice.
 - **Then** logs never contain titles, excerpts or transcript text.
 - **Not yet:** a native macOS window (it is a pair of dialogs) (#4).
+
+### US-32 Find transcripts by meaning
+*As the owner, I want a search for "payment" to also find "we need to settle the invoice",
+so that I find a discussion without remembering its exact words.*
+
+- **Given** `[search] semantic = false` (default), **then** nothing is downloaded, embedded
+  or stored, and search results are exactly the full-text ones (US-20).
+- **Given** `semantic = true`, **then** a small multilingual sentence-embedding model
+  (English and Russian) is downloaded once, pinned to an exact revision and sha256, and runs
+  offline afterwards (US-14); no other network access.
+- **When** a transcript is indexed, **then** its segments are embedded in the background
+  (off the UI and audio threads) into the same local, owner-only index; unchanged sessions are
+  not re-embedded and deleted sessions leave the vectors with their text.
+- **When** I search, **then** the full-text ranking and the meaning ranking are merged
+  (reciprocal rank fusion): a segment found by both comes first, then exact word matches,
+  then meaning-only matches (only above a similarity floor), and words are still
+  highlighted. Search never waits for embedding: while the model is downloading or loading,
+  or part of the archive is not embedded yet, I get the full-text (plus already embedded)
+  results.
+- **When** I switch it off again, **then** the stored vectors are deleted at the next sync (the text index stays).
+- **Not yet:** an accuracy measurement on real transcripts, multi-segment chunks, and
+  summaries (#4).
 
 ### US-29 Right-to-left text readable in the Windows captions
 *As a Hebrew speaker on Windows, I want mixed Hebrew/English/number captions to read
