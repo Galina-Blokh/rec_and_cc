@@ -70,15 +70,35 @@ def summary_excerpt(text: str, limit: int = EXCERPT_CHARS) -> str:
     return out if len(out) <= limit else out[: limit - 1].rstrip() + "…"
 
 
-def _transcript_facts(path: Path) -> tuple[list[str], list[str], float | None]:
-    """(speakers in order of appearance, languages, duration) from a transcript.json."""
+Facts = tuple[list[str], list[str], float | None]
+_facts_cache: dict[Path, tuple[tuple[int, int], Facts]] = {}  # path -> (mtime, size), facts
+
+
+def _transcript_facts(path: Path) -> Facts:
+    """(speakers in order of appearance, languages, duration) from a transcript.json; parsed
+    once per version of the file (the list is rescanned after every change)."""
     try:
+        st = path.stat()
+        stamp = (st.st_mtime_ns, st.st_size)
+        if (hit := _facts_cache.get(path)) and hit[0] == stamp:
+            return hit[1]
         data = json.loads(path.read_text(encoding="utf-8"))
         speakers = list(dict.fromkeys(str(s["speaker"]) for s in data.get("segments", [])))
         dur = data.get("duration")
-        return speakers, [str(x) for x in data.get("languages", [])], dur and float(dur)
+        facts = (speakers, [str(x) for x in data.get("languages", [])], dur and float(dur))
+        _facts_cache[path] = (stamp, facts)
+        return facts
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return [], [], None
+
+
+def inside(directory: Path, output_dir: Path) -> bool:
+    """A real session folder inside ``output_dir`` (not a link out of it)."""
+    try:
+        d = Path(directory)
+        return not d.is_symlink() and Path(output_dir).resolve() in d.resolve().parents
+    except OSError:
+        return False
 
 
 def load_note(directory: Path) -> Note | None:
@@ -105,21 +125,25 @@ def load_note(directory: Path) -> Note | None:
     return note
 
 
-def scan_notes(output_dir: Path, limit: int = NOTES_LIMIT) -> list[Note]:
-    """The newest ``limit`` sessions under <output_dir>/<day>/<session>/, newest first.
-    Blocking (reads every listed session's files): call it off the UI thread."""
+def _newest_dirs(path: Path):
     try:
-        metas = list(Path(output_dir).glob(f"*/*/{SessionInfo.FILENAME}"))
+        return sorted((d for d in path.iterdir() if d.is_dir()), key=lambda d: d.name, reverse=True)
     except OSError:
         return []
-    # Folder names sort by time (<day>/<HHMMSS>_<app>); read only the newest ones.
-    metas.sort(key=lambda f: (f.parent.parent.name, f.parent.name), reverse=True)
+
+
+def scan_notes(output_dir: Path, limit: int = NOTES_LIMIT) -> list[Note]:
+    """The newest ``limit`` sessions under <output_dir>/<day>/<session>/, newest first.
+    Folder names sort by time (<day>/<HHMMSS>_<app>), so it walks them newest first and
+    stops once ``limit`` are read; links out of ``output_dir`` are skipped. Blocking: call
+    it off the UI thread."""
     notes: list[Note] = []
-    for f in metas:  # stop once enough are read (discarded / broken folders are skipped)
-        if len(notes) >= limit:
-            break
-        if note := load_note(f.parent):
-            notes.append(note)
+    for day in _newest_dirs(Path(output_dir)):
+        for d in _newest_dirs(day):
+            if len(notes) >= limit:
+                break
+            if inside(d, output_dir) and (note := load_note(d)):
+                notes.append(note)
     notes.sort(key=lambda n: n.started_at.timestamp(), reverse=True)
     return notes
 
@@ -157,9 +181,11 @@ def action_target(note: Note, action: str) -> Path:
     return note.directory / names[action] if action in names else note.directory
 
 
-def rename_session(directory: Path, title: str) -> None:
+def rename_session(directory: Path, title: str, output_dir: Path) -> None:
     """Store a display title in session.json ("" goes back to the default title); only the
     ``title`` key changes, so metrics written meanwhile are kept."""
+    if not inside(directory, output_dir):
+        raise ValueError("not a session folder inside the output folder")
     SessionInfo.set_title(directory, " ".join(title.split())[:TITLE_CHARS])
 
 
@@ -234,7 +260,7 @@ def delete_session(directory: Path, output_dir: Path) -> str:
     - "refused": a link or not inside ``output_dir``; "failed": the Trash refused it and
       the folder is still there."""
     d = Path(directory)
-    if d.is_symlink() or Path(output_dir).resolve() not in d.resolve().parents:
+    if not inside(d, output_dir):
         log.warning("refusing to delete %s: not a folder inside the output folder", d.name)
         return "refused"  # never follow a link out of output_dir
     if can_trash():

@@ -440,12 +440,14 @@ class Controller:
     def note_busy(self, directory: Path) -> str | None:
         """Why a session can't be renamed or deleted now, or None: it is being recorded or
         is not through its transcription yet (from session start until the queue is done
-        with it). A diarization that finishes after that is the one case not covered."""
+        with it, or while startup re-queues unfinished ones). A late diarization or summary
+        may still write afterwards: a rename only touches the title, and after a delete
+        their writes fail without recreating the folder."""
         live = self.engine.state.session_dir
         with self._lock:
-            in_flight = {d.resolve() for d in self._in_flight}
-        try:
-            if Path(directory).resolve() in in_flight:
+            in_flight = set(self._in_flight)
+        try:  # resolve() may touch the disk: outside the lock
+            if Path(directory).resolve() in {d.resolve() for d in in_flight}:
                 return "It is still being recorded or transcribed; try again when it is done."
             if live and Path(live).resolve() == Path(directory).resolve():
                 return "It is still recording."
@@ -454,7 +456,7 @@ class Controller:
             return None
         if info.ended_at is None and live:  # unfinished while a session runs: maybe this one
             return "It is still recording."
-        if not info.transcribed and self.tq.pending() > 0:
+        if not info.transcribed and (self.tq.pending() > 0 or getattr(self, "_resubmitting", 0)):
             return "It may still be transcribing; try again when the queue is done."
         return None
 
@@ -473,7 +475,7 @@ class Controller:
                 return
             try:
                 if action == "rename":
-                    rename_session(directory, title)
+                    rename_session(directory, title, self.cfg.output_dir)
                 elif action == "delete":
                     result = delete_session(directory, self.cfg.output_dir)
                     self._index_session(directory)  # gone: drops it from the search index
@@ -484,7 +486,8 @@ class Controller:
             except Exception as e:  # noqa: BLE001
                 log.error("meeting %s failed for %s: %s", action, directory.name, type(e).__name__)
                 self.events.put(("notice", f"Could not {action} the meeting", directory.name))
-            self.events.put(("notes", scan_notes(self.cfg.output_dir)))
+            with self._notes_scanning:  # one scan at a time, after a running one (fresh list)
+                self.events.put(("notes", scan_notes(self.cfg.output_dir)))
 
         threading.Thread(target=run, daemon=True, name="notes-action").start()
 
@@ -605,13 +608,16 @@ class Controller:
     def _resubmit_unfinished(self) -> None:
         # Purge first, on this same thread: once a re-queued session is transcribed, its
         # diarization may still need the WAVs, and the purge must not see it as leftover.
-        self._purge_leftover_audio()
+        self._resubmitting = True  # note_busy: untranscribed sessions may be about to queue
         try:
+            self._purge_leftover_audio()
             for s in untranscribed_sessions(self.cfg.output_dir):
                 log.info("re-queueing untranscribed session %s", s.directory)
                 self.tq.submit(s)
         except Exception:
             log.exception("scanning for untranscribed sessions failed")
+        finally:
+            self._resubmitting = False
         try:  # after re-queueing, so deleting big WAVs doesn't delay recovery
             purge_discarded_sessions(self.cfg.output_dir)
         except Exception:

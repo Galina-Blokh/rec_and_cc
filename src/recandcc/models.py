@@ -130,9 +130,16 @@ class SessionInfo:
             data = asdict(self)
         with _SAVE_LOCK:
             # The title on disk wins: a copy loaded before (or after) a rename never undoes it.
-            with contextlib.suppress(OSError, ValueError, AttributeError):
-                on_disk = json.loads((self.directory / self.FILENAME).read_text("utf-8"))
-                data["title"] = on_disk.get("title")
+            target = self.directory / self.FILENAME
+            for attempt in range(_REPLACE_TRIES):
+                try:
+                    data["title"] = json.loads(target.read_text("utf-8")).get("title")
+                    break
+                except FileNotFoundError:
+                    break  # a new session: its own title
+                except (OSError, ValueError, AttributeError):  # locked / half-written (Windows)
+                    if attempt + 1 < _REPLACE_TRIES:
+                        time.sleep(_REPLACE_WAIT_S)
             self._write(data)
 
     @classmethod

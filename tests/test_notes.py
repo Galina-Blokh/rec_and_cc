@@ -96,13 +96,13 @@ def test_rename_is_stored_in_session_json_and_survives_a_stale_save(tmp_path):
     del raw["title"]  # a session.json from before titles existed still loads
     (s.directory / "session.json").write_text(json.dumps(raw), encoding="utf-8")
     assert SessionInfo.load(s.directory).title is None
-    notes.rename_session(s.directory, "  Budget   review ")
+    notes.rename_session(s.directory, "  Budget   review ", tmp_path)
     s.transcribed = True
     s.save()  # the pipeline's own copy, loaded before the rename
     loaded = SessionInfo.load(s.directory)
     assert loaded.title == "Budget review" and loaded.transcribed
     assert notes.scan_notes(tmp_path)[0].title == "Budget review"
-    notes.rename_session(s.directory, "")
+    notes.rename_session(s.directory, "", tmp_path)
     assert notes.scan_notes(tmp_path)[0].title == "zoom.us"
 
 
@@ -184,16 +184,38 @@ def _wait_for(c, kind: str):
 def test_controller_lists_renames_and_deletes(tmp_path, monkeypatch):
     s = make_session(tmp_path, "140312_zoom-us", T0, transcribed=True)
     indexed: list[Path] = []
+    pruned: list[int] = []
     monkeypatch.setattr(Controller, "_index_session", staticmethod(indexed.append))
+    monkeypatch.setattr(Controller, "_prune_voices", staticmethod(lambda: pruned.append(1)))
     monkeypatch.setattr(notes, "delete_session", lambda d, o: notes.discard_session(d) and "x")
     c = _ctrl(tmp_path)
     c.notes_async()
     assert [n.directory for n in _wait_for(c, "notes")[1]] == [s.directory]
     c.note_action_async(s.directory, "rename", "Budget")
     assert _wait_for(c, "notes")[1][0].title == "Budget"
+    assert pruned == [] and indexed == []  # a rename leaves index and voices alone
     c.note_action_async(s.directory, "delete")
     assert _wait_for(c, "notes")[1] == []
-    assert indexed == [s.directory] and not s.directory.exists()
+    assert indexed == [s.directory] and pruned == [1] and not s.directory.exists()
+    c.note_action_async(s.directory, "export")  # unknown: ignored, never a delete
+    c._resubmitting = True  # startup may be about to re-queue an untranscribed session
+    u = make_session(tmp_path, "150000_zoom-us", T0)
+    assert c.note_busy(u.directory)
+
+
+def test_links_out_of_the_output_folder_are_not_listed_or_renamed(tmp_path):
+    out, elsewhere = tmp_path / "out", tmp_path / "elsewhere"
+    s = make_session(elsewhere, "140312_zoom-us", T0)
+    (out / "2026-10-26").mkdir(parents=True)
+    link = out / "2026-10-26" / "140312_zoom-us"
+    try:
+        link.symlink_to(s.directory, target_is_directory=True)
+    except OSError:
+        pytest.skip("no symlink rights (Windows without developer mode)")
+    assert notes.scan_notes(out) == []
+    with pytest.raises(ValueError):
+        notes.rename_session(link, "x", out)
+    assert SessionInfo.load(s.directory).title is None
 
 
 @pytest.mark.parametrize("case", ["recording", "queued", "in_flight", "unfinished"])
@@ -285,10 +307,10 @@ def test_rename_changes_only_the_title(tmp_path):
     s = make_session(tmp_path, "140312_zoom-us", T0)
     s.update_metrics("diarization", {"speakers": 2})
     s.save()
-    notes.rename_session(s.directory, "First")
+    notes.rename_session(s.directory, "First", tmp_path)
     assert SessionInfo.load(s.directory).metrics["diarization"] == {"speakers": 2}
     after_first = SessionInfo.load(s.directory)  # e.g. the CLI, holding title "First"
-    notes.rename_session(s.directory, "Second")
+    notes.rename_session(s.directory, "Second", tmp_path)
     after_first.save()
     s.save()  # loaded before any rename
     assert SessionInfo.load(s.directory).title == "Second"
@@ -321,9 +343,9 @@ def test_listing_survives_a_broken_transcript_and_caps_titles(tmp_path):
     (s.directory / "transcript.json").write_text("{not json", encoding="utf-8")
     (note,) = notes.scan_notes(tmp_path)
     assert note.speakers == [] and note.duration_s == 300.0
-    notes.rename_session(s.directory, "x" * 500)
+    notes.rename_session(s.directory, "x" * 500, tmp_path)
     assert len(SessionInfo.load(s.directory).title or "") == notes.TITLE_CHARS
     s.save()  # the stale copy, twice: the title stays on disk
-    notes.rename_session(s.directory, "second")
+    notes.rename_session(s.directory, "second", tmp_path)
     s.save()
     assert SessionInfo.load(s.directory).title == "second" and s.title is None
