@@ -640,6 +640,7 @@ def test_busy_store_makes_finalize_wait_once_and_skip_voice_work(tmp_path, monke
         waits.append(1)
         raise OSError("the voice data is in use by another process; try again")
 
+    real_posix, real_windows = voices._lock_posix, voices._lock_windows
     monkeypatch.setattr(voices, "_lock_posix", busy)
     monkeypatch.setattr(voices, "_lock_windows", busy)
     session = make_session(tmp_path)
@@ -647,7 +648,10 @@ def test_busy_store_makes_finalize_wait_once_and_skip_voice_work(tmp_path, monke
     out = t._labelled(session, list(SEGS), TURNS, voices.forget_generation())
     assert waits == [1]  # one LOCK_WAIT_S at most, not one per voice step
     assert "Anna" not in {s.speaker for s in out} and "Speaker 1" in {s.speaker for s in out}
-    monkeypatch.undo()
+    # restore only the lock stubs (never monkeypatch.undo(): it would also drop the private
+    # voices folder and read the user's real one)
+    monkeypatch.setattr(voices, "_lock_posix", real_posix)
+    monkeypatch.setattr(voices, "_lock_windows", real_windows)
     assert voices.read_session_voices(session.id) == {}
 
 
