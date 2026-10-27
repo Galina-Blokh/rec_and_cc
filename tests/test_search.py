@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import os
 import queue
+import sqlite3
 import stat
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -207,3 +209,66 @@ def test_controller_indexes_after_transcription_and_searches_off_thread(tmp_path
     kind, query, hits = ctrl.events.get(timeout=5)
     assert (kind, query, len(hits)) == ("search", "kickoff", 1)
     assert search_hit_label(hits[0]).startswith("2026-10-26 14:04 zoom-us-1 · 00:00 Me: ")
+
+
+def leftover(path: Path, token: str) -> int:
+    """How often ``token`` still occurs in the index file (and its journal/WAL, if any)."""
+    files = [path, path.with_name(path.name + "-wal"), path.with_name(path.name + "-journal")]
+    return sum(f.read_bytes().count(token.encode()) for f in files if f.exists())
+
+
+@pytest.mark.parametrize(
+    "fts, fts_secure",
+    [pytest.param(True, True, id="fts5"), pytest.param(True, False, id="fts5-optimize")]
+    + [pytest.param(False, True, id="like")],
+)
+def test_dropped_and_replaced_text_leaves_the_file(tmp_path, out, fts, fts_secure):
+    a = make_session(out, 1, [seg(0, "zebrasecretpassword confidential")])
+    b = make_session(out, 2, [seg(0, "ordinary words"), seg(5, "quokkaoldversion")])
+    idx = index(tmp_path, fts)
+    idx.sync(out)
+    if not fts_secure:  # as on SQLite < 3.42: FTS5 keeps deleted terms until optimize
+        with sqlite3.connect(idx.path) as db:
+            db.execute("INSERT INTO seg_fts(seg_fts, rank) VALUES ('secure-delete', 0)")
+        idx._fts_secure = False
+    assert leftover(idx.path, "zebrasecretpassword") > 0
+    for f in a.iterdir():
+        f.unlink()
+    a.rmdir()
+    write_outputs(SessionInfo.load(b), [seg(0, "ordinary words")], 60.0, "fake")
+    idx.sync(out)
+    assert leftover(idx.path, "zebrasecretpassword") == 0
+    assert leftover(idx.path, "quokkaoldversion") == 0
+    assert len(idx.search("ordinary")) == 1
+
+
+@pytest.mark.parametrize("fts", BACKENDS)
+def test_yo_and_ye_match_each_other(tmp_path, out, fts):
+    make_session(out, 1, [seg(0, "Ёлка и всё остальное", "Me", "ru")])
+    make_session(out, 2, [seg(0, "Елка стоит", "Me", "ru")])
+    idx = index(tmp_path, fts)
+    idx.sync(out)
+    assert len(idx.search("елка")) == 2 and len(idx.search("ЁЛКА")) == 2
+    assert len(idx.search("все остальное")) == 1
+    [hit] = idx.search("остальное")
+    assert hit.snippet == "Ёлка и всё [остальное]"  # shown as written, ё included
+
+
+def test_same_mtime_but_new_size_is_reindexed(tmp_path, out):
+    a = make_session(out, 1, [seg(0, "first")])
+    idx = TranscriptIndex(tmp_path / "idx.sqlite3")
+    idx.sync(out)
+    f = a / "transcript.json"
+    st = f.stat()
+    write_outputs(SessionInfo.load(a), [seg(0, "second and longer")], 60.0, "fake")
+    os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))  # a coarse clock: mtime unchanged
+    assert idx.sync(out) == 1 and idx.search("second")
+
+
+def test_first_connection_from_several_threads(tmp_path, out):
+    make_session(out, 1, [seg(0, "parallel start")])
+    TranscriptIndex(tmp_path / "idx.sqlite3").sync(out)
+    idx = TranscriptIndex(tmp_path / "idx.sqlite3")
+    with ThreadPoolExecutor(8) as pool:
+        results = list(pool.map(lambda _: len(idx.search("parallel")), range(16)))
+    assert results == [1] * 16
