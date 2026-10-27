@@ -178,7 +178,24 @@ def test_normalize_languages_accepts_hebrew_and_cleans_up():
 def test_load_config_validates_languages(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text('[transcription]\nlanguages = ["en", "ru", "iw"]\n', encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.transcription.languages == ["en", "ru", "he"]
+    cfg.live_captions = False  # e.g. a menu toggle saves the config
+    cfg.save(path)
     assert load_config(path).transcription.languages == ["en", "ru", "he"]
+    assert '"iw"' in path.read_text(encoding="utf-8")  # the user's spelling is kept
+    cfg.transcription.languages = ["he"]  # an actual change is saved as is
+    cfg.save(path)
+    assert '"iw"' not in path.read_text(encoding="utf-8")
+    assert load_config(path).transcription.languages == ["he"]
+
+
+def test_languages_that_are_not_a_list_fall_back_to_defaults(tmp_path):
+    assert normalize_languages(5) == ["en", "ru"]
+    assert normalize_languages(None) == []
+    path = tmp_path / "config.toml"
+    path.write_text("[transcription]\nlanguages = 5\n", encoding="utf-8")
+    assert load_config(path).transcription.languages == ["en", "ru"]
 
 
 def test_language_id_restricted_to_three_languages():

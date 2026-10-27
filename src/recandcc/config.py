@@ -159,6 +159,12 @@ class Config:
         path.parent.mkdir(parents=True, exist_ok=True)
         data = asdict(self)
         data["output_dir"] = str(self.output_dir)
+        # Keep the user's own spelling of `languages` ("iw", unknown codes) unless the list
+        # was changed since loading: load_config only normalises the in-memory copy.
+        tr = self.transcription
+        raw = getattr(tr, "_raw_languages", None)
+        if raw is not None and normalize_languages(raw) == tr.languages:
+            data["transcription"]["languages"] = raw
         path.write_bytes(tomli_w.dumps(data).encode())
 
 
@@ -171,7 +177,15 @@ def normalize_languages(value) -> list[str]:
     """`transcription.languages` as clean Whisper codes: lowercased, aliases mapped
     ("iw" -> "he"), duplicates and unknown codes dropped (with a warning). A single string is
     accepted as a one-item list. `[]` stays `[]` (= any language)."""
-    items = [value] if isinstance(value, str) else list(value or [])
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, list | tuple):
+        items = list(value)
+    elif value is None:
+        items = []
+    else:
+        log.warning("transcription.languages must be a list; using the defaults")
+        return list(DEFAULT_LANGUAGES)
     out: list[str] = []
     for item in items:
         code = str(item).strip().lower()
@@ -197,7 +211,10 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     det.mode = Mode(det.mode)
     det.app_modes = {k: Mode(v) for k, v in det.app_modes.items()}
     tr = _build(TranscriptionConfig, data.pop("transcription", {}))
-    tr.languages = normalize_languages(tr.languages)
+    raw = tr.languages
+    tr.languages = normalize_languages(raw)
+    if tr.languages != raw:
+        tr._raw_languages = raw  # type: ignore[attr-defined]  # written back by save()
     cfg = _build(Config, data)
     cfg.output_dir = Path(cfg.output_dir).expanduser()
     cfg.detection, cfg.transcription = det, tr

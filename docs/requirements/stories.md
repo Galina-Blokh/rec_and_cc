@@ -185,5 +185,7 @@ while I decide.*
 - **Given** `"iw"` or an unknown code in `languages`, **then** it is mapped to `he` or
   dropped with a log warning.
 - **Not yet:** a Hebrew-tuned model (ivrit.ai) and per-language model routing, language
-  checkboxes in the menu, a Hebrew evaluation set and WER, and a check of the Windows
-  captions on real hardware (#6).
+  checkboxes in the menu, a Hebrew evaluation set and WER (#6).
+- **Not yet:** the Windows (Tk) captions only right-justify Hebrew lines; Tk does no bidi
+  reordering, so the label stays left of the Hebrew text and the glyph order is unverified
+  on real hardware (#6).
