@@ -29,7 +29,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .. import hotkey as hotkey_mod
-from ..config import CONFIG_PATH, LOG_DIR, Config, load_config
+from ..config import (
+    CONFIG_LOCK,
+    CONFIG_PATH,
+    LOG_DIR,
+    Config,
+    file_signature,
+    load_config,
+    written_by_us,
+)
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind, discard_session
 from ..recorder import make_private_dir
@@ -234,7 +242,7 @@ class Controller:
         self._recent: list[Path] = []
         self._refreshing = False
         self._last_refresh = 0.0
-        self._config_mtime = self._mtime()
+        self._config_sig = file_signature(CONFIG_PATH)
         # global shortcut
         self._hotkey_lock = threading.Lock()
         self._hotkey = None  # HotkeyListener / WinHotkeyListener
@@ -458,30 +466,37 @@ class Controller:
                 self._refreshing = False
         self.events.put(("refreshed",))
 
-    def _mtime(self) -> float:
-        try:
-            return CONFIG_PATH.stat().st_mtime
-        except OSError:
-            return 0.0
-
     def _maybe_reload_config(self) -> None:
-        """Apply edits made to config.toml by hand (detection settings + output dir)."""
-        m = self._mtime()
-        if m == self._config_mtime:
-            return
-        self._config_mtime = m
-        try:
-            new = load_config()
-        except Exception:
-            log.exception("config.toml is invalid; keeping current settings")
-            self.events.put(("notice", "Settings not applied", "config.toml could not be parsed"))
-            return
-        for f in fields(new.detection):
-            setattr(self.cfg.detection, f.name, getattr(new.detection, f.name))
-        self.cfg.output_dir = new.output_dir
-        if new.hotkey != self.cfg.hotkey:
-            self.cfg.hotkey = new.hotkey
-            self.apply_hotkey(new.hotkey)
+        """Apply edits made to config.toml by hand (detection settings + output dir). Our own
+        saves are recognised and skipped; the read and apply hold the config lock, so a
+        menu click saving at the same time is neither lost nor read half-written."""
+        with CONFIG_LOCK:
+            sig = file_signature(CONFIG_PATH)
+            if sig == self._config_sig:
+                return
+            if written_by_us(CONFIG_PATH):
+                self._config_sig = sig
+                return
+            if sig is not None and sig[1] == 0:  # empty: being rewritten in place, retry
+                log.debug("config.toml is empty; keeping current settings")
+                return
+            self._config_sig = sig
+            try:
+                new = load_config(CONFIG_PATH)
+            except Exception:
+                log.warning("config.toml is invalid; keeping current settings", exc_info=True)
+                self.events.put(
+                    ("notice", "Settings not applied", "config.toml could not be parsed")
+                )
+                return
+            for f in fields(new.detection):
+                setattr(self.cfg.detection, f.name, getattr(new.detection, f.name))
+            self.cfg.output_dir = new.output_dir
+            hotkey = None if new.hotkey == self.cfg.hotkey else new.hotkey
+            if hotkey is not None:
+                self.cfg.hotkey = hotkey
+        if hotkey is not None:
+            self.apply_hotkey(hotkey)
         log.info("config reloaded from %s", CONFIG_PATH)
 
     @property

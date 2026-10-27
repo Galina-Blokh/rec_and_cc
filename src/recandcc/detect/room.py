@@ -18,8 +18,9 @@ never opened twice. No audio is logged; it lives only in memory until a session 
 
 With an outside sensitivity set (``thresholds``), a step only counts if its level is
 ``margin_db`` above the room's noise floor (``NoiseFloor``: a low percentile of recent
-levels, kept for the monitor's lifetime), so a fan or café babble doesn't keep triggering;
-steps entirely below it skip the VAD.
+levels, relearnt each time the mic opens), so a fan or café babble doesn't keep triggering.
+The gate is per ~0.5 s step (its loud windows against the floor), not per 32 ms window, so
+the dips between syllables still count; steps below it skip the VAD.
 
 Speech is counted in audio samples (deterministic in tests); if the mic stops delivering
 frames, the wall-clock stall is added to ``seconds_since_speech()``.
@@ -53,6 +54,7 @@ STALL_GRACE_S = 1.0  # frames this late still count as "on time"
 # louder for most of the history), so steady babble becomes the floor while the pauses of a
 # conversation keep it below the voices. With less than FLOOR_MIN_S of history nothing counts.
 FLOOR_PERCENTILE, FLOOR_HISTORY_S, FLOOR_MIN_S = 15, 20.0, 3.0
+STEP_PERCENTILE = 90  # a step's loudness: this percentile of its window levels
 
 # vad(audio) -> one speech probability per WINDOW samples (len(audio) is a WINDOW multiple).
 VadFn = Callable[[np.ndarray], np.ndarray]
@@ -88,16 +90,21 @@ class NoiseFloor:
                 return None
             return float(np.percentile(np.fromiter(self._levels, float), FLOOR_PERCENTILE))
 
-    def loud(self, levels: np.ndarray, margin_db: float) -> np.ndarray:
-        """Per window: at least margin_db above the floor (all False without a floor)."""
+    def loud(self, levels: np.ndarray, margin_db: float) -> bool:
+        """Whether a step (its window levels) is margin_db above the floor; False without
+        a floor yet."""
         floor = self.db
-        if floor is None:
-            return np.zeros(len(levels), bool)
-        return np.asarray(levels) >= floor + margin_db - 1e-9
+        if floor is None or not len(levels):
+            return False
+        return float(np.percentile(levels, STEP_PERCENTILE)) >= floor + margin_db - 1e-9
 
     def add(self, levels: np.ndarray) -> None:
         with self._lock:
             self._levels.extend(float(v) for v in levels)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._levels.clear()
 
 
 def silero_vad(audio: np.ndarray) -> np.ndarray:
@@ -180,7 +187,7 @@ class RoomMonitor:
         self.vad = vad or silero_vad
         self.clock = clock
         self.thresholds = thresholds  # read on every step: a preset change applies at once
-        self.floor = NoiseFloor()  # VAD worker only; survives sessions and mic reopenings
+        self.floor = NoiseFloor()  # VAD worker; cleared whenever the mic (re)opens
         self._lock = threading.Lock()  # everything below except the worker's own buffers
         self._source: AudioSource | None = None
         self._stream = 0  # bumped per mic (re)open/close: frames of an older stream are dropped
@@ -218,6 +225,7 @@ class RoomMonitor:
                 self._worker.start()
             self._stream += 1
             self._reset_locked()
+            self.floor.clear()  # maybe another place now: warm up again
             stream = self._stream
         try:
             src = self.source_factory()
@@ -383,7 +391,7 @@ class RoomMonitor:
                 loud = None if margin is None else self.floor.loud(levels, margin)
                 self.floor.add(levels)
                 probs = np.zeros(n // WINDOW, np.float32)
-                if loud is None or loud.any():  # nothing above the floor: skip the VAD
+                if loud is None or loud:  # a step at the floor: skip the VAD
                     try:
                         probs = self.vad(np.concatenate([ctx, chunk]))[-(n // WINDOW) :]
                     except Exception:
@@ -392,8 +400,6 @@ class RoomMonitor:
                         failed = True
                 ctx = np.concatenate([ctx, chunk])[-HISTORY:]
                 speech = np.asarray(probs) >= self.det.room_vad_threshold
-                if loud is not None:
-                    speech &= loud
                 self._add_step(gen, n, speech)
             except Exception:  # never let one bad step end listening
                 log.exception("room listening: speech detection step failed")

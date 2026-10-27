@@ -17,7 +17,7 @@ PRESETS: dict[str, tuple[int | None, int | None]] = {
     "Normal": (50, 50),
     "Noisy place": (25, 50),
 }
-MIN_MARGIN_DB, MAX_MARGIN_DB = 3.0, 15.0  # room level above its noise floor, at 100 / 0
+MIN_MARGIN_DB, MAX_MARGIN_DB = 10.0, 16.0  # step loudness above the noise floor, at 100 / 0
 # Speech needed is at most this share of the window (the window widens instead): even a busy
 # conversation leaves pauses, so every setting stays reachable.
 MAX_COVERAGE = 0.5

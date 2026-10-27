@@ -158,7 +158,7 @@ class Config:
     def save(self, path: Path = CONFIG_PATH) -> None:
         """Write the settings. Serialized (the snapshot is taken under the lock, so the last
         save writes the current values) and atomic where the OS allows it."""
-        with _SAVE_LOCK:
+        with CONFIG_LOCK:
             data = asdict(self)
             data["output_dir"] = str(self.output_dir)
             for section in ("detection", "transcription"):  # TOML has no null: unset = omitted
@@ -166,9 +166,28 @@ class Config:
             blob = tomli_w.dumps(data).encode()
             path.parent.mkdir(parents=True, exist_ok=True)
             _write_atomic(path, blob)
+            _own_writes[str(path)] = file_signature(path)
 
 
-_SAVE_LOCK = threading.Lock()
+# Held while saving and while applying a reload, so neither sees the other half-done.
+# Re-entrant: load_config() saves the defaults on first run.
+CONFIG_LOCK = threading.RLock()
+_own_writes: dict[str, tuple[int, int] | None] = {}  # path -> signature after our last save
+
+
+def file_signature(path: Path) -> tuple[int, int] | None:
+    """(mtime_ns, size) of the file, None if it is missing."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
+def written_by_us(path: Path) -> bool:
+    """Whether the file is exactly as our last save left it (not a hand edit)."""
+    sig = file_signature(path)
+    return sig is not None and _own_writes.get(str(path)) == sig
 
 
 def _write_atomic(path: Path, blob: bytes) -> None:
@@ -188,7 +207,10 @@ def _write_atomic(path: Path, blob: bytes) -> None:
         log.warning("config: could not replace %s atomically; writing it in place", path.name)
         path.write_bytes(blob)
     finally:
-        tmp.unlink(missing_ok=True)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:  # e.g. still locked on Windows: a stray temp file, not a failed save
+            log.debug("config: could not remove %s", tmp.name)
 
 
 def _build(cls, data: dict):
