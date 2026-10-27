@@ -625,7 +625,11 @@ class TranscriptIndex:
         cheap count first keeps an over-cap index from reading anything; the matrix is filled
         in place (no second copy at the end)."""
         with contextlib.closing(self._connect()) as db:
-            total = db.execute("SELECT count(*) FROM seg_vec").fetchone()[0]  # >= this model's
+            total = db.execute(  # this model's rows only, as the chunked read below selects
+                "SELECT count(*) FROM seg_vec v JOIN sem_sessions m ON m.folder = v.folder "
+                "JOIN sessions s ON s.folder = v.folder WHERE m.model = ?",
+                (model,),
+            ).fetchone()[0]
         if total > CACHE_MAX_ROWS:
             return None
         matrix = np.empty((total, dim), dtype=np.float32)
@@ -661,7 +665,7 @@ class TranscriptIndex:
                 break
         if self._vec_token() != token:
             return None
-        if len(meta) < total:  # other models' rows were counted too: don't pin their space
+        if len(meta) < total:  # rows vanished between the count and the reads
             matrix = matrix[: len(meta)].copy()
         return _VecCache(token, model, matrix, meta)
 

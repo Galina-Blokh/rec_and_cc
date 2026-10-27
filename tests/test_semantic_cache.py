@@ -338,3 +338,15 @@ def test_a_speaker_rename_refreshes_the_cached_metadata(tmp_path, out):
     hits = idx.search("payment")
     assert [h.speaker for h in hits] == ["Alice"]
     assert [h.speaker for h in idx.search("invoice")] == ["Alice"]
+
+
+def test_other_models_rows_do_not_count_against_the_cap(tmp_path, out, monkeypatch):
+    make_session(out, 1, [seg(1, "the invoice"), seg(2, "payment")])
+    d2 = make_session(out, 2, [seg(3, "lunch"), seg(4, "pizza")])
+    idx = make(tmp_path, FakeEmbedder())
+    sync(idx, out)
+    with sqlite3.connect(idx.path) as db:  # session 2 was embedded by another model
+        db.execute("UPDATE sem_sessions SET model = 'old' WHERE folder = ?", (str(d2),))
+    monkeypatch.setattr(search, "CACHE_MAX_ROWS", 2)  # 4 rows stored, 2 of this model
+    assert idx.search("payment")
+    assert idx._cache is not None and len(idx._cache.meta) == 2
