@@ -8,7 +8,8 @@ Pipeline (CPU only; ~2 s for 13 min of audio on an M5 Max, see docs/ARCHITECTURE
                   28 MB ONNX) through sherpa-onnx, on a small thread pool (ONNX Runtime
                   releases the GIL, so windows are embedded in parallel)
                -> agglomerative clustering (average linkage, cosine distance) of the windows
-                  >= 1 s; shorter windows and tiny clusters join the nearest speaker
+                  >= 1 s into k speakers, k picked by silhouette (optional min/max hints);
+                  shorter windows and tiny clusters join the nearest speaker
                -> turns (start, end, speaker id)
 
 ``assign_speakers`` then gives every "Others" transcript segment the speaker it overlaps
@@ -77,6 +78,12 @@ MIN_UNIT_S = 1.0  # shorter windows are too noisy to define a speaker; they join
 CLUSTER_THRESHOLD = 0.5  # cosine distance: clusters closer than this are the same speaker
 MIN_SPEAKER_S = 2.0  # a "speaker" with less clustered speech than this joins the nearest one
 MAX_CLUSTER_UNITS = 3000  # beyond this, cluster an even subsample (memory: n^2 floats)
+# Adaptive speaker count (ADR 0013): with at least MIN_ADAPTIVE_UNITS windows to cluster, the
+# number of speakers is the k <= MAX_AUTO_SPEAKERS (or the max_speakers hint) with the best
+# silhouette; one speaker if no split scores MIN_SPLIT_SCORE. Fewer windows: CLUSTER_THRESHOLD.
+MIN_ADAPTIVE_UNITS = 10
+MAX_AUTO_SPEAKERS = 20
+MIN_SPLIT_SCORE = 0.3
 RETRY_AFTER_S = 600.0  # after a failed download, don't try again for this long
 DOWNLOAD_TIMEOUT_S = 30.0
 
@@ -173,31 +180,93 @@ def cluster_embeddings(
     min_unit_s: float = MIN_UNIT_S,
     min_speaker_s: float = MIN_SPEAKER_S,
     max_units: int = MAX_CLUSTER_UNITS,
+    min_speakers: int = 0,
+    max_speakers: int = 0,
 ) -> np.ndarray:
     """Speaker id (0..k-1) per embedding row.
 
-    Rows with duration >= `min_unit_s` are clustered (average linkage on cosine similarity,
-    stopping at cosine distance `threshold`); clusters with less than `min_speaker_s` of speech
-    are dissolved; then every row (short ones too) takes its nearest cluster centroid.
+    Rows with duration >= `min_unit_s` are clustered (average linkage on cosine similarity)
+    into k speakers, k chosen by ``_pick_k`` (silhouette, or the distance `threshold` for few
+    rows) within the optional `min_speakers` / `max_speakers` hints (0 = no hint); clusters
+    with less than `min_speaker_s` of speech are dissolved (keeping at least `min_speakers`);
+    then every row (short ones too) takes its nearest cluster centroid.
     """
     n = len(embeddings)
     if n == 0:
         return np.zeros(0, dtype=int)
-    x = np.asarray(embeddings, dtype=np.float32)
+    x = np.array(embeddings, dtype=np.float32)
+    finite = np.isfinite(x).all(axis=1)  # a NaN/inf row would break the linkage
+    x[~finite] = 0.0  # not clustered; takes speaker 0
     x = x / np.maximum(np.linalg.norm(x, axis=1, keepdims=True), 1e-9)
     durations = np.asarray(durations, dtype=np.float64)
-    units = np.flatnonzero(durations >= min_unit_s)
+    units = np.flatnonzero((durations >= min_unit_s) & finite)
     if len(units) == 0:
-        units = np.arange(n)
+        units = np.flatnonzero(finite)
+    if len(units) == 0:
+        return np.zeros(n, dtype=int)
     if len(units) > max_units:
         units = units[np.linspace(0, len(units) - 1, max_units).astype(int)]
-    groups = _average_linkage(x[units], 1.0 - threshold)
-    groups = [units[g] for g in groups]
-    big = [g for g in groups if durations[g].sum() >= min_speaker_s]
-    groups = big or [max(groups, key=lambda g: durations[g].sum())]
+    min_speakers, max_speakers = max(0, min_speakers), max(0, max_speakers)
+    cap = max(MAX_AUTO_SPEAKERS, min_speakers, max_speakers)  # scores for the free estimate too
+    merges, scores = _dendrogram(x[units], cap)
+    k = _pick_k(len(units), merges, scores, threshold, min_speakers, max_speakers)
+    groups = [units[g] for g in _cut(len(units), merges, k)]
+    groups.sort(key=lambda g: -durations[g].sum())
+    big = sum(durations[g].sum() >= min_speaker_s for g in groups)
+    groups = groups[: max(1, big, min(min_speakers, len(groups)))]
     centroids = np.stack([x[g].mean(axis=0) for g in groups])
     centroids /= np.maximum(np.linalg.norm(centroids, axis=1, keepdims=True), 1e-9)
     return np.argmax(x @ centroids.T, axis=1)
+
+
+def _pick_k(
+    n: int,
+    merges: list[tuple[int, int, float]],
+    scores: dict[int, float],
+    threshold: float,
+    min_speakers: int,
+    max_speakers: int,
+) -> int:
+    """Number of speakers among `n` clustered rows. With at least ``MIN_ADAPTIVE_UNITS`` rows:
+    the k >= 2 with the best silhouette, or 1 if no split reaches ``MIN_SPLIT_SCORE``. With
+    fewer: the cut at the distance `threshold`. Either way within the hints."""
+    hi = min(max_speakers or n, n)
+    lo = min(max(1, min_speakers), hi)
+    if n < MIN_ADAPTIVE_UNITS:
+        free = n - sum(1 for *_, sim in merges if sim >= 1.0 - threshold)
+        k = min(max(free, lo), hi)
+    else:
+        free, k = _best_k(scores, 1, n), _best_k(scores, lo, hi)
+    if k != free:
+        log.info(
+            "speaker count hint (min %d, max %d): %d speakers instead of %d estimated",
+            min_speakers,
+            max_speakers,
+            k,
+            free,
+        )
+    return k
+
+
+def _best_k(scores: dict[int, float], lo: int, hi: int) -> int:
+    cand = {k: s for k, s in scores.items() if lo <= k <= hi}
+    if not cand:
+        return lo
+    best = max(cand, key=lambda k: (cand[k], -k))
+    return 1 if lo == 1 and cand[best] < MIN_SPLIT_SCORE else best
+
+
+def _cut(n: int, merges: list[tuple[int, int, float]], k: int) -> list[np.ndarray]:
+    """The k clusters left after the first ``n - k`` merges, as index arrays."""
+    parent = np.arange(n)
+    for i, j, _ in merges[: n - k]:
+        parent[j] = i
+    for _ in range(n):  # flatten: follow links until every row points at its cluster's root
+        nxt = parent[parent]
+        if np.array_equal(nxt, parent):
+            break
+        parent = nxt
+    return [np.flatnonzero(parent == r) for r in np.unique(parent)]
 
 
 def speaker_centroids(embeddings: np.ndarray, labels: np.ndarray) -> dict[int, np.ndarray]:
@@ -211,41 +280,61 @@ def speaker_centroids(embeddings: np.ndarray, labels: np.ndarray) -> dict[int, n
     return out
 
 
-def _average_linkage(x: np.ndarray, min_similarity: float) -> list[np.ndarray]:
-    """Agglomerative clustering of unit vectors; merges while the average pairwise cosine
-    similarity of the closest two clusters is >= `min_similarity`. Returns index arrays."""
+def _dendrogram(x: np.ndarray, max_k: int) -> tuple[list[tuple[int, int, float]], dict[int, float]]:
+    """Average-linkage agglomerative clustering of unit vectors (cosine similarity), run to a
+    single cluster. Returns the merges ``(kept, merged, similarity)`` in order (similarity
+    non-increasing) and, for every 2 <= k <= `max_k` clusters on the way, a size-weighted
+    cluster silhouette: per cluster ``(b - a) / max(a, b)`` with ``a`` its mean within-cluster
+    cosine distance and ``b`` the average-linkage distance to its nearest other cluster
+    (0 for a single row). O(k^2) per score, from the linkage matrix it maintains anyway."""
     n = len(x)
+    merges: list[tuple[int, int, float]] = []
+    scores: dict[int, float] = {}
     if n < 2:
-        return [np.arange(n)]
+        return merges, scores
     sim = x @ x.T  # float32: 36 MB for MAX_CLUSTER_UNITS
     np.fill_diagonal(sim, -np.inf)
-    size = np.ones(n, dtype=np.float32)
-    members: list[list[int]] = [[i] for i in range(n)]
+    size = np.ones(n, dtype=np.float64)
+    within = np.zeros(n, dtype=np.float64)  # sum of within-cluster pair similarities
+    alive = np.ones(n, dtype=bool)
     best = sim.argmax(axis=1)
     best_val = sim[np.arange(n), best]
-    while True:  # ends when no two clusters are similar enough (or only one is left)
+
+    def score() -> float:
+        a_idx = np.flatnonzero(alive)
+        b = 1.0 - sim[np.ix_(a_idx, a_idx)].max(axis=1)
+        sz = size[a_idx]
+        pairs = sz * (sz - 1) / 2
+        a = 1.0 - within[a_idx] / np.maximum(pairs, 1)
+        s = np.where(sz > 1, (b - a) / np.maximum(np.maximum(a, b), 1e-9), 0.0)
+        return float((s * sz).sum() / sz.sum())
+
+    for k in range(n, 1, -1):  # k clusters before this merge
+        if 2 <= k <= max_k:
+            scores[k] = score()
         i = int(np.argmax(best_val))
         j = int(best[i])
-        if not best_val[i] >= min_similarity:
+        if not np.isfinite(best_val[i]):  # unreachable for finite embeddings
             break
+        merges.append((i, j, float(best_val[i])))
         # Lance-Williams update for average linkage: merge j into i.
+        within[i] += within[j] + float(sim[i, j]) * size[i] * size[j]
         row = (sim[i] * size[i] + sim[j] * size[j]) / (size[i] + size[j])
         sim[i], sim[:, i] = row, row
         sim[i, i] = -np.inf
         sim[j], sim[:, j] = -np.inf, -np.inf
         size[i] += size[j]
-        members[i] += members[j]
-        members[j] = []
+        alive[j] = False
         best_val[j] = -np.inf
         # rows whose best partner was i or j must be recomputed; others may now prefer i
         stale = np.flatnonzero((best == i) | (best == j))
-        for k in [i, *stale.tolist()]:
-            if members[k]:
-                best[k] = int(np.argmax(sim[k]))
-                best_val[k] = sim[k, best[k]]
+        for r in [i, *stale.tolist()]:
+            if alive[r]:
+                best[r] = int(np.argmax(sim[r]))
+                best_val[r] = sim[r, best[r]]
         better = sim[:, i] > best_val
         best[better], best_val[better] = i, sim[better, i]
-    return [np.array(m) for m in members if m]
+    return merges, scores
 
 
 def assign_speakers(
@@ -335,9 +424,12 @@ class Diarizer:
     (``submit``), embedding windows on `threads` worker threads. Thread-safe; reusable after
     ``close``."""
 
-    def __init__(self, threads: int = 0, vad: VadFn = _silero) -> None:
+    def __init__(
+        self, threads: int = 0, vad: VadFn = _silero, min_speakers: int = 0, max_speakers: int = 0
+    ) -> None:
         self.threads = threads or default_threads()
         self.vad = vad
+        self.min_speakers, self.max_speakers = min_speakers, max_speakers  # 0 = no hint
         self._lock = threading.Lock()
         self._extractor = None
         self._pool: ThreadPoolExecutor | None = None  # embedding workers
@@ -388,7 +480,12 @@ class Diarizer:
             return np.asarray(extractor.compute(stream), dtype=np.float32)
 
         embeddings = np.stack(list(pool.map(embed, windows)))
-        labels = cluster_embeddings(embeddings, np.array([e - s for s, e in windows]))
+        labels = cluster_embeddings(
+            embeddings,
+            np.array([e - s for s, e in windows]),
+            min_speakers=self.min_speakers,
+            max_speakers=self.max_speakers,
+        )
         turns = Turns(centroids=speaker_centroids(embeddings, labels))
         turns += [
             Turn(round(s, 3), round(e, 3), int(k))

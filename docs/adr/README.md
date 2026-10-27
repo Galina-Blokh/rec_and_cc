@@ -21,6 +21,7 @@ the numbers in them come from the commits and docs they link to (measured on an 
 | [0010](0010-offline-first-model-loading.md) | Offline-first model loading | Accepted |
 | [0011](0011-stack-and-packaging-after-v0-1.md) | Stack and packaging after v0.1 | Proposed |
 | [0012](0012-per-app-system-audio-tap.md) | Optional per-app system-audio tap that follows the trigger app | Accepted |
+| [0013](0013-adaptive-speaker-count.md) | Adaptive speaker count (silhouette) instead of a fixed clustering threshold | Accepted |
 
 ## Adding an ADR
 
