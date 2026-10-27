@@ -120,7 +120,14 @@ def fakes(monkeypatch):
     pycaw_pycaw.AudioUtilities = types.SimpleNamespace(GetAllSessions=lambda: state.sessions)
     pycaw.pycaw = pycaw_pycaw
     psutil = types.ModuleType("psutil")
-    psutil.process_iter = lambda attrs: iter(state.procs)
+    state.walks = 0
+
+    def process_iter(attrs, ad_value="unset"):
+        assert ad_value is None  # else protected processes yield AccessDenied in .info
+        state.walks += 1
+        return iter(list(state.procs))
+
+    psutil.process_iter = process_iter
     state.winreg = FakeWinreg(mic_tree({}, {}))
 
     monkeypatch.setitem(sys.modules, "comtypes", state.comtypes)
@@ -208,6 +215,18 @@ def test_mic_merges_with_output_and_skips_own_exe(fakes, mon):
 
 
 TEAMS_DIR = r"C:\Program Files\WindowsApps\MSTeams_24243.1309.3132.617_x64__8wekyb3d8bbwe"
+ns = types.SimpleNamespace
+TEAMS = ns(pid=300, info={"name": "ms-teams.exe", "exe": TEAMS_DIR + r"\ms-teams.exe"})
+STARTER = ns(pid=299, info={"name": "MSTeams_autostarter.exe", "exe": TEAMS_DIR + r"\a.exe"})
+UPDATER = ns(pid=298, info={"name": "updater.exe", "exe": TEAMS_DIR + r"\updater.exe"})
+
+
+class AccessDenied(Exception):
+    """What psutil puts into .info for protected processes when ad_value is not given."""
+
+
+def teams_on_mic(fakes):
+    fakes.winreg.tree = mic_tree({"MSTeams_8wekyb3d8bbwe": IN_USE}, {})
 
 
 def test_packaged_mic_user_maps_to_its_running_exe(fakes, mon):
@@ -217,36 +236,76 @@ def test_packaged_mic_user_maps_to_its_running_exe(fakes, mon):
         {"MSTeams_8wekyb3d8bbwe": IN_USE, "Clipchamp.Clipchamp_yxz26nhyzhsrt": IN_USE}, {}
     )
     fakes.sessions = [FakeSession(proc("ms-teams.exe", 300))]
-    ns = types.SimpleNamespace
     fakes.procs = [
         ns(pid=1, info={"name": "System", "exe": None}),
         ns(pid=2, info={"name": "x.exe", "exe": r"C:\WindowsApps\x.exe"}),  # no package dir
-        ns(pid=299, info={"name": "MSTeams_autostarter.exe", "exe": TEAMS_DIR + r"\a.exe"}),
-        ns(pid=300, info={"name": "ms-teams.exe", "exe": TEAMS_DIR + r"\ms-teams.exe"}),
+        ns(pid=3, info={"name": AccessDenied(), "exe": AccessDenied()}),  # not str: skipped
+        STARTER,
+        TEAMS,
     ]
     assert by_name(mon.snapshot()) == {
         "ms-teams.exe": AudioProcess(300, "ms-teams.exe", "ms-teams.exe", True, True),
         "clipchamp.clipchamp": AudioProcess(0, *["clipchamp.clipchamp"] * 2, True, False),
     }
-    fakes.sessions = []  # mic only: the first process of the package is used
-    assert [(p.pid, p.bundle_id) for p in mon.snapshot() if p.pid] == [
-        (299, "msteams_autostarter.exe")
-    ]
+
+
+@pytest.mark.parametrize("order", [[STARTER, UPDATER, TEAMS], [TEAMS, UPDATER, STARTER]])
+def test_mic_only_package_prefers_the_app_over_helpers(fakes, mon, order):
+    teams_on_mic(fakes)
+    fakes.procs = order
+    assert [(p.pid, p.bundle_id) for p in mon.snapshot()] == [(300, "ms-teams.exe")]
+
+
+def test_package_choice_is_stable_and_sticky(fakes, mon, monkeypatch):
+    """A key that flips between polls would look like a new app and end the session."""
+    now = [0.0]
+    monkeypatch.setattr(win, "time", ns(monotonic=lambda: now[0]))
+    teams_on_mic(fakes)
+    starter = ns(pid=299, info={"name": "starter.exe", "exe": TEAMS_DIR + r"\starter.exe"})
+    widget = ns(pid=297, info={"name": "widget.exe", "exe": TEAMS_DIR + r"\widget.exe"})
+    fakes.sessions = [FakeSession(proc("widget.exe", 297))]
+    fakes.procs = [starter, widget]
+    assert [p.bundle_id for p in mon.snapshot()] == ["widget.exe"]  # has the WASAPI session
+    fakes.sessions = []  # playback ended: keep the key rather than re-pick "starter.exe"
+    for order in ([widget, starter], [starter, widget], [widget, starter]):
+        now[0] += 11  # past the TTL: the table is rebuilt in a different order
+        fakes.procs = order
+        assert [p.bundle_id for p in mon.snapshot()] == ["widget.exe"]
+    fakes.procs = [starter]  # the sticky exe exited: fall back to the sorted choice
+    now[0] += 11
+    assert [p.bundle_id for p in mon.snapshot()] == ["starter.exe"]
+
+
+def test_process_table_is_cached(fakes, mon, monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(win, "time", ns(monotonic=lambda: now[0]))
+    teams_on_mic(fakes)
+    fakes.procs = [TEAMS]
+    mon.snapshot()
+    now[0] += 1
+    mon.snapshot()
+    assert fakes.walks == 1  # stable mic set: one walk, not one per poll
+    fakes.winreg.tree = mic_tree({"MSTeams_8wekyb3d8bbwe": IN_USE}, {"C:#Zoom.exe": IN_USE})
+    mon.snapshot()
+    assert fakes.walks == 2  # mic set changed
+    now[0] += win._TABLE_TTL_S
+    mon.snapshot()
+    assert fakes.walks == 3  # TTL expired
+    fakes.winreg.tree = mic_tree({}, {})
+    mon.snapshot()
+    assert fakes.walks == 3  # nobody on the mic: no walk at all
 
 
 def test_pid_lookup(fakes, mon, monkeypatch):
-    fakes.procs = [
-        types.SimpleNamespace(pid=1, info={"name": None}),
-        types.SimpleNamespace(pid=2, info={"name": "ZOOM.EXE"}),
-    ]
-    assert mon._pid_for_exe("zoom.exe") == 2
-    assert mon._pid_for_exe("missing.exe") == 0
+    fakes.procs = [ns(pid=1, info={"name": None}), ns(pid=2, info={"name": "ZOOM.EXE"})]
+    by_family, by_name = mon._process_table(frozenset({"a"}))
+    assert by_family == {} and by_name == {"zoom.exe": 2}
 
-    def boom(attrs):
-        raise RuntimeError("access denied")
+    def boom(attrs, ad_value=None):
+        raise RuntimeError("psutil broke")
 
     monkeypatch.setattr(sys.modules["psutil"], "process_iter", boom)
-    assert mon._pid_for_exe("zoom.exe") == 0
+    assert mon._process_table(frozenset({"b"})) == ({}, {})
 
 
 def test_registry_unavailable_still_reports_output(fakes, mon, monkeypatch, caplog):
