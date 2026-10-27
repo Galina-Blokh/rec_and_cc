@@ -1,9 +1,14 @@
-"""Stories: US-15."""
+"""Audio retention and keep_audio = false cleanup of transcribed sessions.
+
+Stories: US-15.
+"""
 
 from datetime import datetime, timedelta
 
+import pytest
+
 from recandcc.models import SessionInfo, Track, TriggerKind
-from recandcc.retention import purge_old_audio
+from recandcc.retention import purge_old_audio, purge_transcribed_audio
 
 NOW = datetime(2026, 10, 26, 12, 0).astimezone()
 
@@ -54,3 +59,85 @@ def test_ignores_unreadable_sessions(tmp_path):
     (bad / "me.wav").write_bytes(b"x")
     assert purge_old_audio(tmp_path, 1, now=NOW) == []
     assert (bad / "me.wav").exists()
+
+
+def test_keep_audio_false_purges_only_transcribed_sessions(tmp_path):
+    done = make_session(tmp_path, "done", 0)  # left behind by a slow diarization
+    pending = make_session(tmp_path, "pending", 0, transcribed=False)
+    live = make_session(tmp_path, "live", None, transcribed=False)
+
+    deleted = purge_transcribed_audio(tmp_path, ended_before=NOW + timedelta(minutes=1))
+
+    assert sorted(p.name for p in deleted) == ["me.wav", "others.wav"]
+    assert not list(done.glob("*.wav"))
+    assert (done / "transcript.md").exists() and (done / "session.json").exists()
+    for d in (pending, live):
+        assert len(list(d.glob("*.wav"))) == 2
+    assert purge_transcribed_audio(tmp_path) == []  # idempotent
+    assert purge_transcribed_audio(tmp_path / "nope") == []
+
+
+def test_startup_purge_spares_sessions_of_this_run(tmp_path):
+    before = make_session(tmp_path, "before", 1)
+    now = make_session(tmp_path, "now", 0)  # ended at NOW: may still be being diarized
+    purge_transcribed_audio(tmp_path, ended_before=NOW - timedelta(hours=1))
+    assert not list(before.glob("*.wav"))
+    assert len(list(now.glob("*.wav"))) == 2
+
+
+def test_startup_purge_keeps_untracked_wavs(tmp_path):
+    d = make_session(tmp_path, "done", 1)
+    (d / "notes.wav").write_bytes(b"x")  # not a session track
+    purge_transcribed_audio(tmp_path)
+    assert [p.name for p in d.glob("*.wav")] == ["notes.wav"]
+
+
+@pytest.mark.parametrize("keep_audio", [True, False])
+def test_controller_purges_leftovers_at_startup_only_without_keep_audio(tmp_path, keep_audio):
+    from recandcc.config import Config
+    from recandcc.ui.common import Controller
+
+    class Monitor:
+        def snapshot(self):
+            return []
+
+    class Q:
+        def submit(self, *_a, **_k):
+            pass
+
+        def pending(self):
+            return 0
+
+    done = make_session(tmp_path, "done", 1)
+    pending = make_session(tmp_path, "pending", 1, transcribed=False)
+    cfg = Config(output_dir=tmp_path)
+    cfg.transcription.keep_audio = keep_audio
+    ctrl = Controller(cfg, monitor=Monitor(), recorder=object(), tq=Q(), start_threads=False)
+    ctrl._shut = True  # run only the startup pass of the retention loop
+    ctrl._retention_loop()
+
+    assert len(list(done.glob("*.wav"))) == (2 if keep_audio else 0)
+    assert len(list(pending.glob("*.wav"))) == 2
+
+
+def test_failed_unlink_is_logged_and_retried_on_next_start(tmp_path, monkeypatch, caplog):
+    from pathlib import Path
+
+    d = make_session(tmp_path, "done", 1)
+    real_unlink = Path.unlink
+
+    def locked(self, *a, **k):
+        if self.name == "others.wav":
+            raise PermissionError("file in use")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", locked)
+    with caplog.at_level("WARNING", logger="recandcc.retention"):
+        deleted = purge_transcribed_audio(tmp_path)
+    assert [p.name for p in deleted] == ["me.wav"]
+    assert (d / "others.wav").exists()
+    assert any("could not delete" in r.message for r in caplog.records)
+
+    monkeypatch.setattr(Path, "unlink", real_unlink)  # lock released: next start
+    assert [p.name for p in purge_transcribed_audio(tmp_path)] == ["others.wav"]
+    assert not list(d.glob("*.wav"))

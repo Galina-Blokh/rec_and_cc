@@ -258,7 +258,8 @@ recordings must stay on this computer only.
 
 ### Retention
 
-- `keep_audio = false` deletes a session's WAVs as soon as it is transcribed.
+- `keep_audio = false` deletes a session's WAVs as soon as it is transcribed (any left behind
+  by a quit are deleted at the next startup).
 - `audio_retention_days = N` (menu → **Delete audio after**: Never / 1 / 7 / 30 / 90 days)
   deletes the audio N days after transcription; `0` keeps it forever.
 - Transcripts are never deleted automatically. Delete a session by deleting its folder.
