@@ -220,6 +220,40 @@ To regenerate: `uv run python scripts/make_synthetic_evalset.py "$TMPDIR/rcc-syn
 `uv run python scripts/eval.py "$TMPDIR/rcc-synth" --languages en,ru,he --backend mlx --json
 "$TMPDIR/mlx.json"` (and `--backend cpu`, and `--backend mlx --live`).
 
+## Summary timing (synthetic 1-hour transcript)
+
+Acceptance check of issue #4: "a 1-hour meeting summary in 1-2 minutes". Input: the transcript
+from `scripts/make_synthetic_meeting_transcript.py` at its default seed 0 (232 segments, 8551
+words, four speakers, English; fixed templates, not real data). The default `[summary]` config
+(`mlx-community/Qwen2.5-3B-Instruct-4bit`, 4-bit MLX, `max_tokens = 400`) ran through
+`summarize_session` -> `summarize` (the `recandcc summarize` path; timed by calling `summarize`
+with `MlxGenerator` directly) with `HF_HUB_OFFLINE=1` and the model from the local cache. Only
+timings are recorded here, never text.
+
+| Date | Machine | Model | Load (1st in process) | Load (reload) | Generation | Total |
+|---|---|---|---|---|---|---|
+| 2026-10-27 | Mac17,6 (Apple M5 Max, 36 GB), macOS 26.7.1 | Qwen2.5-3B-Instruct-4bit | 1.70 / 1.93 / 1.64 s | 0.75 / 0.59 / 0.52 s | 30.1 / 26.2 / 27.2 s | ~28-32 s |
+
+Three runs, each in a fresh process. Map-reduce made 10 model calls (8 chunk notes, one
+summary, one action list): 14,866 prompt tokens prefilled and 2,947 tokens generated. That is
+about 100 generated tokens/s counting the prefill time in the denominator (2,947 tokens in
+~28 s); generation-only throughput is higher. The result had a 606-character summary and 8
+action items.
+
+Verdict: **meets the 1-2 minute target on an M5 Max** at roughly 30 s, about 4x inside the 2
+minute limit; slower Macs are untested. Generation (prefill plus decoding) dominates; loading is
+under 2 s. The load times have the model files in the OS page cache; a cold-disk load was not
+measured (needs `sudo purge`). Timings are without a recording running: the summary thread
+waits while recording, and shares the GPU lock with Whisper.
+
+Cross-check: an independent run by another session on the same machine class (M5 Max,
+Qwen2.5-3B-Instruct-4bit, 8 chunks, about 9,000 en/ru words) took 30.7 s, in line with the
+numbers above. That run is `tests/test_summary_timing.py` (`uv run pytest -m slow -k
+summary_timing -s`, offline, fails above 120 s, the upper end of the target). Real meetings have more varied text and longer answers; re-measure on the consented set when it exists (#4).
+
+To regenerate: `uv run python scripts/make_synthetic_meeting_transcript.py "$TMPDIR/rcc-meeting"`,
+then time `summarize` on that folder.
+
 ## Interim synthetic speaker baseline
 
 For issue #1 ("6-speaker test meeting: DER measurably better than v0.1; no regression on 2–3
@@ -290,7 +324,10 @@ then `uv run python scripts/eval.py "$TMPDIR/rcc-meetings" --languages en [--dia
 ### Why two of the six voices merge
 
 Investigated on main at 8097620, which reproduces the rows above: the same speaker counts, and
-DER 0.357 off and 0.308 on (0.309 above). The diarizer is unchanged since 281bd90.
+DER 0.357 off and 0.309 on, as in the table (a rerun at 8097620 gave 0.308 on). The diarizer
+is unchanged since 281bd90. The figures below (cosines, leave-one-out counts, the k splits,
+the forced-count DER and the variants table) come from an uncommitted scratch analysis on the
+regenerated meetings, not from a committed script.
 
 - **The merged voices are Samantha (`en1`) and Karen (`en5`), in both modes.** The cosine
   similarity of their voice centroids (the unit mean of a speaker's clean windows) is 0.74.
@@ -305,7 +342,7 @@ DER 0.357 off and 0.308 on (0.309 above). The diarizer is unchanged since 281bd9
   clusters off and k = 9 on. Both are well past the silhouette's pick (k = 6 off, 5 on), and
   the extra clusters at that point are 1-3-window outliers.
 - **The speaker count is a near tie either way.** Silhouette off: k = 4: 0.470, 5: 0.439,
-  6: 0.478. On: k = 4: 0.507, 5: 0.515, 6: 0.478. Off picks k = 6 by 0.008, and its sixth
+  6: 0.478. On: k = 4: 0.507, 5: 0.515, 6: 0.478. Off picks k = 6 over k = 4 by 0.008, and its sixth
   cluster is two stray windows (one en5, one en2), about 4 s, just above `MIN_SPEAKER_S`
   (2 s). On, segmentation turns those strays into cleaner pieces, so k = 5 wins, and the
   segmentation's own gain shows as lower confusion (32 s vs 41 s). Segmentation is not
