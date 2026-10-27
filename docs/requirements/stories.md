@@ -27,7 +27,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-16 | Permissions set up from the app | ✅ |
 | US-17 | Always on, visible state | ✅ |
 | US-18 | Runs on Windows | 🟡 untested on hardware (#5) |
-| US-19 | Hebrew transcripts and right-to-left captions | 🟡 stock model, no Hebrew test set (#6) |
+| US-19 | Hebrew transcripts and right-to-left captions | 🟡 no Hebrew test set, ivrit.ai routing not evaluated (#6) |
 | US-20 | Search my transcripts | 🟡 search only; summaries, export planned (#4) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
 
@@ -197,8 +197,11 @@ while I decide.*
   or untick one, **then** `languages` is saved (codes added by hand and their spelling kept)
   and the next piece of audio is transcribed with it; unticking the last language is refused
   unless **Any language** is chosen.
-- **Not yet:** a Hebrew-tuned model (ivrit.ai) and per-language model routing, a Hebrew
-  evaluation set and WER (#6).
+- **Given** `language_models = { he = "ivrit-ai/whisper-large-v3-turbo-ct2" }`, **then**
+  Hebrew regions (live and final) are transcribed by that model, loaded once on first
+  Hebrew speech at a pinned revision, and en/ru regions by the default model; **given** it
+  can't be loaded, **then** Hebrew falls back to the default model with a log warning.
+- **Not yet:** a Hebrew evaluation set and WER (#6).
 - **Not yet:** the Windows (Tk) captions only right-justify Hebrew lines; Tk does no bidi
   reordering, so the label stays left of the Hebrew text and the glyph order is unverified
   on real hardware (#6).

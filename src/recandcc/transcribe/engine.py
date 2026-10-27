@@ -21,6 +21,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -33,7 +34,7 @@ from .diarize import Diarizer, Turn, label_speakers
 from .gpu import MlxWhisper, hf_cache_folder, use_gpu
 from .merge import ME, OTHERS, language_confidence, merge_tracks, smooth_languages
 from .output import write_outputs
-from .revisions import check_download_allowed, faster_whisper_revision
+from .revisions import check_download_allowed, ct2_repo, faster_whisper_revision
 
 log = logging.getLogger("recandcc.transcribe")
 
@@ -83,6 +84,10 @@ class Transcriber:
         self._init_lock = threading.Lock()
         self._run_lock = threading.Lock()
         self._diarizer: Diarizer | None = None
+        # cfg.language_models: model name -> loaded model, or None if it failed to load (then
+        # its language falls back to the main model). Loaded on first use, under _route_lock.
+        self._routed: dict[str, Any] = {}
+        self._route_lock = threading.Lock()
         self.diarize_wait_s = DIARIZE_WAIT_S
         # model -> load seconds, not yet reported in a session's metrics (the session that
         # waited for the load gets them)
@@ -177,6 +182,38 @@ class Transcriber:
                     self._model = model
         return self._model
 
+    def _model_for(self, language: str):
+        """The model that transcribes ``language``: its cfg.language_models entry (loaded on
+        first use) or the main model."""
+        main = self._ensure_loaded()
+        name = self.cfg.language_models.get(language)
+        if not name or name == self.cfg.model:
+            return main
+        if name not in self._routed:
+            with self._route_lock:  # other languages keep transcribing while this one loads
+                if name not in self._routed:
+                    self._routed[name] = self._load_routed(name, language, main)
+        return self._routed[name] or main
+
+    def _load_routed(self, name: str, language: str, main):
+        try:
+            if isinstance(main, MlxWhisper):
+                t0 = time.monotonic()
+                model = MlxWhisper(name, allow_unpinned=self.cfg.allow_unpinned_models, share=main)
+                model.load()
+                self._load_times[f"{name} (gpu)"] = rounded(time.monotonic() - t0, 2)
+                return model
+            return self._load(ct2_repo(name))
+        except Exception as e:  # noqa: BLE001 - the main model still transcribes this language
+            log.warning(
+                "model %s for language %s failed to load (%s); using %s for it",
+                name,
+                language,
+                type(e).__name__,
+                self.cfg.model,
+            )
+            return None
+
     def _require_pool(self) -> ThreadPoolExecutor:
         """The worker pool; only valid after _ensure_loaded() and before close()."""
         if self._pool is None:
@@ -194,6 +231,11 @@ class Transcriber:
         with self._init_lock:
             if self._pool:
                 self._pool.shutdown(wait=True)
+            with self._route_lock:
+                routed, self._routed = self._routed, {}
+            for model in routed.values():
+                if isinstance(model, MlxWhisper):
+                    model.close()  # before the main model, whose GPU thread it shares
             if isinstance(self._model, MlxWhisper):
                 self._model.close()
             self._pool, self._model, self._lid_model = None, None, None
@@ -307,8 +349,9 @@ class Transcriber:
     ) -> list[Segment]:
         """Transcribe one piece of audio (<= 30 s) in a fixed language. Segment times are
         ``offset`` + position in the piece, clipped to ``max_end``. Blocking; call it from a
-        pool worker (see ``submit``) to run pieces in parallel."""
-        model = self._ensure_loaded()
+        pool worker (see ``submit``) to run pieces in parallel. ``language`` picks the model
+        (cfg.language_models)."""
+        model = self._model_for(language)
         if isinstance(model, MlxWhisper):
             pieces = model.transcribe(audio, language)  # GPU thread; greedy + fallback
         else:

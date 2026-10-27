@@ -27,6 +27,10 @@ All notable changes to RecAndCC are documented here. The format is based on
 - "Open transcripts folder" creates the folder owner-only, like session folders (#32).
 
 ### Added
+- Per-language model routing, opt-in: `transcription.language_models`, e.g.
+  `{ he = "ivrit-ai/whisper-large-v3-turbo-ct2" }`, transcribes Hebrew regions (live and
+  final) with the Hebrew-tuned ivrit.ai Whisper, pinned for faster-whisper and MLX, loaded on
+  first use; other languages keep the default model (#6).
 - `SECURITY.md`: how to report a vulnerability and a threat-model summary.
 - README "Privacy & consent": consent laws, where data lives, retention, deleting everything.
 - This changelog.
