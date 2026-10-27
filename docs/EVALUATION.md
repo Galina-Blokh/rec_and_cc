@@ -195,3 +195,31 @@ into one speaker (DER 0.64 there; 0.13 on the other three `others` clips). Diari
 To regenerate: `uv run python scripts/make_synthetic_evalset.py "$TMPDIR/rcc-synth"`, then
 `uv run python scripts/eval.py "$TMPDIR/rcc-synth" --languages en,ru,he --backend mlx --json
 "$TMPDIR/mlx.json"` (and `--backend cpu`, and `--backend mlx --live`).
+
+## Summary timing (synthetic 1-hour transcript)
+
+Acceptance check of issue #4: "a 1-hour meeting summary in 1-2 minutes". Input: the seeded
+transcript from `scripts/make_synthetic_meeting_transcript.py` (226 segments, 8503 words, four
+speakers, English; fixed templates, not real data). The default `[summary]` config
+(`mlx-community/Qwen2.5-3B-Instruct-4bit`, 4-bit MLX, `max_tokens = 400`) ran through
+`transcribe.summary.summarize` (what `recandcc summarize` calls) with `HF_HUB_OFFLINE=1` and
+the model from the local cache. Only timings are recorded here, never text.
+
+| Date | Machine | Model | Load (1st in process) | Load (reload) | Generation | Total |
+|---|---|---|---|---|---|---|
+| 2026-10-27 | Mac17,6 (Apple M5 Max, 36 GB), macOS 26.7.1 | Qwen2.5-3B-Instruct-4bit | 1.07 / 0.99 / 0.98 s | 0.31 / 0.34 / 0.26 s | 20.3 / 19.5 / 19.0 s | ~20-21 s |
+
+Three runs, each in a fresh process. Map-reduce made 10 model calls (8 chunk notes, one
+summary, one action list): 14,151 prompt tokens prefilled and 2,606 tokens generated, so about
+130 generated tokens/s overall including prefill. The result had a 791-character summary and
+8 action items.
+
+Verdict: **meets the 1-2 minute target** at roughly 20 s, about 6x faster than the 2 minute
+limit. Generation dominates; loading is about 1 s. The "load" times are with the model files
+in the OS page cache (the `purge` command needs root, so a true cold-disk load was not
+measured); the first read from disk on a slower SSD will add a few seconds at most for the
+1.7 GB model. Timings are without a recording running: the summary thread waits while
+recording, and shares the GPU lock with Whisper.
+
+To regenerate: `uv run python scripts/make_synthetic_meeting_transcript.py "$TMPDIR/rcc-meeting"`,
+then time `summarize` on that folder.
