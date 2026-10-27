@@ -581,7 +581,9 @@ class Transcriber:
         with self._init_lock:
             if self._diarizer is None:
                 self._diarizer = Diarizer(
-                    min_speakers=self.cfg.min_speakers, max_speakers=self.cfg.max_speakers
+                    min_speakers=self.cfg.min_speakers,
+                    max_speakers=self.cfg.max_speakers,
+                    segmentation=self.cfg.diarize_overlap,
                 )
             diarizer = self._diarizer
         futures: dict[Track, Future] = {}

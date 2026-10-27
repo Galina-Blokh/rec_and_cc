@@ -179,7 +179,7 @@ def no_speaker_model(tmp_path, monkeypatch):
     """The real model lookup, with the model not on disk: diarization tries its one download."""
     monkeypatch.setattr(diarize, "model_path", REAL_MODEL_PATH)
     monkeypatch.setattr(diarize, "MODELS_DIR", tmp_path / "models")
-    monkeypatch.setattr(diarize, "_last_failure", 0.0)
+    monkeypatch.setattr(diarize, "_last_failure", {})
 
 
 def test_guard_blocks_and_names_the_caller(net):

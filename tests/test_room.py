@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
+import tomllib
 from datetime import datetime
 
 import numpy as np
@@ -525,13 +526,19 @@ def test_menu_toggle_saves_warns_and_engine_owns_a_closed_room_monitor(tmp_path,
             pass
 
     cfg = Config(output_dir=tmp_path)
-    saved = threading.Event()
-    monkeypatch.setattr(cfg, "save", lambda *a, **k: saved.set())
+    path = tmp_path / "config.toml"
+    path.write_text("[summary]\nenabled = true\n")  # a hand edit the save must keep
+    monkeypatch.setattr("recandcc.ui.common.CONFIG_PATH", path)
     ctrl = Controller(cfg, monitor=Monitor(), recorder=object(), tq=Q(), start_threads=False)
     assert isinstance(ctrl.engine.room, RoomMonitor) and not ctrl.engine.room.running
     ctrl._perm = {"microphone": "denied"}
     ctrl.set_room_listening(True)
-    assert cfg.detection.room_listening and saved.wait(2)
+    for t in threading.enumerate():
+        if t.name == "save-config":
+            t.join(5)
+    saved = tomllib.loads(path.read_text())
+    assert cfg.detection.room_listening and saved["detection"]["room_listening"] is True
+    assert saved["summary"]["enabled"] is True
     assert ctrl.events.get_nowait() == ("notice", "Room listening on", ROOM_LISTENING_NOTICE)
     assert "screen is locked" in ROOM_LISTENING_NOTICE and "consent" in ROOM_LISTENING_NOTICE
     assert ctrl.events.get_nowait()[1] == "Room listening can't hear anything"
