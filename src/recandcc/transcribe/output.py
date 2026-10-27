@@ -69,7 +69,12 @@ def paragraphs(segments: list[Segment], gap_s: float = PARAGRAPH_GAP_S) -> list[
         ):
             text = f"{p.text} {s.text}".strip()
             out[-1] = Segment(
-                p.start, max(p.end, s.end), text, p.speaker, p.language, p.overlap or s.overlap,
+                p.start,
+                max(p.end, s.end),
+                text,
+                p.speaker,
+                p.language,
+                p.overlap or s.overlap,
                 p.track,
             )
         else:

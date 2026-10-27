@@ -178,6 +178,24 @@ def test_a_plain_call_records_the_track_and_names_as_before(tmp_path):
     assert out == [("Me", ""), ("Me", ""), ("Bob", "others"), ("Anna", "others")]
 
 
+def test_a_slow_diarization_writes_tracks_even_when_no_label_changes(tmp_path):
+    from concurrent.futures import Future
+
+    s = _session(tmp_path)
+    t = Transcriber(TranscriptionConfig(model="fake"))
+    segs = [Segment(1, 4, "a", "Me", "en"), Segment(2, 3, "c", "Others", "en")]
+    t._write(s, segs, 15.0)  # written before the labels came
+    done: Future = Future()
+    # one person on each track: both keep their label, only the track is new
+    done.set_result({Track.ME: [Turn(0, 5, 0)], Track.OTHERS: [Turn(0, 5, 0)]})
+    t._relabel_later(s, segs, 15.0, done, voices.forget_generation())
+    data = json.loads((tmp_path / "transcript.json").read_text(encoding="utf-8"))
+    assert [(x["speaker"], x["track"]) for x in data["segments"]] == [
+        ("Me", "me"),
+        ("Others", "others"),
+    ]
+
+
 def test_suggestions_fail_closed_when_the_tracks_are_unknown(tmp_path):
     _transcript(tmp_path, [("Speaker 1", ""), ("Speaker 2", "")], ["Anna"])
     assert callnames.suggestions(tmp_path) == []  # never the room's (or the owner's) labels
