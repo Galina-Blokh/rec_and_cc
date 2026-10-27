@@ -295,18 +295,24 @@ def cmd_config(args) -> int:
 def cmd_speakers(args) -> int:
     from .models import SessionInfo
     from .transcribe import voices
+    from .transcribe.intro_hints import transcript_hints
 
     directory = Path(args.session_dir).expanduser()
     try:
         speakers = voices.session_speakers(directory)
         known = voices.read_session_voices(SessionInfo.load(directory).id)
-    except (OSError, ValueError) as e:
+        hints = transcript_hints(directory)  # reads the transcript only; stores nothing
+    except (OSError, ValueError, KeyError, TypeError) as e:
         print(f"Can't read the transcript: {e}", file=sys.stderr)
         return 1
     for label, lines in speakers:
         print(f"{label}{'' if label in known else '  (no voice data)'}")
+        if hint := hints.get(label):
+            print(f"    suggested: {hint.name} (said: {hint.line[:80]})")
         for line in lines:
             print(f"    {line[:100]}")
+    if hints:
+        print("Suggestions are only hints: nothing is renamed until you run `name-speaker`.")
     if not speakers:
         print("No other speakers in this transcript.")
     return 0

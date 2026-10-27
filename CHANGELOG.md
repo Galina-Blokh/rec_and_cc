@@ -34,6 +34,8 @@ All notable changes to RecAndCC are documented here. The format is based on
   menu item (#59).
 - Speaker names that carry over between sessions, from opt-in local voice profiles; name a
   speaker once from the CLI (#62).
+- `recandcc speakers` suggests a name when a speaker introduces themself in their first
+  2 minutes (English, Russian, Hebrew); only a hint, nothing is stored (#1).
 - Hebrew in `transcription.languages`, with right-to-left captions and transcripts (#60).
 - Record only the app that triggered a session with `detection.system_audio_scope = "app"`
   (macOS per-app audio tap) (#63, #65).
