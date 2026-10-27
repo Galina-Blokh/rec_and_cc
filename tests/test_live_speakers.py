@@ -100,7 +100,15 @@ def test_short_segment_inherits_only_after_a_recent_one():
     assert lab.label(vec(0), 0.0, 3.0) == "Speaker 1"
     assert lab.label(None, 3.4, 3.9) == "Speaker 1"  # 0.4 s after the previous one
     assert lab.label(None, 9.0, 9.5) == "Others"  # long gap: quick exchange, unknown voice
-    assert lab.label(None, 9.6, 12.0) == "Speaker 1"  # long segment without embedding: keeps
+    lab.close()
+
+
+def test_long_segment_without_embedding_inherits_only_within_the_gap():
+    lab = SpeakerLabeler(embedder=lambda a: vec(0))
+    assert lab.label(vec(0), 0.0, 3.0) == "Speaker 1"
+    assert lab.label(None, 3.5, 6.0) == "Speaker 1"  # >= 1 s, 0.5 s after the previous one
+    assert lab.label(None, 20.0, 23.0) == "Others"  # >= 1 s, long gap: maybe a new person
+    assert lab.label(None, 23.5, 26.0) == "Others"  # the Others one did not extend the gap
     lab.close()
 
 

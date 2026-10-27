@@ -33,7 +33,7 @@ SIMILARITY = 0.5  # cosine similarity to a centroid at or above which it is the 
 MAX_SPEAKERS = 8  # beyond this a new voice joins the closest speaker
 MIN_AUDIO_S = 1.0  # shorter segments make noisy embeddings (like diarize.MIN_UNIT_S)
 QUEUE_SIZE = 8  # pending embedding requests; more are dropped
-INHERIT_GAP_S = 1.5  # a short segment inherits the previous label only within this gap
+INHERIT_GAP_S = 1.5  # no-embedding segments inherit the previous label only within this gap
 CLOSE_JOIN_S = 0.5
 LOAD_GRACE_S = 1.5  # most a cold model load may extend the request deadlines
 
@@ -228,14 +228,14 @@ class SpeakerLabeler:
         self, embedding: np.ndarray | None, start: float = 0.0, end: float | None = None
     ) -> str:
         """Display label for a segment: "Speaker N", or "Others" until a voice is known.
-        Without an embedding a segment keeps the previous label (most often the same person);
-        a short one (< 1 s, too short to embed) only if the previous segment ended within
-        INHERIT_GAP_S, as in a quick exchange the speaker may well have changed."""
+        Without an embedding (too short, queue full, deadline passed, no model) a segment keeps
+        the previous label only if the previous segment ended within INHERIT_GAP_S; after a
+        longer gap the speaker may well have changed, so it shows "Others"."""
         end = start if end is None else end
         if embedding is not None:
             with contextlib.suppress(ValueError):
                 self._last = f"Speaker {self.clusterer.assign(embedding)}"
-        elif end - start < MIN_AUDIO_S and start - self._last_end > INHERIT_GAP_S:
+        elif start - self._last_end > INHERIT_GAP_S:
             return "Others"
         self._last_end = max(self._last_end, end)
         return self._last or "Others"
