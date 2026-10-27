@@ -14,6 +14,7 @@ The macOS panel and the transcript files use the platform's own bidi support ins
 from __future__ import annotations
 
 import unicodedata
+from collections.abc import Callable
 
 _R, _L, _N, _NEUTRAL = 1, 2, 3, 0  # kinds: RTL letter, LTR letter, number, everything else
 _MIRROR = str.maketrans("()[]{}<>«»", ")(][}{><»«")
@@ -97,3 +98,43 @@ def visual_rtl(text: str) -> str:
     return "".join(
         c.translate(_MIRROR) if lv == 1 else c for c, lv in zip(chars, levels, strict=True)
     )
+
+
+def wrap_logical(text: str, max_width: float, measure: Callable[[str], float] = len) -> list[str]:
+    """Split logical ``text`` into lines that each measure at most ``max_width``.
+
+    Breaks only at whitespace, so numbers and English words stay whole; a single word wider
+    than the limit is hard-split by characters as a last resort. ``measure`` is e.g. Tk's
+    ``font.measure``; the default counts characters. Runs of whitespace collapse to one space
+    (captions are single-spaced, see ``clean_text``); an LRM/RLM glued to a word stays with it
+    and ``visual_rtl`` drops it. A hard split never separates a combining mark (nikud) from its
+    base letter. Wrap *before* ``visual_rtl``: reordering a long line first and letting the
+    widget wrap it puts the logical end on the first line.
+    """
+    lines: list[str] = []
+    cur = ""
+    for word in text.split():
+        cand = f"{cur} {word}" if cur else word
+        if measure(cand) <= max_width:
+            cur = cand
+            continue
+        if cur:
+            lines.append(cur)
+            cur = ""
+        while measure(word) > max_width and len(word) > 1:
+            lo, hi = 1, len(word) - 1  # largest prefix that fits, by bisection
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if measure(word[:mid]) <= max_width:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            k = lo
+            while k < len(word) and unicodedata.combining(word[k]):
+                k += 1  # keep marks with their base (may overshoot by the mark only)
+            lines.append(word[:k])
+            word = word[k:]
+        cur = word
+    if cur or not lines:
+        lines.append(cur)
+    return lines
