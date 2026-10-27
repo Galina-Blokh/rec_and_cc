@@ -123,12 +123,33 @@ def _controller():
     return ctrl
 
 
-def test_controller_export_posts_a_notice(session, monkeypatch):
-    monkeypatch.setattr(export, "export_session", lambda f, fmt, sk: [f / "transcript.docx"])
+@pytest.mark.parametrize("fmt", ["docx", "pdf", "both"])
+def test_controller_export_posts_a_notice(session, monkeypatch, fmt):
+    seen = []
+
+    def fake(folder, f, skipped):
+        seen.append(f)
+        return [folder / "transcript.docx"]
+
+    monkeypatch.setattr(export, "export_session", fake)
     ctrl = _controller()
-    ctrl.export_async(session / "transcript.md")
+    ctrl.export_async(session / "transcript.md", fmt)
     kind, title, msg = ctrl.events.get(timeout=10)
     assert (kind, title) == ("notice", "Export") and msg.startswith("Saved transcript.docx")
+    assert seen == [fmt]
+
+
+def test_controller_releases_the_lock_when_the_thread_cannot_start(session, monkeypatch):
+    import threading
+
+    def no_start(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", no_start)
+    ctrl = _controller()
+    with pytest.raises(RuntimeError):
+        ctrl.export_async(session / "transcript.md")
+    assert ctrl._export_lock.acquire(blocking=False)
 
 
 def test_controller_export_logs_only_the_error_type(session, monkeypatch, caplog):
@@ -257,3 +278,25 @@ def test_replace_that_never_succeeds_is_an_export_error(session, monkeypatch):
     with pytest.raises(export.ExportError):
         export.export_docx(session)
     assert not list(session.glob(".*.tmp"))
+
+
+def test_latest_finished_skips_live_sessions(tmp_path):
+    from recandcc.ui.common import latest_finished
+
+    def sess(name, done):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "transcript.md").write_text("x")
+        if done:
+            (d / "transcript.json").write_text("{}")
+        return d / "transcript.md"
+
+    live, old, older = sess("live", False), sess("old", True), sess("older", True)
+    assert latest_finished([live, old, older]) == old
+    assert latest_finished([live]) is None and latest_finished([]) is None
+
+
+def test_controller_export_of_nothing_finished_posts_a_notice(tmp_path):
+    ctrl = _controller()
+    ctrl.export_async([])
+    assert ctrl.events.get(timeout=10) == ("notice", "Export", "No finished transcripts yet")

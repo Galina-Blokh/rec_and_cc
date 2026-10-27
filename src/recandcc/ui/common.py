@@ -128,6 +128,12 @@ def recent_transcripts(output_dir: Path, n: int = RECENT_COUNT) -> list[Path]:
         return []
 
 
+def latest_finished(recent: list[Path]) -> Path | None:
+    """The first of ``recent`` (newest first) whose session has a transcript.json: a live or
+    still-transcribing session has only transcript.md."""
+    return next((p for p in recent if (p.parent / "transcript.json").is_file()), None)
+
+
 def transcript_label(path: Path) -> str:
     """'2026-10-26 14:03 zoom-us' from .../2026-10-26/140312_zoom-us/transcript.md"""
     day, sess = path.parent.parent.name, path.parent.name
@@ -414,9 +420,11 @@ class Controller:
 
         threading.Thread(target=run, daemon=True, name="search").start()
 
-    def export_async(self, transcript: Path) -> None:
+    def export_async(self, transcript: Path | list[Path], fmt: str = "both") -> None:
         """Export a session's transcript to DOCX + PDF off the UI thread; posts a ``notice``
-        (never the transcript text). One export at a time: a second click is ignored."""
+        (never the transcript text). One export at a time: a second click is ignored. A list
+        means "the newest of these that is finished", resolved on the worker (no file access on
+        the UI thread)."""
         if not self._export_lock.acquire(blocking=False):
             return
 
@@ -426,7 +434,12 @@ class Controller:
 
                 skipped: list[str] = []
                 try:
-                    paths = export_session(transcript.parent, "both", skipped)
+                    target = (
+                        latest_finished(transcript) if isinstance(transcript, list) else transcript
+                    )
+                    if target is None:
+                        raise ExportError("No finished transcripts yet")
+                    paths = export_session(target.parent, fmt, skipped)
                     msg = "Saved " + " and ".join(p.name for p in paths)
                     if skipped:
                         msg += f". {skipped[0]}"

@@ -26,13 +26,13 @@ log = logging.getLogger(__name__)
 
 DOCX_NAME, PDF_NAME = "transcript.docx", "transcript.pdf"
 FORMATS = ("docx", "pdf")
-_FONT_CANDIDATES = (
-    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+_FONT_CANDIDATES = (  # smaller faces first: Arial Unicode is ~22 MB
     "/System/Library/Fonts/Supplemental/Arial.ttf",
-    "/Library/Fonts/Arial Unicode.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
 )
 
 
