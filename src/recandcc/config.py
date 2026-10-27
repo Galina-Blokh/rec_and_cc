@@ -174,14 +174,18 @@ class TranscriptionConfig:
     allow_unpinned_models: bool = False
 
 
-DEFAULT_SUMMARY_MODEL = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+# Apache-2.0 (commercial use allowed), ~0.9 GB download.
+DEFAULT_SUMMARY_MODEL = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+# The previous default, still pinned and selectable: a larger model (~1.7 GB), but under the
+# Qwen Research licence, which allows non-commercial use only.
+QWEN_RESEARCH_SUMMARY_MODEL = "mlx-community/Qwen2.5-3B-Instruct-4bit"
 
 
 @dataclass
 class SummaryConfig:
     # Write summary.md (short summary + action items) after each final transcript, with a
-    # local LLM (mlx-lm, Apple silicon only). Off by default: it costs ~2 GB of RAM and a
-    # one-time ~1.7 GB model download.
+    # local LLM (mlx-lm, Apple silicon only). Off by default: it costs an estimated
+    # ~1-1.5 GB of RAM and a one-time ~0.9 GB model download.
     enabled: bool = False
     model: str = DEFAULT_SUMMARY_MODEL  # pinned in transcribe/revisions.py, or a local path
     max_tokens: int = 400  # longest generated answer (summary, action list, chunk notes)

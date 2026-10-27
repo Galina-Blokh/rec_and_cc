@@ -16,7 +16,12 @@ from pathlib import Path
 import pytest
 
 from recandcc import cli
-from recandcc.config import DEFAULT_SUMMARY_MODEL, Config, load_config
+from recandcc.config import (
+    DEFAULT_SUMMARY_MODEL,
+    QWEN_RESEARCH_SUMMARY_MODEL,
+    Config,
+    load_config,
+)
 from recandcc.models import Segment, SessionInfo, TriggerKind
 from recandcc.transcribe import gpu, summary
 from recandcc.transcribe.output import PDI, RLI, write_outputs
@@ -135,7 +140,7 @@ def test_summary_md_next_to_the_transcript(tmp_path):
     assert path == d / "summary.md"
     text = path.read_text("utf-8")
     assert text.startswith("# Краткое содержание\n\nWe agreed on the plan.\n\n## Задачи\n\nНет.")
-    assert "Qwen2.5-3B-Instruct-4bit" in text
+    assert "Qwen2.5-1.5B-Instruct-4bit" in text
 
 
 def test_hebrew_summary_is_right_to_left(tmp_path):
@@ -379,7 +384,26 @@ def test_first_download_posts_a_notice(tmp_path, monkeypatch):
     q = summary.SummaryQueue(Config(), notify=lambda *n: notices.append(n))
     q.submit(make_session(tmp_path, [seg("hello")]))
     q.join()
-    assert notices[0] == ("Summary model", "Downloading the summary model (~1.7 GB, once)")
+    assert notices[0] == ("Summary model", "Downloading the summary model (~0.9 GB, once)")
+
+
+@pytest.mark.parametrize(
+    ("model", "notice"),
+    [
+        (QWEN_RESEARCH_SUMMARY_MODEL, "Downloading the summary model (~1.7 GB, once)"),
+        ("me/custom-llm", "Downloading the summary model (once)"),
+    ],
+)
+def test_download_notice_names_the_chosen_models_size(model, notice):
+    assert summary.download_notice(model) == notice
+
+
+def test_default_summary_model_is_apache_and_the_3b_stays_pinned():
+    # Apache-2.0 default (#4); the non-commercial Qwen Research 3B is still selectable offline
+    assert DEFAULT_SUMMARY_MODEL == "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+    assert not Config().summary.enabled  # still opt-in
+    assert gpu.revision(DEFAULT_SUMMARY_MODEL) == "8b403126fc14f14cfc99bb4cfa72ecbc129ea677"
+    assert gpu.revision(QWEN_RESEARCH_SUMMARY_MODEL) == "4f83f8f146fdf28b512a06562b671d7af4fab457"
 
 
 def test_cache_miss_calls_the_download_hook(monkeypatch):

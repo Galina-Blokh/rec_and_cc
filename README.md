@@ -248,9 +248,12 @@ enabled = false              # true = summary.md with action items after each me
 With `[summary] enabled = true` (Apple silicon), each finished transcript also gets a
 `summary.md` in its folder: a few sentences about the meeting and an **Action items** list
 (who does what, by when), written in the meeting's main language (English, Russian or
-Hebrew). A small local model (Qwen2.5 3B, 4-bit, ~1.7 GB) does it in the background after
-the transcript is final, and waits while you are recording, so captions are never slowed; it is downloaded once, pinned to an exact version, and nothing is
-sent anywhere. It is a draft: check names and dates against the transcript. On Windows, or
+Hebrew). A small local model (Qwen2.5 1.5B Instruct, 4-bit, ~0.9 GB, Apache-2.0) does it
+in the background after the transcript is final, and waits while you are recording, so
+captions are never slowed; it is downloaded once, pinned to an exact version, and nothing is
+sent anywhere. It is a draft: check names and dates against the transcript. The larger
+`model = "mlx-community/Qwen2.5-3B-Instruct-4bit"` (~1.7 GB, also pinned) is under the Qwen
+Research licence: non-commercial use only. On Windows, or
 offline before the model is downloaded, the summary is skipped with a notice. It waits for
 the speaker labels (a slow diarization delays it), a summary cut short by quitting is redone
 at the next start (a `.summary-pending` marker in the session folder), and after
@@ -315,7 +318,7 @@ models load from disk without contacting anything (tested with all network acces
 | Each session's speaker voices (only with `speaker_names = true`) | `…/RecAndCC/voices/sessions/` | `%LOCALAPPDATA%\RecAndCC\voices\sessions\` |
 | Speaker-diarization model | `~/Library/Caches/RecAndCC/models/` | `%LOCALAPPDATA%\RecAndCC\Cache\models\` |
 | Whisper models (shared Hugging Face cache) | `~/.cache/huggingface/hub/models--*whisper*` | `%USERPROFILE%\.cache\huggingface\hub\` |
-| Summary model (only with summaries on) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-3B-Instruct-4bit` | not used |
+| Summary model (only with summaries on) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-*-Instruct-4bit` | not used |
 | Launch at login | `~/Library/LaunchAgents/com.gblokh.recandcc.plist` | registry `HKCU\…\CurrentVersion\Run\RecAndCC` |
 
 The folders RecAndCC creates for recordings (the transcripts folder, each day and each

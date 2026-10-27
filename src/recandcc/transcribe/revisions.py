@@ -46,7 +46,11 @@ HF_REVISIONS: dict[str, str] = {
     # ... and their MLX conversions
     "mlx-community/ivrit-ai-whisper-large-v3-turbo-mlx": "53ad8c6cd8b32eb0303f093a404ae13c1b1d567f",
     "mlx-community/ivrit-ai-whisper-large-v3-mlx": "097c0cb2bb4288a3c82f6d524a39c4ce09afa187",
-    # Local summary LLM (mlx-lm, Apple silicon), see summary.py
+    # Local summary LLMs (mlx-lm, Apple silicon), see summary.py. The default, Apache-2.0
+    # (model.safetensors sha256 0979f33d1bc58afcf696d13f57977644e7b11a6f0eec3e631d8e9463d18c0717):
+    "mlx-community/Qwen2.5-1.5B-Instruct-4bit": "8b403126fc14f14cfc99bb4cfa72ecbc129ea677",
+    # ... and the previous default, Qwen Research licence (non-commercial use only)
+    # (model.safetensors sha256 f212cf6fb9923281a09c135e05d43a052ee5ef7121f5b1dc0b0fb2de80f97cfd):
     "mlx-community/Qwen2.5-3B-Instruct-4bit": "4f83f8f146fdf28b512a06562b671d7af4fab457",
 }
 
