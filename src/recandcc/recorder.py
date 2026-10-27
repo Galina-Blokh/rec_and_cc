@@ -39,11 +39,8 @@ PRIVATE_DIR_MODE = 0o700  # owner-only on POSIX; Windows gets an owner-only DACL
 _IS_WINDOWS = sys.platform == "win32"  # module flag so tests can fake Windows safely
 _ERROR_ALREADY_EXISTS = 183
 _FILE_PERSISTENT_ACLS = 0x8  # GetVolumeInformationW file-system flag
-_warned: set[str] = set()  # privacy warnings already logged (once per process / volume)
-_acl_volumes: dict[str, bool] = {}  # volume root -> persists ACLs
-
-
-_privacy_notice = {"pending": False, "sent": False}  # one user-visible notice per process
+_warned: set[str] = set()  # "<reason>:<volume>" keys already logged
+_noticed: set[str] = set()  # "<reason>:<volume>" keys already shown to the user
 PRIVACY_NOTICE = (
     "Recordings may be readable by other users",
     "RecAndCC couldn't make its recording folder private (no owner-only access list on this "
@@ -51,21 +48,12 @@ PRIVACY_NOTICE = (
 )
 
 
-def _warn_not_private(key: str, msg: str, *args: object) -> None:
-    """Log a folder-not-private warning once per key and flag one notice for the UI."""
+def _not_private(key: str, msg: str, *args: object) -> str:
+    """Log a folder-not-private warning once per ``key`` and return ``key``."""
     if key not in _warned:
         _warned.add(key)
         log.warning(msg, *args)
-    if not _privacy_notice["sent"]:
-        _privacy_notice["pending"] = True
-
-
-def take_privacy_notice() -> tuple[str, str] | None:
-    """``(title, message)`` once per process after a folder couldn't be made private."""
-    if _privacy_notice["pending"] and not _privacy_notice["sent"]:
-        _privacy_notice.update(pending=False, sent=True)
-        return PRIVACY_NOTICE
-    return None
+    return key
 
 
 @cache
@@ -170,11 +158,13 @@ def _win_mkdir_owner_only(path: Path) -> None:
         k32.LocalFree(sd)
 
 
-def _volume_root_and_acl_support(path: Path) -> tuple[str, bool]:
-    """``(volume root, persists ACLs)`` for an existing ``path``, cached per volume.
+def _volume_acl_support(path: Path) -> tuple[str, bool]:
+    """``(volume key, persists ACLs)`` for an existing ``path``; key = root + serial number.
 
     FAT/exFAT and some shares accept ``CreateDirectoryW`` with a security descriptor but
-    silently drop it; their volumes lack ``FILE_PERSISTENT_ACLS``. Two in-process API calls.
+    silently drop it; their volumes lack ``FILE_PERSISTENT_ACLS``. Two in-process API calls,
+    made every time (no cache): a USB stick swapped under the same drive letter has another
+    serial number, so it gets its own key.
     """
     if sys.platform != "win32":  # also narrows the Win32-only ctypes names for pyright
         raise OSError("Windows only")
@@ -197,74 +187,73 @@ def _volume_root_and_acl_support(path: Path) -> tuple[str, bool]:
     if not k32.GetVolumePathNameW(str(path), buf, len(buf)):
         raise ctypes.WinError(ctypes.get_last_error())
     root = buf.value
-    if root not in _acl_volumes:
-        flags = wintypes.DWORD()
-        if not k32.GetVolumeInformationW(root, None, 0, None, None, ctypes.byref(flags), None, 0):
-            raise ctypes.WinError(ctypes.get_last_error())
-        _acl_volumes[root] = bool(flags.value & _FILE_PERSISTENT_ACLS)
-    return root, _acl_volumes[root]
+    serial, flags = wintypes.DWORD(), wintypes.DWORD()
+    if not k32.GetVolumeInformationW(
+        root, None, 0, ctypes.byref(serial), None, ctypes.byref(flags), None, 0
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return f"{root} ({serial.value:08X})", bool(flags.value & _FILE_PERSISTENT_ACLS)
 
 
-def _mkdir_private(path: Path) -> None:
+def _mkdir_private(path: Path) -> str | None:
     """Create one folder (parent must exist), private to the current user from the start.
 
     POSIX: ``0700`` (chmod-ed too: ``mkdir(mode=...)`` is filtered by the umask). Windows: an
     owner-only DACL set at creation. If Windows refuses the DACL (e.g. some network shares),
-    this falls back to a plain ``mkdir(mode=0o700)``; if the volume doesn't keep ACLs at all
-    (FAT/exFAT), the folder is not private. Either way recording goes on and a warning is
-    logged once (per process / per volume). Raises ``FileExistsError`` if something is
-    already at ``path``.
+    this falls back to a plain ``mkdir(mode=0o700)``; if the volume doesn't keep ACLs (FAT/
+    exFAT, or it can't tell), the folder is not private. Either way recording goes on, a
+    warning is logged once per (reason, volume), and that key is returned (None = private).
+    Raises ``FileExistsError`` if something is already at ``path``.
     """
-    if _IS_WINDOWS:
-        try:
-            _win_mkdir_owner_only(path)
-        except FileExistsError:
-            raise  # created concurrently / something in the way: not a privacy problem
-        except Exception as e:  # keep recording, just warn
-            path.mkdir(mode=PRIVATE_DIR_MODE)  # FileExistsError here burns no warning
-            _warn_not_private(
-                "acl-fallback",
-                "could not create %s with an owner-only ACL (%s); recordings may be readable "
-                "by other users",
-                path,
-                e,
-            )
-            return
-        try:
-            root, persists = _volume_root_and_acl_support(path)
-        except Exception as e:  # can't tell: assume the worst
-            root, persists = path.anchor or str(path), False
-            log.debug("could not check ACL support for %s: %s", path, e)
-        if not persists:
-            _warn_not_private(
-                f"no-acl:{root}",
-                "%s may not keep file permissions (e.g. FAT/exFAT): recordings in %s may be "
-                "readable by other users",
-                root,
-                path,
-            )
-        return
-    path.mkdir(mode=PRIVATE_DIR_MODE)
-    path.chmod(PRIVATE_DIR_MODE)
+    if not _IS_WINDOWS:
+        path.mkdir(mode=PRIVATE_DIR_MODE)
+        path.chmod(PRIVATE_DIR_MODE)
+        return None
+    try:
+        _win_mkdir_owner_only(path)
+    except FileExistsError:
+        raise  # created concurrently / something in the way: not a privacy problem
+    except Exception as e:  # keep recording, just warn
+        path.mkdir(mode=PRIVATE_DIR_MODE)  # FileExistsError here reports nothing
+        return _not_private(
+            f"acl-fallback:{path.anchor}",
+            "could not create %s with an owner-only ACL (%s); recordings may be readable "
+            "by other users",
+            path,
+            e,
+        )
+    try:
+        volume, persists = _volume_acl_support(path)
+    except Exception as e:  # can't tell: assume the worst
+        volume, persists = path.anchor or str(path), False
+        log.debug("could not check ACL support for %s: %s", path, e)
+    if persists:
+        return None
+    return _not_private(
+        f"no-acl:{volume}",
+        "%s may not keep file permissions (e.g. FAT/exFAT): recordings in %s may be "
+        "readable by other users",
+        volume,
+        path,
+    )
 
 
-def make_private_dir(path: Path) -> None:
+def make_private_dir(path: Path) -> str | None:
     """Create ``path`` (and missing parents) with owner-only permissions, if it doesn't exist.
 
     Each folder this creates is made private (``_mkdir_private``); existing folders are left
-    untouched.
+    untouched. Returns a not-private key if a folder it created isn't private, else None.
     """
     if path.is_dir():
-        return
+        return None
     if path.parent == path:  # a missing drive / UNC share root: nothing left to create
         raise FileNotFoundError(f"{path} does not exist")
-    if not path.parent.is_dir():
-        make_private_dir(path.parent)
+    issue = make_private_dir(path.parent) if not path.parent.is_dir() else None
     try:
-        _mkdir_private(path)
+        return _mkdir_private(path) or issue
     except FileExistsError:
         if path.is_dir():
-            return  # created concurrently
+            return issue  # created concurrently
         raise  # a file (or dangling symlink) is in the way
 
 
@@ -430,6 +419,7 @@ class Recorder:
         self._op_lock = threading.Lock()  # serialises start/stop
         self._lvl_lock = threading.Lock()  # guards _last_sound
         self._session: SessionInfo | None = None
+        self._privacy_issue: str | None = None  # last start's not-private key (privacy_notice)
         self._writers: list[_TrackWriter] = []
         self._started_mono = 0.0
         self._last_sound = 0.0
@@ -469,8 +459,13 @@ class Recorder:
         return max(0.0, self.clock() - last) if self.is_recording else 0.0
 
     def privacy_notice(self) -> tuple[str, str] | None:
-        """``(title, message)`` once per process if a session folder couldn't be made private."""
-        return take_privacy_notice()
+        """``(title, message)`` if the last successful start created a folder that isn't
+        private, once per (reason, volume) per process; cleared when read."""
+        key, self._privacy_issue = self._privacy_issue, None
+        if key is None or key in _noticed:
+            return None
+        _noticed.add(key)
+        return PRIVACY_NOTICE
 
     def silent_tracks(self) -> list[Track]:
         """Tracks of the last stopped session that were digital silence the whole time
@@ -492,7 +487,9 @@ class Recorder:
         return self.clock() - self._started_mono if self.is_recording else 0.0
 
     # ---- lifecycle ----------------------------------------------------------
-    def _make_dir(self, now: datetime, app: str | None, kind: TriggerKind) -> tuple[str, Path]:
+    def _make_dir(
+        self, now: datetime, app: str | None, kind: TriggerKind
+    ) -> tuple[str, Path, str | None]:
         day = self.cfg.output_dir / now.strftime("%Y-%m-%d")
         slug = slugify(app, default=str(kind))
         base = f"{now.strftime('%H%M%S')}_{slug}"
@@ -503,10 +500,10 @@ class Recorder:
             n += 1
         # Recordings and transcripts are private: owner-only folders (0700 / owner-only DACL)
         # at every level the recorder creates. An existing output folder keeps its permissions.
-        for p in (self.cfg.output_dir, day):
-            make_private_dir(p)
-        _mkdir_private(d)
-        return f"{now.strftime('%Y-%m-%d')}_{d.name}", d
+        issues = [make_private_dir(p) for p in (self.cfg.output_dir, day)]
+        issues.append(_mkdir_private(d))
+        issue = next((i for i in issues if i), None)
+        return f"{now.strftime('%Y-%m-%d')}_{d.name}", d, issue
 
     def _per_app(self, target: AppTarget | None) -> AppTarget | None:
         """``target`` if the Others track should record only that app, else None."""
@@ -541,7 +538,8 @@ class Recorder:
             if self._session is not None:
                 raise RuntimeError("already recording")
             now = datetime.now().astimezone()
-            sid, directory = self._make_dir(now, app, kind)
+            self._privacy_issue = None
+            sid, directory, privacy_issue = self._make_dir(now, app, kind)
             session = SessionInfo(
                 id=sid, directory=directory, started_at=now, trigger_kind=kind, trigger_app=app
             )
@@ -573,6 +571,7 @@ class Recorder:
             if not writers:
                 shutil.rmtree(directory, ignore_errors=True)
                 raise RuntimeError("no audio source could be started")
+            self._privacy_issue = privacy_issue  # reported by privacy_notice()
             self._started_mono = self.clock()
             with self._lvl_lock:
                 self._last_sound = self._started_mono
