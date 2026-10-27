@@ -25,6 +25,7 @@ speaker turns come from the real diarizer. Reported per language and overall:
 - resources: wall time and peak resident memory of the whole run (plus MLX's own peak GPU
   memory on the MLX path).
 
+``--languages en,ru,he`` sets the languages to detect among, for this run only.
 ``--backend mlx|cpu`` forces the MLX GPU path or faster-whisper on the CPU for this run only
 (the config on disk is not changed). ``--hypotheses DIR`` scores transcripts made by another
 tool (``<clip-id>.json`` segments or ``<clip-id>.txt``) instead of running the pipeline.
@@ -548,11 +549,19 @@ def main(argv: list[str] | None = None) -> int:
         default="auto",
         help="force MLX on the GPU or faster-whisper on the CPU (default: from config)",
     )
+    p.add_argument(
+        "--languages",
+        help="comma-separated Whisper codes to detect among, e.g. en,ru,he (default: from config)",
+    )
     p.add_argument("--hypotheses", type=Path, help="score <clip-id>.json/.txt from another tool")
     p.add_argument("--json", type=Path, default=Path("eval-results.json"))
     args = p.parse_args(argv)
-    if args.hypotheses and (args.model or args.live or args.backend != "auto"):
-        p.error("--hypotheses scores existing transcripts: no --model, --backend or --live")
+    if args.hypotheses and (
+        args.model or args.live or args.languages is not None or args.backend != "auto"
+    ):
+        p.error(
+            "--hypotheses scores existing transcripts: no --model, --backend, --languages or --live"
+        )
 
     t_start = time.monotonic()
     clips = load_manifest(args.root.expanduser())
@@ -568,7 +577,7 @@ def main(argv: list[str] | None = None) -> int:
         }
         return write_report(args.json, report, results, t_start)
 
-    from recandcc.config import load_config
+    from recandcc.config import WHISPER_LANGUAGES, language_code, load_config, normalize_languages
     from recandcc.transcribe import Transcriber
     from recandcc.transcribe.diarize import Diarizer
     from recandcc.transcribe.gpu import gpu_available
@@ -578,6 +587,12 @@ def main(argv: list[str] | None = None) -> int:
     cfg.keep_audio = True  # only a temporary copy; the clip itself is never touched
     if args.model:
         cfg.model = args.model
+    if args.languages is not None:  # [] would silently mean "any language"
+        codes = [c for c in args.languages.split(",") if c.strip()]
+        bad = [c.strip() for c in codes if language_code(c) not in WHISPER_LANGUAGES]
+        if not codes or bad:
+            p.error(f"--languages: not Whisper language codes: {', '.join(bad) or 'none given'}")
+        cfg.languages = normalize_languages(codes)
     if args.backend == "mlx":
         if not gpu_available():
             p.error("--backend mlx needs Apple silicon with mlx-whisper installed")
@@ -600,6 +615,7 @@ def main(argv: list[str] | None = None) -> int:
     report = {
         "engine": f"model {cfg.model}",
         "model": cfg.model,
+        "languages": cfg.languages,
         "backend": "mlx" if gpu else "faster-whisper" + ("" if dev == "auto" else f" ({dev})"),
         "gpu_peak_memory_mb": mlx_peak_mb() if gpu else None,
     }
