@@ -40,6 +40,8 @@ HEAVY = ("mlx", "mlx_whisper", "faster_whisper", "ctranslate2", "onnxruntime", "
 
 
 def build() -> Path:
+    if WORK.is_symlink():
+        raise SystemExit(f"refusing to delete symlink {WORK}")
     shutil.rmtree(WORK, ignore_errors=True)
     WORK.mkdir(parents=True)
     entry = WORK / "entry.py"

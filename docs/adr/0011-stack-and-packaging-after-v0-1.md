@@ -160,7 +160,8 @@ already cached and the network blocked.
    here: signing, notarization, `/Applications` run, TCC survival, idle memory, the
    standalone-Python option, the superseding ADR. One-folder build with `--collect-all` for
    mlx, mlx_whisper, faster_whisper, ctranslate2, onnxruntime, rumps and numpy; no model
-   weights inside (none over 20 MB except libraries; models load from the user cache as today).
+   weights inside (every file over 20 MB is the launcher, a shared library or `mlx.metallib`;
+   models load from the user cache as today).
 
    | Measure | PyInstaller | `uv run` (.venv) |
    |---|---|---|
@@ -175,7 +176,8 @@ already cached and the network blocked.
    heavy stack (lazy imports), so the import row is the better start-up proxy. The 29.7 s
    first run is one sample of fresh, unsigned binaries (page cache and macOS first-run
    checks); a real cold launch needs `sudo purge` and a signed bundle, so it is still open.
-   The 634 MiB is inside the 0.6-1.3 GB estimate. `transformers`/`av` ship although the
+   The two "first run" figures are not comparable: `uv run` hit a warm venv and `--help`
+   skips the heavy stack, while the PyInstaller numbers come from a freshly built bundle. The 634 MiB is inside the 0.6-1.3 GB estimate. `transformers`/`av` ship although the
    MLX path should not need them (follow-up 4 territory). The bundle used the
    same `uv.lock` environment, so any missed dynamic library would show at run time: only
    imports were exercised, not a transcription.
