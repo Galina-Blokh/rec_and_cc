@@ -343,3 +343,77 @@ at 0.19-0.25 (false alarm in the pauses plus window-boundary confusion). Revisit
 consented set. The options in order: a minimum cluster size from real meetings, so outliers
 don't count as speakers; re-assigning outlier windows after the cut; a stronger embedding
 model.
+
+## Interim synthetic voice-profile recall
+
+For issue #1 ("A person named once is recognized by name in later sessions (≥ 90% of their
+segments on a test set)"), story US-21. **Synthetic TTS (macOS `say`), not the consented set:
+interim, overstates real-world recall.** Real consented recordings of the same people across
+calls (other microphones, rooms, codecs, moods) are still needed to close the criterion.
+
+Method (`scripts/voice_recall_eval.py`, slow test `tests/test_voice_recall.py`): four voices
+talk in session 1, Samantha ("Anna"), Milena (Russian, "Boris"), Daniel ("Carl") and Rishi
+("Dev"), three turns each. Each is named once with `voices.name_speaker` (what
+`recandcc name-speaker` runs). Three later sessions (10 turns each) use sentences that were
+not used before, other speaker mixes and orders, and two voices that were never named, Karen
+and Moira. Each named voice is in two later sessions and so is each unnamed one. Every session's
+`Others` track goes through the real `Diarizer` (`diarize_overlap` off, the default) and the
+transcriber's own labelling (`match_profiles` against the stored profiles,
+`MATCH_MARGIN` 0.1; `MATCH_SIMILARITY` 0.6 before this measurement, 0.75 after). Transcript segments are the true sentences, one per
+turn, instead of Whisper's, so only diarization and matching are measured. 2026-10-27, Apple
+M5 Max, offline, cached `3dspeaker_speech_campplus_sv_zh_en_16k` embedding model. Everything
+(audio, transcripts, profiles) goes to a temp dir. One data set (4 named voices with 21 segments, 2 strangers with 9),
+run twice with identical numbers.
+
+Before and after raising `MATCH_SIMILARITY` from 0.6 to 0.75 (the margin is unchanged):
+
+| Voice | Named | Right name, 0.6 | Right name, 0.75 | Seconds (both) |
+|---|---|---|---|---|
+| Samantha | Anna | 5 / 5 | 5 / 5 | 19.1 / 19.1 |
+| Milena (ru) | Boris | 5 / 5 | 5 / 5 | 15.7 / 15.7 |
+| Daniel | Carl | 5 / 5 | 5 / 5 | 19.4 / 19.4 |
+| Rishi | Dev | 6 / 6 | 6 / 6 | 17.7 / 17.7 |
+| **Named voices** | | **21 / 21 (100%)** | **21 / 21 (100%)** | **71.9 / 71.9 (100%)** |
+
+| Unnamed voice | Wrongly named, 0.6 | Seconds | Wrongly named, 0.75 | Seconds |
+|---|---|---|---|---|
+| Karen | 5 / 5 (all "Anna") | 10.0 / 10.0 | 3 / 5 ("Anna", merged cluster) | 3.6 / 10.0 |
+| Moira | 0 / 4 (stays `Speaker 1`) | 0.0 / 10.6 | 0 / 4 | 0.0 / 10.6 |
+| **Unnamed voices** | **5 / 9 (56%)** | **10.0 / 20.6 (49%)** | **3 / 9 (33%)** | **3.6 / 20.6 (17%)** |
+
+What the clusters scored against the profiles (cosine of centroid to profile, all later
+sessions): the named voice's own cluster 0.92-0.96, with the next profile at least 0.36
+behind; clusters of the never-named voices 0.51-0.68 (Karen 0.68 to Anna, Moira 0.56 and 0.51
+to Boris). Sweeping `MATCH_SIMILARITY` over the same run: 0.6 and 0.65 give 5 / 9 false names;
+0.7 to 0.9 all give 21 / 21 and 3 / 9; 0.95 drops recall to 6 / 21.
+(Same small data set as above.)
+
+Reading it:
+
+- **Chosen rule: cosine ≥ 0.75 and 0.1 ahead of the next profile.** 0.75 sits in the lower
+  part of the clean plateau (0.7-0.9) and 0.07 above the highest stranger. Tuned and checked
+  on the same small synthetic set, so it is not validated: a real microphone, codec or room
+  scores lower than studio TTS, and a real voice may fall below 0.75 and stay `Speaker N`.
+  #1's real-audio criterion stays open until the consented set (#13). The other
+  ideas did not separate the cases on this data. A larger margin: Karen's was 0.16 and the
+  named voices' at least 0.36, so it would need about 0.2, a looser hold on the stranger than
+  the threshold, which already has a 0.24 gap. A minimum of speech: Karen's cluster had 6.4 s,
+  the named ones 6.7-11 s, so no cut-off divides them. A per-profile threshold from the
+  enrollment spread: every profile here is one session's centroid, and the store keeps no
+  enrollment windows, so it would need a new stored field for no measured gain. Revisit all
+  three with the consented set.
+- The recall criterion is still met on this synthetic set (100% ≥ 90%). The test asserts
+  ≥ 90%.
+- **The 3 remaining false names are not a matching error.** In session 2 (Samantha present)
+  the diarizer put Karen (3.6 s) into Samantha's cluster, which scored 0.92 to Anna and rightly
+  took the name. That is the same Samantha/Karen merge as in "Why two of the six voices
+  merge" above (centroid cosine 0.74, the closest pair by far). No threshold on the cluster
+  can split it; the fix belongs to the clustering. The match that was wrong, Karen's own
+  cluster at 0.68 in session 3, is gone. The test's false-name ceiling is 40% (3 / 9 plus a
+  little margin: one more wrong segment fails it).
+- Small set (21 + 9 segments, one run per configuration), clean studio voices, no overlap and
+  no Whisper segmentation: treat it as a regression check, not the acceptance result.
+
+To regenerate: `uv run python scripts/voice_recall_eval.py` (or
+`uv run pytest -m slow tests/test_voice_recall.py -s`). Both skip when not on macOS, when a
+`say` voice is missing or when the speaker model is not cached. Nothing is downloaded.
