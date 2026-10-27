@@ -358,26 +358,42 @@ def test_queue_shutdown_without_wait_drops_sessions_not_started(tmp_path):
 
 
 def test_queue_submit_racing_shutdown_is_never_stranded(monkeypatch, tmp_path):
-    """shutdown() lands exactly while submit() is enqueueing: the session must still run."""
+    """shutdown() runs exactly while submit() is enqueueing: the session must still run."""
     import queue as queue_mod
 
     from recandcc.transcribe import queue as tq
 
     stopper: list[threading.Thread] = []
+    progressed = threading.Event()  # shutdown() is waiting for the lock, or queued _STOP
     holder = {}
+
+    class SpyLock:
+        def __init__(self):
+            self._lock = threading.Lock()
+
+        def __enter__(self):
+            if stopper and threading.current_thread() is stopper[0]:
+                progressed.set()
+            return self._lock.__enter__()
+
+        def __exit__(self, *exc):
+            return self._lock.__exit__(*exc)
 
     class RacingQueue(queue_mod.Queue):
         def put(self, item, *a, **k):
-            if isinstance(item, tuple) and not stopper:  # the submit, not the stop marker
+            if item is tq._STOP:
+                progressed.set()
+            elif not stopper:  # the submit: let shutdown() run as far as it can first
                 stopper.append(threading.Thread(target=holder["q"].shutdown))
                 stopper[0].start()
-                stopper[0].join(0.3)  # let shutdown() get as far as it can
+                assert progressed.wait(5)
             super().put(item, *a, **k)
 
     # The dispatcher must block on the racing queue from the start.
     monkeypatch.setattr(tq.queue, "Queue", RacingQueue)
     stub, done = StubTranscriber(), []
     q = holder["q"] = TranscriptionQueue(stub, on_done=lambda s, r: done.append(s.id))
+    q._lock = SpyLock()
     q.submit(_s("a", tmp_path))
     stopper[0].join(5)
     q._thread.join(5)
