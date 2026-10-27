@@ -23,7 +23,7 @@ or handle only one language per recording.
 3. **Completely private.** RecAndCC itself never uploads audio or transcripts, and works
    offline once the models are downloaded. (A synced folder is another matter: the default
    `~/Documents/Transcribes` may be uploaded by iCloud "Desktop & Documents" or OneDrive
-   folder backup; the README says so, and the app doesn't warn yet.)
+   folder backup; the app warns when `output_dir` is cloud-synced.)
 4. **Invisible when idle.** An always-on menu-bar / tray app that starts at login, uses
    little CPU while waiting, and needs no attention.
 5. **Portable.** macOS first; Windows supported by design so the owner can switch laptops.

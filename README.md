@@ -254,8 +254,11 @@ The folders RecAndCC creates for recordings (the transcripts folder, each day an
 session) are readable only by you (`0700` on macOS). A transcripts folder that already
 existed keeps its permissions; tighten it with `chmod 700 ~/Documents/Transcribes`.
 `~/Documents` may be synced by iCloud Drive ("Desktop & Documents Folders") on macOS, and
-`Documents` by OneDrive folder backup on Windows; set `output_dir` to a folder outside it if
-recordings must stay on this computer only.
+`Documents` by OneDrive folder backup on Windows. RecAndCC checks `output_dir` locally (no network)
+at startup and whenever it changes: if it lies in iCloud Drive, `~/Library/CloudStorage`
+(OneDrive, Dropbox, Google Drive) or a OneDrive folder, it logs a warning and shows a
+one-time notification, and `recandcc config` prints the same warning. Set `output_dir` to a
+local folder (for example `~/Transcribes`) if recordings must stay on this device only.
 
 ### Retention
 

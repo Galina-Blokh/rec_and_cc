@@ -141,7 +141,8 @@ while I decide.*
   checksum is rejected). A custom repo without a pin is refused unless
   `allow_unpinned_models = true`.
 - **Then** RecAndCC uploads nothing itself. The default output folder may still be synced
-  by iCloud or OneDrive; the README warns, the app doesn't yet (#41).
+  by iCloud or OneDrive; the app detects that locally and warns once (log, notification,
+  `recandcc config`), suggesting a local folder.
 - **Not yet:** no automated test runs a whole session with the network blocked
   (`test_offline.py` and `test_model_pinning.py` cover model loading; #40).
 - **Then** logs contain events, app names and paths, never transcript text or audio.
