@@ -311,6 +311,9 @@ don't have to name them myself, without the app ever asking for more permission 
   and one paragraph per segment with its timestamp.
 - **Given** English, Russian and Hebrew segments, **then** all are readable; Hebrew segments
   are right to left (bidi paragraphs in DOCX, shaped and reordered text in the PDF).
+- **Given** the session folder also has a `summary.md` (US-27), **then** its summary and
+  action items come first in the DOCX and PDF, under their own headings and before a
+  "Transcript" heading (Hebrew right to left); without `summary.md` the files are unchanged.
 - **Then** export needs no network, the files are owner-only and logs never contain the
   transcript text.
 - **Not yet:** the Windows tray entry, custom templates; the PDF needs a system font with
