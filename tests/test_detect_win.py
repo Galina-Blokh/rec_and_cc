@@ -198,13 +198,17 @@ def test_mic_users_packaged_and_classic(fakes, mon):
 
 def test_mic_merges_with_output_and_skips_own_exe(fakes, mon):
     fakes.sessions = [FakeSession(proc("Zoom.exe", 101))]
-    fakes.procs = [types.SimpleNamespace(pid=555, info={"name": "Discord.exe"})]
+    ns = types.SimpleNamespace
+    fakes.procs = [
+        ns(pid=555, info={"name": "Discord.exe", "exe": r"C:\Apps\Discord.exe"}),
+        ns(pid=os.getpid(), info={"name": "python.exe", "exe": OWN_EXE}),
+    ]
     fakes.winreg.tree = mic_tree(
         {},
         {
             "C:#Program Files#Zoom#bin#Zoom.exe": IN_USE,
             "C:#Apps#Discord.exe": IN_USE,
-            OWN_EXE.replace("\\", "#"): IN_USE,  # our own recorder: filtered out
+            OWN_EXE.replace("\\", "#"): IN_USE,  # our own recorder (our pid): filtered out
         },
     )
     assert by_name(mon.snapshot()) == {
@@ -217,21 +221,22 @@ class AccessDenied(Exception):
     """What psutil puts into .info for protected processes when ad_value is not given."""
 
 
-def test_pid_lookup(fakes, mon, monkeypatch):
+def test_mic_owner_lookup(fakes, mon, monkeypatch):
     ns = types.SimpleNamespace
     fakes.procs = [
         ns(pid=1, info={"name": None}),  # protected process (ad_value=None)
         ns(pid=3, info={"name": AccessDenied()}),  # not a str: skipped, walk continues
-        ns(pid=2, info={"name": "ZOOM.EXE"}),
+        ns(pid=2, info={"name": "ZOOM.EXE", "exe": None}),
     ]
-    assert mon._pid_for_exe("zoom.exe") == 2
-    assert mon._pid_for_exe("absent.exe") == 0
+    assert mon._mic_owner("zoom.exe", r"C:\Zoom\Zoom.exe") == 2
+    assert mon._mic_owner("absent.exe", r"C:\absent.exe") == 0  # stale entry: not ours
 
     def boom(attrs, ad_value=None):
         raise RuntimeError("psutil broke")
 
     monkeypatch.setattr(sys.modules["psutil"], "process_iter", boom)
-    assert mon._pid_for_exe("zoom.exe") == 0
+    assert mon._mic_owner("zoom.exe", r"C:\Zoom\Zoom.exe") == 0
+    assert mon._mic_owner("python.exe", OWN_EXE) is None  # can't list: fall back to the path
 
 
 def test_registry_unavailable_still_reports_output(fakes, mon, monkeypatch, caplog):
@@ -286,27 +291,54 @@ def test_close_uninit_error_is_swallowed(fakes, mon):
 
 
 # ------------------------------------------------------------------ our own interpreter
-def test_venv_base_interpreter_counts_as_our_own_mic_use(fakes, monkeypatch):
+VENV, BASE = r"C:\proj\.venv\Scripts\python.exe", r"C:\Python312\python.exe"
+
+
+@pytest.fixture
+def venv(monkeypatch):
     # A uv venv's python.exe is a launcher that runs the base interpreter as a child: that
-    # child opens the mic, so the consent store records the base path, not sys.executable.
-    venv, base = r"C:\proj\.venv\Scripts\python.exe", r"C:\Python312\python.exe"
-    monkeypatch.setattr(sys, "executable", venv)
-    monkeypatch.setattr(sys, "_base_executable", base, raising=False)
-    m = WinActivityMonitor()
-    fakes.winreg.tree = mic_tree(
-        {}, {"C:#PYTHON312#python.exe": IN_USE, venv.replace("\\", "#"): IN_USE}
-    )
-    assert m.snapshot() == []
-
-
-def test_another_python_on_the_mic_never_gets_our_pid(fakes, monkeypatch):
-    monkeypatch.setattr(sys, "executable", OWN_EXE)
-    monkeypatch.setattr(sys, "_base_executable", r"C:\Python312\base\python.exe", raising=False)
+    # child (us) opens the mic, so the consent store records the base path.
+    monkeypatch.setattr(sys, "executable", VENV)
+    monkeypatch.setattr(sys, "_base_executable", BASE, raising=False)
     ns = types.SimpleNamespace
-    fakes.procs = [
-        ns(pid=os.getpid(), info={"name": "python.exe"}),  # ourselves
-        ns(pid=os.getppid(), info={"name": "python.exe"}),  # our venv launcher
-        ns(pid=4242, info={"name": "python.exe"}),
+    return [
+        ns(pid=os.getpid(), info={"name": "python.exe", "exe": BASE}),  # ourselves
+        ns(pid=os.getppid(), info={"name": "python.exe", "exe": VENV}),  # our venv launcher
     ]
+
+
+def test_venv_base_interpreter_counts_as_our_own_mic_use(fakes, venv):
+    fakes.procs = venv
+    fakes.winreg.tree = mic_tree(
+        {}, {BASE.replace("\\", "#"): IN_USE, VENV.replace("\\", "#"): IN_USE}
+    )
+    assert WinActivityMonitor().snapshot() == []
+
+
+def test_a_short_path_or_case_variant_of_our_exe_is_still_ours(fakes, venv):
+    fakes.procs = venv  # no process has that exact path: decided by the name -> our pid
+    fakes.winreg.tree = mic_tree({}, {r"C:#PYTHON~1#PYTHON.EXE": IN_USE})
+    assert WinActivityMonitor().snapshot() == []
+
+
+def test_another_script_on_our_base_interpreter_is_reported(fakes, venv):
+    ns = types.SimpleNamespace
+    fakes.procs = [*venv, ns(pid=4242, info={"name": "python.exe", "exe": BASE})]
+    fakes.winreg.tree = mic_tree({}, {BASE.replace("\\", "#"): IN_USE})
+    assert [p.pid for p in WinActivityMonitor().snapshot()] == [4242]
+
+
+def test_a_parent_that_is_not_our_launcher_is_not_us(fakes, venv):
+    # Started from another python (a terminal's REPL, a script runner): that parent's mic use
+    # is its own.
+    venv[1].info["exe"] = r"C:\Other\python.exe"
+    fakes.procs = venv
+    fakes.winreg.tree = mic_tree({}, {r"C:#Other#python.exe": IN_USE})
+    assert [p.pid for p in WinActivityMonitor().snapshot()] == [os.getppid()]
+
+
+def test_another_python_on_the_mic_never_gets_our_pid(fakes, venv):
+    ns = types.SimpleNamespace
+    fakes.procs = [*venv, ns(pid=4242, info={"name": "python.exe"})]
     fakes.winreg.tree = mic_tree({}, {r"C:#Tools#python.exe": IN_USE})
     assert [p.pid for p in WinActivityMonitor().snapshot()] == [4242]

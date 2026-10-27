@@ -218,7 +218,9 @@ pseudo-app's "last seen" is refreshed while the room talks or a room session rec
 session the user stopped or discarded stays suppressed until the room has been quiet for
 `stop_after_inactive_s`. If the mic can't be opened, the engine retries after 60 s. An idle
 room mic that delivers no frames for 10 s (the device went away) is closed and reopened at
-once; if the new one stalls too, it retries after 60 s. The menu
+once; if the new one stalls too, it retries after 60 s. A reopened mic counts as healthy
+again only once frames arrive 10 s after the open, so a dead device that sends one block
+while it opens still backs off. The menu
 toggle goes through `Controller.set_room_listening`, which explains the always-on mic
 indicator, battery and consent each time it is turned on; the same notice appears at every
 start with room listening on and when a hand edit of `config.toml` turns it on.
