@@ -2,7 +2,7 @@
 energy "VAD", plus one check with the real Silero VAD on speech-like bursts; the pre-roll in
 a real Recorder session; mic-track diarization; the menu toggle. Monitor tests from #58.
 
-Stories: US-22.
+Stories: US-12, US-22.
 """
 
 from __future__ import annotations
@@ -367,16 +367,97 @@ def test_room_session_keeps_the_preroll_and_pads_the_other_track(tmp_path):
 def test_room_sessions_diarize_the_mic_track():
     from pathlib import Path
 
-    from recandcc.transcribe.engine import diarized_track
+    from recandcc.transcribe.engine import diarized_tracks
 
     def session(kind):
         return SessionInfo("s", Path("."), datetime.now(), kind)
 
-    assert diarized_track(session(TriggerKind.ROOM)) == Track.ME
-    assert diarized_track(session(TriggerKind.CALL)) == Track.OTHERS
-    upgraded = session(TriggerKind.CALL)  # a room session a call upgraded: the room is on Me
+    assert diarized_tracks(session(TriggerKind.ROOM)) == (Track.ME,)
+    room = session(TriggerKind.ROOM)
+    room.started_as_room = True  # as the recorder sets it
+    assert diarized_tracks(room) == (Track.ME,)
+    assert diarized_tracks(session(TriggerKind.CALL)) == (Track.OTHERS,)
+    upgraded = session(TriggerKind.CALL)  # the room on Me, the remote call on Others
     upgraded.started_as_room = True
-    assert diarized_track(upgraded) == Track.ME
+    assert diarized_tracks(upgraded) == (Track.ME, Track.OTHERS)
+
+
+class FakeDiarizer:
+    """``Diarizer.submit`` stand-in: the turns for each WAV name, done right away."""
+
+    def __init__(self, turns):
+        self.turns, self.paths = turns, []
+
+    def submit(self, path, timing=None):
+        from concurrent.futures import Future
+
+        self.paths.append(path.name)
+        if timing is not None:
+            timing["elapsed_s"] = 0.5
+        done: Future = Future()
+        done.set_result(self.turns.get(path.name))
+        return done
+
+
+def _diarized_final(tmp_path, kind, started_as_room, turns, speaker_names=False):
+    from recandcc.config import TranscriptionConfig
+    from recandcc.models import Segment
+    from recandcc.transcribe.engine import Transcriber
+
+    for name in ("me.wav", "others.wav"):
+        sf.write(tmp_path / name, silence(1), SR)
+    s = SessionInfo("u1", tmp_path, datetime.now(), kind, started_as_room=started_as_room)
+    s.tracks = {Track.ME: "me.wav", Track.OTHERS: "others.wav"}
+    s.save()
+    t = Transcriber(TranscriptionConfig(model="fake", speaker_names=speaker_names))
+    fake = FakeDiarizer(turns)
+    t._diarizer = fake  # pyright: ignore[reportAttributeAccessIssue]
+    segs = [Segment(1, 4, "a", "Me", "en"), Segment(6, 9, "b", "Me", "en")]
+    segs += [Segment(2, 3, "c", "Others", "en"), Segment(11, 14, "d", "Others", "en")]
+    out = [x.speaker for x in t.write_final(s, segs, 15.0)]
+    return out, fake.paths, s
+
+
+def test_upgraded_room_session_diarizes_both_tracks_with_distinct_labels(tmp_path):
+    from recandcc.transcribe.diarize import Turn
+
+    two = [Turn(0, 5, 0), Turn(5, 10, 1)]
+    turns = {"me.wav": two, "others.wav": [Turn(0, 5, 0), Turn(10, 15, 1)]}
+    out, paths, s = _diarized_final(tmp_path, TriggerKind.CALL, True, turns)
+    assert sorted(paths) == ["me.wav", "others.wav"]
+    # the room on the mic first, then the call: numbers never collide between the tracks
+    assert out == ["Speaker 1", "Speaker 2", "Speaker 3", "Speaker 4"]
+    assert s.metrics["diarization"]["elapsed_s"] == 1.0  # both runs
+
+
+def test_plain_call_and_plain_room_diarize_one_track(tmp_path):
+    from recandcc.transcribe.diarize import Turn
+
+    two = [Turn(0, 5, 0), Turn(5, 15, 1)]
+    turns = {"me.wav": two, "others.wav": two}
+    out, paths, _ = _diarized_final(tmp_path, TriggerKind.CALL, False, turns)
+    assert paths == ["others.wav"] and out == ["Me", "Me", "Speaker 1", "Speaker 2"]
+    out, paths, _ = _diarized_final(tmp_path, TriggerKind.ROOM, True, turns)
+    assert paths == ["me.wav"] and out == ["Speaker 1", "Speaker 2", "Others", "Others"]
+
+
+def test_upgraded_room_keeps_a_lone_me_and_stores_no_voice_for_it(tmp_path):
+    from recandcc.transcribe import voices
+    from recandcc.transcribe.diarize import Turn, Turns
+
+    rng = np.random.default_rng(2)
+    me, bob, carl = (v / np.linalg.norm(v) for v in rng.normal(size=(3, 192)))
+    turns = {
+        "me.wav": Turns([Turn(0, 10, 0)], centroids={0: me}),  # one person in the room
+        "others.wav": Turns([Turn(0, 5, 0), Turn(10, 15, 1)], centroids={0: bob, 1: carl}),
+    }
+    out, _, _ = _diarized_final(tmp_path, TriggerKind.CALL, True, turns, speaker_names=True)
+    assert out == ["Me", "Me", "Speaker 1", "Speaker 2"]
+    assert set(voices.read_session_voices("u1")) == {"Speaker 1", "Speaker 2"}
+    turns["others.wav"] = None  # the call side failed: the room is still labelled
+    turns["me.wav"] = Turns([Turn(0, 5, 0), Turn(5, 10, 1)], centroids={0: me, 1: bob})
+    out, _, _ = _diarized_final(tmp_path, TriggerKind.CALL, True, turns, speaker_names=True)
+    assert out == ["Speaker 1", "Speaker 2", "Others", "Others"]
 
 
 def test_room_transcript_numbers_and_names_the_speakers_on_the_mic(tmp_path):

@@ -33,7 +33,7 @@ import threading
 import time
 import urllib.request
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -355,9 +355,11 @@ def label_speakers(
     turns: Sequence[Turn],
     speaker: str = OTHERS,
     names: dict[int, str] | None = None,
+    reserved: Collection[str] = (),
 ) -> tuple[list[Segment], dict[int, str]]:
     """``assign_speakers`` plus the label given to each speaker id that got segments (a lone
-    unnamed speaker keeps `speaker`)."""
+    unnamed speaker keeps `speaker`). `reserved`: labels already given on another track,
+    skipped when numbering so two tracks never share a "Speaker N"."""
     segments = list(segments)
     if not turns:
         return segments, {}
@@ -374,7 +376,7 @@ def label_speakers(
         return segments, {}
     if len(ids) == 1 and not ids & names.keys():
         return segments, {ids.pop(): speaker}
-    taken = {n.casefold() for n in names.values()}
+    taken = {n.casefold() for n in (*names.values(), *reserved)}
     numbers = (f"Speaker {n}" for n in itertools.count(1))
     free = (label for label in numbers if label.casefold() not in taken)  # no duplicate labels
     labels: dict[int, str] = {}
