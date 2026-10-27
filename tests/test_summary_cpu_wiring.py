@@ -136,7 +136,9 @@ def test_the_pause_hook_reaches_the_cpu_generator_only(monkeypatch):
     assert type(mlx) is summary.MlxGenerator and not hasattr(mlx, "pause")
 
 
-def test_summarize_session_hands_its_before_call_to_the_generator(hub, runtime, tmp_path, monkeypatch):
+def test_summarize_session_hands_its_before_call_to_the_generator(
+    hub, runtime, tmp_path, monkeypatch
+):
     monkeypatch.setattr(summary, "mlx_lm_available", lambda: False)
     monkeypatch.setattr(summary_cpu, "CPU_MODELS", {Config().summary.model: _fake_model()})
     d = make_session(tmp_path, [seg(SPOKEN)])
