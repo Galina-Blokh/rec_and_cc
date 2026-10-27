@@ -540,7 +540,9 @@ def test_pdf_has_summary_first_and_hebrew_survives(session):
     assert "Action items" in text and "Anna sends the release notes" in text
     assert text.index("Action items") < text.index("Hello team")
     (session / "summary.md").write_text(SUMMARY_HE, "utf-8")
-    assert export.export_pdf(session).read_bytes().startswith(b"%PDF")
+    text = pdf_text()
+    assert "\u05dc\u05e9\u05dc\u05d5\u05d7 \u05d4\u05e2\u05e8\u05d5\u05ea" in text
+    assert text.index("\u05de\u05e9\u05d9\u05de\u05d5\u05ea") < text.index("Hello team")
 
 
 def test_an_unreadable_summary_is_ignored(session):
@@ -640,3 +642,51 @@ def test_pdf_hebrew_bullet_sits_at_the_right_margin(session):
     row = [(gx, ch) for gx, ch in glyphs if ch == "\u2022" or "\u05d0" <= ch <= "\u05ea"]
     assert any(ch == "\u2022" for _, ch in row)
     assert max(row)[1] == "\u2022"  # the rightmost glyph on the line is the bullet
+
+
+def test_a_pending_or_older_summary_is_not_exported(session):
+    import os
+
+    from recandcc.transcribe.summary import PENDING_MARKER
+
+    summary = session / "summary.md"
+    summary.write_text(SUMMARY_MD, "utf-8")
+    assert export.load_summary(session)
+    (session / PENDING_MARKER).touch()  # being redone, e.g. after a speaker rename
+    assert export.load_summary(session) == []
+    (session / PENDING_MARKER).unlink()
+    t = (session / "transcript.json").stat().st_mtime
+    os.utime(summary, (t - 10, t - 10))  # the transcript was redone after the summary
+    assert export.load_summary(session) == []
+    assert "Action items" not in [
+        p.text for p in Document(str(export.export_docx(session))).paragraphs
+    ]
+
+
+@pytest.mark.skipif(not have_font(), reason="no system font with Latin/Cyrillic/Hebrew")
+def test_pdf_export_survives_a_corrupt_summary(session):
+    (session / "summary.md").write_bytes(b"\xff\xfe\x00 broken \x80")
+    assert export.export_pdf(session).read_bytes().startswith(b"%PDF")
+
+
+def test_docx_bidi_is_in_schema_order(session):
+    (session / "summary.md").write_text(SUMMARY_HE, "utf-8")
+    doc = Document(str(export.export_docx(session)))
+    order = ["pStyle", "numPr", "bidi", "spacing", "ind", "jc"]
+    checked = 0
+    for p in doc.paragraphs:
+        ppr = p._p.pPr
+        if ppr is None or ppr.find(qn("w:bidi")) is None:
+            continue
+        tags = [c.tag.split("}")[1] for c in ppr]
+        assert tags == sorted(tags, key=order.index)
+        checked += 1
+    assert checked >= 3
+    bullet = next(
+        p
+        for p in doc.paragraphs
+        if p.text == "\u05dc\u05e9\u05dc\u05d5\u05d7 \u05d4\u05e2\u05e8\u05d5\u05ea"
+    )
+    tags = [c.tag.split("}")[1] for c in bullet._p.pPr]
+    assert tags[:2] == ["pStyle", "numPr"] or tags[0] == "pStyle"
+    assert tags.index("bidi") > tags.index("pStyle")

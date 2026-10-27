@@ -28,7 +28,7 @@ from pathlib import Path
 
 from ..models import Segment, is_rtl
 from .output import JSON_NAME, fmt_hms, languages_of
-from .summary import SUMMARY_NAME
+from .summary import PENDING_MARKER, SUMMARY_NAME
 
 log = logging.getLogger(__name__)
 
@@ -104,7 +104,9 @@ def load_summary(folder: Path) -> list[tuple[str, str]]:
             blob = f.read(_MAX_SUMMARY_BYTES + 1)
         if len(blob) > _MAX_SUMMARY_BYTES:
             return []
-        raw = blob.decode("utf-8-sig")  # a Notepad BOM must not hide "# Summary"
+        raw = blob.decode("utf-8-sig")
+        if _summary_is_stale(Path(folder), path):
+            return []  # a Notepad BOM must not hide "# Summary"
     except (OSError, ValueError) as e:
         if not isinstance(e, FileNotFoundError):
             log.debug("summary skipped: %s", type(e).__name__)
@@ -128,6 +130,17 @@ def load_summary(folder: Path) -> list[tuple[str, str]]:
         else:
             blocks.append(("p", text))
     return [b for b in blocks if b[1]]
+
+
+def _summary_is_stale(folder: Path, summary: Path) -> bool:
+    """A summary that is being redone (marker present) or is older than the transcript
+    (re-transcribed since) must not head a newer transcript."""
+    if (folder / PENDING_MARKER).exists():
+        return True
+    try:
+        return summary.stat().st_mtime < (folder / JSON_NAME).stat().st_mtime
+    except OSError:
+        return False
 
 
 def _majority_rtl(text: str) -> bool:
@@ -244,6 +257,23 @@ def _type_only(fn):
     return wrapper
 
 
+_AFTER_BIDI = (  # CT_PPr children that follow w:bidi in the schema sequence
+    "w:adjustRightInd", "w:snapToGrid", "w:spacing", "w:ind", "w:contextualSpacing",
+    "w:mirrorIndents", "w:suppressOverlap", "w:jc", "w:textDirection", "w:textAlignment",
+    "w:textboxTightWrap", "w:outlineLvl", "w:divId", "w:cnfStyle", "w:rPr", "w:sectPr",
+    "w:pPrChange",
+)  # fmt: skip
+
+
+def _set_bidi(paragraph) -> None:
+    """Mark the paragraph right to left, at the schema-correct place in w:pPr (after pStyle,
+    numPr, ...; before spacing, ind and jc) so Word never sees a misordered element."""
+    from docx.oxml import OxmlElement
+
+    ppr = paragraph._p.get_or_add_pPr()
+    ppr.insert_element_before(OxmlElement("w:bidi"), *_AFTER_BIDI)
+
+
 @_type_only
 def export_docx(folder: Path, loaded=None) -> Path:
     from docx import Document
@@ -266,7 +296,7 @@ def export_docx(folder: Path, loaded=None) -> Path:
             p = doc.add_paragraph()
             p.add_run(text).italic = kind == "note"
         if _majority_rtl(text):
-            p._p.get_or_add_pPr().append(OxmlElement("w:bidi"))
+            _set_bidi(p)
             for r in p.runs:
                 rpr = r._r.get_or_add_rPr()
                 if r.italic:
@@ -284,7 +314,7 @@ def export_docx(folder: Path, loaded=None) -> Path:
             lp.add_run(label).bold = True
             lp.paragraph_format.space_after = Pt(0)
             p = doc.add_paragraph()
-            p._p.get_or_add_pPr().append(OxmlElement("w:bidi"))  # before w:spacing (schema)
+            _set_bidi(p)
             p.add_run(seg.text)._r.get_or_add_rPr().append(OxmlElement("w:rtl"))
         else:
             p = doc.add_paragraph()
