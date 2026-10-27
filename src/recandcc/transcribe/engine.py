@@ -483,8 +483,11 @@ class Transcriber:
             except Exception:  # noqa: BLE001 - cancelled; diarization is optional
                 turns = None
             self._diarization_metrics(session, diarization)
-            segments = self._labelled(session, segments, turns, gen)
-        self._write(session, segments, duration)
+            with voices.NAMING_LOCK:  # voices and transcript change together, not mid-naming
+                segments = self._labelled(session, segments, turns, gen)
+                self._write(session, segments, duration)
+        else:
+            self._write(session, segments, duration)
         self._drop_audio(session)
         return segments
 

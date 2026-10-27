@@ -106,31 +106,45 @@ def forget_generation(voices_dir: Path | None = None) -> int:
         return 0
 
 
+_held = threading.local()  # file-lock depth of this thread: re-entrant
+
+
 @contextlib.contextmanager
 def _file_lock(voices_dir: Path | None = None):
-    """Exclusive lock on the voices folder across processes (and threads, with LOCK).
-    Never nested: a second handle on the same file would block this very thread."""
-    d = _dir(voices_dir)
-    d.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with LOCK, open(d / LOCK_FILE, "a+b") as f:
-        if os.name == "nt":
-            import msvcrt
-
-            f.seek(0)
-            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
+    """Exclusive lock on the voices folder across processes (and threads, with LOCK), taken
+    by every change of the voice store. Re-entrant per thread: a second handle on the same
+    file would block this very thread."""
+    with LOCK:
+        if getattr(_held, "depth", 0):
+            _held.depth += 1
+            try:
+                yield
+            finally:
+                _held.depth -= 1
+            return
+        d = _dir(voices_dir)
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with open(d / LOCK_FILE, "a+b") as f:
             if os.name == "nt":
                 import msvcrt
 
                 f.seek(0)
-                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-            # POSIX: closing the file releases the flock
+                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(f, fcntl.LOCK_EX)
+            _held.depth = 1
+            try:
+                yield
+            finally:
+                _held.depth = 0
+                if os.name == "nt":
+                    import msvcrt
+
+                    f.seek(0)
+                    msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+                # POSIX: closing the file releases the flock
 
 
 def profiles_if_current(since: int | None, voices_dir: Path | None = None) -> list[Profile]:
@@ -144,7 +158,7 @@ def profiles_if_current(since: int | None, voices_dir: Path | None = None) -> li
 def _locked(fn):
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        with LOCK:
+        with _file_lock():
             return fn(*args, **kwargs)
 
     return wrapper
@@ -372,7 +386,7 @@ def write_session_voices(
     ``forget_generation()`` when the work began; if all voices were deleted since, nothing
     is written."""
     if since is None:
-        with LOCK:
+        with _file_lock(voices_dir):
             _store_session_voices(session, speakers, folded, voices_dir)
         return
     with _file_lock(voices_dir):  # check and write together: a forget can't land between
@@ -450,7 +464,7 @@ def _name_speaker(directory: Path, label: str, name: str, voices_dir: Path | Non
         raise ValueError(f'"{ME}" is your microphone track and is never renamed')
     if any(_key(s.speaker) == _key(name) and s.speaker != label for s in segments):
         raise ValueError(f"{name!r} is already another speaker of this session")
-    with LOCK:  # the voice store only; the transcript is rewritten outside it
+    with _file_lock(voices_dir):  # the voice store only; the transcript is rewritten outside it
         stored = read_session_voices(session.id, voices_dir)
         folded_as = {k: _key(v["profile"] or "") for k, v in stored.items()}
         # `name`: its voice was renamed already, but rewriting the transcript failed last time

@@ -315,3 +315,44 @@ def test_dialog_scripts_quote_names_and_hints():
     assert 'with prompt "Who is \\"this\\"?"' in script
     assert "\n" not in script
     assert 'Name for Speaker \\"1\\":' in name_dialog_script('Speaker "1"')
+
+
+def test_every_voice_mutation_takes_the_file_lock_reentrantly(tmp_path, monkeypatch):
+    taken = []
+    real = voices._file_lock
+
+    def spy(*args, **kwargs):
+        taken.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(voices, "_file_lock", spy)
+    session = make_session(tmp_path)
+    voices.save_profile("Anna", ANNA)  # also nests inside name_speaker and delete_profile
+    voices.write_session_voices(session, {"Speaker 1": ANNA})
+    voices.delete_session_voices(session.id)
+    assert voices.delete_profile("Anna") and voices.delete_all_profiles() == 0
+    assert len(taken) >= 5
+
+
+def test_fast_final_write_holds_the_naming_lock(tmp_path, monkeypatch):
+    from concurrent.futures import Future
+
+    from test_voices import SEGS, TURNS
+
+    from recandcc.models import SessionInfo
+    from recandcc.transcribe import engine as engine_mod
+    from recandcc.transcribe.engine import Transcriber
+
+    _final(tmp_path, monkeypatch, speaker_names=True)
+    held = []
+    real = engine_mod.write_outputs
+    monkeypatch.setattr(
+        engine_mod,
+        "write_outputs",
+        lambda *a, **k: (held.append(voices.NAMING_LOCK.locked()), real(*a, **k))[1],
+    )
+    done: Future = Future()
+    done.set_result(TURNS)
+    t = Transcriber(TranscriptionConfig(model="fake", speaker_names=True))
+    t.write_final(SessionInfo.load(tmp_path), list(SEGS), 60.0, done)
+    assert held == [True]

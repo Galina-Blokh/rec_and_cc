@@ -459,11 +459,10 @@ class Controller:
                 from ..models import SessionInfo
                 from ..transcribe import voices
 
-                with voices.NAMING_LOCK:  # not between a naming's voice and transcript rewrites
-                    known = voices.read_session_voices(SessionInfo.load(directory).id)
-                    result = [
-                        (lbl, ln) for lbl, ln in voices.session_speakers(directory) if lbl in known
-                    ]
+                # the transcript (maybe cloud-synced) is read outside any lock
+                lines = voices.session_speakers(directory)
+                known = voices.read_session_voices(SessionInfo.load(directory).id)
+                result = [(lbl, ln) for lbl, ln in lines if lbl in known]
             except Exception as e:  # noqa: BLE001
                 log.error("could not list the speakers: %s", type(e).__name__)
                 result = e
