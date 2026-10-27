@@ -157,11 +157,15 @@ def chunk_lines(lines: list[str], max_chars: int = 0) -> list[str]:
     return chunks
 
 
-def build_messages(task: str, text: str, language: str, part: str = "") -> Messages:
-    """Chat messages for ``task`` ("notes", "summary" or "actions") in ``language``."""
+def build_messages(
+    task: str, text: str, language: str, part: str = "", room: bool = False
+) -> Messages:
+    """Chat messages for ``task`` ("notes", "summary" or "actions") in ``language``.
+    ``room``: a room session whose mic speakers are numbered, so no line is 'Me'."""
     lang = LANGUAGE_NAMES.get(language, f"the language with code '{language}'")
+    owner = "the owner is one of the numbered speakers in the room" if room else "'Me' is the owner"
     system = (
-        "You summarise meeting transcripts. Lines are 'Speaker: text'; 'Me' is the owner. "
+        f"You summarise meeting transcripts. Lines are 'Speaker: text'; {owner}. "
         f"Always answer in {lang}, even if parts of the input are in another language. "
         "Use only facts from the input; do not invent names, dates or tasks."
     )
@@ -186,7 +190,9 @@ def build_messages(task: str, text: str, language: str, part: str = "") -> Messa
     ]
 
 
-def _reduce(lines: list[str], generate: Generator, language: str, max_tokens: int) -> str:
+def _reduce(
+    lines: list[str], generate: Generator, language: str, max_tokens: int, room: bool = False
+) -> str:
     """Map step: replace the text by chunk notes until it fits in one chunk."""
     chunks = chunk_lines(lines)
     for _ in range(MAX_ROUNDS):
@@ -194,7 +200,7 @@ def _reduce(lines: list[str], generate: Generator, language: str, max_tokens: in
             break
         n = len(chunks)
         notes = [
-            generate(build_messages("notes", c, language, f"{i} of {n}"), max_tokens)
+            generate(build_messages("notes", c, language, f"{i} of {n}", room), max_tokens)
             for i, c in enumerate(chunks, 1)
         ]
         chunks = chunk_lines(notes)
@@ -215,15 +221,17 @@ def action_items(answer: str) -> list[str]:
 
 
 def summarize(
-    segments: list[Segment], generate: Generator, max_tokens: int = 400
+    segments: list[Segment], generate: Generator, max_tokens: int = 400, room: bool = False
 ) -> tuple[str, str, list[str]]:
-    """(language, summary, action items) of a transcript."""
+    """(language, summary, action items) of a transcript. ``room``: the session started as a
+    room session; if its mic speakers were numbered (no 'Me' line), the prompts say so."""
     language = main_language(segments)
-    text = _reduce(transcript_lines(segments), generate, language, max_tokens)
+    room = room and not any(s.speaker == "Me" for s in segments)
+    text = _reduce(transcript_lines(segments), generate, language, max_tokens, room)
     if not text:
         return language, "", []
-    summary = generate(build_messages("summary", text, language), max_tokens).strip()
-    items = action_items(generate(build_messages("actions", text, language), max_tokens))
+    summary = generate(build_messages("summary", text, language, room=room), max_tokens).strip()
+    items = action_items(generate(build_messages("actions", text, language, room=room), max_tokens))
     return language, summary, items
 
 
@@ -264,6 +272,11 @@ def summarize_session(
     data = json.loads((directory / JSON_NAME).read_text(encoding="utf-8"))
     segments = [Segment(**s) for s in data.get("segments", [])]
     model = summary_model(cfg, segments)
+    try:
+        room = SessionInfo.load(directory).started_as_room
+    except Exception as e:  # noqa: BLE001 - only a hint for the prompt
+        log.debug("no session.json for the summary prompt (%s)", type(e).__name__)
+        room = False
     t0 = time.monotonic()
 
     def run(gen: Generator) -> tuple[str, str, list[str]]:
@@ -272,7 +285,7 @@ def summarize_session(
                 before_call()
             return gen(messages, max_tokens)
 
-        return summarize(segments, call, cfg.summary.max_tokens)
+        return summarize(segments, call, cfg.summary.max_tokens, room)
 
     def run_model(name: str) -> tuple[str, str, list[str]]:
         notice = on_download

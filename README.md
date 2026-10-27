@@ -124,7 +124,8 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   stays on (macOS shows the orange dot the whole time; it costs some battery, and Bluetooth
   headsets switch to their call profile) and about 6 s of speech within 15 s near the laptop
   starts a recording, as in Auto/Ask mode, including the 15 s before it (system audio is
-  recorded too, as for calls). It stops after 90 s without speech. Apps take precedence:
+  recorded too, all of it: there is no app to follow; with `system_audio_scope = "app"` only
+  the call app once a call joins). It stops after 90 s without speech. Apps take precedence:
   nothing starts while another app plays or uses the mic (music too), and a room recording
   stops if an app you switched off, stopped or ignore starts. The people in the room become
   `Speaker 1`, `Speaker 2`, … in the transcript (one person alone stays `Me`); if a call joins,
