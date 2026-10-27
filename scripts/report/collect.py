@@ -16,15 +16,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
+import random
 import re
 import statistics
 import subprocess
 import sys
+import threading
+import time
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+log = logging.getLogger("report.collect")
 
 REPO = "Galina-Blokh/rec_and_cc"
 try:
@@ -32,6 +39,11 @@ try:
 except ZoneInfoNotFoundError:  # Windows without the tzdata package: report in UTC
     UK = UTC
 TIMEOUT = 120  # seconds for any one gh or git call
+RETRIES, BACKOFF = 3, 2.0  # retry rate-limited gh calls after 2, 4, 8 s
+RATE_LIMITED = re.compile(r"HTTP 429|rate limit", re.I)  # not a bare 403 (permissions)
+NOT_FOUND = re.compile(r"HTTP 404|Not Found")
+FULL_WALK = timedelta(hours=24)  # walk every list end to end at least this often
+MAX_RUN_REFRESH = 20  # unfinished runs refetched by id per collect
 CACHE = Path.home() / ".cache" / "recandcc-report"
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 REVIEW_MARK = "## 🤖 Cursor review"
@@ -114,8 +126,23 @@ def pearson(xs: list[float], ys: list[float]) -> float | None:
 # ---------- GitHub ----------
 
 
+def _dedupe(items: list, field: str = "id") -> list:
+    """Keep the first occurrence of each `field` value, in order."""
+    seen: set = set()
+    out = []
+    for i in items:
+        if i[field] not in seen:
+            seen.add(i[field])
+            out.append(i)
+    return out
+
+
 class GitHub:
-    """`gh api` with an on-disk cache keyed by endpoint (and an `updated_at` stamp)."""
+    """`gh api` with an on-disk cache keyed by endpoint (and an `updated_at` stamp).
+
+    Safe to share between threads: each endpoint has its own cache file and `calls` is
+    guarded by a lock.
+    """
 
     def __init__(self, repo: str, cache: Path, offline: bool = False):
         self.repo = repo
@@ -123,58 +150,189 @@ class GitHub:
         self.cache.mkdir(parents=True, exist_ok=True)
         self.offline = offline
         self.calls = 0
+        self._lock = threading.Lock()
+        self.dropped: dict[str, list] = {}  # endpoint -> cached items that left the list
 
     def _path(self, key: str) -> Path:
         return self.cache / (re.sub(r"[^A-Za-z0-9_.-]+", "_", key) + ".json")
 
+    def _load(self, path: Path) -> dict | None:
+        """The cached record at `path`, or None when missing or unreadable (a killed run)."""
+        try:
+            return json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
+
     def get(self, endpoint: str, stamp: str | None = None, paginate: bool = True):
         """Fetch `repos/<repo>/<endpoint>`. With a `stamp`, reuse the cache while it matches."""
         path = self._path(endpoint)
-        if path.exists():
-            cached = json.loads(path.read_text())
-            if self.offline or (stamp is not None and cached.get("stamp") == stamp):
-                return cached["data"]
+        cached = self._load(path)
+        if cached is not None and (
+            self.offline or (stamp is not None and cached.get("stamp") == stamp)
+        ):
+            return cached["data"]
         if self.offline:
             return []
-        args = ["gh", "api", f"repos/{self.repo}/{endpoint}"]
-        if paginate:
-            args += ["--paginate", "--slurp"]
-        env = dict(os.environ)
-        env.setdefault("GH_TOKEN", env.get("git_api_key_0307", ""))
-        try:
-            out = subprocess.run(  # noqa: S603
-                args, capture_output=True, text=True, env=env, check=False, timeout=TIMEOUT
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"gh api {endpoint} timed out after {TIMEOUT} s") from exc
-        self.calls += 1
-        if out.returncode != 0:
-            # gh's stderr never contains the token; keep only its first line.
-            first = (out.stderr.strip().splitlines() or ["unknown error"])[0]
-            raise RuntimeError(f"gh api {endpoint} failed: {first}")
-        data = json.loads(out.stdout or "null")
+        data = self._api(endpoint, paginate)
         if paginate:
             pages = data or []
             data = []
             for page in pages:
                 data.extend(page.get("workflow_runs", []) if isinstance(page, dict) else page)
-        path.write_text(json.dumps({"stamp": stamp, "data": data}))
+        self._write(path, {"stamp": stamp, "data": data})
         return data
 
+    @staticmethod
+    def _write(path: Path, payload) -> None:
+        """Atomic cache write: temp file in the same directory, then `os.replace`."""
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            tmp.write_text(json.dumps(payload))
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
 
-def fetch_github(gh: GitHub) -> dict:
-    pulls = gh.get("pulls?state=all&per_page=100")
-    detail = {}
-    for p in pulls:
-        n, stamp = p["number"], p["updated_at"]
-        detail[n] = {
+    def get_list(self, endpoint: str, key: str | None = None) -> list:
+        """Incremental fetch of a newest-first list endpoint.
+
+        Reads page by page and stops at the first page holding an item already cached
+        unchanged (same `id` and `updated_at`). A complete walk (short or empty last page)
+        yields the fetched items only. An early stop yields the fetched items plus the cached
+        tail after the last cached item on that page. Duplicates (head inserts shift pages)
+        collapse to the first occurrence by `id`. Cached items that left the list are dropped
+        and recorded in `self.dropped[endpoint]`. Early stops are allowed only within
+        FULL_WALK of the last complete walk, so deletions anywhere are seen at least daily.
+        `key` names the list inside a dict page.
+        """
+        path = self._path(endpoint)
+        record = self._load(path) or {}
+        cached = record.get("data") or []
+        if self.offline:
+            return cached
+        # Deletions below the stop point are only seen on a complete walk, so force one when
+        # the last complete walk is older than FULL_WALK.
+        last_full = ts(record.get("full_at"))
+        allow_stop = bool(last_full) and datetime.now(UTC) - last_full < FULL_WALK
+        known = {(i["id"], i.get("updated_at")) for i in cached}
+        pos = {i["id"]: n for n, i in enumerate(cached)}
+        m = re.search(r"per_page=(\d+)", endpoint)
+        per_page = int(m.group(1)) if m else 30
+        sep = "&" if "?" in endpoint else "?"
+        fresh: list = []
+        tail_from = None  # index in `cached` after which the cached tail is kept
+        page = 1
+        while True:
+            data = self._api(f"{endpoint}{sep}page={page}")
+            items = (data or {}).get(key, []) if key else (data or [])
+            fresh.extend(items)
+            if len(items) < per_page:
+                break
+            if allow_stop and any((i["id"], i.get("updated_at")) in known for i in items):
+                tail_from = max(pos[i["id"]] for i in items if i["id"] in pos)
+                break
+            page += 1
+        merged = _dedupe(fresh)
+        if tail_from is not None:
+            seen = {i["id"] for i in merged}
+            merged += [i for i in cached[tail_from + 1 :] if i["id"] not in seen]
+        if key == "workflow_runs":
+            # Runs are listed by creation time, so a run still going when it was cached can
+            # sit below the stop point; refetch each such run so its result is current.
+            fetched = {i["id"] for i in fresh}
+            stale = [
+                i["id"] for i in merged if i["id"] not in fetched and i.get("status") != "completed"
+            ]
+            # At most MAX_RUN_REFRESH per collect; the rest wait for the next run or full walk.
+            todo = set(stale[:MAX_RUN_REFRESH])
+            merged = [
+                r
+                for r in (self._refetch_run(i) if i["id"] in todo else i for i in merged)
+                if r is not None
+            ]
+        kept = {i["id"] for i in merged}
+        self.dropped[endpoint] = [i for i in cached if i["id"] not in kept]
+        full_at = iso(datetime.now(UTC)) if tail_from is None else record.get("full_at")
+        self._write(path, {"stamp": None, "data": merged, "full_at": full_at})
+        return merged
+
+    def _refetch_run(self, run: dict) -> dict | None:
+        """The current state of one unfinished run, or None if it can't be read (deleted)."""
+        try:
+            return self._api(f"actions/runs/{run['id']}")
+        except RuntimeError:
+            log.debug("run %s could not be refreshed; dropping it", run["id"])
+            return None
+
+    def _api(self, endpoint: str, paginate: bool = False):
+        """One `gh api` call (all pages slurped with `paginate`), parsed from JSON."""
+        args = ["gh", "api", f"repos/{self.repo}/{endpoint}"]
+        if paginate:
+            args += ["--paginate", "--slurp"]
+        env = dict(os.environ)
+        env.setdefault("GH_TOKEN", env.get("git_api_key_0307", ""))
+        for attempt in range(RETRIES + 1):
+            try:
+                out = subprocess.run(  # noqa: S603
+                    args, capture_output=True, text=True, env=env, check=False, timeout=TIMEOUT
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(f"gh api {endpoint} timed out after {TIMEOUT} s") from exc
+            with self._lock:
+                self.calls += 1
+            limited = out.returncode != 0 and RATE_LIMITED.search(out.stderr or "")
+            if not limited or attempt == RETRIES:
+                break
+            # GitHub rate limits (429, or a 403 that says rate limit); jitter so parallel workers spread out
+            time.sleep(BACKOFF * 2**attempt * random.uniform(0.5, 1.5))  # noqa: S311
+        if out.returncode != 0:
+            # gh's stderr never contains the token; keep only its first line.
+            first = (out.stderr.strip().splitlines() or ["unknown error"])[0]
+            raise RuntimeError(f"gh api {endpoint} failed: {first}")
+        return json.loads(out.stdout or "null")
+
+
+def _pr_files(gh: GitHub, n: int) -> list[Path]:
+    return [
+        gh._path(e)
+        for e in (
+            f"pulls/{n}",
+            f"pulls/{n}/commits?per_page=100",
+            f"pulls/{n}/reviews?per_page=100",
+            f"issues/{n}/comments?per_page=100",
+        )
+    ]
+
+
+def _pr_detail(gh: GitHub, p: dict) -> tuple[int, dict] | None:
+    """One PR's detail, or None when GitHub no longer has it (404)."""
+    n, stamp = p["number"], p["updated_at"]
+    try:
+        return n, {
             "pr": gh.get(f"pulls/{n}", stamp, paginate=False),
             "commits": gh.get(f"pulls/{n}/commits?per_page=100", stamp),
             "reviews": gh.get(f"pulls/{n}/reviews?per_page=100", stamp),
             "comments": gh.get(f"issues/{n}/comments?per_page=100", stamp),
         }
-    issues = gh.get("issues?state=all&per_page=100")
-    runs = gh.get("actions/runs?per_page=100")
+    except RuntimeError as exc:
+        if NOT_FOUND.search(str(exc).partition(" failed: ")[2]):  # gh's stderr, not the path
+            log.debug("PR #%s is gone on GitHub; skipping", n)
+            for f in _pr_files(gh, n):  # deleted content must not linger on disk
+                f.unlink(missing_ok=True)
+            return None
+        raise
+
+
+def fetch_github(gh: GitHub, workers: int = 4) -> dict:
+    pulls_ep = "pulls?state=all&sort=updated&direction=desc&per_page=100"
+    pulls = _dedupe(gh.get_list(pulls_ep), "number")
+    for p in gh.dropped.get(pulls_ep, []):  # deleted content must not linger on disk
+        for f in _pr_files(gh, p["number"]):
+            f.unlink(missing_ok=True)
+    # Up to 4 PRs' details in flight; each endpoint writes only its own cache file.
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        detail = dict(r for r in pool.map(lambda p: _pr_detail(gh, p), pulls) if r)
+    issues = gh.get_list("issues?state=all&sort=updated&direction=desc&per_page=100")
+    runs = gh.get_list("actions/runs?per_page=100", key="workflow_runs")
     return {"detail": detail, "issues": issues, "runs": runs}
 
 
@@ -248,31 +406,28 @@ def project_dirs(root: Path, base: Path) -> list[Path]:
     return sorted(d for d in base.iterdir() if d.is_dir() and d.name in wanted)
 
 
-def read_sessions(dirs: list[Path]) -> dict:
-    """Counts and token usage from session logs. Never keeps message text."""
-    seen: set[str] = set()
+def claude_usage(dirs: list[Path], branch_to_pr: dict) -> dict:
+    """Session counts and token/cost totals, folded into running sums while scanning the logs.
+
+    Keeps only per-session counts and the totals, never message text or usage records.
+    """
+    seen: set[str] = set()  # message ids already counted: logs repeat a message per block
     sessions: dict[str, dict] = {}
+    by_model: dict[str, dict] = defaultdict(lambda: {"tokens": 0, "cost": 0.0, "output": 0})
+    by_day: dict[str, dict] = defaultdict(lambda: {"tokens": 0, "cost": 0.0})
+    by_pr: dict[int, dict] = defaultdict(lambda: {"tokens": 0, "cost": 0.0})
+    kinds = Counter()
+    linked = unlinked = 0.0
     for d in dirs:
         for f in d.rglob("*.jsonl"):
             sub = "subagents" in f.parts
-            sid = f.stem
-            s = sessions.setdefault(
-                sid,
-                {"subagent": sub, "prompts": 0, "first": None, "last": None, "branches": Counter()},
-            )
-            s["usage"] = s.get("usage", [])
+            s = sessions.setdefault(f.stem, {"subagent": sub, "prompts": 0})
             with f.open(encoding="utf-8", errors="replace") as fh:
                 for line in fh:
                     try:
                         rec = json.loads(line)
                     except ValueError:
                         continue
-                    when = ts(rec.get("timestamp"))
-                    if when:
-                        s["first"] = min(filter(None, [s["first"], when]))
-                        s["last"] = max(filter(None, [s["last"], when]))
-                    if rec.get("gitBranch"):
-                        s["branches"][rec["gitBranch"]] += 1
                     msg = rec.get("message") or {}
                     if (
                         rec.get("type") == "user"
@@ -280,51 +435,40 @@ def read_sessions(dirs: list[Path]) -> dict:
                         and isinstance(msg.get("content"), str)
                     ):
                         s["prompts"] += 1
-                    if rec.get("type") == "assistant" and msg.get("usage"):
-                        mid = msg.get("id") or rec.get("uuid")
-                        if mid in seen:
-                            continue
-                        seen.add(mid)
-                        s["usage"].append(
-                            (msg.get("model", "unknown"), msg["usage"], when, rec.get("gitBranch"))
-                        )
-    return sessions
-
-
-def summarize_sessions(sessions: dict, branch_to_pr: dict) -> dict:
-    by_model: dict[str, dict] = defaultdict(lambda: {"tokens": 0, "cost": 0.0, "output": 0})
-    by_day: dict[str, dict] = defaultdict(lambda: {"tokens": 0, "cost": 0.0})
-    by_pr: dict[int, dict] = defaultdict(lambda: {"tokens": 0, "cost": 0.0})
-    kinds = Counter()
-    linked = unlinked = 0.0
-    for s in sessions.values():
-        for model, u, when, branch in s.get("usage", []):
-            if model.startswith("<"):
-                continue
-            tok = (
-                u.get("input_tokens", 0)
-                + u.get("output_tokens", 0)
-                + u.get("cache_read_input_tokens", 0)
-                + u.get("cache_creation_input_tokens", 0)
-            )
-            cost = price(model, u)
-            kinds["input"] += u.get("input_tokens", 0)
-            kinds["output"] += u.get("output_tokens", 0)
-            kinds["cache_read"] += u.get("cache_read_input_tokens", 0)
-            kinds["cache_write"] += u.get("cache_creation_input_tokens", 0)
-            by_model[model]["tokens"] += tok
-            by_model[model]["cost"] += cost
-            by_model[model]["output"] += u.get("output_tokens", 0)
-            if when:
-                by_day[day_key(when)]["tokens"] += tok
-                by_day[day_key(when)]["cost"] += cost
-            pr = branch_to_pr.get(branch or "")
-            if pr:
-                by_pr[pr]["tokens"] += tok
-                by_pr[pr]["cost"] += cost
-                linked += cost
-            else:
-                unlinked += cost
+                    if rec.get("type") != "assistant" or not msg.get("usage"):
+                        continue
+                    mid = msg.get("id") or rec.get("uuid")
+                    if mid in seen:
+                        continue
+                    seen.add(mid)
+                    model, u = msg.get("model", "unknown"), msg["usage"]
+                    if model.startswith("<"):
+                        continue
+                    tok = (
+                        u.get("input_tokens", 0)
+                        + u.get("output_tokens", 0)
+                        + u.get("cache_read_input_tokens", 0)
+                        + u.get("cache_creation_input_tokens", 0)
+                    )
+                    cost = price(model, u)
+                    kinds["input"] += u.get("input_tokens", 0)
+                    kinds["output"] += u.get("output_tokens", 0)
+                    kinds["cache_read"] += u.get("cache_read_input_tokens", 0)
+                    kinds["cache_write"] += u.get("cache_creation_input_tokens", 0)
+                    by_model[model]["tokens"] += tok
+                    by_model[model]["cost"] += cost
+                    by_model[model]["output"] += u.get("output_tokens", 0)
+                    when = ts(rec.get("timestamp"))
+                    if when:
+                        by_day[day_key(when)]["tokens"] += tok
+                        by_day[day_key(when)]["cost"] += cost
+                    pr = branch_to_pr.get(rec.get("gitBranch") or "")
+                    if pr:
+                        by_pr[pr]["tokens"] += tok
+                        by_pr[pr]["cost"] += cost
+                        linked += cost
+                    else:
+                        unlinked += cost
     total = sum(m["cost"] for m in by_model.values())
     return {
         "sessions": sum(1 for s in sessions.values() if not s["subagent"]),
@@ -778,7 +922,7 @@ def collect(
     prs = build_prs(raw, raw["runs"], now)
     issues = build_issues(raw["issues"], prs)
     branch_to_pr = {p["branch"]: p["number"] for p in prs}
-    claude = summarize_sessions(read_sessions(project_dirs(root, logs)), branch_to_pr)
+    claude = claude_usage(project_dirs(root, logs), branch_to_pr)
     commits = build_commits(ledger)
     return {
         "schema": 1,
