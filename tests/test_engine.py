@@ -1,4 +1,7 @@
-"""Stories: US-01, US-02, US-03, US-04, US-05, US-06, US-07, US-08, US-13, US-16, US-17, US-22."""
+"""Detection engine with fakes and a fake clock.
+
+Stories: US-01, US-02, US-03, US-04, US-05, US-06, US-07, US-08, US-13, US-16, US-17, US-22, US-23.
+"""
 
 import shutil
 import threading
@@ -1203,3 +1206,41 @@ def test_room_mic_failure_backs_off_and_shutdown_closes_it():
     assert h.room.opens == 1 and h.room.running
     h.eng.shutdown()
     assert not h.room.running
+
+
+# --- sensitivity (outside = room, inside = app audio) -----------------------------------
+# The room's own thresholds are applied inside RoomMonitor (test_sensitivity.py); here the
+# engine side: inside scales min_active_s, and the room competes with what's left.
+def test_sensitivity_unset_keeps_the_plain_thresholds():
+    h = _room_harness()
+    h.mon.procs = [CHROME]
+    h.run(2)
+    assert h.rec.starts == []
+    h.run(2)
+    assert h.rec.starts == [(TriggerKind.MEDIA, "Google Chrome")]  # after min_active_s = 3
+
+
+def test_low_inside_sensitivity_delays_app_audio_then_room_speech_starts():
+    h = _room_harness(outside_sensitivity=100, inside_sensitivity=0)
+    h.mon.procs = [CHROME]
+    h.run(10)  # 10 s of app audio < 4 x min_active_s: nothing yet (inside = 0)
+    assert h.rec.starts == []
+    h.mon.procs = []
+    h.run(1)
+    h.room.speech = True
+    h.eng.tick()
+    assert h.rec.starts == [(TriggerKind.ROOM, "Room")]
+
+
+def test_inside_favoured_app_audio_wins_quickly():
+    h = _room_harness(outside_sensitivity=0, inside_sensitivity=100)
+    h.mon.procs = [CHROME]
+    h.run(2)  # 0.75 s is enough
+    assert h.rec.starts == [(TriggerKind.MEDIA, "Google Chrome")]
+
+
+def test_invalid_inside_sensitivity_does_not_break_ticks():
+    h = _room_harness(inside_sensitivity="normal")
+    h.mon.procs = [CHROME]
+    h.run(4)  # treated as unset
+    assert h.rec.starts == [(TriggerKind.MEDIA, "Google Chrome")]

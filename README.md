@@ -128,6 +128,10 @@ Menu items:
   stops if an app you switched off, stopped or ignore starts. The people in the room become
   `Speaker 1`, `Speaker 2`, … in the transcript (one person alone stays `Me`); if a call joins,
   its participants are numbered after them. Tell the people in the room: recording them may need their consent.
+- **Sensitivity** (Off by default): presets *Quiet room / Normal / Noisy place* for how
+  readily the room (microphone) and app audio start a recording; a noisy place needs more
+  and louder-than-background speech. Fine-tune with `outside_sensitivity` /
+  `inside_sensitivity` in the settings.
 - **Open live transcript**: opens the current (or last) live session's `transcript.md`.
 - **Recent transcripts**: the last 10, click to open.
 - **Search transcripts…**: full-text search across all your transcripts (English, Russian,
