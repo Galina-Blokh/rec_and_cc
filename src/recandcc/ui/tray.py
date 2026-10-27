@@ -41,6 +41,9 @@ from .common import (
     PERM_TITLES,
     PROMPT_BUTTONS,
     ROOM_ITEM,
+    SENSITIVITY_HINT,
+    SENSITIVITY_ITEM,
+    SENSITIVITY_PRESETS,
     Controller,
     keep_prompt_text,
     open_output_folder,
@@ -472,6 +475,14 @@ class TrayApp:
                 radio=True,
             )
 
+        def sensitivity_item(name):
+            return Item(
+                name,
+                lambda: self.ctrl.set_sensitivity(name),
+                checked=lambda _i: self.ctrl.sensitivity_preset() == name,
+                radio=True,
+            )
+
         def recent():
             items = [
                 Item(transcript_label(p), (lambda p=p: lambda: open_path(p))())  # noqa: B023 — p is bound by the default arg
@@ -538,6 +549,14 @@ class TrayApp:
                 ROOM_ITEM,
                 lambda: self.ctrl.set_room_listening(not self.cfg.detection.room_listening),
                 checked=lambda _i: bool(self.cfg.detection.room_listening),
+            ),
+            Item(
+                SENSITIVITY_ITEM,
+                pystray.Menu(
+                    *(sensitivity_item(n) for n in SENSITIVITY_PRESETS),
+                    pystray.Menu.SEPARATOR,
+                    Item(SENSITIVITY_HINT, None, enabled=False),
+                ),
             ),
             Item(
                 "Open live transcript",

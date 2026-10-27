@@ -21,6 +21,9 @@ Threading model
   the monitor's own stream (``session_source()``: pre-roll, then live), so it stays open
   for that session; before any other session starts it is closed, so the mic is never
   opened twice, and it reopens when the engine is idle again.
+* Sensitivity (``sensitivity.py``): ``tick`` reads the effective ``min_active_s`` (inside);
+  the room monitor reads its effective thresholds (outside) on every step, so a preset change
+  applies without reopening the mic.
 * Time comes from an injectable ``clock`` so tests can drive the state machine with a fake
   clock by calling ``tick()`` directly without starting the thread.
 """
@@ -45,6 +48,7 @@ from .models import (
     discard_session,
     mark_discarded,
 )
+from .sensitivity import effective_min_active_s
 
 log = logging.getLogger(__name__)
 
@@ -303,7 +307,7 @@ class Engine:
             choice = "ignore"
         self._command(("respond", choice, prompt_id))
 
-    def set_mode(self, mode: Mode | str) -> None:
+    def set_mode(self, mode: Mode | str, *, save: bool = True) -> None:
         mode = Mode(mode)
         with self._lock:
             self.det.mode = mode
@@ -313,7 +317,8 @@ class Engine:
                     self._prompt = None
                 if self._rec is not None and not self._rec.manual:
                     self._commands.append(("stop",))
-        self._safe_save()
+        if save:
+            self._safe_save()
         self._wake.set()
         self._notify()
 
@@ -391,6 +396,7 @@ class Engine:
                 log.exception("recorder level query failed")
         apps = group_activity(procs, self.det, self.own_pids)
         now = self.clock()
+        min_active = effective_min_active_s(self.det)  # inside sensitivity
         room = self.room
         # Any other process doing audio (even an ignored or switched-off one): the room mic
         # would hear exactly that, so room listening holds off. Mic users close the room mic,
@@ -556,7 +562,7 @@ class Engine:
                         continue
                     if a.key != r.key and (
                         a.key in self._suppressed
-                        or now - self._first_seen[a.key] < det.min_active_s
+                        or now - self._first_seen[a.key] < min_active
                         or effective_mode(det, a.key, a.procs) == Mode.OFF
                     ):
                         continue
@@ -572,7 +578,7 @@ class Engine:
                 cands = [
                     a
                     for k, a in apps.items()
-                    if k not in self._suppressed and now - self._first_seen[k] >= det.min_active_s
+                    if k not in self._suppressed and now - self._first_seen[k] >= min_active
                 ]
                 cands.sort(key=lambda a: (a.kind != TriggerKind.CALL, self._first_seen[a.key]))
                 # Apps take precedence; no app doing audio at all (an app the user switched
@@ -805,6 +811,10 @@ class Engine:
         self._session_end(session, False)
         # Also when stop() failed or dropped it as too short: whatever it wrote must go.
         session = session or started
+        if session is not None:  # a discarded call must not leave its participants' names behind
+            from . import participants
+
+            participants.forget(session.id)
         # Already gone (stop() dropped it as too short): don't schedule a delete, as the next
         # session may reuse the name. Only the engine thread creates folders, so no race here.
         if session is None or not session.directory.exists():
