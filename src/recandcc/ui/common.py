@@ -772,7 +772,9 @@ class Controller:
                         raise ExportError("No finished transcripts yet")
                     if not inside(target.parent, self.cfg.output_dir):
                         raise ExportError("That session is outside the transcripts folder")
-                    paths = export_session(target.parent, fmt, skipped)
+                    paths = export_session(
+                        target.parent, fmt, skipped, template=self.cfg.export.template
+                    )
                     if not all(p.is_file() for p in paths):  # e.g. the session was deleted
                         raise ExportError("The session folder changed during the export")
                     names = " and ".join(p.name for p in paths)
@@ -1066,6 +1068,7 @@ class Controller:
             out[("summary", f.name)] = getattr(cfg.summary, f.name)
         for f in fields(cfg.search):  # [search] semantic: applies from the next search
             out[("search", f.name)] = getattr(cfg.search, f.name)
+        out[("export", "template")] = cfg.export.template  # read at each export
         for name in RELOADED_TRANSCRIPTION_KEYS:
             out[("transcription", name)] = getattr(cfg.transcription, name)
         tr = cfg.transcription
@@ -1094,6 +1097,7 @@ class Controller:
             "detection": self.cfg.detection,
             "summary": self.cfg.summary,
             "search": self.cfg.search,
+            "export": self.cfg.export,
             "transcription": self.cfg.transcription,
         }[owner]
 

@@ -32,7 +32,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
 | US-26 | Name speakers and forget voices from the menu | 🟡 macOS menu, first lines instead of an audio sample; Windows tray not yet (#1) |
 | US-31 | Speaker names from the call app's participant list | 🟡 claimed (#1 A.3): opt-in, macOS, one-to-one only |
-| US-25 | Export a transcript to DOCX and PDF | 🟡 CLI and macOS menu; Windows tray, templates planned (#4) |
+| US-25 | Export a transcript to DOCX and PDF | 🟡 CLI and macOS menu, custom templates; Windows tray planned (#4) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
 | US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
 | US-23 | Sensitivity: room vs system audio | 🟡 presets and keys shipped (#7, #102); live level meters not yet |
@@ -335,9 +335,14 @@ don't have to name them myself, without the app ever asking for more permission 
 - **Given** the session folder also has a `summary.md` (US-27), **then** its summary and
   action items come first in the DOCX and PDF, under their own headings and before a
   "Transcript" heading (Hebrew right to left); without `summary.md` the files are unchanged.
+- **Given** `export.template` names a local TOML file, **then** its title format
+  (`{date}` `{time}` `{duration}` `{title}` ...), section order and headings (summary, action
+  items, transcript) and header/footer line shape the DOCX and PDF; unknown placeholders stay
+  literal; a missing or invalid file logs one warning and the default layout is used
+  (unchanged without a template).
 - **Then** export needs no network, the files are owner-only and logs never contain the
   transcript text.
-- **Not yet:** the Windows tray entry, custom templates; the PDF needs a system font with
+- **Not yet:** the Windows tray entry; the PDF needs a system font with
   Latin, Cyrillic and Hebrew (Arial, DejaVu Sans), otherwise only DOCX is produced (#4).
 
 ### US-27 Meeting summaries and action items

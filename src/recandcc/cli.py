@@ -327,7 +327,12 @@ def cmd_export(args) -> int:
 
     try:
         skipped: list[str] = []
-        paths = export_session(Path(args.session_dir).expanduser(), args.format, skipped)
+        paths = export_session(
+            Path(args.session_dir).expanduser(),
+            args.format,
+            skipped,
+            template=load_config().export.template,
+        )
     except ExportError as e:
         print(f"Can't export: {e}", file=sys.stderr)
         return 1

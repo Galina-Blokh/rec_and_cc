@@ -185,7 +185,8 @@ def _controller(output_dir=None):
 
     ctrl = Controller.__new__(Controller)  # only the export wiring, no runtime
     ctrl.events, ctrl._export_lock = queue.Queue(), threading.Lock()
-    ctrl.cfg = type("C", (), {"output_dir": output_dir})()
+    export_cfg = type("E", (), {"template": ""})()
+    ctrl.cfg = type("C", (), {"output_dir": output_dir, "export": export_cfg})()
     return ctrl
 
 
@@ -193,7 +194,7 @@ def _controller(output_dir=None):
 def test_controller_export_posts_a_notice(session, monkeypatch, fmt):
     seen = []
 
-    def fake(folder, f, skipped):
+    def fake(folder, f, skipped, template=None):
         seen.append(f)
         (folder / "transcript.docx").write_text("x")
         return [folder / "transcript.docx"]
@@ -220,7 +221,7 @@ def test_controller_releases_the_lock_when_the_thread_cannot_start(session, monk
 
 
 def test_controller_export_logs_only_the_error_type(session, monkeypatch, caplog):
-    def boom(*_a):
+    def boom(*_a, **_kw):
         raise RuntimeError("secret words from the call")
 
     monkeypatch.setattr(export, "export_session", boom)
@@ -309,7 +310,7 @@ def test_concurrent_exports_of_one_session_are_serialised(session):
 
 
 def test_a_pdf_failure_other_than_the_font_keeps_the_docx(session, monkeypatch):
-    def boom(folder, loaded=None, summary=None):
+    def boom(folder, loaded=None, summary=None, template=None):
         raise RuntimeError("Привет, секрет")
 
     monkeypatch.setattr(export, "export_pdf", boom)
@@ -724,7 +725,9 @@ def test_both_formats_make_the_same_summary_decision(session, monkeypatch, caplo
     monkeypatch.setattr(
         export,
         "export_pdf",
-        lambda f, loaded=None, summary=None: seen.append(summary) or real_pdf(f, loaded, summary),
+        lambda f, loaded=None, summary=None, template=None: (
+            seen.append(summary) or real_pdf(f, loaded, summary, template)
+        ),
     )
     export.export_session(session)
     assert seen and seen[0]  # the PDF got the same, non-empty summary as the DOCX
