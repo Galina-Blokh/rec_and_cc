@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
 import os
 import sys
 import tempfile
+import time
 import tomllib
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field, fields
@@ -212,7 +214,7 @@ class Config:
         raw = getattr(tr, "_raw_languages", None)
         if raw is not None and normalize_languages(raw) == tr.languages:
             data["transcription"]["languages"] = raw
-        path.write_bytes(tomli_w.dumps(data).encode())
+        _write_atomic(path, tomli_w.dumps(data).encode())
 
 
 def _build(cls, data: dict):
@@ -276,9 +278,10 @@ def save_keys(path: Path | None, updates: dict[str, Any]) -> float:
     config.toml, leaving every other key's value exactly as it is on disk (it may have been
     edited by hand since the app loaded it). Like every save, it drops TOML comments and
     rewrites the file in tomli_w's key order. ``path=None`` means CONFIG_PATH, read at call
-    time. Returns the new file's mtime. Raises FileNotFoundError if there is no file yet,
-    ValueError if it is not valid TOML or a key's
-    parent is not a table."""
+    time. Returns the new file's mtime. Writers in this process and the CLI are serialized
+    by a lock file; an editor saving in the same millisecond is not (it doesn't take it).
+    Raises FileNotFoundError if there is no file yet, ValueError if it is not valid TOML or a
+    key's parent is not a table."""
     path = (
         CONFIG_PATH if path is None else path
     ).resolve()  # a symlinked config.toml stays a symlink
@@ -310,8 +313,9 @@ def _file_lock(lock_path: Path) -> Iterator[None]:
                     f.seek(0)
                     msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
                     break
-                except OSError:
-                    continue
+                except OSError as e:
+                    if e.errno not in (errno.EDEADLK, errno.EACCES):  # only "still held"
+                        raise
             try:
                 yield
             finally:
@@ -341,11 +345,25 @@ def _write_atomic(path: Path, payload: bytes) -> float:
         with contextlib.suppress(OSError):
             os.chmod(tmp, path.stat().st_mode & 0o777)  # keep the user's file mode
         mtime = tmp.stat().st_mtime  # os.replace keeps it
-        os.replace(tmp, path)
+        _replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
     return mtime
+
+
+def _replace(src: Path, dst: Path) -> None:
+    """os.replace, retried briefly on Windows, where a reader that has the file open (an
+    editor, antivirus, the app's own reload) makes it fail with PermissionError."""
+    for delay in (0.05, 0.1, 0.2, 0.4):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if sys.platform != "win32":
+                raise
+            time.sleep(delay)
+    os.replace(src, dst)
 
 
 def save_languages(languages: list, path: Path | None = None) -> None:

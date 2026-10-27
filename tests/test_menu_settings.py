@@ -3,6 +3,7 @@
 Stories: US-17.
 """
 
+import subprocess
 import sys
 import threading
 import tomllib
@@ -101,9 +102,11 @@ def test_concurrent_save_keys_keep_both_keys(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text("a = 0\nb = 0\n")
     errors: list[BaseException] = []
+    start = threading.Barrier(2)
 
     def writer(key: str) -> None:
         try:
+            start.wait(10)
             for i in range(200):
                 save_keys(path, {key: i})
         except BaseException as e:  # noqa: BLE001 - reported below
@@ -239,3 +242,18 @@ def test_mac_toggles_keep_hand_edits(tmp_path, monkeypatch):
     data = _kept(path)
     assert data["live_captions"] is False and data["autostart"] is True
     assert data["transcription"]["audio_retention_days"] == 30
+
+
+def test_save_keys_from_another_process_keeps_both_keys(tmp_path):
+    """The CLI is a separate process: the lock file serializes it with the app's writes."""
+    path = tmp_path / "config.toml"
+    path.write_text("a = 0\nb = 0\n")
+    code = (
+        "import sys\nfrom pathlib import Path\nfrom recandcc.config import save_keys\n"
+        "for i in range(100):\n    save_keys(Path(sys.argv[1]), {'b': i})\n"
+    )
+    child = subprocess.Popen([sys.executable, "-c", code, str(path)])
+    for i in range(100):
+        save_keys(path, {"a": i})
+    assert child.wait(60) == 0
+    assert tomllib.loads(path.read_text()) == {"a": 99, "b": 99}
