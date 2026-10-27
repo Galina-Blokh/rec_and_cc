@@ -28,7 +28,7 @@ from pathlib import Path
 
 from ..models import Segment, is_rtl
 from .output import JSON_NAME, fmt_hms, languages_of
-from .summary import PENDING_MARKER, SUMMARY_NAME
+from .summary import PENDING_MARKER, SOURCE_NAME, SUMMARY_NAME, transcript_fingerprint
 
 log = logging.getLogger(__name__)
 
@@ -141,9 +141,16 @@ def load_summary(folder: Path, transcript_mtime: float | None = None) -> list[tu
 
 def _summary_is_stale(folder: Path, summary: Path, transcript_mtime: float | None = None) -> str:
     """Why the summary must not head the transcript ("" if it may): it is being redone
-    (marker present) or is older than the transcript (re-transcribed since)."""
+    (marker present) or made from other text than the transcript has now (re-transcribed).
+    A summary with a fingerprint survives speaker renames; an older one uses the mtime rule."""
     if (folder / PENDING_MARKER).exists():
         return "pending marker"
+    try:
+        recorded = (folder / SOURCE_NAME).read_text("utf-8").strip()
+        segs = json.loads((folder / JSON_NAME).read_text("utf-8")).get("segments", [])
+        return "" if transcript_fingerprint(segs) == recorded else "transcript text changed"
+    except (OSError, ValueError, AttributeError):
+        pass  # no (or unreadable) fingerprint: an old session
     try:
         mtime = transcript_mtime
         if mtime is None:

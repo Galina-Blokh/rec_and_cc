@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import gc
+import hashlib
 import importlib.util
 import json
 import logging
@@ -33,6 +34,9 @@ SUMMARY_NAME = "summary.md"
 # In a session folder while its summary is owed (queued, or stale after a speaker rename);
 # startup re-queues these, so a summary cut short by quitting is redone.
 PENDING_MARKER = ".summary-pending"
+# Fingerprint of the transcript text a summary was made from. Unlike an mtime it survives a
+# speaker rename or call-app names (they rewrite transcript.json but not what was said).
+SOURCE_NAME = ".summary-source"
 # ~2-5k tokens (en..he): well inside Qwen2.5's 32k context, and each chunk's prompt prefill
 # (which holds gpu.MLX_LOCK) stays within ~1-2 s.
 CHUNK_CHARS = 8_000
@@ -167,6 +171,14 @@ def summarize(
     return language, summary, items
 
 
+def transcript_fingerprint(segments: list[dict]) -> str:
+    """Hash of each transcript.json segment's start, end and text (speaker labels excluded)."""
+    h = hashlib.sha256()
+    for seg in segments:
+        h.update(f"{seg.get('start')}\x1f{seg.get('end')}\x1f{seg.get('text')}\x1e".encode())
+    return h.hexdigest()
+
+
 def format_summary(language: str, summary: str, items: list[str], model: str) -> str:
     title, actions, none = HEADINGS.get(language, HEADINGS["en"])
 
@@ -197,6 +209,8 @@ def summarize_session(directory: Path, cfg: Config, generate: Generator | None =
     path = atomic_write(
         directory / SUMMARY_NAME, format_summary(language, summary, items, cfg.summary.model)
     )
+    with contextlib.suppress(OSError):  # no fingerprint: export falls back to the mtime rule
+        atomic_write(directory / SOURCE_NAME, transcript_fingerprint(data.get("segments", [])))
     log.info(
         "summary of %s written: %d action item(s), %s, in %.1fs",
         directory.name,

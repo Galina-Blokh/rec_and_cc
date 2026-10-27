@@ -753,3 +753,67 @@ def test_a_year_is_not_a_numbered_item(session):
         ("p", "2026. The budget was approved"),
         ("num", "12. real item"),
     ]
+
+
+def _summary_texts(session):
+    return [t for _, t in export.load_summary(session)]
+
+
+def _rewrite_transcript(session, edit):
+    path = session / "transcript.json"
+    data = json.loads(path.read_text("utf-8"))
+    edit(data["segments"])
+    path.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+    os.utime(path, (9e9, 9e9))  # a rewrite is always newer than the summary
+
+
+def _with_fingerprint(session):
+    from recandcc.transcribe.summary import SOURCE_NAME, transcript_fingerprint
+
+    segs = json.loads((session / "transcript.json").read_text("utf-8"))["segments"]
+    (session / SOURCE_NAME).write_text(transcript_fingerprint(segs), "utf-8")
+
+
+def test_summary_survives_a_speaker_rename_rewrite(session):
+    """Stories: US-25."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+
+    def rename(segs):
+        for s in segs:
+            s["speaker"] = "Anna"  # name-speaker / call-app names relabel in place
+
+    _rewrite_transcript(session, rename)
+    assert _summary_texts(session)
+
+
+def test_summary_is_dropped_when_the_text_changed(session):
+    """Stories: US-25."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    _with_fingerprint(session)
+    _rewrite_transcript(session, lambda segs: segs[0].update(text="something else entirely"))
+    assert _summary_texts(session) == []
+
+
+def test_summary_without_a_fingerprint_keeps_the_mtime_rule(session):
+    """Stories: US-25."""
+    (session / "summary.md").write_text(SUMMARY_MD, "utf-8")
+    os.utime(session / "summary.md", (9e9, 9e9))
+    assert _summary_texts(session)  # newer than the transcript
+    os.utime(session / "summary.md", (1, 1))
+    assert _summary_texts(session) == []
+
+
+def test_summarize_session_records_the_fingerprint(session):
+    """Stories: US-25."""
+    from recandcc.config import Config
+    from recandcc.transcribe import summary
+
+    gen = lambda messages, max_tokens: "- do it"  # noqa: E731
+    summary.summarize_session(session, Config(), gen)
+
+    def rename(segs):
+        segs[0]["speaker"] = "Zed"
+
+    _rewrite_transcript(session, rename)
+    assert _summary_texts(session)
