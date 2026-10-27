@@ -1493,6 +1493,7 @@ def test_hand_edited_semantic_setting_is_applied_to_a_running_app(tmp_path, monk
     ctrl = SimpleNamespace(
         cfg=Config(output_dir=tmp_path),
         _save_lock=threading.Lock(),
+        _sync_index_lock=threading.Lock(),
         _lang_lock=threading.Lock(),
         _dirty_lock=threading.Lock(),
         _dirty={},
@@ -1655,6 +1656,7 @@ def _reload_ctrl(cfg, new, sync_index=None):
     ctrl = SimpleNamespace(
         cfg=cfg,
         _save_lock=threading.Lock(),
+        _sync_index_lock=threading.Lock(),
         _lang_lock=threading.Lock(),
         _dirty_lock=threading.Lock(),
         _dirty={},
@@ -1844,3 +1846,47 @@ def test_cli_search_never_downloads_while_the_app_runs(out, model_dir, monkeypat
     got = capsys.readouterr()
     assert "invoice" in got.out and "full-text matches only" in got.err
     assert "Downloading" not in got.err
+
+
+def test_sync_index_is_serialised_and_reads_the_setting_inside_the_lock():
+    """Two reload threads after a fast on->off flip: the last to run applies the current value."""
+    from recandcc.ui.common import Controller
+
+    cfg = Config()
+    cfg.search.semantic = True
+    ctrl = _reload_ctrl(cfg, cfg)
+    ctrl._sync_index = None  # use the real method below
+    seen: list[bool] = []
+    first_in = threading.Event()
+    release = threading.Event()
+
+    class Idx:
+        def __init__(self, flag):
+            self.flag = flag
+
+        def sync(self, _out):
+            seen.append(self.flag)
+
+    def fake_default_index(flag, _busy):
+        if not first_in.is_set():  # first thread: stall between reading the flag and syncing
+            first_in.set()
+            release.wait(5)
+        return Idx(flag)
+
+    import recandcc.search as search_mod
+
+    orig = search_mod.default_index
+    search_mod.default_index = fake_default_index
+    try:
+        t1 = threading.Thread(target=lambda: Controller._sync_index(ctrl))
+        t1.start()
+        assert first_in.wait(5)
+        cfg.search.semantic = False  # flipped while thread 1 is inside
+        t2 = threading.Thread(target=lambda: Controller._sync_index(ctrl))
+        t2.start()
+        release.set()
+        t1.join(5)
+        t2.join(5)
+    finally:
+        search_mod.default_index = orig
+    assert seen[-1] is False

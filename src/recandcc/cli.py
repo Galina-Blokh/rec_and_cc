@@ -92,10 +92,21 @@ def app_running() -> bool:
     return _SingleInstance(CONFIG_DIR / "run.lock").held_elsewhere()
 
 
+_ACQUIRE_RETRIES = 3
+_ACQUIRE_RETRY_S = 0.05
+
+
 def cmd_run(args) -> int:
     setup_logging()
     lock = _SingleInstance(CONFIG_DIR / "run.lock")
-    if not lock.acquire():
+    # held_elsewhere() probes hold the lock for a moment; don't mistake one for a running app
+    acquired = lock.acquire()
+    for _ in range(_ACQUIRE_RETRIES - 1):
+        if acquired:
+            break
+        time.sleep(_ACQUIRE_RETRY_S)
+        acquired = lock.acquire()
+    if not acquired:
         log.error("RecAndCC is already running (lock %s)", lock.path)
         print("RecAndCC is already running.", file=sys.stderr)
         return 1

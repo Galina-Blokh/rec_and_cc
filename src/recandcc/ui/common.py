@@ -344,6 +344,7 @@ class Controller:
         self._refreshing = False
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
+        self._sync_index_lock = threading.Lock()  # serialises _sync_index (worker threads only)
         self._save_lock = threading.Lock()  # menu writes to config.toml
         # guards _dirty; also spans the reload's snapshot+apply (only _lang_lock nests)
         self._dirty_lock = threading.Lock()
@@ -914,7 +915,10 @@ class Controller:
         try:
             from ..search import default_index
 
-            default_index(self.cfg.search.semantic, self._recording_busy).sync(self.cfg.output_dir)
+            with self._sync_index_lock:  # read the setting inside: the last runner sees the latest
+                default_index(self.cfg.search.semantic, self._recording_busy).sync(
+                    self.cfg.output_dir
+                )
         except Exception:  # noqa: BLE001 - search is optional
             log.exception("could not sync the search index")
 
