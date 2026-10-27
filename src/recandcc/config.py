@@ -140,12 +140,20 @@ class TranscriptionConfig:
     # Split "Others" into "Speaker 1", "Speaker 2", ... in the final transcript (offline
     # speaker diarization). Live captions keep showing "Others".
     diarize: bool = True
+    # Hints for diarization when you know how many other people are on the call: the number of
+    # speakers is picked automatically within [min_speakers, max_speakers]. 0 = no hint.
+    min_speakers: int = 0
+    max_speakers: int = 0
     # Remember speakers' voices so that a speaker named once (`recandcc name-speaker`) is named
     # in later sessions. Off by default: voice profiles are biometric data. See voices.py.
     speaker_names: bool = False
     # Transcribe while recording: text appears ~1-2 s after each phrase, and the final
     # transcript is ready right when the session stops (no post-session pass).
     live: bool = True
+    # Per-language model routing, e.g. {he = "ivrit-ai/whisper-large-v3-turbo-ct2"}: speech
+    # regions detected in a listed language are transcribed by its model (loaded on first
+    # use), all others by `model`. {} = `model` for every language.
+    language_models: dict[str, str] = field(default_factory=dict)
     # Allow downloading Whisper repos without a pinned revision (custom HF repo ids). Off by
     # default: upstream could swap their weights. Already-downloaded copies load either way.
     allow_unpinned_models: bool = False
@@ -228,6 +236,24 @@ def normalize_languages(value) -> list[str]:
     return out
 
 
+def normalize_language_models(value) -> dict[str, str]:
+    """`transcription.language_models` with clean Whisper codes as keys ("iw" -> "he").
+    Unknown language codes and empty or non-string model names are dropped with a warning."""
+    if not isinstance(value, dict):
+        log.warning("transcription.language_models must be a table; ignoring it")
+        return {}
+    out: dict[str, str] = {}
+    for key, model in value.items():
+        code = language_code(key)
+        if code not in WHISPER_LANGUAGES:
+            log.warning("ignoring unknown language %r in transcription.language_models", key)
+        elif not isinstance(model, str) or not model.strip():
+            log.warning("ignoring transcription.language_models.%s: not a model name", key)
+        else:
+            out[code] = model.strip()
+    return out
+
+
 def save_languages(languages: list, path: Path | None = None) -> None:
     """Write only `transcription.languages` into config.toml, leaving every other key as it is
     on disk (it may have been edited by hand since the app loaded it). Raises
@@ -254,6 +280,14 @@ def load_config(path: Path | None = None) -> Config:
     tr.languages = normalize_languages(raw)
     if tr.languages != raw:
         tr._raw_languages = raw  # type: ignore[attr-defined]  # written back by save()
+    tr.language_models = normalize_language_models(tr.language_models)
+    for code in tr.language_models:
+        if tr.languages and code not in tr.languages:
+            log.warning(
+                "transcription.language_models.%s is unused: %s is not in transcription.languages",
+                code,
+                code,
+            )
     summary = _build(SummaryConfig, data.pop("summary", {}))
     cfg = _build(Config, data)
     cfg.output_dir = Path(cfg.output_dir).expanduser()
