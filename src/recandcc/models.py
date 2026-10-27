@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
+import os
+import shutil
 import threading
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -12,6 +17,11 @@ from pathlib import Path
 # All captured audio is normalised to this format before it leaves a capture backend:
 # float32, mono, 16 kHz (what Whisper expects).
 SAMPLE_RATE = 16_000
+
+log = logging.getLogger(__name__)
+
+# SessionInfo.save: how often / how long to retry replacing a session.json someone has open.
+_REPLACE_TRIES, _REPLACE_WAIT_S = 5, 0.05
 
 # Guards SessionInfo.metrics updates against a concurrent save (several pipeline threads).
 _METRICS_LOCK = threading.RLock()
@@ -72,6 +82,8 @@ class SessionInfo:
     metrics: dict[str, dict] = field(default_factory=dict)
 
     FILENAME = "session.json"
+    # Present in a folder the user discarded: never transcribe or list it (discard_session).
+    DISCARD_MARKER = ".discarded"
 
     def update_metrics(self, stage: str, values: dict) -> None:
         """Merge `values` into ``metrics[stage]`` (thread-safe; not saved until ``save``)."""
@@ -85,9 +97,25 @@ class SessionInfo:
         data["started_at"] = self.started_at.isoformat()
         data["ended_at"] = self.ended_at.isoformat() if self.ended_at else None
         data["tracks"] = {str(k): v for k, v in self.tracks.items()}
-        (self.directory / self.FILENAME).write_text(
-            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        text = json.dumps(data, indent=2, ensure_ascii=False)
+        target = self.directory / self.FILENAME
+        # Atomic, so a crash mid-write can't leave a truncated session.json; unique per
+        # process and thread (the app and the CLI may both save).
+        tmp = self.directory / f"{self.FILENAME}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            for attempt in range(_REPLACE_TRIES):
+                try:
+                    os.replace(tmp, target)
+                    return
+                except PermissionError:  # Windows: someone (antivirus, a reader) has it open
+                    if attempt + 1 < _REPLACE_TRIES:
+                        time.sleep(_REPLACE_WAIT_S)
+            log.warning("%s stays in use; writing it in place", target)
+            target.write_text(text, encoding="utf-8")
+        finally:
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
 
     @classmethod
     def load(cls, directory: Path) -> SessionInfo:
@@ -103,3 +131,71 @@ class SessionInfo:
             transcribed=data.get("transcribed", False),
             metrics=data.get("metrics") or {},
         )
+
+
+def mark_discarded(directory: Path) -> None:
+    """Mark a session folder as discarded, so it is never transcribed or listed again: create
+    ``SessionInfo.DISCARD_MARKER``, or if that fails rename session.json to it, or as a last
+    resort delete session.json. Never raises."""
+    d = Path(directory)
+    marker, meta = d / SessionInfo.DISCARD_MARKER, d / SessionInfo.FILENAME
+    try:
+        marker.touch()
+        return
+    except OSError:
+        pass
+    try:
+        os.replace(meta, marker)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        with contextlib.suppress(OSError):
+            meta.unlink(missing_ok=True)
+
+
+def discard_session(directory: Path) -> bool:
+    """Delete a session folder the user discarded; True once it is gone.
+
+    The folder is marked (``mark_discarded``) before any audio is touched and the marker is
+    deleted last. So if a file can't be deleted (e.g. Windows still locks a WAV) the leftover
+    is never transcribed and is deleted again at the next start. Files that vanish meanwhile
+    are fine. May take a while (big WAVs): call it off latency-sensitive threads."""
+    d = Path(directory)
+    marker, meta = d / SessionInfo.DISCARD_MARKER, d / SessionInfo.FILENAME
+    failed: list[str] = []
+    for _ in range(2):  # a second pass catches files written meanwhile (e.g. a racing purge)
+        mark_discarded(d)  # every pass runs marked
+        failed = []
+        try:
+            entries = list(d.iterdir())
+        except FileNotFoundError:
+            return True
+        except OSError as e:
+            failed.append(str(e))
+            break
+        # Audio and transcripts first, then session.json, the marker last.
+        for p in sorted(entries, key=lambda p: (p == marker, p == meta)):
+            if p == marker and failed:
+                break
+            try:
+                if p.is_dir() and not p.is_symlink():
+                    shutil.rmtree(p)
+                else:
+                    p.unlink(missing_ok=True)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                failed.append(f"{p.name}: {e.strerror or e}")
+        if not failed:
+            try:
+                d.rmdir()
+                return True
+            except FileNotFoundError:
+                return True
+            except OSError as e:
+                failed.append(str(e))
+    with contextlib.suppress(OSError):
+        if not d.exists():
+            return True
+    log.warning("could not delete discarded session %s: %s", d, "; ".join(failed))
+    return False

@@ -1,4 +1,7 @@
-"""Crash reporting (excepthooks -> log + notice event) and per-session pipeline metrics."""
+"""Crash reporting (excepthooks -> log + notice event) and per-session pipeline metrics.
+
+Stories: US-10, US-17.
+"""
 
 from __future__ import annotations
 
@@ -151,3 +154,49 @@ def test_batch_transcription_saves_rtf(tmp_path, monkeypatch):
     s, _segs, _model, _ = _run_fake(tmp_path, monkeypatch, lid=None)
     m = SessionInfo.load(s.directory).metrics["transcription"]
     assert m["chunks"] > 0 and m["rtf"] >= 0 and m["audio_s"] > 0
+
+
+def test_setup_logging_adds_file_and_stderr_handlers_once(monkeypatch, tmp_path):
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "handlers", [])
+    monkeypatch.setattr(root, "level", root.level)
+    monkeypatch.setattr(logging_setup, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(logging_setup, "LOG_FILE", tmp_path / "logs" / "recandcc.log")
+    for name in ("faster_whisper", "httpx", "urllib3", "huggingface_hub"):
+        noisy = logging.getLogger(name)
+        monkeypatch.setattr(noisy, "level", noisy.level)  # restored after the test
+    installed = []
+    monkeypatch.setattr(logging_setup, "install_crash_handlers", installed.append)
+    try:
+        logging_setup.setup_logging(logging.DEBUG)
+        logging_setup.setup_logging(logging.DEBUG)  # second call is a no-op
+        kinds = sorted(type(h).__name__ for h in root.handlers)
+        assert kinds == ["RotatingFileHandler", "StreamHandler"]
+        assert root.level == logging.DEBUG
+        assert logging.getLogger("httpx").level == logging.WARNING
+        assert installed == [logging_setup.FAULTS_FILE]
+        logging.getLogger("recandcc.test").info("hello")
+        for h in root.handlers:
+            h.flush()
+        assert "recandcc.test: hello" in (tmp_path / "logs" / "recandcc.log").read_text()
+    finally:
+        for h in root.handlers:
+            h.close()
+        if hasattr(root, "_recandcc_configured"):
+            del root._recandcc_configured
+
+
+def test_faulthandler_goes_to_the_faults_file(monkeypatch, tmp_path):
+    enabled = []
+    monkeypatch.setattr(logging_setup, "_faults_file", None)
+    monkeypatch.setattr(logging_setup, "_installed", True)  # keep the real excepthooks
+    monkeypatch.setattr(
+        logging_setup.faulthandler, "enable", lambda file, all_threads: enabled.append(file)
+    )
+    faults = tmp_path / "logs" / "faults.log"
+    logging_setup.install_crash_handlers(faults)
+    try:
+        assert enabled and enabled[0].name == str(faults)
+        assert faults.exists()
+    finally:
+        logging_setup._faults_file.close()

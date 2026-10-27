@@ -37,11 +37,13 @@ class TranscriptionQueue:
         self._thread.start()
 
     def submit(self, session: SessionInfo, finalize: Finalizer | None = None) -> None:
-        if self._closed:
-            raise RuntimeError("TranscriptionQueue is shut down")
+        # Under the lock so a submit racing shutdown() is either rejected or queued ahead of
+        # the stop marker, never stranded behind it.
         with self._lock:
+            if self._closed:
+                raise RuntimeError("TranscriptionQueue is shut down")
             self._busy += 1
-        self._q.put((session, finalize))
+            self._q.put((session, finalize))
         log.info("queued session %s (%d pending)", session.id, self.pending())
 
     def pending(self) -> int:
@@ -52,17 +54,23 @@ class TranscriptionQueue:
     def shutdown(self, wait: bool = True) -> None:
         """Stop accepting work. wait=True finishes queued sessions first; wait=False drops
         sessions that haven't started (the current one still completes in the background)."""
-        self._closed = True
-        if not wait:
-            while True:
-                try:
-                    item = self._q.get_nowait()
-                except queue.Empty:
-                    break
-                if item is not _STOP:
-                    with self._lock:
+        with self._lock:
+            # One stop marker, queued after every accepted session (submit checks _closed
+            # under this lock); a repeated call only drains and/or waits.
+            need_stop = not self._closed
+            self._closed = True
+            if not wait:
+                while True:
+                    try:
+                        item = self._q.get_nowait()
+                    except queue.Empty:
+                        break
+                    if item is _STOP:
+                        need_stop = True
+                    else:
                         self._busy -= 1
-        self._q.put(_STOP)
+            if need_stop:
+                self._q.put(_STOP)
         if wait:
             self._thread.join()
 

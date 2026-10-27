@@ -10,9 +10,14 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .config import CONFIG_DIR, CONFIG_PATH, LOG_DIR, load_config
 from .logging_setup import LOG_FILE, set_crash_notifier, setup_logging
+
+if TYPE_CHECKING:
+    from .transcribe import Transcriber
+    from .transcribe.live import LiveTranscriber
 
 log = logging.getLogger("recandcc")
 
@@ -105,7 +110,8 @@ def cmd_record(args) -> int:
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     session = rec.start(TriggerKind.MANUAL, "manual", record_mic=False if args.no_mic else None)
     print(f"Recording to {session.directory} (tracks: {', '.join(map(str, session.tracks))})")
-    live = transcriber = None
+    live: LiveTranscriber | None = None
+    transcriber: Transcriber | None = None
     print_lock = threading.Lock()
     if cfg.transcription.live and not args.no_transcribe:
         from .transcribe import Transcriber
@@ -139,7 +145,7 @@ def cmd_record(args) -> int:
             "check microphone / system audio permissions."
         )
     if result is None:
-        if live is not None:
+        if live is not None and transcriber is not None:  # set together
             live.cancel()
             transcriber.close()
         print("Session too short; discarded.")
@@ -147,7 +153,7 @@ def cmd_record(args) -> int:
     print(f"Saved {result.directory}")
     if args.no_transcribe:
         return 0
-    if live is None:
+    if live is None or transcriber is None:  # set together
         _transcribe_now(cfg, result)
         return 0
     try:

@@ -32,7 +32,9 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "pyright>=1.1.414",
     "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
     "ruff>=0.17.2",
 ]
 
@@ -59,7 +61,28 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "S"]
 # Report scripts build HTML from long template strings; E501 there hurts readability.
 "scripts/report/*.py" = ["E501"]
 
+[tool.pyright]
+typeCheckingMode = "basic"
+pythonVersion = "3.12"
+include = ["src"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not slow'"
+# The coverage floor is enforced in CI only: `--cov-fail-under` in .github/workflows/ci.yml.
+addopts = "-m 'not slow' --cov --cov-report=term-missing:skip-covered"
 markers = ["slow: downloads Whisper models / runs real inference (run with -m slow)"]
+
+[tool.coverage.run]
+source = ["recandcc"]
+# UI shells (AppKit / pystray, exercised by hand) and the CLI entry points are not counted;
+# their testable logic lives in ui/common.py and ui/captions.py, which are.
+omit = [
+    "*/recandcc/__main__.py",
+    "*/recandcc/cli.py",
+    "*/recandcc/ui/mac.py",
+    "*/recandcc/ui/tray.py",
+    "*/recandcc/ui/captions_mac.py",
+    "*/recandcc/ui/toast_mac.py",
+]
+
+

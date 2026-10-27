@@ -4,6 +4,8 @@ Run: uv run pytest -m slow tests/test_diarize_integration.py -v -s
 The speaker model is downloaded once into the cache dir; after that the test runs with all
 network access blocked (proxy to a closed port + urlopen patched to fail).
 Whisper model: RECANDCC_TEST_MODEL (default "large-v3-turbo", the app default, so it is cached).
+
+Stories: US-12.
 """
 
 from __future__ import annotations
