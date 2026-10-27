@@ -41,14 +41,15 @@ PREFILL_STEP = 512  # prompt tokens per prefill step (lower peak memory than mlx
 # Download sizes of the offered (pinned) summary models, for the one-time download notice.
 MODEL_SIZES = {
     "mlx-community/Qwen2.5-3B-Instruct-4bit": "~1.7 GB",
-    "mlx-community/gemma-4-e4b-it-4bit": "~5.2 GB",
+    "mlx-community/gemma-4-e4b-it-4bit": "~5.1 GB",
     "mlx-community/gemma-4-e2b-it-4bit": "~3.6 GB",
 }
-# Gemma 4 writes a thought block before every answer, even with thinking off (prefilling an
-# empty thought channel or folding the system prompt into the user turn did not stop it). It
-# gets this many extra tokens for it, and only the text after the last CHANNEL_END is kept.
+# A thinking model (mlx-lm's tokenizer.has_thinking, e.g. Gemma 4) runs with thinking on, as
+# measured for Hebrew in #6 (with it off, Gemma 4 E2B's summaries lost facts). Its thought
+# block gets this many extra tokens, and only the text after the block is kept.
 THINKING_TOKENS = 1600
-CHANNEL_START, CHANNEL_END = "<|channel>", "<channel|>"
+CHANNEL_START, CHANNEL_END = "<|channel>thought", "<channel|>"  # Gemma 4's thought block
+CUT_OFF = "the summary model ran out of tokens while thinking"
 MAX_ROUNDS = 3  # reduce rounds before the notes are cut to fit
 LANGUAGE_NAMES = {"en": "English", "ru": "Russian", "he": "Hebrew"}
 # (summary heading, action items heading, "none") per language; English otherwise.
@@ -99,18 +100,13 @@ def download_notice(model: str) -> str:
     return f"Downloading the summary model ({size + ', ' if size else ''}once)"
 
 
-def thinks(model: str) -> bool:
-    """Whether ``model`` (a repo id or local path) is a Gemma 4, which thinks before answering."""
-    return "gemma-4" in Path(model).name.lower()
-
-
-def strip_thinking(text: str) -> str:
-    """The answer after a Gemma 4 thought block; "" if the thought never ended."""
-    if CHANNEL_END in text:
-        return text.rsplit(CHANNEL_END, 1)[1].strip()
-    if CHANNEL_START in text:
-        log.warning("the summary model ran out of tokens before it answered")
-        return ""
+def strip_thinking(text: str, start: str = CHANNEL_START, end: str = CHANNEL_END) -> str:
+    """The answer after a thought block (``start``...``end``). Raises SummaryUnavailable if
+    the thought never ended: no answer, so no summary.md that says "none"."""
+    if end in text:
+        return text.rsplit(end, 1)[1].strip()
+    if start in text:
+        raise SummaryUnavailable(CUT_OFF)
     return text.strip()
 
 
@@ -335,8 +331,12 @@ class MlxGenerator:
             raise SummaryUnavailable("the summary model is not on disk or can't be loaded") from e
         from mlx_lm import load  # pyright: ignore[reportMissingImports]
 
-        with MLX_LOCK:
-            self._model, self._tokenizer = load(path)[:2]
+        try:
+            with MLX_LOCK:
+                self._model, self._tokenizer = load(path)[:2]
+        except Exception as e:  # noqa: BLE001 - e.g. a model type this mlx-lm doesn't know
+            log.info("summary model %s failed to load: %s", self.model_name, type(e).__name__)
+            raise SummaryUnavailable("this mlx-lm can't load the summary model") from e
 
     def __call__(self, messages: Messages, max_tokens: int) -> str:
         if self._model is None:
@@ -350,10 +350,12 @@ class MlxGenerator:
 
         model: Any = self._model
         tokenizer: Any = self._tokenizer
-        thinking = thinks(self.model_name)
+        # mlx-lm's own detection; False for the default Qwen2.5, whose prompt stays unchanged
+        thinking = getattr(tokenizer, "has_thinking", False) is True
+        kw = {"enable_thinking": True} if thinking else {}
         if thinking:  # room for the thought block before the answer
             max_tokens += THINKING_TOKENS
-        prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+        prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, **kw)
         steps = stream_generate(
             model,
             tokenizer,
@@ -368,11 +370,15 @@ class MlxGenerator:
                 step = next(steps, None)
             if step is None:
                 text = "".join(out)
-                return strip_thinking(text) if thinking else text.strip()
+                if not thinking:
+                    return text.strip()
+                start = getattr(tokenizer, "think_start", None) or CHANNEL_START
+                end = getattr(tokenizer, "think_end", None) or CHANNEL_END
+                return strip_thinking(text, start, end)
             out.append(step.text)
 
     def close(self) -> None:
-        """Free the model, so its ~2 GB don't stay resident between sessions."""
+        """Free the model, so its 2-5 GB don't stay resident between sessions."""
         if self._model is None:
             return
         self._model = self._tokenizer = None

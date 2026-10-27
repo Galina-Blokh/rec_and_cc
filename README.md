@@ -276,12 +276,13 @@ which handles English, Russian and Hebrew; meetings in other languages keep the 
 
 ```toml
 [summary.language_models]
-he = "mlx-community/gemma-4-e4b-it-4bit"   # ~5.2 GB once, ~5 GB RAM while it runs
+he = "mlx-community/gemma-4-e4b-it-4bit"   # ~5.1 GB once, ~5 GB RAM while it runs
 # he = "mlx-community/gemma-4-e2b-it-4bit" # lighter (~3.6 GB), nearly as good
 ```
 
 The model is picked by the language with the most speech time, downloaded once (pinned) on
-the first meeting that needs it, and freed after each summary.
+the first meeting that needs it, and freed after each summary. Gemma thinks before it answers,
+so these summaries are slower; on an 8 GB Mac use E2B.
 
 ## Command line
 

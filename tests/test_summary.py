@@ -133,7 +133,6 @@ def test_session_loads_only_the_routed_model_and_frees_it(tmp_path, monkeypatch)
             "Anna fixes signing.",
         ),
         ("<|channel>thought\na<channel|>x<|channel>thought\nb<channel|>\n Final. ", "Final."),
-        ("<|channel>thought\nstill thinking when the budget ran out", ""),
         ("  plain answer\n", "plain answer"),
     ],
 )
@@ -141,14 +140,20 @@ def test_gemma_thinking_is_stripped(raw, answer):
     assert summary.strip_thinking(raw) == answer
 
 
-def _fake_mlx_lm(monkeypatch, text: str, seen: list[int]):
+def _fake_mlx_lm(monkeypatch, text: str, seen: list, thinking: bool):
     """Fake mlx_lm that streams ``text``; returns a fake tokenizer (no real model loads)."""
 
     def stream_generate(model, tokenizer, prompt, max_tokens, **kw):
         seen.append(max_tokens)
         return iter(types.SimpleNamespace(text=c) for c in [text[:5], text[5:]])
 
-    tok = types.SimpleNamespace(apply_chat_template=lambda m, add_generation_prompt: [1])
+    def apply_chat_template(messages, add_generation_prompt, **kw):
+        seen.append(kw)
+        return [1]
+
+    tok = types.SimpleNamespace(apply_chat_template=apply_chat_template, has_thinking=thinking)
+    if thinking:  # what mlx-lm detects for Gemma 4
+        tok.think_start, tok.think_end = "<|channel>thought", "<channel|>"
     sample = types.SimpleNamespace(make_logits_processors=lambda **kw: [])
     monkeypatch.setitem(
         sys.modules, "mlx_lm", types.SimpleNamespace(stream_generate=stream_generate)
@@ -157,17 +162,50 @@ def _fake_mlx_lm(monkeypatch, text: str, seen: list[int]):
     return tok
 
 
+RAW_GEMMA = "<|channel>thought\nplan<channel|>Answer."
+
+
 @pytest.mark.parametrize(
-    ("model", "budget", "answer"),
-    [(GEMMA, 400 + summary.THINKING_TOKENS, "Answer."), (DEFAULT_SUMMARY_MODEL, 400, None)],
+    ("model", "thinking", "seen", "answer"),
+    [
+        (GEMMA, True, [{"enable_thinking": True}, 400 + summary.THINKING_TOKENS], "Answer."),
+        (DEFAULT_SUMMARY_MODEL, False, [{}, 400], RAW_GEMMA),  # Qwen2.5: exactly as before
+    ],
 )
-def test_generator_gives_gemma_room_to_think_and_strips_it(monkeypatch, model, budget, answer):
-    raw = "<|channel>thought\nplan<channel|>Answer."
-    seen: list[int] = []
+def test_generator_gives_a_thinking_model_room_and_strips_it(
+    monkeypatch, model, thinking, seen, answer
+):
+    calls: list = []
     gen = summary.MlxGenerator(model)
-    gen._model, gen._tokenizer = object(), _fake_mlx_lm(monkeypatch, raw, seen)
-    assert gen([{"role": "user", "content": "x"}], 400) == (answer or raw)
-    assert seen == [budget]
+    gen._model, gen._tokenizer = object(), _fake_mlx_lm(monkeypatch, RAW_GEMMA, calls, thinking)
+    assert gen([{"role": "user", "content": "x"}], 400) == answer
+    assert calls == seen
+
+
+def test_thought_cut_off_writes_no_summary(tmp_path, caplog):
+    def cut_off(messages, max_tokens):
+        return summary.strip_thinking(f"<|channel>thought\n{SPOKEN} and more")
+
+    d = make_session(tmp_path, [seg(SPOKEN)])
+    notices = []
+    q = summary.SummaryQueue(Config(), notify=lambda *n: notices.append(n), generate=cut_off)
+    with caplog.at_level(logging.DEBUG, logger="recandcc"):
+        q.submit(d)
+        q.join()
+    assert not (d / "summary.md").exists() and not (d / summary.PENDING_MARKER).exists()
+    assert notices == [("Summary skipped", summary.CUT_OFF)]
+    assert SPOKEN not in caplog.text
+
+
+def test_a_model_this_mlx_lm_cannot_load_is_skipped(monkeypatch):
+    def load(path):
+        raise ValueError("Model type gemma4 not supported.")
+
+    monkeypatch.setattr(summary, "mlx_lm_available", lambda: True)
+    monkeypatch.setattr(gpu, "local_model_path", lambda *a: "/cache/m")
+    monkeypatch.setitem(sys.modules, "mlx_lm", types.SimpleNamespace(load=load))
+    with pytest.raises(summary.SummaryUnavailable, match="can't load"):
+        summary.MlxGenerator(GEMMA).load()
 
 
 def test_offered_summary_models_are_pinned_and_documented():
@@ -180,7 +218,7 @@ def test_offered_summary_models_are_pinned_and_documented():
         assert re.fullmatch(r"[0-9a-f]{40}", revisions.HF_REVISIONS[model]), model
         assert model in summary.MODEL_SIZES
         assert all(model.split("/")[1] in d for d in docs), model
-    assert summary.download_notice(GEMMA) == "Downloading the summary model (~5.2 GB, once)"
+    assert summary.download_notice(GEMMA) == "Downloading the summary model (~5.1 GB, once)"
     assert summary.download_notice("me/custom") == "Downloading the summary model (once)"
 
 
@@ -189,6 +227,9 @@ def test_load_config_reads_summary_language_models(tmp_path):
     path.write_text(f'[summary]\nlanguage_models = {{ iw = "{GEMMA}", xx = "m" }}\n', "utf-8")
     assert load_config(path).summary.language_models == {"he": GEMMA}
     assert Config().summary.language_models == {}
+    cfg = load_config(path)
+    cfg.save(tmp_path / "saved.toml")  # round-trips
+    assert load_config(tmp_path / "saved.toml").summary.language_models == {"he": GEMMA}
 
 
 def test_chunks_stay_within_the_limit_and_keep_everything():
