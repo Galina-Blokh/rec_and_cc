@@ -199,12 +199,15 @@ To regenerate: `uv run python scripts/make_synthetic_evalset.py "$TMPDIR/rcc-syn
 
 ## Interim synthetic speaker baseline
 
-For issue #1 ("6-speaker test meeting: DER better than v0.1; no regression at 2-3 speakers").
+For issue #1 ("6-speaker test meeting: DER measurably better than v0.1; no regression on 2–3
+speakers").
 **Synthetic TTS (macOS `say`), not the consented set: interim, overstates real-world accuracy.**
 Real calls have room noise, codecs, crosstalk and voices that differ far less than six distinct
 TTS voices do, so treat the numbers as a regression check, not as the acceptance result.
 
-DER here is scored with 10 ms frames and no collar. Set: `scripts/make_synthetic_evalset.py --meetings` (en only; voices Samantha, Reed, Daniel,
+DER here is scored with 10 ms frames and no collar.
+
+Set: `scripts/make_synthetic_evalset.py --meetings` (en only; voices Samantha, Reed, Daniel,
 Karen, Moira, Rishi). Three `others` clips of turn-taking meetings with turns of 1 to ~15
 words, varied pauses (0.15-1.0 s) and quick replies: 2 speakers (71 s, 24 turns), 3 speakers
 (83 s, 26 turns), 6 speakers (224 s, 77 turns). No overlapping speech. 2026-10-27, Apple M5 Max,
@@ -217,12 +220,12 @@ Transcription (large-v3-turbo, MLX, `--languages en`) gives WER 0.003 on the 997
 | v0.1.0 | 2 speakers | 3 / 2 | 0.257 | 0.0 | 7.6 | 7.4 |
 | v0.1.0 | 3 speakers | 3 / 3 | 0.210 | 0.0 | 8.6 | 5.9 |
 | v0.1.0 | 6 speakers | 6 / 6 | 0.357 | 0.0 | 25.3 | 41.4 |
-| main, `diarize_overlap` off | 2 speakers | 2 / 2 | 0.231 | 0.0 | 7.6 | 5.9 |
-| main, `diarize_overlap` off | 3 speakers | 3 / 3 | 0.210 | 0.0 | 8.6 | 5.9 |
-| main, `diarize_overlap` off | 6 speakers | 6 / 6 | 0.357 | 0.0 | 25.3 | 41.4 |
-| main, `diarize_overlap` on | 2 speakers | 2 / 2 | 0.130 | 0.0 | 7.6 | 0.0 |
-| main, `diarize_overlap` on | 3 speakers | 3 / 3 | 0.169 | 0.0 | 8.6 | 3.1 |
-| main, `diarize_overlap` on | 6 speakers | 5 / 6 | 0.309 | 0.0 | 25.3 | 32.3 |
+| 281bd90, `diarize_overlap` off | 2 speakers | 2 / 2 | 0.231 | 0.0 | 7.6 | 5.9 |
+| 281bd90, `diarize_overlap` off | 3 speakers | 3 / 3 | 0.210 | 0.0 | 8.6 | 5.9 |
+| 281bd90, `diarize_overlap` off | 6 speakers | 6 / 6 | 0.357 | 0.0 | 25.3 | 41.4 |
+| 281bd90, `diarize_overlap` on | 2 speakers | 2 / 2 | 0.130 | 0.0 | 7.6 | 0.0 |
+| 281bd90, `diarize_overlap` on | 3 speakers | 3 / 3 | 0.169 | 0.0 | 8.6 | 3.1 |
+| 281bd90, `diarize_overlap` on | 6 speakers | 5 / 6 | 0.309 | 0.0 | 25.3 | 32.3 |
 
 These numbers are not comparable with the 7-clip baseline above (DER 0.240): the clip set
 differs (long meetings with 2, 3 and 6 distinct voices, shorter pauses).
@@ -232,7 +235,7 @@ Reading it:
 - Missed speech is 0 everywhere. False alarm is the same in every row because every
   diarizer fills the pauses between turns (about 72-75% of the pause time in the three clips).
   Confusion is the part that differs.
-- Main with `diarize_overlap` off matches v0.1.0 at 3 and 6 speakers (consistent with
+- 281bd90 with `diarize_overlap` off matches v0.1.0 at 3 and 6 speakers (consistent with
   the same windows and clustering) and is slightly better at 2 (v0.1.0 found a third speaker;
   the cause was not investigated).
   So: no regression at 2-3 speakers, but **no gain at 6 speakers either**.
@@ -240,18 +243,66 @@ Reading it:
   merged two of the six voices (5 found). The "better than v0.1" criterion is met only in that
   mode and only by 5 points on TTS; it stays open until measured on a real, consented
   6-speaker meeting.
+- The 6 / 6 with `diarize_overlap` off is a coincidence, not better separation: it merges the
+  same two voices, and its sixth "speaker" is a ~4 s cluster of two stray windows. See
+  [Why two of the six voices merge](#why-two-of-the-six-voices-merge).
 
-How the rows were made: current `scripts/eval.py` on main at 281bd90, with and without the new
+How the rows were made: the diarizer at commit 281bd90 (the commit measured, pinned here; not
+the current main), scored with `scripts/eval.py` from #111, with and without its
 `--diarize-overlap` flag (which builds `Diarizer(segmentation=True)`, like config
-`diarize_overlap`); `eval.py` now also stores `speakers` and `ref_speakers` per clip. v0.1.0
-has no `eval.py` and no segmentation, so its rows come from a throwaway driver that put a
-`git worktree` of the `v0.1.0` tag (commit 5126a7c) first on `sys.path`, ran its `Diarizer().diarize_file` on
-each clip and scored the turns with the current `eval.py`'s `der` (same references, same
-10 ms frames, no collar), with the same cached embedding model
-(`3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx`) as main. Each clip was run once,
-so there is no variance estimate. `--diarize-overlap` exits with an error if the segmentation
-model is not on disk (it never downloads or silently falls back). The audio was generated into a temp folder and is not committed.
+`diarize_overlap`); `eval.py` also stores `speakers` and `ref_speakers` per clip. v0.1.0 has
+no `eval.py` and no segmentation, so its rows come from a throwaway driver that put a
+`git worktree` of the `v0.1.0` tag (commit 5126a7c) first on `sys.path`, ran its
+`Diarizer().diarize_file` on each clip and scored the turns with the current `eval.py`'s `der`
+(same references, same 10 ms frames, no collar), with the same cached embedding model
+(`3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx`) as 281bd90. Each clip was run
+once, so there is no variance estimate. `--diarize-overlap` exits with an error if the
+segmentation model is not on disk (it never downloads or silently falls back). The audio was
+generated into a temp folder and is not committed.
 
 To regenerate: `uv run python scripts/make_synthetic_evalset.py --meetings "$TMPDIR/rcc-meetings"`,
 then `uv run python scripts/eval.py "$TMPDIR/rcc-meetings" --languages en [--diarize-overlap]
 --json "$TMPDIR/out.json"`.
+
+### Why two of the six voices merge
+
+Investigated on main at 8097620, which reproduces the rows above: the same speaker counts, and
+DER 0.357 off and 0.308 on (0.309 above). The diarizer is unchanged since 281bd90.
+
+- **The merged voices are Samantha (`en1`) and Karen (`en5`), in both modes.** The cosine
+  similarity of their voice centroids (the unit mean of a speaker's clean windows) is 0.74.
+  Every other pair is 0.25-0.58. Within one voice, windows average 0.83-0.87 to their own
+  centroid. To CAM++ these two TTS voices are much closer than any other pair, but they are not
+  the same: a leave-one-out nearest-centroid test with the true labels separates their windows
+  perfectly (31 of 31 off, 33 of 33 on).
+- **Average linkage merges them before it absorbs outliers.** Their windows' average
+  cross-similarity is about 0.55. A few stray windows (a short reply, the end of a turn) are
+  less similar than that to everything. So the dendrogram keeps 1-2-window outlier clusters
+  as separate "speakers" longer than it keeps en1 and en5 apart. They first split at k = 12
+  clusters off and k = 9 on. Both are well past the silhouette's pick (k = 6 off, 5 on), and
+  the extra clusters at that point are 1-3-window outliers.
+- **The speaker count is a near tie either way.** Silhouette off: k = 4: 0.470, 5: 0.439,
+  6: 0.478. On: k = 4: 0.507, 5: 0.515, 6: 0.478. Off picks k = 6 by 0.008, and its sixth
+  cluster is two stray windows (one en5, one en2), about 4 s, just above `MIN_SPEAKER_S`
+  (2 s). On, segmentation turns those strays into cleaner pieces, so k = 5 wins, and the
+  segmentation's own gain shows as lower confusion (32 s vs 41 s). Segmentation is not
+  what merges the voices. The embedding windows are about as long with it as without it
+  (mean clustered window 1.90 s vs 2.05 s).
+- **Forcing the right count does not fix it either.** With `min_speakers = max_speakers = 6`,
+  DER is 0.357 off and 0.313 on, because the sixth cluster is still an outlier, not en5.
+
+**No principled fix found, so the clustering is unchanged.** Changes that were tried on the
+saved embeddings:
+
+| Change | 6 speakers, off / on | 2-3 speakers |
+|---|---|---|
+| Silhouette over cuts whose clusters of ≥ N windows count as speakers (smaller ones are outliers) | N = 2: 7 / 6; N = 3-4: 5 / 7; N = 5: 6 / 6 | unchanged |
+| Spectral clustering, pruned cosine affinity, eigengap count | p = 0.1: 6 / 6; p = 0.15: 6 / 6; p = 0.2: 5 / 6; p = 0.3: 5 / 5 | p = 0.1: 16-18 speakers found with segmentation on; else unchanged |
+
+Each fixes the 6-speaker clip only at one setting of its own parameter, and moving the
+parameter one step breaks it again (or breaks the 2-3-speaker clips). One synthetic clip
+can't justify that choice; it would be tuning to two TTS voices. Even with 6 / 6, DER stays
+at 0.19-0.25 (false alarm in the pauses plus window-boundary confusion). Revisit with the
+consented set. The options in order: a minimum cluster size from real meetings, so outliers
+don't count as speakers; re-assigning outlier windows after the cut; a stronger embedding
+model.
