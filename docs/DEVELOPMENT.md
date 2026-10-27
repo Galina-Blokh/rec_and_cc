@@ -42,7 +42,7 @@ src/recandcc/
   permissions.py native.py      TCC permissions + helper discovery (macOS)
   ui/                           common Controller + rumps (mac) / pystray (windows) + live captions
   autostart.py cli.py logging_setup.py
-native/macos/AudioTap/          SwiftPM: rcc-audiotap (monitor/capture/permissions/hotkey) + RecAndCC launcher
+native/macos/AudioTap/          SwiftPM: rcc-audiotap (monitor/capture/permissions/hotkey/settings) + RecAndCC launcher
 tests/                          pytest suite
 scripts/                        dev tools (captions_demo.py, eval.py, pyinstaller_spike.py)
 docs/                           this documentation
