@@ -90,6 +90,8 @@ All notable changes to RecAndCC are documented here. The format is based on
   (#36, #54, #55).
 
 ### Fixed
+- PDF export no longer silently drops characters its font lacks: bidi controls are stripped
+  and emoji or other uncovered glyphs become a visible placeholder (part of #4).
 - A summary stays at the top of DOCX/PDF exports after a speaker rename or call-app names:
   freshness follows the transcript text (`.summary-source` fingerprint), not its mtime (audit
   by rec-and-cc-7e). The CLI `recandcc name-speaker` still marks the summary pending so the app

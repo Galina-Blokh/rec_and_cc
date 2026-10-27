@@ -124,7 +124,8 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   stays on (macOS shows the orange dot the whole time; it costs some battery, and Bluetooth
   headsets switch to their call profile) and about 6 s of speech within 15 s near the laptop
   starts a recording, as in Auto/Ask mode, including the 15 s before it (system audio is
-  recorded too, as for calls). It stops after 90 s without speech. Apps take precedence:
+  recorded too, all of it: there is no app to follow; with `system_audio_scope = "app"` only
+  the call app once a call joins). It stops after 90 s without speech. Apps take precedence:
   nothing starts while another app plays or uses the mic (music too), and a room recording
   stops if an app you switched off, stopped or ignore starts. The people in the room become
   `Speaker 1`, `Speaker 2`, … in the transcript (one person alone stays `Me`); if a call joins,
@@ -145,7 +146,7 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
 - **Forget all voices…**: after a confirmation, deletes every voice profile and all saved
   session voices (`recandcc voices delete --all`), including those of sessions still waiting
   to be transcribed. Closing the confirmation, or leaving it until it times out, deletes nothing.
-- **Export latest transcript (DOCX + PDF)** (*macOS only*; on Windows use `recandcc export`): writes `transcript.docx` and `transcript.pdf`
+- **Export latest transcript (DOCX + PDF)**: writes `transcript.docx` and `transcript.pdf`
   next to the newest transcript. Same as `recandcc export`. If the session has a
   `summary.md`, the summary and action items come first (their freshness follows the transcript text, start/end/text, not file times, so speaker renames and call-app names keep them; deleting `.summary-source` falls back to the file-time rule, which also applies to sessions summarised before this version). The export renders the summary's
   headings, bullets, numbered items and notes (Hebrew headings follow the text, right to left).
@@ -165,12 +166,17 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   you added in the settings by hand are kept and listed as "Also from settings".
 - **Use names from the call app** (*macOS only*, off by default): see
   [Names from the call app](#names-from-the-call-app).
-- **Delete audio after** (*macOS only*; on Windows set `audio_retention_days`): Never / 1 / 7 / 30 / 90 days. Audio of transcribed recordings is
-  deleted after that many days; transcripts are always kept. Any number of days can be set as
-  `audio_retention_days` in the settings.
+- **Delete audio after**: Never / 1 / 7 / 30 / 90 days. Audio of transcribed recordings is
+  deleted after that many days; transcripts are always kept. Choosing a value deletes at once
+  the transcribed audio already older than that ("1 day" deletes transcribed audio more than
+  a day old). Any number of days can be set as `audio_retention_days` in the settings.
+  Session folders that are links (symlinks, junctions) to somewhere else are skipped (logged once per folder).
 - **Settings…** (*macOS only*; needs the rebuilt helper, `./native/macos/build.sh`): a window for mode,
-  transcripts folder, languages, keep audio, live captions and speaker names. Saved values
-  apply at once. Without it, the app opens `config.toml` instead.
+  transcripts folder, languages, keep audio, live transcription, the live captions window,
+  speaker names and the Whisper model (only the pinned models listed in
+  [CONFIGURATION.md](docs/CONFIGURATION.md)). Saved values apply at once, live transcription
+  from the next session, and a model change after the app restarts (a model not on disk yet
+  is downloaded once then). Without it, the app opens `config.toml` instead.
 - **Edit config.toml** (**Edit settings** in the Windows tray): opens `config.toml` (changes
   to detection settings, `hotkey` and `languages` apply live).
 - **Reveal logs**: shows the log folder in Finder / Explorer.

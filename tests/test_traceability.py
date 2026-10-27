@@ -89,6 +89,17 @@ def test_split_refs_rejects_malformed_entries():
     assert bad == ["test_a.py::test-x", "sub/test_b.py::t"]
 
 
+def test_every_module_path_exists():
+    missing = []
+    for line in (REQ / "traceability.md").read_text("utf-8").splitlines():
+        if not (m := re.match(r"\| (US-\d+) \|([^|]*)\|", line)):
+            continue
+        for path in re.findall(r"`([^`]+)`", m[2]):
+            if not any((base / path).exists() for base in (ROOT / "src" / "recandcc", ROOT)):
+                missing.append((m[1], path))
+    assert not missing, missing
+
+
 def test_every_table_reference_is_well_formed():
     bad = {story: split_refs(cell)[1] for story, cell in table_cells().items()}
     assert not any(bad.values()), {s: b for s, b in bad.items() if b}

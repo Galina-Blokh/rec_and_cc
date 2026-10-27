@@ -511,10 +511,7 @@ _PROBE = "aZé\u0416\u0451\u044f\u05d0\u05ea\u05b7\u05f3\u05f4—…«»“”"
 def _covers_scripts(path: Path) -> bool:
     """True if the font has glyphs for Latin, Cyrillic and Hebrew (fontTools comes with fpdf2)."""
     try:
-        from fontTools.ttLib import TTFont
-
-        with TTFont(str(path), lazy=True, fontNumber=0) as f:
-            cmap = f.getBestCmap() or {}
+        cmap = _font_cmap(path)
         return all(ord(c) in cmap for c in _PROBE)
     except Exception:  # noqa: BLE001 - an unreadable font is just not a candidate
         return False
@@ -530,6 +527,63 @@ def find_font() -> Path:
         "no system font with Latin, Cyrillic and Hebrew found for the PDF (install Arial or "
         "DejaVu Sans); DOCX export still works"
     )
+
+
+# Embedding/isolate controls (and ALM): dropped always, the PDF lays direction out itself.
+_BIDI_CONTROLS = frozenset([0x061C, *range(0x202A, 0x202F), *range(0x2066, 0x206A)])
+# Invisible format characters (LRM/RLM, ZWJ/ZWNJ, ZWSP, word joiner, BOM, soft hyphen, variation
+# selectors): kept when the font has a glyph (LRM/RLM keep neutral punctuation ordered in RTL
+# text, ZWNJ/ZWJ matter for Persian and Indic), otherwise dropped rather than shown as "?".
+_FORMAT = frozenset([0x00AD, 0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0x2060, 0xFEFF]) | frozenset(
+    [*range(0xFE00, 0xFE10)]
+)
+_ZWJ = 0x200D
+_EMOJI_MODIFIERS = range(0x1F3FB, 0x1F400)
+
+
+@functools.lru_cache(maxsize=4)
+def _font_cmap(path: Path) -> frozenset[int]:
+    from fontTools.ttLib import TTFont
+
+    with TTFont(str(path), lazy=True, fontNumber=0) as f:
+        return frozenset(f.getBestCmap() or {})
+
+
+def _is_emoji(o: int) -> bool:
+    return o >= 0x1F000 or 0x2190 <= o <= 0x2BFF or o in _EMOJI_MODIFIERS
+
+
+def pdf_safe_text(text: str, path: Path) -> str:
+    """Strip bidi controls and swap characters the font lacks (emoji, ...) for a visible
+    placeholder, so the PDF never silently loses text the DOCX has. A ZWJ emoji sequence or
+    skin-tone run becomes one placeholder. The font cmap is cached per ``path`` (by value)."""
+    cmap = _font_cmap(path)
+    mark = "\ufffd" if 0xFFFD in cmap else "?"
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    out: list[str] = []
+    after_mark = False  # the last thing emitted is a placeholder that a ZWJ/modifier extends
+    joined = False  # a dropped ZWJ follows that placeholder
+    swapped = 0
+    for c in text:
+        o = ord(c)
+        if o in _BIDI_CONTROLS or (o < 0x20 and c not in "\n\t") or 0x7F <= o < 0xA0:
+            continue
+        if after_mark and o == _ZWJ:
+            joined = True  # inside an emoji sequence: glue, not text
+        elif o in cmap or c in "\n\t":
+            out.append(c)
+            after_mark = joined = False
+        elif o in _FORMAT:
+            joined = after_mark and (joined or o == _ZWJ)
+        elif after_mark and (o in _EMOJI_MODIFIERS or (joined and _is_emoji(o))):
+            joined = False
+        else:
+            out.append(mark)
+            swapped += 1
+            after_mark, joined = True, False
+    if swapped:
+        log.debug("PDF: %d character(s) shown as a placeholder (not in the font)", swapped)
+    return "".join(out)
 
 
 @_type_only
@@ -555,6 +609,7 @@ def _export_pdf(folder: Path, pin: _Pin, loaded, summary) -> Path:
     width = pdf.w - pdf.l_margin - pdf.r_margin
 
     def para(text: str, size: int, rtl: bool = False, gap: float = 2) -> None:
+        text = pdf_safe_text(text, font)
         pdf.set_font("body", size=size)
         pdf.set_text_shaping(True, direction="rtl" if rtl else "ltr")
         pdf.set_x(pdf.l_margin)
