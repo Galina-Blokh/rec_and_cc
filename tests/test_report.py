@@ -1,4 +1,4 @@
-"""Build-report collector: metrics from a tiny fixture and price maths. No network.
+"""Build-report scripts: metrics from a tiny fixture, rendering and price maths. No network.
 
 Stories: none.
 """
@@ -20,6 +20,7 @@ def _load(name):
 
 
 collect = _load("collect")
+render = _load("render")
 diff = _load("diff")
 
 
@@ -331,6 +332,195 @@ def test_pooled_pr_details_match_sequential(tmp_path, monkeypatch):
     again, again_log = collect.GitHub("o/r", tmp_path / "a"), []
     _fake_api(again, responses(), again_log)
     assert collect.fetch_github(again) == pooled and len(again_log) == 3
+
+
+def _report_data(claude=None, docs=None):
+    raw = _data()
+    now = collect.ts("2026-10-26T14:00:00Z")
+    prs = collect.build_prs(raw, raw["runs"], now)
+    issues = collect.build_issues(raw["issues"], prs)
+    ledger = [
+        {
+            "sha": "a",
+            "merge": False,
+            "author": "dev",
+            "email": "e",
+            "at": "2026-10-26T10:00:00+00:00",
+            "subject": "feat: x",
+            "ai": True,
+        }
+    ]
+    return {
+        "repo": "o/r",
+        "generated_at": "2026-10-26T14:00:00+00:00",
+        "window": {"start": "2026-10-26T10:00:00+00:00", "end": "2026-10-26T14:00:00+00:00"},
+        "refresh": {"on_merge": True, "minutes": 360},
+        "summary": collect.summarize(prs, issues, now),
+        "series": collect.series(prs, ledger),
+        "commits": collect.build_commits(ledger),
+        "ci": collect.build_ci(raw["runs"]),
+        "claude": claude or collect.claude_usage([], {}),
+        "docs": docs or {"adrs": [], "roadmap": []},
+        "prs": prs,
+        "issues": issues,
+        "prices": {"claude-opus-5-5": {"input": 4.0, "output": 20.0, "cache_read": 0.2}},
+        "sources": {"github_calls": 0, "ref": "origin/main"},
+    }
+
+
+SECTIONS = (
+    "tldr",
+    "how",
+    "delivery",
+    "prd",
+    "size",
+    "cycle",
+    "quality",
+    "team",
+    "work",
+    "ai",
+    "lessons",
+    "deferrals",
+    "dq",
+    "recos",
+    "allprs",
+    "allissues",
+    "allci",
+    "sources",
+    "glossary",
+)
+
+
+def test_render_produces_every_section():
+    page = render.render(_report_data())
+    for sid in SECTIONS:
+        assert f'id="{sid}"' in page
+    assert "None" not in page.replace("NoneType", "")
+    assert "<script src" not in page and "https://cdn" not in page
+
+
+def test_render_with_claude_usage_and_docs_and_fragment(tmp_path):
+    usage = {"input_tokens": 1, "output_tokens": 2, "cache_read_input_tokens": 3}
+    d = tmp_path / "proj"
+    d.mkdir()
+    rec = {
+        "type": "assistant",
+        "gitBranch": "b1",
+        "timestamp": "2026-10-26T10:00:00Z",
+        "message": {"id": "m1", "model": "claude-opus-5-5", "usage": usage},
+    }
+    (d / "s.jsonl").write_text(json.dumps(rec))
+    claude = collect.claude_usage([d], {"b1": 1})
+    docs = {
+        "adrs": [
+            {"id": "0001", "title": "Python core", "status": "Accepted", "path": "docs/adr/x.md"}
+        ],
+        "roadmap": [{"section": "Future work", "done": False, "text": "Hebrew support"}],
+    }
+    page = render.render(_report_data(claude, docs))
+    assert "Python core" in page and "Hebrew support" in page and "claude-opus-5-5" in page
+    frag = render.fragment(page)
+    assert frag.startswith("<title>") and "<html" not in frag and "<body" not in frag
+    assert 'name="claude:viewport-fit-sides"' in frag and 'charset="utf-8"' not in frag
+
+
+def _titles(data):
+    return {f["title"]: f["severity"] for f in render.findings(data)}
+
+
+def test_findings_fire_from_the_evidence():
+    data = _report_data()
+    t = _titles(data)
+    assert t["No review by a person"] == "medium"
+    assert t["Open issues have no owner"] == "low"
+    assert "Changes merged while CI was red" not in t and "main went red after a merge" not in t
+
+    data["summary"]["merged_red"] = 2
+    findings = render.findings(data)
+    assert (findings[0]["title"], findings[0]["severity"]) == (
+        "Changes merged while CI was red",
+        "high",
+    )
+    assert "2 merged pull requests" in findings[0]["evidence"]
+
+    data["ci"]["main_failed"], data["ci"]["main_runs"] = 1, 4
+    data["claude"].update(cost=10.0, unlinked_share=0.4)
+    data["summary"].update(open=5, closed_unmerged=1, reviewed_human=1)
+    t = _titles(data)
+    assert t["main went red after a merge"] == "medium"
+    assert t["Most Claude spend cannot be tied to a pull request"] == "medium"
+    assert t["Open pull requests pile up"] == "medium"
+    assert t["Work thrown away"] == "low"
+    assert "No review by a person" not in t
+
+
+def test_render_survives_an_empty_record():
+    empty_summary = collect.summarize([], [], collect.ts("2026-10-26T14:00:00Z"))
+    data = {
+        **_report_data(),
+        "window": {"start": None, "end": "2026-10-26T14:00:00+00:00"},
+        "summary": empty_summary,
+        "series": collect.series([], []),
+        "commits": collect.build_commits([]),
+        "ci": collect.build_ci([]),
+        "prs": [],
+        "issues": [],
+    }
+    page = render.render(data)
+    assert 'id="tldr"' in page and "0 merged pull requests" in page
+
+
+def test_cursor_review_rule_flips_severity_at_one_finding_per_round():
+    data = _report_data()
+    data["summary"].update(review_rounds=4, review_findings=2)
+    assert _titles(data)["Cursor reviews mostly came back clean"] == "low"
+    data["summary"].update(review_findings=6)
+    t = _titles(data)
+    assert t["Every Cursor review round found something"] == "medium"
+    assert "Cursor reviews mostly came back clean" not in t
+    data["summary"].update(review_rounds=0, review_findings=0)
+    assert not {k for k in _titles(data) if "Cursor review" in k}
+
+
+def test_stale_banner_follows_the_refresh_cadence():
+    data = _report_data()  # generated 26/10 14:00 UTC, refreshed every 6 h
+    fresh = render.render(data, now=collect.ts("2026-10-26T20:00:00Z"))
+    late = render.render(data, now=collect.ts("2026-10-27T03:00:00Z"))
+    assert "Stale: the scheduled refresh has not run." not in fresh
+    assert "Stale: the scheduled refresh has not run." in late
+
+
+def test_ci_hour_table_matches_the_gap_filled_chart():
+    data = _report_data()
+    data["ci"]["per_hour"] = [
+        {"hour": "2026-10-26 10:00", "passed": 1, "failed": 0},
+        {"hour": "2026-10-26 13:00", "passed": 0, "failed": 1},
+    ]
+    page = render.render(data)
+    figure = page.split('id="c-ciday"', 1)[1].split("</figure>", 1)[0]
+    table = figure.split("<tbody>", 1)[1]
+    assert table.count("<tr>") == 4 and "2026-10-26 11:00" in table
+
+
+def test_day_names_do_not_depend_on_the_locale():
+    assert render.day_name("2026-10-27") == "Tue 27/10"
+
+
+def test_fill_hours_fills_gaps_and_switches_to_days_on_long_spans():
+    short = render.fill_hours(
+        [{"hour": "2026-10-26 10:00", "n": 1}, {"hour": "2026-10-26 13:00", "n": 2}], ["n"]
+    )
+    assert [r["n"] for r in short] == [1, 0, 0, 2]
+    long = render.fill_hours(
+        [
+            {"hour": "2026-10-01 10:00", "n": 1},
+            {"hour": "2026-10-01 11:00", "n": 1},
+            {"hour": "2026-10-14 09:00", "n": 3},
+        ],
+        ["n"],
+    )
+    assert len(long) == 14 and long[0] == {"hour": "2026-10-01", "n": 2} and long[-1]["n"] == 3
+    assert render.hour_label(long[0]["hour"]) == "01/10"
 
 
 def test_diff_lists_moved_headline_figures():
