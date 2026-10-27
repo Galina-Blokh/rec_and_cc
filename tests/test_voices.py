@@ -237,6 +237,38 @@ def test_a_failure_partway_never_counts_a_session_twice(tmp_path, monkeypatch):
     assert "Carl" not in (tmp_path / "transcript.md").read_text(encoding="utf-8")
 
 
+def test_failed_transcript_write_leaves_the_speaker_nameable(tmp_path, monkeypatch):
+    _final(tmp_path, monkeypatch, speaker_names=True)
+
+    def boom(*_a, **_k):
+        raise OSError("cloud folder")
+
+    with monkeypatch.context() as m:
+        m.setattr(voices, "write_outputs", boom)
+        with pytest.raises(OSError):
+            voices.name_speaker(tmp_path, "Speaker 2", "Carl")
+    assert voices.load_profiles() == []
+    assert set(voices.read_session_voices("s1")) == {"Speaker 1", "Speaker 2"}
+    assert "Speaker 2" in dict(voices.session_speakers(tmp_path))
+    assert voices.name_speaker(tmp_path, "Speaker 2", "Dora").count == 1  # any name works
+
+
+def test_failed_store_step_restores_label_and_voices(tmp_path, monkeypatch):
+    _final(tmp_path, monkeypatch, speaker_names=True)
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    with monkeypatch.context() as m:
+        m.setattr(voices, "save_profile", boom)
+        with pytest.raises(OSError):
+            voices.name_speaker(tmp_path, "Speaker 2", "Carl")
+    assert "Carl" not in (tmp_path / "transcript.md").read_text(encoding="utf-8")
+    assert set(voices.read_session_voices("s1")) == {"Speaker 1", "Speaker 2"}
+    assert voices.load_profiles() == []
+    assert voices.name_speaker(tmp_path, "Speaker 2", "Dora").count == 1
+
+
 def test_windows_replace_retries_when_the_file_is_held_open(tmp_path, monkeypatch):
     real, calls = os.replace, []
 

@@ -352,8 +352,10 @@ name can take a session's centroid out again) and the session centroids (`sessio
 by session id, with the session folder: pruned once it is deleted) live in the owner-only (0700/0600)
 `platformdirs.user_data_dir("RecAndCC")/voices`, never in `output_dir`, which may be synced
 to a cloud drive. A transcript written without labels or with the option off deletes its
-session's centroids. `name-speaker` marks the session as folded into the profile before it
-changes the profile, so a failure partway can't count one session twice. All of it runs on the diarizer / writer threads, after the audio threads.
+session's centroids. `name-speaker` rewrites the transcript first, then re-keys the session
+voices and saves the profile; if either step fails, the other is put back (old label, old
+voices), so the speaker stays nameable. Within the store step it marks the session as folded
+into the profile before it changes the profile, so a failure partway can't count one session twice. All of it runs on the diarizer / writer threads, after the audio threads.
 Locking: `voices.NAMING_LOCK` (in-process) serialises everything that changes a session's
 speaker labels — finalize/relabel, `name-speaker`, the call-app rename and "Forget all
 voices" (`forget_all`, so a forget comes after any of them and no forgotten name is written

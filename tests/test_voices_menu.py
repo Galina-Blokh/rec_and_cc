@@ -148,7 +148,9 @@ def test_forget_waits_for_a_running_naming(tmp_path, monkeypatch):
     assert started.wait(5)
     ctrl.forget_voices_async()
     assert spy.waiting.wait(5)  # forget is queued on NAMING_LOCK behind the naming
-    assert ctrl.events.empty() and voices.load_profiles()  # ...and has deleted nothing yet
+    assert ctrl.events.empty() and voices.read_session_voices(
+        "s1"
+    )  # ...and has deleted nothing yet
     release.set()
     assert ctrl.events.get(timeout=5)[0] == "named"
     assert ctrl.events.get(timeout=5) == ("forgot", 1)
@@ -255,18 +257,20 @@ def test_a_forget_in_another_process_drops_a_stale_diarization_write(tmp_path, m
     assert voices.read_session_voices(session.id)
 
 
-def test_forget_between_voice_write_and_transcript_rewrite_wins(tmp_path, monkeypatch):
+def test_forget_between_transcript_rewrite_and_voice_write_wins(tmp_path, monkeypatch):
     _final(tmp_path, monkeypatch, speaker_names=True)
     real = voices.write_outputs
 
-    def forget_first(*args, **kwargs):
-        voices.delete_all_profiles()  # lands after the voices were saved, before the transcript
-        return real(*args, **kwargs)
+    def forget_after(*args, **kwargs):
+        real(*args, **kwargs)
+        voices.delete_all_profiles()  # lands after the transcript, before the voice store
+        return None
 
-    monkeypatch.setattr(voices, "write_outputs", forget_first)
-    voices.name_speaker(tmp_path, "Speaker 2", "Carl")
-    assert "Carl:** hi" in (tmp_path / "transcript.md").read_text(encoding="utf-8")
+    monkeypatch.setattr(voices, "write_outputs", forget_after)
+    with pytest.raises(ValueError):  # the voice is gone: nothing is remembered, label restored
+        voices.name_speaker(tmp_path, "Speaker 2", "Carl")
     assert voices.load_profiles() == [] and voices.read_session_voices("s1") == {}
+    assert "Carl" not in (tmp_path / "transcript.md").read_text(encoding="utf-8")
 
 
 def test_slow_relabel_keeps_a_name_and_holds_the_naming_lock(tmp_path, monkeypatch):
