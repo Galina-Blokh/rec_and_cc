@@ -1,4 +1,7 @@
-"""LiveTranscriber with a fake model (real Silero VAD on synthetic, speech-like bursts)."""
+"""LiveTranscriber with a fake model (real Silero VAD on synthetic, speech-like bursts).
+
+Stories: US-08, US-09, US-11.
+"""
 
 from __future__ import annotations
 

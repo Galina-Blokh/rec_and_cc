@@ -1,4 +1,7 @@
-"""Integration tests for the macOS native helper (rcc-audiotap). Skipped elsewhere."""
+"""Integration tests for the macOS native helper (rcc-audiotap). Skipped elsewhere.
+
+Stories: US-01, US-16.
+"""
 
 from __future__ import annotations
 

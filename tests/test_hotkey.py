@@ -1,4 +1,7 @@
-"""Global shortcut: combo parsing, toggle/debounce in the Controller, helper restart logic."""
+"""Global shortcut: combo parsing, toggle/debounce in the Controller, helper restart logic.
+
+Stories: US-05, US-18.
+"""
 
 from __future__ import annotations
 

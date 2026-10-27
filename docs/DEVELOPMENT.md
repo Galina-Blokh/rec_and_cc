@@ -108,6 +108,12 @@ uv run ruff check . && uv run ruff format --check src tests
 - **Transcription unit tests** use a fake model. The `slow` test runs real inference.
 - **`test_mac_native.py`** runs only on macOS when `bin/rcc-audiotap` exists. It plays
   audio with `afplay`/`say` and checks that it is detected and captured.
+- **Traceability:** each test file's docstring names the user stories it covers
+  (`Stories: US-03, US-06.`), matching [requirements/traceability.md](requirements/traceability.md).
+  Every test file needs that line; tooling tests say `Stories: none.`.
+  `test_traceability.py` fails when a story has no tests, a listed test doesn't exist, or a
+  docstring disagrees with the table. A new behaviour gets a story in
+  [requirements/stories.md](requirements/stories.md) (or a criterion in an existing one).
 
 CI (`.github/workflows/ci.yml`) runs lint on Linux and the fast suite on macOS and Windows.
 
