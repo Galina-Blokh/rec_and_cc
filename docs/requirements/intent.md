@@ -42,7 +42,7 @@ or handle only one language per recording.
 | Constraint | Means | Enforced by |
 |---|---|---|
 | Local only | Whisper (MLX on Apple-silicon GPU, faster-whisper on CPU) and diarization run on the device | ADR 0004, 0009 |
-| Offline | No network except the one-time model download (default models pinned to exact revisions, speaker model SHA-256-verified); no telemetry or update checks | AGENTS.md rule 5; `tests/test_offline.py` checks model loading only, no end-to-end blocked-network test yet |
+| Offline | No network except the one-time model download (default models pinned to exact revisions, speaker model SHA-256-verified); no telemetry or update checks | AGENTS.md rule 5; enforced end to end: `tests/test_offline_e2e.py` records and transcribes a session with sockets and DNS blocked; `tests/test_offline.py` checks model loading |
 | Privacy | No audio or transcript content in logs at INFO+; recording folders owner-only (POSIX `0700`; not yet enforced by Windows ACLs) | AGENTS.md rule 6, `tests/test_recorder.py` |
 | Languages | English and Russian, auto-detected per speech region | ADR 0005 |
 | Platforms | macOS 14.4+ (Core Audio process taps); Windows through the same interfaces | ADR 0001, 0002; CI on Windows |
@@ -57,5 +57,5 @@ or handle only one language per recording.
 - A 1-hour meeting transcribes in about 2–3 minutes on the Apple-silicon GPU (about
   15 minutes on CPU-only machines such as Windows); the live transcript is final a few
   seconds after the recording stops.
-- With all network access blocked, a session records and transcribes end to end (target;
-  not yet covered by an automated test).
+- With all network access blocked, a session records and transcribes end to end
+  (`tests/test_offline_e2e.py`; its `slow` variant uses the real cached models).

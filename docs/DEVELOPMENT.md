@@ -109,6 +109,14 @@ uv run pyright                   # type check src/ (basic mode; CI runs it in th
 - **Transcription unit tests** use a fake model. The `slow` test runs real inference.
 - **Accuracy on real speech** (WER, language ID, DER, RTF) is measured with
   `scripts/eval.py` on a local consented set; see [EVALUATION.md](EVALUATION.md).
+- **`test_offline_e2e.py`** runs whole sessions, live and batch, through the real
+  Controller, Engine, Recorder, queue, outputs and diarization fallback with the network
+  blocked: socket connects (loopback too), UDP sends, DNS lookups and launching programs
+  raise and fail the test, naming the calling app frame. The only attempt allowed is the
+  speaker-model download's connection to its own host, which must give up. C extensions
+  that open sockets themselves aren't covered. The `slow` variants load the real Whisper
+  models from disk (skipped if not cached); with the speaker model on disk too, they must
+  make no attempt at all.
 - **`test_mac_native.py`** runs only on macOS when `bin/rcc-audiotap` exists. It plays
   audio with `afplay`/`say` and checks that it is detected and captured.
 - **Type checking**: `pyright` in basic mode over `src/` (config in `pyproject.toml`). CI runs it
