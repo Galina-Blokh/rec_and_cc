@@ -20,7 +20,7 @@ from recandcc.models import Segment, SessionInfo, TriggerKind
 from recandcc.transcribe import summary
 from recandcc.transcribe.output import write_outputs
 
-HARD_BOUND_S = 180.0  # the story says ~1-2 min; this is the failure line
+HARD_BOUND_S = 120.0  # the story's target: an hour in at most 2 min (slow-only test)
 TARGET_WORDS = 9_000
 
 EN_TOPICS = [
@@ -73,6 +73,8 @@ def synthetic_meeting(target_words: int = TARGET_WORDS) -> list[Segment]:
         lang = "en" if (i // 12) % 2 == 0 else "ru"
         topics, templates = (EN_TOPICS, EN_TEMPLATES) if lang == "en" else (RU_TOPICS, RU_TEMPLATES)
         text = ACTIONS.get(i) or templates[i % len(templates)].format(t=topics[(i // 3) % 5])
+        if i in ACTIONS:  # an action keeps its own language, whatever block it falls in
+            lang = "ru" if any("а" <= c.lower() <= "я" for c in text) else "en"
         words += len(text.split())
         segs.append(Segment(t, t + step * 0.8, text, SPEAKERS[i % len(SPEAKERS)], lang))
         t += step
@@ -106,10 +108,14 @@ def _model_cached(repo: str) -> bool:
     not summary.mlx_lm_available(), reason="summaries need Apple silicon with mlx-lm"
 )
 def test_summary_timing_one_hour_meeting_offline(tmp_path: Path, monkeypatch, capsys):
+    # offline before the hub is used: its flag is read at import, so set the constant too
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    import huggingface_hub.constants as hub_constants
+
+    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", True)
     cfg = Config()
     if not _model_cached(cfg.summary.model):
         pytest.skip("pinned summary model is not in the local cache (tests never download)")
-    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
 
     segs = synthetic_meeting()
     d = tmp_path / "2026-10-27" / "100000_zoom"
@@ -138,8 +144,15 @@ def test_summary_timing_one_hour_meeting_offline(tmp_path: Path, monkeypatch, ca
 
     text = path.read_text(encoding="utf-8")
     assert path.name == "summary.md"
-    assert "## Action items" in text or "## Задачи" in text
-    body = text.split("\n## ", 1)[0].split("\n", 1)[1]
-    assert body.strip(), "empty summary"
+    head, _, actions = text.partition("\n## ")
+    assert head.startswith(("# Summary", "# Краткое содержание"))
+    body = head.split("\n", 1)[1].strip()
+    assert body and body not in ("None.", "Нет."), "empty summary"
+    assert actions.startswith(("Action items", "Задачи"))
+    items = [ln for ln in actions.splitlines()[1:] if ln.startswith("- ")]
+    # Qwen2.5-3B finds no action item in this planted-actions en/ru text (greedy: it is
+    # always "None."), so only the format is asserted; real quality needs the consented set.
+    assert items or actions.split("\n")[2] in ("None.", "Нет."), "malformed action list"
+    assert all(len(i) > 3 and i[2:] not in ("None.", "Нет.") for i in items), "bad action items"
     assert chunk_counts and chunk_counts[0] > 1, "map-reduce path did not run"
     assert elapsed < HARD_BOUND_S, f"summary took {elapsed:.0f}s (story: ~1-2 min)"

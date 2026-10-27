@@ -36,15 +36,26 @@ def test_shape_is_an_hour_of_speech_the_app_can_load():
     assert all(a.end <= b.start for a, b in zip(segs, segs[1:], strict=False))
 
 
-def test_writes_json_and_refuses_repo_and_documents(tmp_path, capsys):
+def test_writes_json_into_a_fresh_folder(tmp_path):
     out = tmp_path / "m"
     assert mk.main([str(out)]) == 0
     assert json.loads((out / "transcript.json").read_text())["segments"]
+    assert mk.main([str(out)]) == 0  # an earlier meeting folder may be rewritten
+
+
+def test_refusals_use_tmp_paths_only(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     checkout = tmp_path / "checkout"
     (checkout / ".git").mkdir(parents=True)  # a fake checkout: works in a source tarball too
-    assert mk.main([str(checkout / "sub")]) == 2
     afile = tmp_path / "f"
     afile.write_text("x")
-    assert mk.main([str(afile)]) == 2
-    assert mk.main([str(Path.home() / "Documents" / "x")]) == 2
-    assert "refusing" in capsys.readouterr().err
+    busy = tmp_path / "busy"
+    busy.mkdir()
+    (busy / "other.txt").write_text("x")
+    for target in (home / "Documents" / "x", checkout / "sub", afile, busy):
+        assert mk.main([str(target)]) == 2, target
+        assert not (target / "transcript.json").exists() if target.is_dir() else True
+    err = capsys.readouterr().err
+    assert err.count("refusing") == 4

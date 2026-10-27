@@ -301,7 +301,10 @@ then `uv run python scripts/eval.py "$TMPDIR/rcc-meetings" --languages en [--dia
 ### Why two of the six voices merge
 
 Investigated on main at 8097620, which reproduces the rows above: the same speaker counts, and
-DER 0.357 off and 0.308 on (0.309 above). The diarizer is unchanged since 281bd90.
+DER 0.357 off and 0.309 on, as in the table (a rerun at 8097620 gave 0.308 on). The diarizer
+is unchanged since 281bd90. The figures below (cosines, leave-one-out counts, the k splits,
+the forced-count DER and the variants table) come from an uncommitted scratch analysis on the
+regenerated meetings, not from a committed script.
 
 - **The merged voices are Samantha (`en1`) and Karen (`en5`), in both modes.** The cosine
   similarity of their voice centroids (the unit mean of a speaker's clean windows) is 0.74.
@@ -316,7 +319,7 @@ DER 0.357 off and 0.308 on (0.309 above). The diarizer is unchanged since 281bd9
   clusters off and k = 9 on. Both are well past the silhouette's pick (k = 6 off, 5 on), and
   the extra clusters at that point are 1-3-window outliers.
 - **The speaker count is a near tie either way.** Silhouette off: k = 4: 0.470, 5: 0.439,
-  6: 0.478. On: k = 4: 0.507, 5: 0.515, 6: 0.478. Off picks k = 6 by 0.008, and its sixth
+  6: 0.478. On: k = 4: 0.507, 5: 0.515, 6: 0.478. Off picks k = 6 over k = 4 by 0.008, and its sixth
   cluster is two stray windows (one en5, one en2), about 4 s, just above `MIN_SPEAKER_S`
   (2 s). On, segmentation turns those strays into cleaner pieces, so k = 5 wins, and the
   segmentation's own gain shows as lower confusion (32 s vs 41 s). Segmentation is not
