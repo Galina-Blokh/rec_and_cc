@@ -334,6 +334,18 @@ def test_render_survives_an_empty_record():
     assert 'id="tldr"' in page and "0 merged pull requests" in page
 
 
+def test_cursor_review_rule_flips_severity_at_one_finding_per_round():
+    data = _report_data()
+    data["summary"].update(review_rounds=4, review_findings=2)
+    assert _titles(data)["Cursor reviews mostly came back clean"] == "low"
+    data["summary"].update(review_findings=6)
+    t = _titles(data)
+    assert t["Every Cursor review round found something"] == "medium"
+    assert "Cursor reviews mostly came back clean" not in t
+    data["summary"].update(review_rounds=0, review_findings=0)
+    assert not {k for k in _titles(data) if "Cursor review" in k}
+
+
 def test_stale_banner_follows_the_refresh_cadence():
     data = _report_data()  # generated 26/10 14:00 UTC, refreshed every 6 h
     fresh = render.render(data, now=collect.ts("2026-10-26T20:00:00Z"))
