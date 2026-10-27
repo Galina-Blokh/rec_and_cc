@@ -34,7 +34,7 @@ across platforms.
 |---|---|
 | `models.py` | Shared types: `Mode`, `Track`, `TriggerKind`, `AudioProcess`, `Segment`, `SessionInfo`, `SAMPLE_RATE` |
 | `config.py` | Dataclass config ⇄ TOML, defaults and app lists, platform paths |
-| `detect/` | `ActivityMonitor`: which processes are doing audio input/output right now. `mac.py` (Core Audio process objects via helper), `win.py` (pycaw sessions + registry mic-in-use) |
+| `detect/` | `ActivityMonitor`: which processes are doing audio input/output right now. `mac.py` (Core Audio process objects via helper), `win.py` (pycaw sessions + registry mic-in-use). `room.py`: opt-in room listening (mic + Silero VAD → "room speech active") |
 | `capture/` | `AudioSource`: produces float32 mono 16 kHz frames. `mic.py` (sounddevice), `system_mac.py` (process tap via helper), `system_win.py` (WASAPI loopback) |
 | `recorder.py` | One session: sources → queues → WAV writer threads, live levels, silence tracking, frame tap for live transcription |
 | `engine.py` | Detection state machine: classify apps, debounce, ask/auto/off, stop conditions |
@@ -68,7 +68,8 @@ The app is built around one rule: **real-time audio threads never block**. Every
 | capture reader (per source) | Reads the pipe / PortAudio callback → `on_frames` (+ frame listeners, which only enqueue) | `queue.Queue` |
 | WAV writer (per track) | Writes PCM_16 WAV, so disk I/O never stalls capture | owns its file |
 | monitor reader | Parses JSON, keeps the latest snapshot (lock-protected) | `snapshot()` |
-| engine | `tick()` loop: the only thread that starts/stops the recorder; on exit it calls the activity monitor's `release_thread()`, so per-thread resources (Windows COM) are released on the thread that created them; `shutdown()` then calls `close()` | command queue + one lock |
+| engine | `tick()` loop: the only thread that starts/stops the recorder and the room monitor; on exit it calls the activity monitor's `release_thread()`, so per-thread resources (Windows COM) are released on the thread that created them; `shutdown()` then calls `close()` | command queue + one lock |
+| room VAD (room listening on) | Mic frames (the capture thread only copies into the pre-roll ring and a queue) → Silero VAD per ~0.5 s step → sliding speech window | `SimpleQueue`; `triggered()` / `seconds_since_speech()` under its lock |
 | transcription dispatcher | Processes sessions in order, one at a time: a full transcription, or the "finalize" job of a live session (waits for `LiveTranscriber.finish()`) | `TranscriptionQueue` |
 | live worker (per recording session) | Buffers the tap's frames, VAD every 0.3 s, submits ended phrases, emits results, rewrites `transcript.md`, writes the final transcript | input `SimpleQueue`; callbacks |
 | transcription workers (N) | Whisper chunks / live phrases from **both tracks concurrently** (shared by batch and live) | `ThreadPoolExecutor` |
@@ -159,6 +160,62 @@ engine matches bundle ids against call / media / ignore lists, requires 3 s of c
 activity (debounce), and applies the per-app or global mode. Level-based silence (recorder
 dBFS) is a second stop condition, for apps that keep the audio device open while paused.
 
+### Room listening: a pseudo-app `@room` with its own trigger kind
+Opt-in (`detection.room_listening`), for conversations near the laptop that involve no app
+(#2; the monitor, its ring buffer and session tap come from #58). `detect/room.RoomMonitor`
+keeps a mic stream open while the engine wants it (room listening on, mode not `off`,
+`record_mic` not `never`, nothing recording) and runs Silero VAD on ~0.5 s steps on its own
+thread; the capture thread only copies frames into a pre-roll ring buffer and a queue. The
+engine thread alone opens and closes it, never under its lock. Off means the mic is never
+opened.
+
+**Mic handoff.** A room session doesn't open a second mic stream: its `Me` track is the
+monitor's own stream (`session_source()`), which replays the last
+`max(room_preroll_s, room_window_s)` seconds and then continues with the live frames,
+sample-exact, so the sentence that triggered it is kept. The recorder opens that track first
+and starts the other tracks padded to its length, so they stay aligned. When the session's
+mic track stops, the pre-roll and the speech history are cleared, so the next session
+neither repeats this audio nor triggers on it. Before any *other* session starts, the
+engine closes the monitor's mic (the recorder opens its own) and reopens it when idle again.
+
+**Trigger kind.** `TriggerKind.ROOM` (not `MANUAL` or `CALL`) because the stop rules,
+diarization and UI differ: there is no app, so a room session stops after
+`room_stop_after_silence_s` without speech (VAD on the session's own mic stream) or by the
+level rule (`stop_after_silence_s`), and the `calls` mic policy includes it. Everyone in the
+room is on the mic, so diarization numbers the speakers of the `Me` track in room sessions,
+also after a call upgraded one (`SessionInfo.started_as_room`; `transcribe/engine.py:
+diarized_track`). The replayed pre-roll is not counted as writer backlog.
+
+**Precedence.** In `tick()` sustained room speech is a candidate `@room`, appended *after*
+the app candidates and only when nothing records or asks and **no other process is doing
+audio** (even one the user switched off, stopped, or that is ignored, such as Voice Memos or
+Spotify): the mic would hear exactly that. System chimes and alerts that only play
+(`SYSTEM_SOUNDS`: notification center, system sounds, `coreaudiod`) are the exception, so a
+notification doesn't cut a conversation. While another process uses the mic, the
+monitor's mic is closed (nothing is heard or kept); while one plays, its pre-roll and speech
+window are reset every tick, and once more on the first clean snapshot (detection lags the
+audio by ~1-2 s), which must come before room speech can trigger. A running room session
+stops as soon as a process uses the mic or plays audio that the user excluded, or room
+listening is turned off; a call that may still upgrade it (debouncing, mode not `off`) and
+an app that may record are allowed. Detection latency still lets up to ~2 s of excluded
+audio into a running room session before it stops; a session pinned with the shortcut
+(manual) skips these checks like any manual session. When a call upgrades a room session
+that is still asking "Keep it?", the prompt follows the session, so Discard still discards
+it. `started_at` is moved back by the replayed pre-roll. A room session records
+`Others` (system audio) too, so a call can upgrade it without a gap. The writers keep
+`max(room_preroll_s, room_window_s) + 5` s for listeners on room sessions, so live
+transcription, which attaches after `recorder.start()`, still gets the whole pre-roll. The `@` keeps
+`app_modes["@room"]` ("Always" on a room prompt) out of the substring matching of real apps.
+A call that starts during a room session upgrades it like a media session
+(`recorder.upgrade_to_call`; the mic is already there) and from then on the call's
+inactivity rule applies; the monitor stays open because it is that session's mic. The
+pseudo-app's "last seen" is refreshed while the room talks or a room session records, so a
+session the user stopped or discarded stays suppressed until the room has been quiet for
+`stop_after_inactive_s`. If the mic can't be opened, the engine retries after 60 s. The menu
+toggle goes through `Controller.set_room_listening`, which explains the always-on mic
+indicator, battery and consent each time it is turned on; the same notice appears at every
+start with room listening on and when a hand edit of `config.toml` turns it on.
+
 ### Two tracks → speaker labels for free
 Mic → `Me`, system → `Others`. A mic track that joins mid-session (a media recording upgraded
 to a call) starts with silence up to that moment, so both tracks share one timeline. If you use speakers instead of headphones, the mic also picks
@@ -167,7 +224,8 @@ and has similar text (`difflib` ratio ≥ 0.6).
 
 ### Speaker diarization: `Others` → `Speaker 1`, `Speaker 2`, …
 The system-audio track mixes everyone else on the call. Only the **final** transcript splits
-it; live captions keep `Others`, and `Me` is never touched (`diarize.py`):
+it; live captions keep `Others`, and `Me` is never touched (`diarize.py`), except in a
+room session, where the `Me` track is the one split:
 
 1. Silero VAD (the one used for chunking) finds speech in `others.wav`; regions are cut into
    ~2 s windows.
@@ -257,6 +315,7 @@ before the GPU backend).
 detected ─(active 3 s)─► recording ──────────────────────────────────────────────┐
    ask mode: "Keep it?" pop-up → Keep/Always/no answer: keep · Discard: stop+delete │
    call app appears during a media recording → upgrade: + mic track, padded        │
+   (room: 6 s speech in 15 s → ROOM session + 15 s pre-roll; a call upgrades it)   │
 stop: app inactive 20 s │ silent 3 min │ manual stop ◄─────────────────────────────┘
   stop(): flush writers, save session.json ─► (< 3 s audio? delete) ─► TranscriptionQueue
   ─► transcript.md/.srt/.json (+ Speaker N labels), session.transcribed = true ─► (keep_audio = false? delete WAVs)
