@@ -1,5 +1,6 @@
 """Measure an unsigned PyInstaller one-folder build of RecAndCC (ADR 0011, follow-up 3).
 
+macOS only (the collected packages are darwin-only; it exits early elsewhere).
 Measurement only: no signing, no notarization, no model weights, and it never touches
 ``RecAndCC.app``. Output goes to ``build/pyinstaller-spike/`` (gitignored). Not run in CI.
 
@@ -24,14 +25,22 @@ WORK = ROOT / "build" / "pyinstaller-spike"
 NAME = "recandcc"
 # The heavy imports run only when RCC_SPIKE_PROBE=1: `--help` alone does not load them.
 ENTRY = """\
-import os, time
+import os, sys, time
 if os.environ.get("RCC_SPIKE_PROBE") == "1":
     t = time.perf_counter()
+    failed = []
     for m in ("numpy", "mlx.core", "mlx_whisper", "faster_whisper", "onnxruntime", "rumps"):
         try:
-            __import__(m)
-        except Exception:
-            pass
+            if m == "mlx_whisper":  # the app's numba-free import path (transcribe/gpu.py)
+                from recandcc.transcribe.gpu import import_mlx_whisper
+
+                import_mlx_whisper()
+            else:
+                __import__(m)
+        except Exception as e:
+            failed.append(f"{m}: {e!r}")
+    if failed:
+        sys.exit("probe: failed imports: " + "; ".join(failed))
     print(f"probe-imports {time.perf_counter() - t:.2f}s")
 from recandcc import main
 main()
@@ -85,16 +94,17 @@ def report_size(bundle: Path) -> None:
         print(f"  {mib:8.0f} MiB  {name}")
 
 
-def timed(cmd: list[str], env: dict[str, str]) -> float:
+def timed(cmd: list[str], env: dict[str, str], cwd: str) -> float:
     t = time.perf_counter()
-    subprocess.run(cmd, env=env, stdout=subprocess.DEVNULL, check=True, cwd=tempfile.gettempdir())
+    # check=True: a non-zero exit (e.g. a failed probe import) fails the measurement.
+    subprocess.run(cmd, env=env, stdout=subprocess.DEVNULL, check=True, cwd=cwd)
     return time.perf_counter() - t
 
 
-def measure(label: str, cmd: list[str], runs: int, probe: bool) -> None:
+def measure(label: str, cmd: list[str], runs: int, probe: bool, cwd: str) -> None:
     env = {**os.environ, "RCC_SPIKE_PROBE": "1" if probe else "0"}
-    first = timed(cmd, env)  # first run after build: the closest to a cold launch without sudo
-    warm = [timed(cmd, env) for _ in range(runs)]
+    first = timed(cmd, env, cwd)  # first run after build: the closest to a cold launch without sudo
+    warm = [timed(cmd, env, cwd) for _ in range(runs)]
     print(
         f"{label:34s} first {first:6.2f}s  warm median {statistics.median(warm):6.2f}s "
         f"(n={runs}, min {min(warm):.2f}, max {max(warm):.2f})"
@@ -106,13 +116,19 @@ def main() -> None:
     ap.add_argument("--runs", type=int, default=7)
     ap.add_argument("--skip-build", action="store_true")
     args = ap.parse_args()
+    if sys.platform != "darwin":
+        raise SystemExit("pyinstaller_spike.py is macOS-only (mlx, rumps); nothing to do here")
     bundle = WORK / "dist" / NAME if args.skip_build else build()
     report_size(bundle)
-    exe = str(bundle / NAME)
+    exe = bundle / (NAME + (".exe" if sys.platform == "win32" else ""))
+    if not exe.is_file():
+        raise SystemExit(f"missing frozen executable: {exe}")
+    tmp = tempfile.gettempdir()  # frozen binary: run away from the repo
     print()
-    measure("pyinstaller --help", [exe, "--help"], args.runs, False)
-    measure("uv run --help", ["uv", "run", "recandcc", "--help"], args.runs, False)
-    measure("pyinstaller + heavy imports", [exe, "--help"], args.runs, True)
+    measure("pyinstaller --help", [str(exe), "--help"], args.runs, False, tmp)
+    # uv needs the project to resolve the environment, so run it from the repo root.
+    measure("uv run --help", ["uv", "run", "recandcc", "--help"], args.runs, False, str(ROOT))
+    measure("pyinstaller + heavy imports", [str(exe), "--help"], args.runs, True, tmp)
 
 
 if __name__ == "__main__":

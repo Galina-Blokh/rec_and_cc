@@ -201,4 +201,4 @@ Anthropic list prices (the table is in `collect.py`).
 - Never block a real-time audio thread or the UI main thread. Use queues and worker threads.
 - Logging goes through `logging` (`recandcc.*` loggers), never `print`, outside `cli.py`.
 
-Packaging spike (ADR 0011, follow-up 3): `uv run python scripts/pyinstaller_spike.py` builds an unsigned PyInstaller bundle into the gitignored `build/pyinstaller-spike/` and prints size and start-up timings; it never touches `RecAndCC.app`.
+Packaging spike (ADR 0011, follow-up 3): `uv run python scripts/pyinstaller_spike.py` (macOS only) builds an unsigned PyInstaller bundle into the gitignored `build/pyinstaller-spike/` and prints size and start-up timings; it never touches `RecAndCC.app`.
