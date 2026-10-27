@@ -105,7 +105,7 @@ def test_helper_never_uses_the_prompting_api():
     code = "\n".join(
         line
         for p in src.rglob("*.swift")
-        for line in p.read_text().splitlines()
+        for line in p.read_text(encoding="utf-8").splitlines()
         if not line.lstrip().startswith("//")
     )
     assert "AXIsProcessTrusted()" in code
