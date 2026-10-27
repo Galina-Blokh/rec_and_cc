@@ -341,7 +341,9 @@ def _file_lock(lock_path: Path) -> Iterator[None]:
                     msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
                     break
                 except OSError as e:
-                    if e.errno not in (errno.EDEADLK, errno.EACCES):  # only "still held"
+                    # LK_LOCK reports "still held after ~10 s" as EDEADLOCK; anything else
+                    # (a real permission error) would otherwise retry forever.
+                    if e.errno != errno.EDEADLK:
                         raise
             try:
                 yield
