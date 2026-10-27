@@ -60,6 +60,22 @@ def test_match_needs_similarity_and_margin():
     assert voices.match_profiles({0: near(ANNA)}, twins) == {}
 
 
+def at_similarity(v, sim):
+    """A unit vector at exactly cosine `sim` to `v` (and almost orthogonal to the others)."""
+    w = RNG.normal(size=v.shape)
+    w -= (w @ v) * v
+    return sim * v + np.sqrt(1 - sim**2) * w / np.linalg.norm(w)
+
+
+def test_a_similar_stranger_is_not_named():
+    # The synthetic recall eval (docs/EVALUATION.md): a never-named voice reached 0.68 to a
+    # profile with a 0.16 margin and took its name under the old 0.6 threshold.
+    known = profiles(Anna=ANNA, Bob=BOB)
+    assert voices.MATCH_SIMILARITY >= 0.7
+    assert voices.match_profiles({0: at_similarity(ANNA, 0.68)}, known) == {}
+    assert voices.match_profiles({0: at_similarity(ANNA, 0.9)}, known) == {0: "Anna"}
+
+
 def test_each_name_is_used_once_per_session():
     close, closer = near(ANNA, 0.6), near(ANNA, 0.1)
     assert voices.match_profiles({0: close, 1: closer}, profiles(Anna=ANNA)) == {1: "Anna"}

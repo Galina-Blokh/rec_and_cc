@@ -320,7 +320,7 @@ untouched. Words live in `Segment.words` (memory only, not in `transcript.json`)
 
 **Speaker names (opt-in, `speaker_names`, `voices.py`).** Diarization also returns each
 speaker's centroid (unit mean of its window embeddings). With the option on, the final pass
-names a speaker whose centroid matches a voice profile (cosine ≥ 0.6 and 0.1 ahead of the
+names a speaker whose centroid matches a voice profile (cosine ≥ 0.75 and 0.1 ahead of the
 next profile; each name once per session, `Me` never; numbers skip names) and saves the
 session's centroids, so `recandcc name-speaker` can name a speaker later without re-running
 diarization. Profiles (sum + count + embedding model, one JSON file per name, so a corrected

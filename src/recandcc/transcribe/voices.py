@@ -43,10 +43,12 @@ log = logging.getLogger("recandcc.transcribe.voices")
 
 VOICES_DIR = Path(platformdirs.user_data_dir(APP_NAME, appauthor=False)) / "voices"
 MODEL = EMBEDDING_MODEL.name  # centroids of another embedding model are not comparable
-# Cosine similarity of a session's speaker centroid to a profile. Deliberately strict (the
-# clustering itself merges windows at >= 0.5): a wrong name is worse than "Speaker N", and a
-# match also needs a clear margin over the next profile. To be tuned on real speech (#13).
-MATCH_SIMILARITY = 0.6
+# Cosine similarity of a session's speaker centroid to a profile. Deliberately strict: a wrong
+# name is worse than "Speaker N", and a match also needs a clear margin over the next profile.
+# Synthetic eval (docs/EVALUATION.md): the same voice in a later session scores 0.92-0.96, a
+# never-named one up to 0.68 (it took a name at 0.6). 0.75 leaves room on both sides for
+# real speech, which scores lower; to be re-tuned on the consented set (#1, #13).
+MATCH_SIMILARITY = 0.75
 MATCH_MARGIN = 0.1
 REPLACE_TRIES = 5
 NUMBERED = re.compile(r"speaker\s*\d+")  # labels the diarizer hands out itself

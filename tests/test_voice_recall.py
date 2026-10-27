@@ -3,7 +3,7 @@ diarizer: scripts/voice_recall_eval.py, asserted with a floor below the measured
 
 Run: uv run pytest -m slow tests/test_voice_recall.py -v -s
 Skipped unless macOS, the `say` voices and the cached speaker model are all there: nothing is
-downloaded, and the network is blocked while it runs. Profiles go to the conftest temp dir.
+downloaded, and the network is blocked while it runs. Profiles go to the test's temp dir.
 
 Stories: US-21.
 """
@@ -24,10 +24,11 @@ pytestmark = [
 
 ROOT = Path(__file__).resolve().parents[1]
 # Measured 2026-10-27: 21/21 later segments of the four named voices (100%); the floor is the
-# issue #1 target and allows two misses. False names: 5/9 (one unnamed voice takes "Anna",
-# docs/EVALUATION.md). That ceiling only guards against getting worse; it is not a target.
+# issue #1 target and allows two misses. False names: 3/9 with MATCH_SIMILARITY 0.75 (5/9 at
+# 0.6), all from one cluster the diarizer merged with a named voice (docs/EVALUATION.md); the
+# ceiling fails on one more wrongly named segment.
 RECALL_FLOOR = 0.90
-FALSE_NAME_CEILING = 0.60
+FALSE_NAME_CEILING = 0.40
 
 
 def _load():
@@ -41,7 +42,7 @@ def _load():
 
 
 def test_named_voices_are_recognized_in_later_sessions(tmp_path, monkeypatch):
-    from recandcc.transcribe import diarize
+    from recandcc.transcribe import diarize, voices
 
     ev = _load()
     if missing := ev.missing_voices():
@@ -53,6 +54,7 @@ def test_named_voices_are_recognized_in_later_sessions(tmp_path, monkeypatch):
         raise AssertionError("network access during the recall eval")
 
     monkeypatch.setattr(diarize.urllib.request, "urlopen", no_network)
+    monkeypatch.setattr(voices, "VOICES_DIR", tmp_path / "voices")  # never the real profiles
     (tmp_path / "say").mkdir()
     enrolled, later = ev.run(tmp_path / "sessions", ev.mk.say_synth(tmp_path / "say"))
     rows = ev.score(later)
