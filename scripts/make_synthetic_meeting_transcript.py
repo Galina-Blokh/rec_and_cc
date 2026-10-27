@@ -118,6 +118,8 @@ def forbidden(out: Path) -> str | None:
     checkout (this repo, its main checkout from a worktree, or another one), or a non-empty
     folder that is not an earlier synthetic meeting."""
     out = out.expanduser().resolve()
+    if out.exists() and not out.is_dir():
+        return "refusing to write into something that is not a folder"
     if out.is_relative_to((Path.home() / "Documents").resolve()):
         return "refusing to write the transcript inside ~/Documents"
     if any((d / ".git").exists() for d in (out, *out.parents)):

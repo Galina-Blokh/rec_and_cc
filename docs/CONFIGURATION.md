@@ -2,8 +2,9 @@
 
 File: `~/Library/Application Support/RecAndCC/config.toml` (macOS) or
 `%LOCALAPPDATA%\RecAndCC\config.toml` (Windows). It is created with defaults on first run.
-Open it from **menu → Edit settings**, or print it with `recandcc config`. Unknown keys are
-ignored, and missing keys take their default values.
+Open it from **menu → Edit config.toml** (macOS) or **Edit settings** (Windows tray), or
+print it with `recandcc config`. On macOS, **menu → Settings…** edits the common keys in a
+window. Unknown keys are ignored, and missing keys take their default values.
 
 A menu change (or `recandcc autostart on/off`) writes only its own key, so other hand edits in
 the file are kept; like any save, it drops comments and rewrites the keys in a fixed order.
@@ -45,7 +46,7 @@ Changes to `[detection]` are picked up while the app runs. Restart the app after
 | `inside_sensitivity` | unset | 0–100: how readily app audio (calls, videos) starts a recording. Scales `min_active_s` the same way (12 s at 0, 0.75 s at 100 with the default 3 s). Unset = plain `min_active_s`. Presets: Quiet room = 75/50, Normal = 50/50, Noisy place = 25/50 (outside/inside), Off = both unset |
 | `call_apps` | Zoom, Teams, FaceTime, Slack, Discord, Telegram, WhatsApp, Skype, Webex | Patterns for call apps |
 | `media_apps` | browsers, QuickTime, VLC, Podcasts, TV | Patterns for media apps |
-| `ignore_apps` | Spotify, Music, system sounds, Siri, Voice Memos | Never trigger |
+| `ignore_apps` | Spotify, Music, system sounds (`com.apple.systemsound`, `coreaudiod`), Notification Center, Siri, Voice Memos, RecAndCC itself, `afplay`, `rcc-audiotap` | Never trigger |
 | `app_modes` | `{}` | Per-app mode overrides, e.g. `{"us.zoom" = "auto", "com.google.chrome" = "ask"}` |
 
 **Patterns** are case-insensitive substrings matched against the app's bundle id (macOS,
@@ -69,6 +70,7 @@ using the mic is treated as a call (Google Meet). The global `mode = "off"` over
 | `workers` | `0` | Parallel transcription workers; `0` = auto (`min(4, cores // 4)`) |
 | `dedupe_echo` | `true` | Remove mic segments that are speaker echo of the other side |
 | `diarize` | `true` | Split `Others` into `Speaker 1`, `Speaker 2`, … (numbered by first appearance) in the final transcript (md/srt/json), with offline speaker diarization of the system-audio track. One other speaker stays `Others`; `Me` is never changed; live captions keep `Others`. Costs ~1.5 s per 10 min of audio (CPU, overlapped with transcription). Needs the audio, so sessions whose WAVs were deleted are not diarized. The 28 MB model is downloaded once to `~/Library/Caches/RecAndCC/models` (Windows: `%LOCALAPPDATA%\RecAndCC\Cache\models`); without it (offline) transcripts keep `Others` |
+| `split_on_speaker_change` | `false` | Opt-in, not yet measured: split an `Others` segment at the word where the diarized speaker changes, so each part gets the right `Speaker N` (runs under 1 s and 3 words are ignored). Needs word timestamps, which cost extra CPU time, so it applies only to batch transcription (`live = false`, `recandcc transcribe`, sessions re-queued at startup) on the faster-whisper backend. It does not apply to live sessions (their phrases are transcribed without words) or to the MLX (Apple GPU) backend yet; those keep whole segments. Needs `diarize = true`; `Me` is never split |
 | `min_speakers` | `0` | Diarization hint: at least this many other speakers (`Others` only, `Me` not counted). `0` = no hint: the count is estimated per session (up to 20). Useful when you know the size of the meeting |
 | `max_speakers` | `0` | Diarization hint: at most this many other speakers; `0` = no hint (estimated, up to 20). If both are set and `min_speakers` is larger, `max_speakers` wins |
 | `diarize_overlap` | `false` | Opt-in, experimental: tuned on synthetic voices only, not yet measured on real meetings (#13). Before the speaker embeddings, find speaker changes without a pause and overlapped speech with pyannote segmentation-3.0 (6 MB, downloaded once next to the speaker model only when this is `true`; ~4 s per hour of audio). Sharper speaker boundaries; overlapped speech goes to the dominant speaker and the segment gets `"overlap": true` in `transcript.json` (md/srt unchanged). `false`, the model missing (offline) or broken: fixed ~2 s windows |

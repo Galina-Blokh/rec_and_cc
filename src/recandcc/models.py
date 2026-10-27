@@ -82,6 +82,10 @@ class Segment:
     speaker: str  # "Me", "Others" (later: "Speaker 1", ...)
     language: str  # ISO 639-1 code, e.g. "en", "ru", "he"
     overlap: bool = False  # diarization: two other speakers at once (json only, when True)
+    # (start, end, text) per word, when the backend gave word timestamps (faster-whisper, only
+    # for "Others" while diarizing). In memory only: used to split at a speaker change, never
+    # written to transcript.json.
+    words: list[tuple[float, float, str]] = field(default_factory=list, compare=False, repr=False)
 
 
 def is_rtl(language: str, text: str = "") -> bool:
