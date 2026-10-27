@@ -76,9 +76,17 @@ def plain_thresholds(det: DetectionConfig) -> tuple[float, float, float | None]:
     return min(float(det.room_speech_s), window), window, None
 
 
+def finite(audio: np.ndarray) -> np.ndarray:
+    """`audio` with NaN/inf samples zeroed (a copy only if there are any)."""
+    if np.isfinite(audio).all():
+        return audio
+    return np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def window_levels(audio: np.ndarray) -> np.ndarray:
-    """RMS level in dBFS of each WINDOW of `audio` (a WINDOW multiple); -120 for silence."""
-    w = audio.reshape(-1, WINDOW).astype(np.float64)
+    """RMS level in dBFS of each WINDOW of `audio` (a WINDOW multiple); -120 for silence.
+    Non-finite samples (a glitching device) count as silence, so a level is always finite."""
+    w = finite(audio).reshape(-1, WINDOW).astype(np.float64)
     return 20.0 * np.log10(np.maximum(np.sqrt(np.mean(w * w, axis=1)), 1e-6))
 
 
@@ -110,9 +118,10 @@ class NoiseFloor:
 
     def add(self, levels: np.ndarray, margin_db: float | None = None) -> bool:
         """Account a step's window levels. With a margin, returns True if the room's level
-        shifted up (the floor then restarts from the last SHIFT_S of audio)."""
+        shifted up (the floor then restarts from the last SHIFT_S of audio). Non-finite
+        levels are dropped, so one bad value can't turn the floor into NaN."""
         with self._lock:
-            vals = [float(v) for v in levels]
+            vals = [float(v) for v in levels if np.isfinite(v)]
             self._levels.extend(vals)
             self._recent.extend(vals)
             if margin_db is None or len(self._levels) < self._min:
@@ -335,10 +344,14 @@ class RoomMonitor:
         return sum(n for end, n in self._steps if end > lo)
 
     def triggered(self) -> bool:
-        """At least ``room_speech_s`` of speech within the window (and listening)."""
+        """At least ``room_speech_s`` of speech within the window (and listening). Some
+        speech is always needed, even if a bad config makes the threshold zero."""
         speech_s = self.thresholds(self.det)[0]
         with self._lock:
-            return self._source is not None and self._speech_locked() >= speech_s * SAMPLE_RATE
+            if self._source is None:
+                return False
+            heard = self._speech_locked()
+            return heard > 0 and heard >= speech_s * SAMPLE_RATE
 
     def seconds_since_speech(self) -> float:
         """Audio seconds since the last speech (or since listening started), plus the time
@@ -453,6 +466,7 @@ class RoomMonitor:
                 audio = np.concatenate(pending)
                 n = (audio.size // WINDOW) * WINDOW
                 chunk, rest = audio[:n], audio[n:]
+                chunk = finite(chunk)  # a NaN would poison the floor and the VAD's context
                 pending, size = ([rest], rest.size) if rest.size else ([], 0)
                 with self._lock:
                     in_session = bool(self._taps)
