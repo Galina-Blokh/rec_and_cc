@@ -388,8 +388,9 @@ class MlxGenerator:
         # since a thinking model would then get no extra budget and no strip). False for the
         # default Qwen2.5, whose prompt and budget stay unchanged.
         # Missing or non-bool has_thinking = not a thinking model (load() warns when missing).
+        # Gemma 4's markers are still stripped, so a thought never lands in summary.md.
         if getattr(tokenizer, "has_thinking", False) is not True:
-            return generate(None, max_tokens).strip()
+            return strip_thinking(generate(None, max_tokens))
         start = getattr(tokenizer, "think_start", None) or CHANNEL_START
         end = getattr(tokenizer, "think_end", None) or CHANNEL_END
         try:  # room for the thought block before the answer

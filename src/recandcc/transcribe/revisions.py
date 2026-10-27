@@ -48,8 +48,11 @@ HF_REVISIONS: dict[str, str] = {
     "mlx-community/ivrit-ai-whisper-large-v3-mlx": "097c0cb2bb4288a3c82f6d524a39c4ce09afa187",
     # Local summary LLM (mlx-lm, Apple silicon), see summary.py
     "mlx-community/Qwen2.5-3B-Instruct-4bit": "4f83f8f146fdf28b512a06562b671d7af4fab457",
-    # ... and the Hebrew-capable ones offered for summary.language_models (Gemma 4, Apache-2.0
-    # upstream). model.safetensors sha256 at these commits (HF API, LFS oid):
+    # ... and the Hebrew-capable ones offered for summary.language_models (opt-in). Gemma 4:
+    # Gemma Terms of Use (https://ai.google.dev/gemma/terms); the user downloads the weights
+    # from Hugging Face, we don't redistribute them. For reference only (not checked at run
+    # time: the commit id already fixes the LFS content), model.safetensors sha256 at these
+    # commits per the HF API (LFS oid):
     # e4b 932b8271fc3fe65adcc78b96c10c6268bbfb13e8f67d1358727c0d6ee97e1eff (5.1 GB),
     # e2b 038e39a37a7667373d2c3991375446b10c96ae1d717a68674870343db376b76e (3.6 GB).
     "mlx-community/gemma-4-e4b-it-4bit": "475b9088d29754a3379866cf5aeb6b41acd313c2",

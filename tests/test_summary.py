@@ -185,7 +185,7 @@ def test_gemma_thinking_is_stripped(raw, answer):
     assert summary.strip_thinking(raw) == answer
 
 
-def _fake_mlx_lm(monkeypatch, text: str | list[str], seen: list, thinking: bool):
+def _fake_mlx_lm(monkeypatch, text: str | list[str], seen: list, thinking: bool | None):
     """Fake mlx_lm that streams ``text`` (or each of a list of texts, one per generation);
     returns a fake tokenizer (no real model loads)."""
     texts = [text] if isinstance(text, str) else list(text)
@@ -199,7 +199,9 @@ def _fake_mlx_lm(monkeypatch, text: str | list[str], seen: list, thinking: bool)
         seen.append(kw)
         return [1]
 
-    tok = types.SimpleNamespace(apply_chat_template=apply_chat_template, has_thinking=thinking)
+    tok = types.SimpleNamespace(apply_chat_template=apply_chat_template)
+    if thinking is not None:  # None: an mlx-lm without has_thinking
+        tok.has_thinking = thinking
     if thinking:  # what mlx-lm detects for Gemma 4
         tok.think_start, tok.think_end = "<|channel>thought", "<channel|>"
     sample = types.SimpleNamespace(make_logits_processors=lambda **kw: [])
@@ -217,7 +219,9 @@ RAW_GEMMA = "<|channel>thought\nplan<channel|>Answer."
     ("model", "thinking", "seen", "answer"),
     [
         (GEMMA, True, [{"enable_thinking": True}, 400 + summary.THINKING_TOKENS], "Answer."),
-        (DEFAULT_SUMMARY_MODEL, False, [{}, 400], RAW_GEMMA),  # Qwen2.5: exactly as before
+        (DEFAULT_SUMMARY_MODEL, False, [{}, 400], "Answer."),  # Qwen2.5: prompt as before
+        # no has_thinking (another mlx-lm): no budget, but a thought never reaches summary.md
+        (GEMMA, None, [{}, 400], "Answer."),
     ],
 )
 def test_generator_gives_a_thinking_model_room_and_strips_it(
