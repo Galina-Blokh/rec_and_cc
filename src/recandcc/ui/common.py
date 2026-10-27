@@ -30,7 +30,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from .. import hotkey as hotkey_mod
-from ..cloudsync import cloud_sync_provider, network_volume, network_warning_text, warning_text
+from ..cloudsync import (
+    PROBE_FAILED,
+    cloud_sync_provider,
+    network_volume,
+    network_warning_text,
+    warning_text,
+)
 from ..config import (
     CONFIG_PATH,
     LOG_DIR,
@@ -339,7 +345,8 @@ class Controller:
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
         self._save_lock = threading.Lock()  # menu writes to config.toml
-        self._dirty_lock = threading.Lock()  # guards _dirty (a leaf lock: nothing nested)
+        # guards _dirty; also spans the reload's snapshot+apply (only _lang_lock nests)
+        self._dirty_lock = threading.Lock()
         self._dirty: dict[str, int] = {}  # dotted key -> menu saves not yet written
         self._settings_lock = threading.Lock()  # one settings window at a time
         self._lang_lock = threading.Lock()  # transcription.languages + its raw spelling
@@ -969,7 +976,11 @@ class Controller:
             with self._lock:
                 self._net_retry[out] = time.monotonic() + NET_PROBE_RETRY_S
             return
-        if kind is None:
+        if kind is PROBE_FAILED:  # errored, not "local": back off like a hung probe
+            with self._lock:
+                self._net_retry[out] = time.monotonic() + NET_PROBE_RETRY_S
+            return
+        if not isinstance(kind, str):
             return
         with self._lock:
             if out in self._net_warned:
@@ -1029,23 +1040,25 @@ class Controller:
             # "file read" and "memory updated", so it can't write half-applied values. A field
             # a menu click changed meanwhile keeps the click (its queued save writes it).
             was_listening = self.cfg.detection.room_listening
-            now = self._reloadable(self.cfg)
+            # _dirty_lock spans snapshot and apply: a click marks + sets under it too, so it
+            # lands either before the snapshot (seen) or after the apply (kept), never between.
             with self._dirty_lock:
+                now = self._reloadable(self.cfg)
                 dirty = set(self._dirty)  # changed in the menu, save not written yet
-            for key, value in self._reloadable(new).items():
-                if now[key] != before[key] or self._dotted(key) in dirty:
-                    continue
-                owner, name = key
-                if owner == "languages":
-                    tr = self.cfg.transcription
-                    with self._lang_lock:  # both together: save() pairs them
-                        if (getattr(tr, "_raw_languages", None), tr.languages) == before[key]:
-                            tr._raw_languages = value[0]  # type: ignore[attr-defined]
-                            tr.languages = value[1]
-                else:
-                    if key == ("top", "hotkey") and value != now[key]:
-                        hotkey_changed = True
-                    setattr(self._reload_target(owner), name, value)
+                for key, value in self._reloadable(new).items():
+                    if now[key] != before[key] or self._dotted(key) in dirty:
+                        continue
+                    owner, name = key
+                    if owner == "languages":
+                        tr = self.cfg.transcription
+                        with self._lang_lock:  # both together: save() pairs them
+                            if (getattr(tr, "_raw_languages", None), tr.languages) == before[key]:
+                                tr._raw_languages = value[0]  # type: ignore[attr-defined]
+                                tr.languages = value[1]
+                    else:
+                        if key == ("top", "hotkey") and value != now[key]:
+                            hotkey_changed = True
+                        setattr(self._reload_target(owner), name, value)
             if self.cfg.detection.room_listening and not was_listening:  # turned on by hand
                 self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
         if hotkey_changed:  # re-registering the listener may block: outside the lock
@@ -1104,16 +1117,25 @@ class Controller:
         from .present import LANGUAGES_KEEP_ONE, toggle_languages
 
         tr = self.cfg.transcription
-        with self._lang_lock:
-            new = toggle_languages(tr.languages, getattr(tr, "_raw_languages", None), code)
+        key = "transcription.languages"
+        try:
+            # mark + set together under _dirty_lock (a leaf lock; only _lang_lock nests in it)
+            with self._dirty_lock:
+                self._dirty[key] = self._dirty.get(key, 0) + 1
+                with self._lang_lock:
+                    new = toggle_languages(tr.languages, getattr(tr, "_raw_languages", None), code)
+                    if new is not None:
+                        langs = normalize_languages(new)
+                        tr._raw_languages = new if new != langs else None  # type: ignore[attr-defined]
+                        tr.languages = langs  # a new list: other threads never see it half-built
             if new is not None:
-                langs = normalize_languages(new)
-                tr._raw_languages = new if new != langs else None  # type: ignore[attr-defined]
-                tr.languages = langs  # a new list: other threads never see it half-built
+                self.save_settings(key, title="Languages", marked=True)
+        except BaseException:
+            self._mark_dirty((key,), -1)  # the save thread never started: don't leak the mark
+            raise
         if new is None:
+            self._mark_dirty((key,), -1)
             self.post_notice("Languages", LANGUAGES_KEEP_ONE)
-            return
-        self.save_settings("transcription.languages", title="Languages")
 
     def toggle_call_app_names(self) -> None:
         """Menu "Use names from the call app" (macOS), from the main thread; never blocks.
@@ -1154,12 +1176,14 @@ class Controller:
         self.cfg.transcription.names_from_call_app = on
         self.save_settings("transcription.names_from_call_app", title="Names from the call app")
 
-    def save_settings(self, *keys: str, title: str = "Settings") -> None:
+    def save_settings(self, *keys: str, title: str = "Settings", marked: bool = False) -> None:
         """Save the in-memory value of each dotted key ("live_captions",
         "transcription.audio_retention_days") to config.toml on a worker thread. Menu
-        callbacks use this instead of ``cfg.save()``, which would overwrite hand edits."""
+        callbacks use this instead of ``cfg.save()``, which would overwrite hand edits.
+        ``marked``: the caller already marked ``keys`` dirty (before changing memory)."""
         kw = {"title": title}
-        self._mark_dirty(keys, 1)  # a config reload before the write must not undo the change
+        if not marked:
+            self._mark_dirty(keys, 1)  # a config reload before the write must not undo the change
 
         def run() -> None:
             try:
@@ -1169,7 +1193,11 @@ class Controller:
 
         t = threading.Thread(target=run, name="save-config")
         t.daemon = True
-        t.start()
+        try:
+            t.start()
+        except BaseException:
+            self._mark_dirty(keys, -1)  # run() will never unmark
+            raise
 
     def write_settings(self, *keys: str, title: str = "Settings") -> None:
         """Blocking save of ``keys`` (see ``_write_settings``); marks them as pending so a
