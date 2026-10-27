@@ -9,7 +9,7 @@ account, nothing uploaded.
   so the transcript knows who spoke: `Me` / `Others`.
 - 🗣️ **Speaker labels** for the other side: in a 5-person call, `Others` is split into
   `Speaker 1`, `Speaker 2`, … in the final transcript (offline speaker diarization, a few
-  seconds per hour of audio). Live captions keep showing `Others`. Opt in to
+  seconds per hour of audio). Live captions label them too (`live_speaker_labels`), provisionally: a live `Speaker 2` can be a different person than the final transcript's `Speaker 2`, because both cluster independently. Opt in to
   `speaker_names` and name a speaker once (`recandcc name-speaker`): later sessions
   recognize that voice and write `Anna` instead of `Speaker 2`. Optionally (macOS,
   `names_from_call_app`, off by default) the name shown in the call app's open participants

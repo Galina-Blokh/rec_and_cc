@@ -205,3 +205,7 @@ def test_speaker_model_warmup_is_off_main_thread_and_never_downloads(tmp_path, m
     ctrl.cfg.transcription.live_speaker_labels = False
     ctrl._warm_speaker_model()
     assert not done.wait(0.3) and len(calls) == 1
+    ctrl.cfg.transcription.live_speaker_labels = True
+    ctrl.cfg.transcription.diarize = False  # the labeler needs the diarize model setting
+    ctrl._warm_speaker_model()
+    assert not done.wait(0.3) and len(calls) == 1

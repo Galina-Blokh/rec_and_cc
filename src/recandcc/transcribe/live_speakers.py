@@ -234,14 +234,18 @@ class SpeakerLabeler:
         self, embedding: np.ndarray | None, start: float = 0.0, end: float | None = None
     ) -> str:
         """Display label for a segment: "Speaker N", or "Others" until a voice is known.
-        Without an embedding (too short, queue full, deadline passed, no model) a segment keeps
+        Without a usable embedding (too short, NaN, queue full, late, no model) a segment keeps
         the previous label only if the previous segment ended within INHERIT_GAP_S; after a
         longer gap the speaker may well have changed, so it shows "Others"."""
         end = start if end is None else end
+        usable = False
         if embedding is not None:
-            with contextlib.suppress(ValueError):
+            try:
                 self._last = f"Speaker {self.clusterer.assign(embedding)}"
-        elif start - self._last_end > INHERIT_GAP_S:
+                usable = True
+            except ValueError:  # e.g. NaN: treated like a missing embedding
+                pass
+        if not usable and start - self._last_end > INHERIT_GAP_S:
             return "Others"
         self._last_end = max(self._last_end, end)
         return self._last or "Others"

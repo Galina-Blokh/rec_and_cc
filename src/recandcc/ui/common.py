@@ -414,10 +414,12 @@ class Controller:
 
     def _warm_speaker_model(self) -> None:
         """Load the speaker-embedding model off the main thread so the first live session
-        doesn't wait for it (US-33). Never downloads; a no-op if live labels are off or the
-        model isn't on disk."""
+        doesn't wait for it (US-33). Never downloads; a no-op unless live captions, live labels and
+        diarize are all on, or the model isn't on disk."""
         tcfg = self.cfg.transcription
-        if not (tcfg.live and getattr(tcfg, "live_speaker_labels", False)):
+        if not (
+            tcfg.live and getattr(tcfg, "live_speaker_labels", False) and tcfg.diarize
+        ):  # otherwise no live session would use it: don't hold its memory
             return
 
         def run() -> None:

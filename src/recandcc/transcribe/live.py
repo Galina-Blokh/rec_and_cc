@@ -224,7 +224,7 @@ class LiveTranscriber:
         # "Speaker N" labels for Others captions (display only, see live_speakers.py)
         # Not when the final transcript also numbers Me's speakers (room / started-as-room
         # sessions): it numbers Me first, so live numbers would not match it. Decided here, at
-        # the start, so a call upgraded to a room mid-way keeps its labels (documented limit).
+        # the start: a room upgraded to a call mid-way stays unlabelled (documented limit).
         numbers_me = Track.ME in diarized_tracks(session)
         if numbers_me:
             if labeler is not None:
