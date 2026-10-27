@@ -12,6 +12,7 @@ import io
 import logging
 import shutil
 import sqlite3
+import sys
 import threading
 import time
 from dataclasses import replace
@@ -161,6 +162,20 @@ def test_rewritten_transcript_is_re_embedded(tmp_path, out):
     sync(idx, out)
     assert emb.calls[-1] == ["the pizza trip"]
     assert vector_rows(idx) == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_index_stays_owner_only_after_switching_off(tmp_path, out):
+    make_session(out, 1, [seg(1, "the invoice")])
+    idx = make(tmp_path, FakeEmbedder())
+    sync(idx, out)
+    assert vector_rows(idx) == 1
+    idx.path.chmod(0o644)  # as if the file had been rebuilt with a loose umask
+    off = make(tmp_path)
+    sync(off, out)
+    assert vector_rows(off) == 0
+    assert (off.path.stat().st_mode & 0o777) == 0o600
+    assert (off.path.parent.stat().st_mode & 0o777) == 0o700
 
 
 def test_switching_off_forgets_the_vectors(tmp_path, out):
@@ -364,6 +379,63 @@ def test_vectors_of_another_model_are_re_embedded(tmp_path, out):
         assert db.execute("SELECT model FROM sem_sessions").fetchone()[0] == "v2"
 
 
+def test_v2_index_is_rebuilt_and_re_embedded_with_the_model_tag(tmp_path, out):
+    make_session(out, 1, [seg(1, "the invoice")])
+    path = tmp_path / "idx" / "s.sqlite3"
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as db:  # a v2 index: sem_sessions without a model column
+        db.execute("CREATE TABLE sem_sessions (folder TEXT PRIMARY KEY, stamp TEXT)")
+        db.execute("INSERT INTO sem_sessions VALUES ('gone', 'x')")
+        db.execute("CREATE TABLE sessions (folder TEXT PRIMARY KEY, session_id TEXT)")
+        db.execute("INSERT INTO sessions VALUES ('gone', 'old')")
+        db.execute("PRAGMA user_version = 2")
+    emb = FakeEmbedder()
+    emb.model_id = "m1"
+    idx = TranscriptIndex(path, embedder=emb)
+    assert sync(idx, out) == 1
+    assert [h.start for h in idx.search("invoice")] == [1.0]
+    with sqlite3.connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == search.SCHEMA_VERSION
+        assert db.execute("SELECT model FROM sem_sessions").fetchall() == [("m1",)]
+        assert db.execute("SELECT count(*) FROM sessions").fetchone()[0] == 1
+    assert vector_rows(idx) == 1
+
+
+def test_embedder_swapped_during_a_search_falls_back_to_full_text(tmp_path, out):
+    make_session(out, 1, [seg(1, "the invoice")])
+    emb = FakeEmbedder()
+    idx = make(tmp_path, emb)
+    sync(idx, out)
+    other = FakeEmbedder()
+    other.embed = lambda texts: np.ones((len(texts), 7), dtype=np.float32)  # another dimension
+    other.model_id = emb.model_id = "same"  # the stored rows match; only the width differs
+    real = emb.embed
+
+    def swapping(texts):
+        idx.embedder = other
+        return real(texts)
+
+    emb.embed = swapping
+    assert [h.start for h in idx.search("invoice")] == [1.0]  # full text, no exception
+    assert idx._semantic("invoice", 5) == []
+
+
+def test_failed_embedder_start_does_not_wedge_the_worker(tmp_path, out, monkeypatch):
+    make_session(out, 1, [seg(1, "the invoice")])
+    idx = make(tmp_path, FakeEmbedder())
+    real_start = threading.Thread.start
+
+    def broken(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", broken)
+    idx.sync(out)
+    assert idx._embed_thread is None and idx.wait_embedded(1)
+    monkeypatch.setattr(threading.Thread, "start", real_start)
+    sync(idx, out)  # a later kick works
+    assert vector_rows(idx) == 1
+
+
 def test_meaning_hits_rank_after_exact_word_hits(tmp_path, out):
     make_session(
         out,
@@ -488,6 +560,89 @@ def test_model_that_fails_to_load_is_deleted_for_a_fresh_download(tmp_path, monk
     emb = semantic.OnnxEmbedder()
     assert emb.embed(["x"]) is None and not emb.ready()
     assert not any(f.exists() for f in files.values())
+
+
+def test_oversized_download_is_aborted_and_deleted(model_dir, monkeypatch):
+    data = b"weights" * 1000
+    reads = []
+
+    class Endless(io.RawIOBase):
+        def read(self, n=-1):
+            reads.append(n)
+            return b"x" * n if len(reads) < 1000 else b""
+
+    monkeypatch.setattr(semantic.urllib.request, "urlopen", lambda url, timeout=None: Endless())
+    assert semantic.model_path(_fake_model(data)) is None
+    assert len(reads) == 1  # stopped at the first block over the expected size
+    assert list(model_dir.iterdir()) == []
+
+
+def test_short_download_is_rejected(model_dir, monkeypatch):
+    data = b"weights" * 1000
+    _urlopen(monkeypatch, data[:-1])
+    assert semantic.model_path(_fake_model(data)) is None
+    assert list(model_dir.iterdir()) == []
+
+
+def test_load_failure_of_verified_files_does_not_redownload(tmp_path, monkeypatch):
+    """Stories: US-32."""
+    pytest.importorskip("onnxruntime")
+    import onnxruntime
+
+    files = {m.name: tmp_path / m.name for m in (semantic.MODEL, semantic.TOKENIZER)}
+    for f in files.values():
+        f.write_bytes(b"junk")
+    calls = []
+
+    def model_path(m, download=True):
+        calls.append(m.name)
+        return files[m.name]
+
+    monkeypatch.setattr(semantic, "model_path", model_path)
+    monkeypatch.setattr(semantic, "_verified", set(files.values()))
+    monkeypatch.setattr(semantic, "_last_failure", 0.0)
+    monkeypatch.setattr(
+        onnxruntime, "InferenceSession", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("abi"))
+    )
+    monkeypatch.setattr(
+        "tokenizers.Tokenizer.from_file",
+        staticmethod(
+            lambda p: type(
+                "T", (), {"enable_truncation": lambda *a: None, "enable_padding": lambda *a: None}
+            )()
+        ),
+    )
+    emb = semantic.OnnxEmbedder()
+    assert emb.embed(["x"]) is None
+    assert emb.embed(["x"]) is None and emb.embed(["x"]) is None
+    assert len(calls) == 2  # looked up once (model, tokenizer); never again
+    assert all(f.exists() for f in files.values())  # verified files are not corrupt
+    assert semantic._last_failure > 0
+
+
+def test_unverified_files_that_fail_to_load_are_deleted_and_back_off(tmp_path, monkeypatch):
+    pytest.importorskip("onnxruntime")
+    import onnxruntime
+
+    files = {m.name: tmp_path / m.name for m in (semantic.MODEL, semantic.TOKENIZER)}
+    for f in files.values():
+        f.write_bytes(b"junk")
+    monkeypatch.setattr(semantic, "model_path", lambda m, download=True: files[m.name])
+    monkeypatch.setattr(semantic, "_verified", set())
+    monkeypatch.setattr(semantic, "_last_failure", 0.0)
+    monkeypatch.setattr(
+        onnxruntime, "InferenceSession", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x"))
+    )
+    monkeypatch.setattr(
+        "tokenizers.Tokenizer.from_file",
+        staticmethod(
+            lambda p: type(
+                "T", (), {"enable_truncation": lambda *a: None, "enable_padding": lambda *a: None}
+            )()
+        ),
+    )
+    assert semantic.OnnxEmbedder().embed(["x"]) is None
+    assert not any(f.exists() for f in files.values()) and semantic._last_failure > 0
 
 
 def test_bad_checksum_is_rejected(model_dir, monkeypatch):

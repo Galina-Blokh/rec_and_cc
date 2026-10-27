@@ -128,9 +128,15 @@ def _download(model: ModelFile, path: Path) -> None:
             urllib.request.urlopen(model.url, timeout=DOWNLOAD_TIMEOUT_S) as r,  # noqa: S310 - https only, checked above
             tmp.open("wb") as f,
         ):
+            written = 0
             while block := r.read(1 << 20):
+                written += len(block)
+                if written > model.size:  # a bad or hostile server must not fill the disk
+                    raise ValueError(f"download larger than the expected {model.size} bytes")
                 digest.update(block)
                 f.write(block)
+        if written != model.size:
+            raise ValueError(f"size mismatch ({written} bytes)")
         if digest.hexdigest() != model.sha256:
             raise ValueError(f"sha256 mismatch ({digest.hexdigest()})")
         tmp.replace(path)
@@ -145,6 +151,7 @@ class OnnxEmbedder:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._loaded: tuple[Any, Any] | None = None
+        self._broken = False  # verified files that the runtime can't load: don't retry per search
 
     model_id = MODEL.name
 
@@ -155,6 +162,8 @@ class OnnxEmbedder:
     def _load(self) -> tuple[Any, Any] | None:
         with self._lock:
             if self._loaded is None:
+                if self._broken:
+                    return None
                 m, t = model_path(MODEL), model_path(TOKENIZER)
                 if m is None or t is None:
                     return None
@@ -169,10 +178,14 @@ class OnnxEmbedder:
                     opts.intra_op_num_threads = 2  # background work: leave cores to transcription
                     self._loaded = (ort.InferenceSession(str(m), opts), tok)
                 except Exception as e:  # noqa: BLE001 - unreadable model files
-                    log.warning("search model failed to load (%s); removing the files", e)
-                    for f in (m, t):  # so the next attempt downloads them again
-                        _verified.discard(f)
-                        f.unlink(missing_ok=True)
+                    global _last_failure
+                    _last_failure = time.monotonic()  # the download backoff applies
+                    log.warning("search model failed to load (%s)", e)
+                    for f in (m, t):
+                        if f in _verified:
+                            self._broken = True  # intact files: the runtime is the problem
+                        else:
+                            f.unlink(missing_ok=True)  # so a later attempt downloads it again
                     return None
             return self._loaded
 

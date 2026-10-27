@@ -116,6 +116,11 @@ class TranscriptIndex:
                     self._ready = True
         return self._open()
 
+    def _owner_only(self) -> None:
+        """Re-apply 0600 after a VACUUM rebuilt the file (it may come back with the umask)."""
+        with contextlib.suppress(OSError):
+            os.chmod(self.path, 0o600)
+
     def _open(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=10)
         # Deleted rows are overwritten, so a dropped session's text can't be recovered.
@@ -170,6 +175,7 @@ class TranscriptIndex:
             db.execute("INSERT INTO seg_fts(seg_fts) VALUES ('optimize')")
             db.commit()
             db.execute("VACUUM")
+            self._owner_only()
 
     # ------------------------------------------------------------------ updates
     def index_session(self, directory: Path) -> bool:
@@ -269,9 +275,15 @@ class TranscriptIndex:
             self._embed_dirty = True
             if self._embed_thread is not None:
                 return
+            # Daemon: being killed at interpreter exit loses nothing. SQLite writes are atomic
+            # and a leftover model ``.part`` file is overwritten by the next download.
             t = threading.Thread(target=self._embed_worker, name="search-embed", daemon=True)
             self._embed_thread = t
-        t.start()
+            try:
+                t.start()  # inside the guard: nobody can join an unstarted thread
+            except RuntimeError:
+                self._embed_thread = None
+                log.warning("could not start the embedding worker")
 
     def _embed_worker(self) -> None:
         while True:
@@ -286,7 +298,10 @@ class TranscriptIndex:
         """Block until the embedding worker is idle (tests, CLI); False on timeout."""
         deadline = time.monotonic() + timeout
         while (t := self._embed_thread) is not None:
-            t.join(max(0.0, deadline - time.monotonic()))
+            try:
+                t.join(max(0.0, deadline - time.monotonic()))
+            except RuntimeError:  # never started
+                return True
             if time.monotonic() >= deadline and self._embed_thread is not None:
                 return False
         return True
@@ -304,6 +319,7 @@ class TranscriptIndex:
                     db.execute("DELETE FROM sem_sessions")
                     db.commit()
                     db.execute("VACUUM")
+                    self._owner_only()
         except Exception as e:  # noqa: BLE001 - semantic search is optional
             log.error("dropping search vectors failed: %s", type(e).__name__)
 
@@ -377,6 +393,8 @@ class TranscriptIndex:
             if not rows:
                 return []
             matrix = np.frombuffer(b"".join(r[1] for r in rows), dtype=np.float32)
+            if matrix.size != len(rows) * q.shape[1]:  # embedder swapped meanwhile
+                return []
             sims = matrix.reshape(len(rows), -1) @ q[0]
             best = [int(i) for i in np.argsort(-sims)[:limit] if sims[i] >= SEMANTIC_MIN_SIM]
             ids = [rows[i][0] for i in best]

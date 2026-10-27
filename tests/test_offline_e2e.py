@@ -10,9 +10,11 @@ Whisper model. Blocked, and recorded as an attempt:
 - launching programs (``subprocess.Popen``, ``os.system``), e.g. a curl; only the app's own
   audio helper (``rcc-audiotap``, permission checks) may run.
 Not covered: C extensions that open sockets themselves, and names bound before the test
-(``from socket import getaddrinfo``). The only attempt allowed is the one-time speaker-model
-download in ``diarize._download``, and only its connection to the model host; it must fail
-fast and leave "Others" in the transcript. The slow tests load the real Whisper models from
+(``from socket import getaddrinfo``). The only attempts allowed are the one-time speaker-model
+download in ``diarize._download`` and, with ``[search] semantic = true``, the one-time search
+model download in ``semantic._download``, each only its connection to its own model host; they
+must fail fast (the transcript keeps "Others", search stays full-text). With the search model on
+disk, semantic search makes no attempt. The slow tests load the real Whisper models from
 disk; with the speaker model on disk too they must make no attempt at all.
 
 Stories: US-14.
@@ -36,6 +38,7 @@ import pytest
 from test_live import FakeTranscriber, burst, phrase, silence
 from test_recorder import FakeSource
 
+from recandcc import search, semantic
 from recandcc.config import Config, TranscriptionConfig
 from recandcc.models import SAMPLE_RATE, Mode
 from recandcc.native import HELPER_NAME
@@ -47,6 +50,7 @@ REAL_MODEL_PATH = diarize.model_path  # before conftest stubs it out for fast te
 AF_UNIX = getattr(socket, "AF_UNIX", None)
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
 MODEL_HOST = urlparse(diarize.EMBEDDING_MODEL.url).hostname
+SEMANTIC_HOST = urlparse(semantic.MODEL.url).hostname
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
 
 
@@ -66,6 +70,7 @@ class Attempt:
     host: str | None
     caller: str
     stack: list[str] = field(repr=False)
+    files: list[str] = field(repr=False, default_factory=list)  # parallel to stack
 
 
 class NetworkGuard:
@@ -73,26 +78,42 @@ class NetworkGuard:
         self.attempts: list[Attempt] = []
 
     def deny(self, api: str, target) -> OSError:
-        stack = [f.name for f in traceback.extract_stack()]
+        frames = traceback.extract_stack()
+        stack = [f.name for f in frames]
+        files = [f.filename.replace("\\", "/") for f in frames]
         caller = _caller()
         host = target[0] if isinstance(target, tuple) and target else None
-        self.attempts.append(Attempt(api, repr(target), host, caller, stack))
+        self.attempts.append(Attempt(api, repr(target), host, caller, stack, files))
         return OSError(f"network blocked by test: {api}({target!r}) from {caller}")
 
-    def model_downloads(self) -> list[Attempt]:
-        """The speaker-model download's first step towards its own host (it fails there)."""
+    def _downloads(self, host: str | None, module: str | None) -> list[Attempt]:
         return [
             a
             for a in self.attempts
             if "_download" in a.stack
             and "model_path" in a.stack
             and a.api in ("socket.create_connection", "socket.getaddrinfo")
-            and a.host == MODEL_HOST
+            and a.host == host
+            and (
+                module is None
+                or any(
+                    n == "_download" and f.endswith(f"/{module}.py")
+                    for n, f in zip(a.stack, a.files, strict=True)
+                )
+            )
         ]
 
+    def model_downloads(self) -> list[Attempt]:
+        """The speaker-model download's first step towards its own host (it fails there)."""
+        return self._downloads(MODEL_HOST, None)
+
+    def semantic_downloads(self) -> list[Attempt]:
+        """The search-model download's first step, from ``semantic._download`` to its host."""
+        return self._downloads(SEMANTIC_HOST, "semantic")
+
     def unexpected(self) -> list[Attempt]:
-        downloads = self.model_downloads()
-        return [a for a in self.attempts if a not in downloads]
+        allowed = self.model_downloads() + self.semantic_downloads()
+        return [a for a in self.attempts if a not in allowed]
 
 
 @pytest.fixture
@@ -182,6 +203,18 @@ def no_speaker_model(tmp_path, monkeypatch):
     monkeypatch.setattr(diarize, "_last_failure", 0.0)
 
 
+@pytest.fixture
+def search_model(tmp_path, monkeypatch):
+    """Real search-model lookup into an empty tmp cache, a fresh index, and a config whose
+    ``[search] semantic`` is on. Nothing touches the user's cache, index or config."""
+    monkeypatch.setattr(semantic, "MODELS_DIR", tmp_path / "search-models")
+    monkeypatch.setattr(semantic, "_last_failure", 0.0)
+    monkeypatch.setattr(semantic, "_verified", set())
+    monkeypatch.setattr(semantic, "_default", None)
+    monkeypatch.setattr(search, "_default", None)
+    return tmp_path / "search-models"
+
+
 def test_guard_blocks_and_names_the_caller(net):
     with pytest.raises(OSError, match="network blocked by test: socket.create_connection"):
         socket.create_connection(("example.com", 443), timeout=1)
@@ -256,8 +289,9 @@ class Monitor:
 AUDIO = np.concatenate([silence(1), burst(1.5), silence(1.5), burst(1)])
 
 
-def make_ctrl(tmp_path, transcriber_cfg: TranscriptionConfig, transcriber=None):
+def make_ctrl(tmp_path, transcriber_cfg: TranscriptionConfig, transcriber=None, semantic=False):
     cfg = Config(output_dir=tmp_path / "out")
+    cfg.search.semantic = semantic
     cfg.detection.mode = Mode.OFF
     cfg.transcription = transcriber_cfg
     sources = {}
@@ -349,6 +383,52 @@ def test_failed_speaker_download_is_not_retried_every_session(tmp_path, net, no_
     assert diarize.model_path() is None
     assert len(net.model_downloads()) == tried  # within RETRY_AFTER_S: no second attempt
     assert not (tmp_path / "models" / diarize.EMBEDDING_MODEL.name).exists()
+
+
+def _session_with_semantic_search(tmp_path):
+    ctrl, sources = make_ctrl(
+        tmp_path,
+        TranscriptionConfig(model="fake", workers=2, live=False, languages=["en"]),
+        semantic=True,
+    )
+    session_dir, evs = run_session(ctrl, sources, live_wait=0.0)
+    assert evs[-1][1].transcribed
+    for th in threading.enumerate():  # the Controller indexes on its own "search" thread
+        if th.name == "search":
+            th.join(10)
+    index = search.default_index(True)  # the Controller indexed the session; embedding is async
+    assert index.wait_embedded(30)
+    return index
+
+
+def test_semantic_model_not_cached_allows_one_download_attempt(
+    tmp_path, net, no_speaker_model, search_model
+):
+    """Stories: US-32."""
+    index = _session_with_semantic_search(tmp_path)
+    assert len(net.semantic_downloads()) == 1  # one attempt, then the backoff holds
+    index.sync(tmp_path / "out")
+    assert index.wait_embedded(30)
+    assert len(net.semantic_downloads()) == 1
+    assert index.search(phrase(1).split()[0])  # full-text still answers
+    assert not (search_model / semantic.MODEL.name).exists()
+
+
+def test_semantic_model_cached_makes_no_network_attempt(
+    tmp_path, net, no_speaker_model, search_model, monkeypatch
+):
+    """Stories: US-32."""
+    search_model.mkdir()
+    fakes = []
+    for m in (semantic.MODEL, semantic.TOKENIZER):
+        data = b"x" * m.size  # right size; the sha256 is faked below
+        (search_model / m.name).write_bytes(data)
+        fakes.append(m.name)
+    # right size, and checked once already in this process (a real check would hash 135 MB)
+    monkeypatch.setattr(semantic, "_verified", {search_model / n for n in fakes})
+    _session_with_semantic_search(tmp_path)
+    assert net.semantic_downloads() == []  # on disk: used (or fails to load), never fetched
+    assert all((search_model / n).exists() for n in fakes)
 
 
 # --------------------------------------------------------------------------- real models
