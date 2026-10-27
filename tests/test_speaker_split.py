@@ -494,6 +494,49 @@ def test_a_failing_word_pass_keeps_the_session_and_the_chunk_whole(tmp_path, mon
     assert t2_segs and len([c for c in model.calls if c]) == 1
 
 
+def test_an_empty_tail_window_does_not_trip_the_session_breaker(tmp_path, monkeypatch, caplog):
+    """A 1-frame tail window aligns to no words (no exception), so every chunk keeps its word
+    pass: the breaker must not switch words off for the rest of the session."""
+    import logging
+
+    from test_transcribe import FakeModel, _install, _write_tracks
+
+    from recandcc.transcribe import mlx_timing
+
+    class TailWindow(_FakeMlx):
+        def transcribe(self, audio, language, words=False):
+            self.calls.append(words)
+            if words:
+                segs = [{"seek": 0, "start": 0.0, "end": 0.02, "tokens": [10, 11, 100]}]
+                mlx_timing.add_word_timestamps(
+                    segments=segs,
+                    model=None,
+                    tokenizer=types.SimpleNamespace(eot=100),
+                    mel=None,
+                    num_frames=1,
+                    last_speech_timestamp=0.0,
+                )
+                assert segs[0].get("words", []) == []
+                return [(0.0, len(audio) / SAMPLE_RATE, " hello there", [])]
+            return [(0.0, len(audio) / SAMPLE_RATE, " hello there")]
+
+    regions = _write_tracks(tmp_path)
+    monkeypatch.setattr(eng, "find_speech", lambda a: regions)
+    monkeypatch.setattr(eng, "mlx_word_timestamps", lambda: True)
+    s = make_session(tmp_path, {eng.Track.ME: "me.wav", eng.Track.OTHERS: "others.wav"})
+    t = eng.Transcriber(TranscriptionConfig(model="fake", workers=1, split_on_speaker_change=True))
+    model = TailWindow()
+    monkeypatch.setattr(t, "_ensure_loaded", lambda: _install(t, model, FakeModel()))
+    monkeypatch.setattr(t, "_word_tracks", lambda _s: (eng.Track.OTHERS,))
+    with caplog.at_level(logging.DEBUG, "recandcc.transcribe"):
+        segs = t.transcribe_session(s)
+    t.close()
+    others = [x for x in segs if x.speaker == "Others"]
+    assert len(others) > 1
+    assert model.calls.count(True) == len(others)  # the word pass ran on every chunk
+    assert not any("word timestamps failed" in r.getMessage() for r in caplog.records)
+
+
 def test_failed_lazy_word_pass_is_closed_before_the_retry():
     """faster-whisper yields segments lazily: a failure mid-iteration must close that
     generator before the same model transcribes the chunk again without words."""

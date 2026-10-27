@@ -441,7 +441,8 @@ class Transcriber:
                 chunk.language,
             )
         speaker = SPEAKERS[chunk.track]
-        # decided once per session (see _word_tracks), so every chunk of it agrees
+        # which tracks get words is decided once per session (see _word_tracks); the first
+        # word-pass failure turns words off for the rest of it (_note_word_failure)
         words = chunk.track in word_tracks
         return self.transcribe_audio(
             piece, chunk.start, speaker, lang, max_end=chunk.end, words=words
