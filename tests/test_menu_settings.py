@@ -384,7 +384,7 @@ def test_mac_toggles_keep_hand_edits(tmp_path, monkeypatch):
     app._toggle_login(types.SimpleNamespace(state=0))
     _join()
     app._set_retention(types.SimpleNamespace(retention_days=30))
-    _join("retention-set")
+    _join()
     data = _kept(path)
     assert data["live_captions"] is False and data["autostart"] is True
     assert data["transcription"]["audio_retention_days"] == 30

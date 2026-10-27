@@ -581,8 +581,7 @@ class TrayApp:
             self._notify("Can't open transcripts folder", err)
 
     def _toggle_captions(self) -> None:
-        self.cfg.live_captions = not self.cfg.live_captions
-        self.ctrl.save_settings("live_captions")
+        self.ctrl.menu_set("live_captions", not self.cfg.live_captions)
         if not self.cfg.live_captions:
             self.captions.post("hide")
         elif self._live_id is not None:
@@ -601,11 +600,10 @@ class TrayApp:
         try:
             if autostart.is_enabled():
                 autostart.disable()
-                self.cfg.autostart = False
+                self.ctrl.menu_set("autostart", False)
             else:
                 autostart.enable()
-                self.cfg.autostart = True
-            self.ctrl.save_settings("autostart")
+                self.ctrl.menu_set("autostart", True)
         except Exception:
             log.exception("autostart toggle failed")
 

@@ -368,11 +368,10 @@ class MacApp(rumps.App):
         try:
             if autostart.is_enabled():
                 autostart.disable()
-                self.cfg.autostart = False
+                self.ctrl.menu_set("autostart", False)
             else:
                 autostart.enable()
-                self.cfg.autostart = True
-            self.ctrl.save_settings("autostart")
+                self.ctrl.menu_set("autostart", True)
         except Exception as e:
             log.exception("autostart toggle failed")
             self._notify("Launch at login", f"Failed: {e}")
@@ -403,19 +402,17 @@ class MacApp(rumps.App):
         self._render_languages()
 
     def _set_retention(self, sender) -> None:
-        self.cfg.transcription.audio_retention_days = sender.retention_days
+        # marked dirty before memory changes; the purge runs on the save thread after the write
+        self.ctrl.menu_set(
+            "transcription.audio_retention_days",
+            sender.retention_days,
+            then=self.ctrl.purge_audio_now,
+        )
         self._render_retention()
 
-        def apply():
-            self.ctrl.write_settings("transcription.audio_retention_days")
-            self.ctrl.purge_audio_now()
-
-        threading.Thread(target=apply, daemon=True, name="retention-set").start()
-
     def _toggle_captions(self, sender) -> None:
-        self.cfg.live_captions = not self.cfg.live_captions
+        self.ctrl.menu_set("live_captions", not self.cfg.live_captions)
         sender.state = 1 if self.cfg.live_captions else 0
-        self.ctrl.save_settings("live_captions")
         self._apply_captions()
 
     def _apply_captions(self) -> None:
