@@ -12,6 +12,7 @@
 //   rcc-audiotap open-settings microphone|system_audio
 //                                               open the matching System Settings privacy pane
 //   rcc-audiotap hotkey "<cmd>+<shift>+r"       register a global shortcut, JSON line per press
+//   rcc-audiotap settings --config FILE.json    SwiftUI settings window; one JSON line on close
 
 import Foundation
 
@@ -24,6 +25,7 @@ usage:
   rcc-audiotap request microphone|system_audio [--timeout SECONDS]
   rcc-audiotap open-settings microphone|system_audio
   rcc-audiotap hotkey COMBO        (e.g. "<cmd>+<shift>+r")
+  rcc-audiotap settings --config SNAPSHOT.json
 
 """
 
@@ -110,6 +112,10 @@ do {
     case "hotkey":
         guard args.count == 1 else { fail("hotkey takes exactly one combo, e.g. \"<cmd>+<shift>+r\"") }
         runHotkey(args[0])
+
+    case "settings":
+        guard args.count == 2, args[0] == "--config" else { fail("settings needs --config FILE") }
+        runSettings(configPath: args[1])
 
     case "-h", "--help", "help":
         print(usage, terminator: "")

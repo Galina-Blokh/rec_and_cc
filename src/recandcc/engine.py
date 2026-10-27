@@ -307,7 +307,7 @@ class Engine:
             choice = "ignore"
         self._command(("respond", choice, prompt_id))
 
-    def set_mode(self, mode: Mode | str) -> None:
+    def set_mode(self, mode: Mode | str, *, save: bool = True) -> None:
         mode = Mode(mode)
         with self._lock:
             self.det.mode = mode
@@ -317,7 +317,8 @@ class Engine:
                     self._prompt = None
                 if self._rec is not None and not self._rec.manual:
                     self._commands.append(("stop",))
-        self._safe_save()
+        if save:
+            self._safe_save()
         self._wake.set()
         self._notify()
 

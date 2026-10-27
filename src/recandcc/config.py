@@ -349,6 +349,67 @@ def save_languages(languages: list, path: Path | None = None) -> None:
     save_keys(path, {"transcription.languages": list(languages)})
 
 
+# Keys the native settings window may change: flat name -> dotted config key.
+SETTINGS_KEYS = {
+    "mode": "detection.mode",
+    "output_dir": "output_dir",
+    "languages": "transcription.languages",
+    "keep_audio": "transcription.keep_audio",
+    "speaker_names": "transcription.speaker_names",
+    "live_captions": "live_captions",
+}
+
+
+def validate_settings(values) -> dict:
+    """Check values sent by the settings window (untrusted JSON) and return them cleaned:
+    ``mode`` as a Mode, ``output_dir`` as an expanded Path, ``languages`` normalised
+    ([] = any language), the rest as bools. Unknown names are ignored. Raises ValueError on a
+    bad value."""
+    if not isinstance(values, dict):
+        raise ValueError("settings must be an object")
+    out: dict = {}
+    for name, value in values.items():
+        if name not in SETTINGS_KEYS:
+            continue
+        if name == "mode":
+            out[name] = Mode(value)
+        elif name == "output_dir":
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("output_dir must be a folder path")
+            out[name] = Path(value).expanduser()
+            if not out[name].is_absolute():
+                raise ValueError("output_dir must be an absolute path")
+        elif name == "languages":
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                raise ValueError("languages must be a list of codes")
+            langs = list(dict.fromkeys(language_code(v) for v in value))  # [] = any language
+            clean = normalize_languages(langs)
+            if len(clean) != len(langs):
+                raise ValueError("languages: unknown language code")
+            out[name] = clean
+        elif isinstance(value, bool):
+            out[name] = value
+        else:
+            raise ValueError(f"{name} must be true or false")
+    return out
+
+
+def save_settings(updates: dict, path: Path | None = None) -> float:
+    """Write validated settings (see validate_settings) into config.toml, keeping every other
+    key as it is on disk (see `save_keys`). Returns the new file's mtime."""
+    return save_keys(
+        path,
+        {
+            SETTINGS_KEYS[name]: (
+                value.value
+                if isinstance(value, Mode)
+                else (str(value) if isinstance(value, Path) else value)
+            )
+            for name, value in updates.items()
+        },
+    )
+
+
 def load_config(path: Path | None = None) -> Config:
     """Load config, creating a default file on first run. Unknown keys are ignored."""
     path = CONFIG_PATH if path is None else path
