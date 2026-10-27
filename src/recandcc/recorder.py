@@ -7,7 +7,9 @@ Thread layout per track::
 ``on_frames`` only measures the level (cheap numpy RMS) and enqueues a copy, so capture
 never blocks on disk I/O. Frame listeners (``add_listener``, used for live transcription) get
 the same copy on the capture thread and must only enqueue it. ``stop()`` stops the sources,
-sends a sentinel to each writer, joins them, and persists session.json.
+sends a sentinel to each writer, joins them, and persists session.json. A writer's backlog
+is bounded (``WRITER_BACKLOG_S``; overflow is written as silence) and so is the join
+(``FINISH_TIMEOUT_*``): a stalled disk never grows memory or freezes the caller.
 """
 
 from __future__ import annotations
@@ -314,6 +316,14 @@ SystemSourceFactory = Callable[..., AudioSource]
 FrameListener = Callable[[Track, int, np.ndarray], None]
 # Captured audio kept per track to replay to a listener added after the session started.
 REPLAY_SECONDS = 10.0
+# Captured audio a track's writer may have waiting (a stalled disk: network volume, slow USB,
+# sleep). Beyond it new blocks are dropped and later written as silence (``_TrackWriter``).
+WRITER_BACKLOG_S = 120.0  # 120 s of float32 mono 16 kHz = ~7.7 MB per track
+# finish() waits this long plus a share of the remaining backlog, capped, then lets the writer
+# finish in the background so a stalled disk never freezes the engine thread.
+FINISH_TIMEOUT_S = 5.0
+FINISH_TIMEOUT_PER_BACKLOG_S = 0.1  # extra wait per second of audio still queued
+FINISH_TIMEOUT_MAX_S = 15.0
 
 
 def slugify(text: str | None, default: str = "session") -> str:
@@ -356,8 +366,15 @@ class _TrackWriter:
         self.source = source
         self.recorder = recorder
         self.replay_s = REPLAY_SECONDS  # longer for a room mic: listeners get its pre-roll
-        self.q: queue.Queue[np.ndarray | None] = queue.Queue()
-        self.frames_written = 0
+        # Audio blocks; an int is that many samples of silence (padding, dropped audio).
+        self.q: queue.Queue[np.ndarray | int | None] = queue.Queue()
+        self.frames_written = 0  # timeline position on disk, silence included
+        self._queued_in = 0  # samples of audio blocks queued (capture thread only)
+        self._queued_out = 0  # ... of which written (writer thread only)
+        self._gap = 0  # dropped samples not yet queued as silence (capture thread)
+        self.dropped_frames = 0  # audio lost to a full backlog, written as silence instead
+        self.abandoned = False  # finish() timed out: the writer completes in the background
+        self._finishing = False  # finish() sent the sentinel
         self.frames_received = 0  # updated on the capture thread; ahead of frames_written
         self.backlog_max = 0  # most samples ever waiting for the writer (disk falling behind)
         self._padding = 0  # leading zeros (mid-session join): not counted as backlog
@@ -391,10 +408,30 @@ class _TrackWriter:
                 self._recent_frames -= self._recent.popleft()[1].size
             for cb in self._listeners:
                 self._call(cb, start, block)
-        self.q.put(block)
+        # The room pre-roll arrives all at once in start(): never drop it.
+        limit = max(WRITER_BACKLOG_S, self.replay_s) * SAMPLE_RATE
+        if self._queued_in - self._queued_out + block.size > limit:
+            self._drop(block.size)
+        else:
+            if self._gap:  # silence where audio was dropped keeps the tracks aligned
+                self.q.put_nowait(self._gap)
+                self._gap = 0
+            self._queued_in += block.size
+            self.q.put_nowait(block)
         written = self.frames_written  # an int written by the writer thread: atomic read
         if written >= self._padding:
             self.backlog_max = max(self.backlog_max, start + block.size - written)
+
+    def _drop(self, n: int) -> None:
+        """The writer is ``WRITER_BACKLOG_S`` behind: drop ``n`` samples (capture thread)."""
+        self._gap += n
+        self.dropped_frames += n
+        if self.dropped_frames == n:  # once per track and session; finish() logs the total
+            log.warning(
+                "%s writer is %gs behind (disk stalled?): dropping new audio, written as silence",
+                self.track,
+                WRITER_BACKLOG_S,
+            )
 
     def _call(self, cb: FrameListener, start: int, block: np.ndarray) -> None:
         try:
@@ -420,8 +457,8 @@ class _TrackWriter:
         with self._tap_lock:
             self.frames_received += frames
         self._padding += frames
-        for i in range(0, frames, SAMPLE_RATE):
-            self.q.put(np.zeros(min(SAMPLE_RATE, frames - i), dtype=np.float32))
+        if frames:
+            self.q.put_nowait(frames)  # an int: no memory held for the zeros
 
     def _run(self) -> None:
         try:
@@ -429,8 +466,15 @@ class _TrackWriter:
                 block = self.q.get()
                 if block is None:
                     break
+                if isinstance(block, int):
+                    for i in range(0, block, SAMPLE_RATE):
+                        n = min(SAMPLE_RATE, block - i)
+                        self._file.write(np.zeros(n, dtype=np.float32))
+                        self.frames_written += n
+                    continue
                 self._file.write(np.clip(block, -1.0, 1.0))
                 self.frames_written += block.size
+                self._queued_out += block.size
         except BaseException as e:  # disk full etc. — drain so capture isn't stuck
             self.error = e
             log.exception("writer %s failed", self.track)
@@ -439,9 +483,40 @@ class _TrackWriter:
         finally:
             self._file.close()
 
-    def finish(self) -> None:
-        self.q.put(None)
-        self.thread.join()
+    def finish(self) -> bool:
+        """Flush and close; False if the writer is still stuck after the timeout. It then
+        finishes on its own (daemon thread) and closes the file itself, so the track is
+        complete once the disk recovers; this session's folder is unique, so a later session
+        never writes to the same file."""
+        if self._finishing:  # called again: only wait
+            self.thread.join(FINISH_TIMEOUT_S)
+            return not self.thread.is_alive()
+        self._finishing = True
+        if self._gap:  # the track keeps its full length (sources are stopped by now)
+            self.q.put_nowait(self._gap)
+            self._gap = 0
+        self.q.put_nowait(None)
+        if self.dropped_frames:
+            log.warning(
+                "%s: %.1fs of audio dropped (disk too slow) and written as silence",
+                self.track,
+                self.dropped_frames / SAMPLE_RATE,
+            )
+        backlog_s = max(0, self._queued_in - self._queued_out) / SAMPLE_RATE
+        timeout = min(
+            FINISH_TIMEOUT_S + backlog_s * FINISH_TIMEOUT_PER_BACKLOG_S, FINISH_TIMEOUT_MAX_S
+        )
+        self.thread.join(timeout)
+        if not self.thread.is_alive():
+            return True
+        self.abandoned = True
+        log.warning(
+            "%s writer still busy after %.1fs (disk stalled?); %s completes in the background",
+            self.track,
+            timeout,
+            self.path.name,
+        )
+        return False
 
 
 class Recorder:

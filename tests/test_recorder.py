@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
+from recandcc import recorder as recmod
 from recandcc.capture.base import AudioSource
 from recandcc.capture.mic import StreamResampler
 from recandcc.config import Config
@@ -313,8 +314,6 @@ def test_listeners_are_per_session_and_errors_contained(cfg):
 
 
 def test_replay_buffer_is_bounded(cfg):
-    from recandcc import recorder as recmod
-
     rec, src = make(cfg, sine(15))
     rec.start(TriggerKind.MEDIA, "x")
     src["sys"].done.wait(5)
@@ -445,3 +444,76 @@ def test_facetime_uses_the_global_tap_and_upgrades_add_its_daemon(cfg):
     rec.upgrade_to_call("FaceTime", target=facetime)
     rec.stop()
     assert made[1].added == [AppTarget(("com.apple.facetime", "avconferenced"), (30,))]
+
+
+# ---- stalled disk: bounded writer backlog, bounded finish() -------------------------------
+@pytest.fixture
+def stalled_disk(monkeypatch):
+    """Writes to a new WAV block until the returned Event is set; short limits for speed."""
+    gate = threading.Event()
+
+    class GatedSoundFile(sf.SoundFile):
+        def write(self, data):
+            gate.wait(10)  # bounded so a broken test can't hang CI
+            return super().write(data)
+
+    monkeypatch.setattr(recmod.sf, "SoundFile", GatedSoundFile)
+    monkeypatch.setattr(recmod, "WRITER_BACKLOG_S", 0.5)  # 8000 samples = 5 blocks of 1600
+    monkeypatch.setattr(recmod, "REPLAY_SECONDS", 0.5)  # the bound is at least the replay
+    monkeypatch.setattr(recmod, "FINISH_TIMEOUT_S", 0.1)
+    monkeypatch.setattr(recmod, "FINISH_TIMEOUT_PER_BACKLOG_S", 0.0)
+    monkeypatch.setattr(recmod, "FINISH_TIMEOUT_MAX_S", 0.2)
+    yield gate
+    gate.set()
+
+
+def _drained(w):
+    deadline = time.monotonic() + 5
+    while w._queued_out < w._queued_in and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return w._queued_out == w._queued_in
+
+
+def test_stalled_writer_drops_beyond_the_bound_and_pads_with_silence(cfg, stalled_disk, caplog):
+    sig = sine(3)
+    rec, src = make(cfg, sig)
+    rec.start(TriggerKind.MEDIA, "Music")
+    assert src["sys"].done.wait(5)  # the producer never blocked on the stuck writer
+    w = rec._writers[0]
+    assert w._queued_in == 8000  # the backlog stopped at the bound ...
+    assert w.dropped_frames == len(sig) - 8000  # ... and every later sample is counted
+    drops = [r for r in caplog.records if "dropping new audio" in r.getMessage()]
+    assert len(drops) == 1 and drops[0].levelname == "WARNING"
+
+    stalled_disk.set()  # the disk recovers
+    assert _drained(w)
+    w.on_frames(np.full(1600, 0.25, dtype=np.float32))  # the gap is queued before this block
+    out = rec.stop()
+    assert out is not None and not w.abandoned
+    data, _ = sf.read(out.directory / "others.wav")
+    assert len(data) == len(sig) + 1600  # same timeline length: the tracks stay aligned
+    assert np.allclose(data[:8000], sig[:8000], atol=1e-3)
+    assert np.all(data[8000 : len(sig)] == 0)
+    assert np.allclose(data[len(sig) :], 0.25, atol=1e-3)
+    assert any("2.5s of audio dropped" in r.getMessage() for r in caplog.records)
+
+
+def test_finish_returns_while_the_writer_is_stuck_and_it_completes_later(cfg, stalled_disk):
+    sig = sine(1)
+    rec, src = make(cfg, sig)
+    rec.start(TriggerKind.MEDIA, "Music")
+    assert src["sys"].done.wait(5)
+    w = rec._writers[0]
+    w.source.stop()
+    t0 = time.monotonic()
+    assert w.finish() is False  # gave up waiting instead of freezing the caller
+    assert time.monotonic() - t0 < 2
+    assert w.abandoned and w.thread.is_alive() and not w._file.closed
+
+    stalled_disk.set()
+    w.thread.join(5)
+    assert not w.thread.is_alive() and w._file.closed  # the writer closed the file itself
+    data, _ = sf.read(w.path)
+    assert len(data) == len(sig)  # full length: the bound kept 8000, the rest is silence
+    assert np.allclose(data[:8000], sig[:8000], atol=1e-3)
+    rec.stop()  # finish() again only waits; the 1 s session is discarded as too short

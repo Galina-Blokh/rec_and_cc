@@ -84,7 +84,7 @@ The app is built around one rule: **real-time audio threads never block**. Every
 | `rcc-audiotap settings` (process) | SwiftUI window in an `NSApplication` with a regular activation policy; started by the menu on a worker thread, one JSON line on close | JSON snapshot file in, stdout line out |
 | hotkey reader | Reads the helper (restart with backoff) / Windows: `GetMessage` loop for `WM_HOTKEY`; calls `Controller.hotkey_pressed()` (debounced 0.5 s → `start_manual`/`stop` commands + `notice` event) | engine commands, event queue |
 | capture reader (per source) | Reads the pipe / PortAudio callback → `on_frames` (+ frame listeners, which only enqueue) | `queue.Queue` |
-| WAV writer (per track) | Writes PCM_16 WAV, so disk I/O never stalls capture | owns its file |
+| WAV writer (per track) | Writes PCM_16 WAV, so disk I/O never stalls capture; backlog bounded (below) | owns its file |
 | monitor reader | Parses JSON, keeps the latest snapshot (lock-protected) | `snapshot()` |
 | engine | `tick()` loop: the only thread that starts/stops the recorder and the room monitor; on exit it calls the activity monitor's `release_thread()`, so per-thread resources (Windows COM) are released on the thread that created them; `shutdown()` then calls `close()` | command queue + one lock |
 | room VAD (room listening on) | Mic frames (the capture thread only copies into the pre-roll ring and a queue) → Silero VAD per ~0.5 s step → sliding speech window | `SimpleQueue`; `triggered()` / `seconds_since_speech()` under its lock |
@@ -100,6 +100,17 @@ The app is built around one rule: **real-time audio threads never block**. Every
 - The engine holds one lock and never makes a blocking call while holding it. UI actions
   (`start_manual`, `stop`, `respond`) are queued as commands, so only the engine thread
   touches the recorder.
+- A track's writer backlog is bounded (`WRITER_BACKLOG_S` = 120 s of audio queued). On a
+  stalled disk the capture thread keeps calling `put_nowait`; past the bound it drops the
+  *newest* blocks (the queued audio is older and already in order), counts them, logs one
+  WARNING per track and session plus the total at stop, and queues the dropped span as
+  silence once the writer catches up, so `me.wav` and `others.wav` keep one timeline.
+  Silence (padding, dropped spans) is queued as a sample count, not as zero arrays.
+- `_TrackWriter.finish()` joins for 5 s + 0.1 s per second of queued audio, capped at 15 s.
+  If the writer is still stuck it logs a WARNING and returns, so the engine thread is never
+  frozen; the daemon writer finishes and closes the WAV itself when the disk recovers (a quit
+  before that leaves the file without a final header). Session folders are unique, so a later
+  session never shares a file with it.
 - AppKit objects are touched only on the main thread. Worker threads post events that the
   main-thread timer applies.
 - Engine → Controller: `on_session_start(session)` / `on_session_end(session | None, kept)`
