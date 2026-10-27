@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .config import CONFIG_DIR, CONFIG_PATH, LOG_DIR, load_config
+from .config import CONFIG_DIR, CONFIG_PATH, LOG_DIR, load_config, save_keys
 from .logging_setup import LOG_FILE, set_crash_notifier, setup_logging
 
 if TYPE_CHECKING:
@@ -270,9 +270,8 @@ def cmd_autostart(args) -> int:
     elif args.action == "off":
         autostart.disable()
     if args.action in ("on", "off"):
-        cfg = load_config()
-        cfg.autostart = args.action == "on"
-        cfg.save()
+        load_config(CONFIG_PATH)  # creates the file on first run
+        save_keys(CONFIG_PATH, {"autostart": args.action == "on"})  # keeps other hand edits
     print(f"Launch at login: {autostart.describe()}")
     return 0
 
