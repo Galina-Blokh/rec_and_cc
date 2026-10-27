@@ -188,6 +188,13 @@ def _build(cls, data: dict):
     return cls(**{k: v for k, v in data.items() if k in known})
 
 
+def language_code(item) -> str:
+    """One `languages` entry as written by the user, lowercased and alias-mapped ("iw" ->
+    "he"). The result may still be an unknown code."""
+    code = str(item).strip().lower()
+    return LANGUAGE_ALIASES.get(code, code)
+
+
 def normalize_languages(value) -> list[str]:
     """`transcription.languages` as clean Whisper codes: lowercased, aliases mapped
     ("iw" -> "he"), duplicates and unknown codes dropped (with a warning). A single string is
@@ -203,8 +210,7 @@ def normalize_languages(value) -> list[str]:
         return list(DEFAULT_LANGUAGES)
     out: list[str] = []
     for item in items:
-        code = str(item).strip().lower()
-        code = LANGUAGE_ALIASES.get(code, code)
+        code = language_code(item)
         if code not in WHISPER_LANGUAGES:
             log.warning("ignoring unknown language %r in transcription.languages", item)
         elif code not in out:
@@ -213,6 +219,15 @@ def normalize_languages(value) -> list[str]:
         log.warning("no valid transcription.languages; using %s", ", ".join(DEFAULT_LANGUAGES))
         return list(DEFAULT_LANGUAGES)
     return out
+
+
+def save_languages(languages: list, path: Path = CONFIG_PATH) -> None:
+    """Write only `transcription.languages` into config.toml, leaving every other key as it is
+    on disk (it may have been edited by hand since the app loaded it). Raises
+    FileNotFoundError if there is no file yet, ValueError if it is not valid TOML."""
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    data.setdefault("transcription", {})["languages"] = list(languages)
+    path.write_bytes(tomli_w.dumps(data).encode())
 
 
 def load_config(path: Path = CONFIG_PATH) -> Config:

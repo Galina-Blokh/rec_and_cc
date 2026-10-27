@@ -5,6 +5,7 @@ Stories: US-20.
 
 from __future__ import annotations
 
+import logging
 import os
 import queue
 import sqlite3
@@ -214,6 +215,23 @@ def test_controller_indexes_after_transcription_and_searches_off_thread(tmp_path
     kind, query, hits = ctrl.events.get(timeout=5)
     assert (kind, query, len(hits)) == ("search", "kickoff", 1)
     assert search_hit_label(hits[0]).startswith("2026-10-26 14:04 zoom-us-1 · 00:00 Me: ")
+
+
+def test_failed_search_never_logs_the_query(out, monkeypatch, caplog):
+    from recandcc.ui.common import Controller
+
+    def fail(output_dir, query, limit):
+        raise sqlite3.OperationalError(f'fts5: syntax error near "{query}"')
+
+    monkeypatch.setattr(search, "search_transcripts", fail)
+    ctrl = Controller.__new__(Controller)
+    ctrl.events, ctrl.cfg = queue.Queue(), type("C", (), {"output_dir": out})()
+    caplog.set_level(logging.DEBUG)
+    ctrl.search_async("secretword")
+    kind, _query, hits = ctrl.events.get(timeout=5)
+    assert kind == "search" and isinstance(hits, sqlite3.OperationalError)
+    assert "transcript search failed: OperationalError" in caplog.text
+    assert "secretword" not in caplog.text
 
 
 def leftover(path: Path, token: str) -> int:

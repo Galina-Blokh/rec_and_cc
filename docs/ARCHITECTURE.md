@@ -234,11 +234,13 @@ speaker's centroid (unit mean of its window embeddings). With the option on, the
 names a speaker whose centroid matches a voice profile (cosine ≥ 0.6 and 0.1 ahead of the
 next profile; each name once per session, `Me` never; numbers skip names) and saves the
 session's centroids, so `recandcc name-speaker` can name a speaker later without re-running
-diarization. Profiles (running mean + count + embedding model, one JSON file per name) and the
-session centroids (`sessions/`, keyed by session id) live in the owner-only (0700/0600)
+diarization. Profiles (sum + count + embedding model, one JSON file per name, so a corrected
+name can take a session's centroid out again) and the session centroids (`sessions/`, keyed
+by session id, with the session folder: pruned once it is deleted) live in the owner-only (0700/0600)
 `platformdirs.user_data_dir("RecAndCC")/voices`, never in `output_dir`, which may be synced
 to a cloud drive. A transcript written without labels or with the option off deletes its
-session's centroids. All of it runs on the diarizer / writer threads, after the audio threads.
+session's centroids. `name-speaker` marks the session as folded into the profile before it
+changes the profile, so a failure partway can't count one session twice. All of it runs on the diarizer / writer threads, after the audio threads.
 
 ### Mixed English/Russian
 Whisper normally detects one language per 30 s window. Instead:

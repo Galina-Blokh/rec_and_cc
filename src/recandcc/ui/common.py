@@ -31,7 +31,14 @@ from typing import TYPE_CHECKING
 
 from .. import hotkey as hotkey_mod
 from ..cloudsync import cloud_sync_provider, warning_text
-from ..config import CONFIG_PATH, LOG_DIR, Config, load_config
+from ..config import (
+    CONFIG_PATH,
+    LOG_DIR,
+    Config,
+    load_config,
+    normalize_languages,
+    save_languages,
+)
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind, discard_session
 from ..recorder import make_private_dir
@@ -131,10 +138,14 @@ def transcript_label(path: Path) -> str:
 
 def search_hit_label(hit) -> str:
     """'2026-10-26 14:03 zoom-us · 12:05 Me: …the [budget] for…' for a search.Hit."""
-    t = int(hit.start)
-    when = f"{t // 60:02d}:{t % 60:02d}"
     text = " ".join(hit.snippet.split())
-    return f"{transcript_label(hit.transcript)} · {when} {hit.speaker}: {text}"
+    return f"{transcript_label(hit.transcript)} · {clock(hit.start)} {hit.speaker}: {text}"
+
+
+def clock(seconds: float) -> str:
+    """'12:05' (minutes:seconds) for an offset into a recording."""
+    t = int(seconds)
+    return f"{t // 60:02d}:{t % 60:02d}"
 
 
 def untranscribed_sessions(output_dir: Path) -> list[SessionInfo]:
@@ -245,6 +256,8 @@ class Controller:
         self._refreshing = False
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
+        self._save_lock = threading.Lock()  # menu writes to config.toml
+        self._lang_lock = threading.Lock()  # transcription.languages + its raw spelling
         self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
         # global shortcut
         self._hotkey_lock = threading.Lock()
@@ -396,7 +409,8 @@ class Controller:
 
                 hits = search_transcripts(self.cfg.output_dir, query, SEARCH_LIMIT)
             except Exception as e:  # noqa: BLE001
-                log.exception("transcript search failed")
+                # the type only: an FTS5 syntax error quotes the query
+                log.error("transcript search failed: %s", type(e).__name__)
                 hits = e
             self.events.put(("search", query, hits))
 
@@ -556,24 +570,71 @@ class Controller:
             return 0.0
 
     def _maybe_reload_config(self) -> None:
-        """Apply edits made to config.toml by hand (detection settings + output dir)."""
-        m = self._mtime()
-        if m == self._config_mtime:
-            return
-        self._config_mtime = m
-        try:
-            new = load_config()
-        except Exception:
-            log.exception("config.toml is invalid; keeping current settings")
-            self.events.put(("notice", "Settings not applied", "config.toml could not be parsed"))
-            return
+        """Apply edits made to config.toml by hand (detection settings, output dir, hotkey,
+        languages). Under ``_save_lock`` so a menu write never interleaves with the read."""
+        with self._save_lock:
+            m = self._mtime()
+            if m == self._config_mtime:
+                return
+            self._config_mtime = m
+            try:
+                new = load_config()
+            except Exception:
+                log.exception("config.toml is invalid; keeping current settings")
+                self.post_notice("Settings not applied", "config.toml could not be parsed")
+                return
         for f in fields(new.detection):
             setattr(self.cfg.detection, f.name, getattr(new.detection, f.name))
         self.cfg.output_dir = new.output_dir
+        tr, new_tr = self.cfg.transcription, new.transcription
+        with self._lang_lock:  # both together: save() pairs them
+            tr._raw_languages = getattr(new_tr, "_raw_languages", None)  # type: ignore[attr-defined]
+            tr.languages = new_tr.languages
         if new.hotkey != self.cfg.hotkey:
             self.cfg.hotkey = new.hotkey
             self.apply_hotkey(new.hotkey)
         log.info("config reloaded from %s", CONFIG_PATH)
+
+    # --- settings changed from the menu (main thread; saved on a worker thread)
+    def toggle_language(self, code: str) -> None:
+        """Menu "Languages": check/uncheck ``code`` ("" = Any language). Applies at once: the
+        transcriber reads ``cfg.transcription.languages`` for every piece of audio."""
+        from .present import LANGUAGES_KEEP_ONE, toggle_languages
+
+        tr = self.cfg.transcription
+        with self._lang_lock:
+            new = toggle_languages(tr.languages, getattr(tr, "_raw_languages", None), code)
+            if new is not None:
+                langs = normalize_languages(new)
+                tr._raw_languages = new if new != langs else None  # type: ignore[attr-defined]
+                tr.languages = langs  # a new list: other threads never see it half-built
+        if new is None:
+            self.post_notice("Languages", LANGUAGES_KEEP_ONE)
+            return
+        threading.Thread(target=self._save_languages, daemon=True, name="save-config").start()
+
+    def _save_languages(self) -> None:
+        """Write the menu's languages into config.toml, changing nothing else in the file: a
+        hand edit made since the last reload is kept, and picked up by the next refresh."""
+        tr = self.cfg.transcription
+        with self._save_lock:
+            with self._lang_lock:
+                raw = getattr(tr, "_raw_languages", None)
+                value = list(raw) if raw is not None else list(tr.languages)
+            edited = self._mtime() != self._config_mtime  # changed on disk, not reloaded yet
+            try:
+                try:
+                    save_languages(value, CONFIG_PATH)
+                except FileNotFoundError:
+                    self.cfg.save(CONFIG_PATH)
+                if not edited:
+                    self._config_mtime = self._mtime()  # our own write: nothing to reload
+            except ValueError:  # invalid TOML (mid-edit?): don't overwrite the user's file
+                log.warning("config.toml could not be parsed; languages not saved")
+                self.post_notice("Languages not saved", "config.toml could not be parsed")
+            except Exception:
+                log.exception("saving settings failed")
+                self.post_notice("Settings not saved", "config.toml could not be written")
 
     @property
     def permissions(self) -> dict[str, str]:
