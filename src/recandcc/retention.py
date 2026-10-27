@@ -20,8 +20,9 @@ log = logging.getLogger("recandcc.retention")
 RETENTION_CHOICES = (0, 1, 7, 30, 90)
 
 
-def _transcribed_sessions(output_dir: Path) -> Iterator[SessionInfo]:
-    """Finished, transcribed sessions under ``output_dir`` (unreadable ones are skipped)."""
+def _transcribed_sessions(output_dir: Path) -> Iterator[tuple[SessionInfo, datetime]]:
+    """Finished, transcribed sessions under ``output_dir`` with their (timezone-aware) end
+    time; unreadable and discarded ones are skipped."""
     for meta in output_dir.glob(f"*/*/{SessionInfo.FILENAME}"):
         if (meta.parent / SessionInfo.DISCARD_MARKER).exists():
             continue  # being deleted whole by purge_discarded_sessions
@@ -30,8 +31,9 @@ def _transcribed_sessions(output_dir: Path) -> Iterator[SessionInfo]:
         except Exception:
             log.warning("skipping unreadable session %s", meta.parent)
             continue
-        if session.transcribed and session.ended_at is not None:
-            yield session
+        ended = session.ended_at
+        if session.transcribed and ended is not None:
+            yield session, ended if ended.tzinfo is not None else ended.astimezone()
 
 
 def _unlink_all(paths, deleted: list[Path]) -> None:
@@ -72,10 +74,7 @@ def purge_old_audio(output_dir: Path, days: int, now: datetime | None = None) ->
     now = now or datetime.now().astimezone()
     cutoff = now - timedelta(days=days)
     deleted: list[Path] = []
-    for session in _transcribed_sessions(output_dir):
-        ended = session.ended_at
-        if ended.tzinfo is None:
-            ended = ended.astimezone()
+    for session, ended in _transcribed_sessions(output_dir):
         if ended <= cutoff:
             _unlink_all(session.directory.glob("*.wav"), deleted)
     if deleted:
@@ -95,10 +94,7 @@ def purge_transcribed_audio(output_dir: Path, ended_before: datetime | None = No
     if not output_dir.is_dir():
         return []
     deleted: list[Path] = []
-    for session in _transcribed_sessions(output_dir):
-        ended = session.ended_at
-        if ended.tzinfo is None:
-            ended = ended.astimezone()
+    for session, ended in _transcribed_sessions(output_dir):
         if ended_before is not None and ended >= ended_before:
             continue
         _unlink_all(_track_wavs(session), deleted)
