@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import threading
 import time
 from concurrent.futures import Future
 from pathlib import Path
@@ -384,28 +385,69 @@ def test_replay_clock_skips_idle_time_only():
     assert clock.skipped == 5.0
     clock.wait(5.0, [done], [])  # a finished region: collected at once, no time passes
     assert clock.skipped == 5.0 and clock() < 5.5
-    clock.wait(0.05, [running], [running])  # in flight: waited for in real time
-    assert clock.skipped == 5.0 and clock() >= 5.05
+    # in flight: waited for in real time, but only until the region is done (no skip)
+    threading.Timer(0.05, running.set_result, [[]]).start()
+    t0 = time.monotonic()
+    clock.wait(30.0, [running], [running])
+    assert running.done() and clock.skipped == 5.0 and time.monotonic() - t0 < 25.0
 
 
-@pytest.mark.parametrize("delay", [0.0, 0.6])
-def test_replay_live_measures_caption_latency(tmp_path, delay):
+class VirtualClock(ev.ReplayClock):
+    """Skipped time only: deterministic when nothing is ever in flight (inline fake model)."""
+
+    def __call__(self) -> float:
+        return self.skipped
+
+
+def edges_vad(audio):
+    """Stub VAD: the exact non-zero runs of the tail, unpadded."""
+    d = np.diff(np.concatenate([[0], (audio != 0).astype(int), [0]]))
+    starts, ends = np.flatnonzero(d == 1), np.flatnonzero(d == -1)
+    return [(s / SAMPLE_RATE, e / SAMPLE_RATE) for s, e in zip(starts, ends, strict=True)]
+
+
+def fake_model(delay=0.0):
     from test_live import FakeTranscriber as FakeModel
-    from test_live import burst, make_session, silence
 
     from recandcc.config import TranscriptionConfig
 
     tr = FakeModel(TranscriptionConfig(model="fake", workers=2, diarize=False), sync=delay == 0)
-    tr.delay = delay  # model time is waited for in real time; idle time is skipped
-    audio = np.concatenate([silence(1), burst(2), silence(2), burst(1.5), silence(1.5)])
-    session = make_session(tmp_path)
-    t0 = time.monotonic()
+    tr.delay = delay
+    return tr
+
+
+def test_replay_live_latency_is_commit_silence_on_the_step_grid(tmp_path):
+    from test_live import make_session
+
+    def part(seconds, value=0.0):
+        return np.full(int(seconds * SAMPLE_RATE), value, np.float32)
+
+    # speech 1-3 s and 5-6.4 s
+    audio = np.concatenate([part(1), part(2, 0.5), part(2), part(1.4, 0.5), part(1.6)])
+    tr, clock, session = fake_model(), VirtualClock(), make_session(tmp_path)
     try:
-        lat = ev.replay_live(audio, ev.Track.OTHERS, tr, session)
+        lat = ev.replay_live(audio, ev.Track.OTHERS, tr, session, clock, vad=edges_vad)
     finally:
         tr.close()
-    assert time.monotonic() - t0 < 6.0  # faster than the 8 s of audio: idle time skipped
+    # committed at the first 0.3 s step with >= 0.4 s of silence fed after the speech:
+    # 3.0 -> 3.6 s and 6.4 -> 6.9 s
+    assert lat == pytest.approx([0.6, 0.5])
+    assert clock.skipped >= 8.0  # every step was idle: no real time was waited for
     assert not (session.directory / "transcript.json").exists()  # captions only
+
+
+@pytest.mark.parametrize("delay", [0.0, 0.6])
+def test_replay_live_with_silero_counts_model_time(tmp_path, delay):
+    from test_live import burst, make_session, silence
+
+    tr = fake_model(delay)  # model time is waited for in real time; idle time is skipped
+    audio = np.concatenate([silence(1), burst(2), silence(2), burst(1.5), silence(1.5)])
+    clock = ev.ReplayClock()
+    try:
+        lat = ev.replay_live(audio, ev.Track.OTHERS, tr, make_session(tmp_path), clock)
+    finally:
+        tr.close()
+    assert clock.skipped > 4.0  # most of the 8 s was skipped, not waited for
     assert len(lat) == 2  # one caption per burst
     # commit silence + step granularity (+ slack for slow CI), plus the model's own time
     assert all(0.3 + delay <= x <= 4.0 + delay for x in lat), lat

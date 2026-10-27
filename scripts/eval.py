@@ -274,9 +274,11 @@ def arrival(end: float, samples: int) -> float:
 
 
 def replay_live(
-    audio: np.ndarray, track: Track, transcriber, session: SessionInfo, clock=None
+    audio: np.ndarray, track: Track, transcriber, session: SessionInfo, clock=None, **live_kw
 ) -> list[float]:
-    """Replay `audio` through a LiveTranscriber; per emitted segment, its caption latency (s)."""
+    """Replay `audio` through a LiveTranscriber; per emitted segment, its caption latency (s).
+
+    `live_kw`: LiveTranscriber tuning overrides (tests pass a stub VAD)."""
     from recandcc.transcribe.live import LiveTranscriber, live_vad
 
     transcriber.ensure_loaded()  # the app loads the models before the session starts
@@ -289,25 +291,28 @@ def replay_live(
 
     # Drives the worker's private step and reads its job queues, as tests/test_live.py does;
     # test_replay_live_measures_caption_latency breaks if those internals change.
-    live = LiveTranscriber(
-        transcriber, session, on_segments, clock=clock, start=False, md_interval_s=math.inf
-    )
+    live_kw.setdefault("md_interval_s", math.inf)
+    live = LiveTranscriber(transcriber, session, on_segments, clock=clock, start=False, **live_kw)
     # Only the captions are measured: the batch run already wrote this session's transcript.
     live._start_diarization = live._write_final = lambda: None
     pos, n = 0, len(audio)
-    while pos < n:  # one iteration per live worker step, driven here instead of its thread
-        now = clock() * SAMPLE_RATE
-        upto = n if now >= n else int(now) // BLOCK * BLOCK
-        for i in range(pos, upto, BLOCK):
-            live.feed(track, i, audio[i : min(i + BLOCK, upto)])
-        pos = max(pos, upto)
-        if pos >= n:
-            break  # recording stops: flush() wakes the worker at once, no idle step first
-        live._step(False)
-        queues = [[j.future for j in tb.jobs if j.future] for tb in live._tracks.values()]
-        heads = [q[0] for q in queues if q]
-        clock.wait(live.step_s, heads, [f for q in queues for f in q if not f.done()])
-    live._step(True)  # recording stopped: the tail is transcribed and emitted
+    try:
+        while pos < n:  # one iteration per live worker step, driven here instead of its thread
+            now = int(clock() * SAMPLE_RATE + 0.5)  # nearest sample
+            upto = n if now >= n else now // BLOCK * BLOCK
+            for i in range(pos, upto, BLOCK):
+                live.feed(track, i, audio[i : min(i + BLOCK, upto)])
+            pos = max(pos, upto)
+            if pos >= n:
+                break  # recording stops: flush() wakes the worker at once, no idle step first
+            live._step(False)
+            queues = [[j.future for j in tb.jobs if j.future] for tb in live._tracks.values()]
+            heads = [q[0] for q in queues if q]
+            clock.wait(live.step_s, heads, [f for q in queues for f in q if not f.done()])
+        live._step(True)  # recording stopped: the tail is transcribed and emitted
+    except BaseException:
+        live.cancel()  # leave no regions on the shared pool to slow down the next clip
+        raise
     return [round(t - arrival(end, n), 3) for end, t in emitted]
 
 
