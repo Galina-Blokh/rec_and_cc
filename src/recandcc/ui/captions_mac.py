@@ -184,13 +184,14 @@ class CaptionsPanel:
     def tick(self, elapsed: float | None = None) -> None:
         """Main-thread timer hook: refresh the clock; auto-hide a finished session.
         ``elapsed`` overrides the panel's own clock (e.g. the engine's recording time)."""
-        if self._panel is None or self._started is None:
+        if self._started is None:
             return
         if should_auto_hide(self._ended, time.monotonic()):
             self.hide()
             self._started = self._ended = None
             return
-        self._render_header(elapsed=elapsed)
+        if self._panel is not None:  # captions off / never shown: nothing to refresh
+            self._render_header(elapsed=elapsed)
 
     def header(self, elapsed: float | None = None) -> str:
         if elapsed is None and self._started is not None:
@@ -281,6 +282,8 @@ class CaptionsPanel:
         return NSMakeRect(*default_frame(visible))
 
     def _render_header(self, elapsed: float | None = None, force: bool = False) -> None:
+        if self._panel is None:  # captions off, never shown, or torn down
+            return
         text = self.header(elapsed)
         if force or text != self._last_header:
             self._last_header = text
