@@ -30,7 +30,7 @@ import re
 import sqlite3
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,6 +51,9 @@ _MARKS = "\x01\x02"  # highlight marks, shown as [ ]
 SEMANTIC_MIN_SIM = 0.45  # cosine below this is not a semantic match (0.3 matched unrelated lines)
 RRF_K = 60  # reciprocal rank fusion constant
 POOL = 4  # each ranking contributes up to POOL * limit candidates to the fusion
+SCAN_CHUNK = 2048  # vectors scored per fetch: bounded memory, no whole-table matrix
+EMBED_CHUNK = 64  # segments embedded between two checks of ``busy``
+BUSY_POLL_S = 0.5
 NO_VECTORS = np.zeros((0, 0), dtype=np.float32)  # a session without segments
 _TOKEN = re.compile(r"\w+", re.UNICODE)
 _LIKE_SQL = (
@@ -88,9 +91,15 @@ class TranscriptIndex:
     """``fts=None`` uses FTS5 when this SQLite has it; ``False`` forces the LIKE fallback."""
 
     def __init__(
-        self, path: Path | None = None, fts: bool | None = None, embedder: Embedder | None = None
+        self,
+        path: Path | None = None,
+        fts: bool | None = None,
+        embedder: Embedder | None = None,
+        busy: Callable[[], bool] | None = None,
     ) -> None:
         self.embedder = embedder  # swapped by default_index when the setting changes
+        self.busy = busy  # True while recording: the embedding worker then pauses
+        self.busy_poll_s = BUSY_POLL_S
         self._embed_guard = threading.Lock()  # guards the two fields below (never held long)
         self._embed_thread: threading.Thread | None = None  # the one background embedding worker
         self._embed_dirty = False  # work arrived while the worker was running
@@ -261,6 +270,14 @@ class TranscriptIndex:
         a running worker notices the swap before it stores anything."""
         self.embedder = embedder
 
+    def _wait_idle(self, embedder: Embedder) -> bool:
+        """Pause while ``busy`` (a recording or a prompt); False if the embedder was swapped."""
+        while self.busy is not None and self.busy():
+            if self.embedder is not embedder:
+                return False
+            time.sleep(self.busy_poll_s)
+        return self.embedder is embedder
+
     def _model_id(self) -> str:
         e = self.embedder
         return str(getattr(e, "model_id", type(e).__name__))
@@ -317,9 +334,7 @@ class TranscriptIndex:
                 if had:
                     db.execute("DELETE FROM seg_vec")
                     db.execute("DELETE FROM sem_sessions")
-                    db.commit()
-                    db.execute("VACUUM")
-                    self._owner_only()
+                    db.commit()  # secure_delete overwrites freed pages: no VACUUM in the lock
         except Exception as e:  # noqa: BLE001 - semantic search is optional
             log.error("dropping search vectors failed: %s", type(e).__name__)
 
@@ -339,17 +354,28 @@ class TranscriptIndex:
                     "OR v.model IS NOT ?",
                     (model,),
                 ).fetchall()
+            loaded = getattr(embedder, "ready", lambda: True)()
+            if (todo or not loaded) and not self._wait_idle(embedder):
+                return
             if not todo:
                 ready = getattr(embedder, "ready", None)
                 if ready is not None and not ready():
                     embedder.embed([])  # load (or download) the model so search can use it
                 return
             for folder, stamp in todo:
+                if not self._wait_idle(embedder):
+                    return
                 data = _read(Path(folder))
                 segs = data["segments"] if data else []
-                vecs = embedder.embed([_yo(s[0]) for s in segs]) if segs else NO_VECTORS
-                if vecs is None:
-                    return  # model unavailable now: retry at the next sync
+                parts: list[np.ndarray] = []
+                for k in range(0, len(segs), EMBED_CHUNK):
+                    if not self._wait_idle(embedder):
+                        return
+                    part = embedder.embed([_yo(s[0]) for s in segs[k : k + EMBED_CHUNK]])
+                    if part is None:
+                        return  # model unavailable now: retry at the next sync
+                    parts.append(part)
+                vecs = np.concatenate(parts) if parts else NO_VECTORS
                 with self._lock, contextlib.closing(self._connect()) as db:
                     if self.embedder is not embedder:
                         return  # switched off or swapped: don't store
@@ -383,22 +409,41 @@ class TranscriptIndex:
         q = embedder.embed([query])
         if q is None or not len(q):
             return []
-        with contextlib.closing(self._connect()) as db:
-            # only ids and vectors; the text of the few winners is fetched below
-            rows = db.execute(
-                "SELECT v.rowid, v.vec FROM seg_vec v JOIN sem_sessions m ON m.folder = v.folder "
-                "WHERE m.model = ?",
-                (self._model_id(),),
-            ).fetchall()
+        model, dim, q0 = self._model_id(), q.shape[1], q[0]
+        top_ids = np.zeros(0, dtype=np.int64)
+        top_sims = np.zeros(0, dtype=np.float32)
+        last = 0
+        while True:
+            with contextlib.closing(self._connect()) as db:  # not held while scoring
+                rows = db.execute(
+                    "SELECT v.rowid, v.vec FROM seg_vec v JOIN sem_sessions m "
+                    "ON m.folder = v.folder WHERE m.model = ? AND v.rowid > ? "
+                    "ORDER BY v.rowid LIMIT ?",
+                    (model, last, SCAN_CHUNK),
+                ).fetchall()
             if not rows:
-                return []
+                break
+            last = rows[-1][0]
             matrix = np.frombuffer(b"".join(r[1] for r in rows), dtype=np.float32)
-            if matrix.size != len(rows) * q.shape[1]:  # embedder swapped meanwhile
+            if matrix.size != len(rows) * dim:  # embedder swapped meanwhile
                 return []
-            sims = matrix.reshape(len(rows), -1) @ q[0]
-            best = [int(i) for i in np.argsort(-sims)[:limit] if sims[i] >= SEMANTIC_MIN_SIM]
-            ids = [rows[i][0] for i in best]
-            found: dict[int, tuple] = {}
+            sims = matrix.reshape(len(rows), -1) @ q0
+            keep = sims >= SEMANTIC_MIN_SIM
+            top_ids = np.concatenate(
+                [top_ids, np.array([r[0] for r in rows], dtype=np.int64)[keep]]
+            )
+            top_sims = np.concatenate([top_sims, sims[keep]])
+            if len(top_ids) > limit:  # running top-k
+                part = np.argpartition(-top_sims, limit - 1)[:limit]
+                top_ids, top_sims = top_ids[part], top_sims[part]
+            if len(rows) < SCAN_CHUNK:
+                break
+        order = np.lexsort((top_ids, -top_sims))  # best first; ties by insertion order
+        ids = [int(top_ids[i]) for i in order[:limit]]
+        if not ids:
+            return []
+        found: dict[int, tuple] = {}
+        with contextlib.closing(self._connect()) as db:
             for k in range(0, len(ids), 500):
                 chunk = ids[k : k + 500]
                 marks = ",".join("?" * len(chunk))
@@ -559,16 +604,26 @@ _default: TranscriptIndex | None = None
 _default_lock = threading.Lock()
 
 
-def default_index(semantic: bool = False) -> TranscriptIndex:
+def default_index(
+    semantic: bool = False, busy: Callable[[], bool] | None = None
+) -> TranscriptIndex:
     """The process-wide index at ``INDEX_PATH`` (created on first use). ``semantic`` is
-    ``[search] semantic``; a change of it takes effect on the next call."""
+    ``[search] semantic``; a change of it takes effect on the next call. ``busy`` (when given)
+    pauses background embedding while it is true (a recording). Turning semantic off also
+    unloads the model."""
     global _default
     with _default_lock:
         if _default is None or _default.path != INDEX_PATH:
             _default = TranscriptIndex()
         # one index (one lock, one worker) per path: only its embedder follows the setting
+        if busy is not None:
+            _default.busy = busy
         if not semantic:
-            _default.set_embedder(None)
+            if _default.embedder is not None:
+                _default.set_embedder(None)
+                from .semantic import close_default_embedder
+
+                close_default_embedder()
         elif _default.embedder is None:
             from .semantic import default_embedder
 

@@ -398,6 +398,9 @@ class Controller:
             if self.cfg.summary.enabled:
                 self._summarize(session.directory)
 
+    def _recording_busy(self) -> bool:
+        return self.engine.state.status != IDLE
+
     def _summarize(self, directory: Path) -> None:
         """Queue summary.md for a final transcript (local LLM, own background thread)."""
         summaries = getattr(self, "_summaries", None)
@@ -416,7 +419,7 @@ class Controller:
         try:
             from ..search import default_index
 
-            default_index(self.cfg.search.semantic).index_session(directory)
+            default_index(self.cfg.search.semantic, self._recording_busy).index_session(directory)
         except Exception:  # noqa: BLE001 - search is optional; never break transcription
             log.exception("could not update the search index")
 
@@ -631,7 +634,7 @@ class Controller:
         try:
             from ..search import default_index
 
-            default_index(self.cfg.search.semantic).sync(self.cfg.output_dir)
+            default_index(self.cfg.search.semantic, self._recording_busy).sync(self.cfg.output_dir)
         except Exception:  # noqa: BLE001 - search is optional
             log.exception("could not sync the search index")
 

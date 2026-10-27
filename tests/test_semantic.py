@@ -693,3 +693,241 @@ def test_real_model_matches_meaning_in_english_and_russian(tmp_path):
         assert unrelated is not None and (vecs[2:] @ unrelated[0]).max() < floor
     ru = emb.embed(["оплата счёта"])
     assert ru is not None and (vecs[:2] @ ru[0]).min() >= floor
+
+
+# --------------------------------------------------------------------------- resources, load
+def _fake_onnx(monkeypatch, tmp_path, tracker):
+    """Fake onnxruntime + tokenizers (no model files); `tracker` records concurrent entries."""
+    files = {}
+    for m in (semantic.MODEL, semantic.TOKENIZER):
+        files[m.name] = tmp_path / m.name
+        files[m.name].write_bytes(b"x")
+    monkeypatch.setattr(semantic, "model_path", lambda m, download=True: files[m.name])
+
+    class Enc:
+        ids = [1, 2, 3]
+        attention_mask = [1, 1, 1]
+
+    class Tok:
+        def enable_truncation(self, n):
+            pass
+
+        def enable_padding(self):
+            pass
+
+        def encode_batch(self, texts):
+            with tracker("tok"):
+                return [Enc() for _ in texts]
+
+    class Session:
+        def run(self, _out, feed):
+            with tracker("ort"):
+                n = feed["input_ids"].shape[0]
+                return [np.ones((n, 3, semantic.DIM), dtype=np.float32)]
+
+    ort = type(
+        "ort",
+        (),
+        {
+            "SessionOptions": type("O", (), {}),
+            "InferenceSession": staticmethod(lambda path, opts: Session()),
+        },
+    )
+    tokmod = type(
+        "tokmod", (), {"Tokenizer": type("T", (), {"from_file": staticmethod(lambda p: Tok())})}
+    )
+    monkeypatch.setitem(sys.modules, "onnxruntime", ort)
+    monkeypatch.setitem(sys.modules, "tokenizers", tokmod)
+
+
+def test_close_unloads_the_model_and_a_later_embed_reloads_it(tmp_path, monkeypatch):
+    import contextlib
+
+    loads = []
+    _fake_onnx(monkeypatch, tmp_path, lambda name: contextlib.nullcontext())
+    real = sys.modules["onnxruntime"].InferenceSession
+    sys.modules["onnxruntime"].InferenceSession = staticmethod(
+        lambda p, o: (loads.append(1), real(p, o))[1]
+    )
+    emb = semantic.OnnxEmbedder()
+    assert emb.embed(["a"]).shape == (1, semantic.DIM) and emb.ready()
+    emb.close()
+    assert not emb.ready() and emb._loaded is None
+    assert emb.embed(["b"]) is not None and emb.ready() and len(loads) == 2
+
+
+def test_switching_off_unloads_the_default_model(tmp_path, monkeypatch):
+    import contextlib
+
+    _fake_onnx(monkeypatch, tmp_path, lambda name: contextlib.nullcontext())
+    emb = semantic.OnnxEmbedder()
+    monkeypatch.setattr(semantic, "_default", emb)
+    emb.embed(["a"])
+    assert search.default_index(True).embedder is emb and emb.ready()
+    search.default_index(False)
+    assert not emb.ready() and emb._loaded is None
+    assert search.default_index(True).embedder is emb
+    emb.embed(["a"])
+    assert emb.ready()  # enabling again reloads
+
+
+def test_embed_calls_never_overlap_in_the_tokenizer_or_session(tmp_path, monkeypatch):
+    import contextlib
+
+    guard, inside, overlaps = threading.Lock(), [0], []
+
+    @contextlib.contextmanager
+    def tracker(name):
+        with guard:
+            inside[0] += 1
+            if inside[0] > 1:
+                overlaps.append(name)
+        time.sleep(0.01)
+        try:
+            yield
+        finally:
+            with guard:
+                inside[0] -= 1
+
+    _fake_onnx(monkeypatch, tmp_path, tracker)
+    emb = semantic.OnnxEmbedder()
+    emb.embed(["warm"])
+    threads = [
+        threading.Thread(target=lambda: [emb.embed(["a", "b"]) for _ in range(5)]) for _ in range(2)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert overlaps == []
+
+
+# --------------------------------------------------------------------------- recording pause
+def test_embedding_pauses_while_busy_and_resumes(tmp_path, out):
+    make_session(out, 1, [seg(1, "the invoice")])
+    emb = FakeEmbedder()
+    state = {"busy": True}
+    idx = TranscriptIndex(tmp_path / "idx" / "s.sqlite3", embedder=emb, busy=lambda: state["busy"])
+    idx.busy_poll_s = 0.01
+    idx.sync(out)
+    time.sleep(0.3)
+    assert emb.calls == [] and vector_rows(idx) == 0  # paused: a recording is running
+    state["busy"] = False
+    assert idx.wait_embedded(30)
+    assert emb.calls and vector_rows(idx) == 1
+
+
+def test_a_long_session_is_embedded_in_chunks_that_each_wait_for_idle(tmp_path, out, monkeypatch):
+    monkeypatch.setattr(search, "EMBED_CHUNK", 2)
+    make_session(out, 1, [seg(i, f"invoice {i}") for i in range(5)])
+    emb = FakeEmbedder()
+    idx = make(tmp_path, emb)
+    sync(idx, out)
+    assert [len(c) for c in emb.calls] == [2, 2, 1] and vector_rows(idx) == 5
+
+
+# --------------------------------------------------------------------------- scale / budget
+DIM = semantic.DIM
+SEMANTIC_BUDGET_S = 0.2  # measured ~5-10 ms locally: a 20x margin for slow CI runners
+
+
+class VecEmbedder:
+    """384-d unit vectors derived from the text (deterministic), like the real model's shape."""
+
+    model_id = "fake-384"
+
+    def embed(self, texts):
+        out = np.zeros((len(texts), DIM), dtype=np.float32)
+        for i, t in enumerate(texts):
+            out[i] = np.random.default_rng(abs(hash(t)) % (2**32)).standard_normal(DIM)
+            out[i] /= np.linalg.norm(out[i])
+        return out
+
+
+def _best_of(n, fn):
+    times = []
+    for _ in range(n):
+        t0 = time.perf_counter()
+        fn()
+        times.append(time.perf_counter() - t0)
+    return min(times)
+
+
+def test_semantic_search_over_6000_segments_stays_in_budget(tmp_path):
+    """US-32 performance: the meaning ranking over 6,000 stored 384-d vectors (no model)."""
+    idx = TranscriptIndex(tmp_path / "idx" / "s.sqlite3", embedder=VecEmbedder())
+    rng = np.random.default_rng(1)
+    vecs = rng.standard_normal((6000, DIM)).astype(np.float32)
+    vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
+    with idx._connect() as db:
+        for f in range(100):
+            db.execute("INSERT INTO sessions VALUES (?, ?, '', 's', 0)", (f"f{f}", f"s{f}"))
+            db.execute("INSERT INTO sem_sessions VALUES (?, 's', 'fake-384')", (f"f{f}",))
+        db.executemany(
+            "INSERT INTO seg_vec VALUES (?, ?, 'Me', 'en', ?, ?)",
+            [(f"f{i % 100}", float(i), f"seg {i}", vecs[i].tobytes()) for i in range(6000)],
+        )
+    q = vecs[1234] * 1.0  # a stored vector: cosine 1 with itself
+
+    class Fixed:
+        model_id = "fake-384"
+
+        def embed(self, texts):
+            return q[None, :]
+
+    idx.embedder = Fixed()
+    hits = idx._semantic("anything", 80)
+    assert hits and hits[0].start == 1234.0 and len(hits) <= 80
+    t = _best_of(5, lambda: idx._semantic("anything", 80))
+    assert t < SEMANTIC_BUDGET_S
+
+
+def test_top_k_scan_matches_a_full_sort(tmp_path, monkeypatch):
+    monkeypatch.setattr(search, "SCAN_CHUNK", 7)
+    monkeypatch.setattr(search, "SEMANTIC_MIN_SIM", -1.0)
+    idx = TranscriptIndex(tmp_path / "idx" / "s.sqlite3")
+    rng = np.random.default_rng(2)
+    vecs = rng.standard_normal((50, DIM)).astype(np.float32)
+    vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
+    with idx._connect() as db:
+        db.execute("INSERT INTO sessions VALUES ('f', 's', '', 's', 0)")
+        db.execute("INSERT INTO sem_sessions VALUES ('f', 's', 'fake-384')")
+        db.executemany(
+            "INSERT INTO seg_vec VALUES ('f', ?, 'Me', 'en', 't', ?)",
+            [(float(i), vecs[i].tobytes()) for i in range(50)],
+        )
+    q = rng.standard_normal(DIM).astype(np.float32)
+    q /= np.linalg.norm(q)
+
+    class Fixed:
+        model_id = "fake-384"
+
+        def embed(self, texts):
+            return q[None, :]
+
+    idx.embedder = Fixed()
+    got = [h.start for h in idx._semantic("x", 10)]
+    assert got == [float(i) for i in np.argsort(-(vecs @ q))[:10]]
+
+
+def test_semantic_search_transcripts_100_sessions_stays_in_budget(out, monkeypatch):
+    """US-32 performance: the US-20 path (unchanged sync + query) with semantic on, 6,000
+    segments embedded by a fast 384-d fake."""
+    monkeypatch.setattr(semantic, "default_embedder", lambda: VecEmbedder())
+    words = ["budget", "roadmap", "hiring", "release", "бюджет", "релиз", "найм", "клиент"]
+    for n in range(100):
+        make_session(
+            out,
+            n,
+            [seg(i * 5, f"{words[(n + i) % len(words)]} item {i} of {n}") for i in range(60)],
+        )
+    idx = search.default_index(True)
+    search.search_transcripts(out, "budget", limit=50, semantic=True)
+    assert idx.wait_embedded(120)
+    assert vector_rows(idx) == 6000
+
+    def run():
+        assert search.search_transcripts(out, "budget", limit=50, semantic=True)
+
+    t = _best_of(5, run)
+    assert t < SEMANTIC_BUDGET_S

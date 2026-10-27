@@ -146,10 +146,15 @@ def _download(model: ModelFile, path: Path) -> None:
 
 
 class OnnxEmbedder:
-    """The sentence model on the CPU. Loaded on first use; thread-safe."""
+    """The sentence model on the CPU. Loaded on first use; thread-safe.
+
+    ``_lock`` guards loading (which may wait for a download); ``_compute`` serialises the
+    tokenizer and the ONNX session, so concurrent ``embed`` calls never overlap in them, while
+    a query never waits for a download that another thread is running."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._compute = threading.Lock()
         self._loaded: tuple[Any, Any] | None = None
         self._broken = False  # verified files that the runtime can't load: don't retry per search
 
@@ -158,6 +163,11 @@ class OnnxEmbedder:
     def ready(self) -> bool:
         """True once the model is loaded: ``embed`` then doesn't wait for a download."""
         return self._loaded is not None
+
+    def close(self) -> None:
+        """Drop the session and tokenizer (~120 MB); the next ``embed`` reloads them."""
+        with self._compute, self._lock:
+            self._loaded = None
 
     def _load(self) -> tuple[Any, Any] | None:
         with self._lock:
@@ -193,6 +203,11 @@ class OnnxEmbedder:
         loaded = self._load()
         if loaded is None:
             return None
+        with self._compute:
+            return self._run(loaded, texts)
+
+    @staticmethod
+    def _run(loaded: tuple[Any, Any], texts: list[str]) -> np.ndarray:
         session, tok = loaded
         out = []
         for i in range(0, len(texts), BATCH):
@@ -218,3 +233,11 @@ def default_embedder() -> OnnxEmbedder:
         if _default is None:
             _default = OnnxEmbedder()
         return _default
+
+
+def close_default_embedder() -> None:
+    """Unload the process-wide model, if it was ever created (semantic search turned off)."""
+    with _default_lock:
+        e = _default
+    if e is not None:
+        e.close()
