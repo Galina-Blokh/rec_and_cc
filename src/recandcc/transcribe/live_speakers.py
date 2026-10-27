@@ -107,6 +107,7 @@ class SpeakerLabeler:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._closed = False
+        self._stop = threading.Event()
         self.clusterer = clusterer or SpeakerClusterer()
         self.dropped = 0
         self._last = ""
@@ -130,10 +131,11 @@ class SpeakerLabeler:
         return fut
 
     def _run(self) -> None:
-        while True:
-            item = self._q.get()
-            if item is None:
-                return
+        while not self._stop.is_set():
+            try:
+                item = self._q.get(timeout=0.2)
+            except queue.Empty:
+                continue
             audio, fut = item
             try:
                 fut.set_result(self._embedder(audio))
@@ -165,9 +167,14 @@ class SpeakerLabeler:
         with self._lock:
             self._closed = True
             started = self._thread is not None
+        self._stop.set()  # the thread checks it between jobs, even with a full queue
         if started:
-            with contextlib.suppress(queue.Full):  # daemon thread: ends with the process
-                self._q.put_nowait(None)
+            while True:  # fail what is still queued so nobody waits on it
+                try:
+                    _, fut = self._q.get_nowait()
+                except queue.Empty:
+                    break
+                fut.set_result(None)
 
 
 __all__ = ["SpeakerClusterer", "SpeakerLabeler", "sherpa_embedder"]

@@ -42,7 +42,9 @@ class FakeTranscriber(Transcriber):
     """
 
     def __init__(self, cfg: TranscriptionConfig | None = None, sync: bool = True, workers=2):
-        super().__init__(cfg or TranscriptionConfig(model="fake", workers=workers))
+        super().__init__(
+            cfg or TranscriptionConfig(model="fake", workers=workers, live_speaker_labels=False)
+        )
         self.sync = sync
         self.calls: list[tuple[str, float, float, str]] = []  # speaker, offset, dur, language
         self.lock = threading.Lock()

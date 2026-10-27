@@ -210,7 +210,11 @@ def test_live_final_transcript_gets_speaker_labels(track, offline, tmp_path):
         print(f"finish() incl. diarization: {time.monotonic() - t0:.2f}s")
     finally:
         t.close()
-    assert {s.speaker for s in shown} <= {"Me", "Others"}  # captions unchanged
+    # live captions: Me, or "Speaker N" ("Others" before any voice is known) for system audio
+    assert shown and all(
+        s.speaker == "Me" or s.speaker == "Others" or s.speaker.startswith("Speaker ")
+        for s in shown
+    )
     others = [s for s in segs if s.speaker != "Me"]
     labels = labels_per_phrase(truth, [(s.start, s.end, s.speaker) for s in others])
     check(truth, labels, min_ok=len(truth) - 1)

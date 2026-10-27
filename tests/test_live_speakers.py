@@ -6,6 +6,7 @@ Stories: US-33.
 from __future__ import annotations
 
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -13,6 +14,7 @@ from test_live import FakeTranscriber, Feeder, burst, make_session, manual, sile
 
 from recandcc.models import SAMPLE_RATE, Track
 from recandcc.transcribe import diarize
+from recandcc.transcribe.live import EMBED_WAIT_S
 from recandcc.transcribe.live_speakers import SpeakerClusterer, SpeakerLabeler
 
 SR = SAMPLE_RATE
@@ -121,3 +123,31 @@ def test_live_without_labeler_is_unchanged(tmp_path, emitted):
     Feeder(live, Track.OTHERS)(np.concatenate([silence(1), burst(2), silence(1.5)]))
     live._step(True)
     assert [s.speaker for s in emitted] == ["Others"]
+
+
+def test_slow_embedder_does_not_delay_captions(tmp_path, emitted):
+    gate = threading.Event()
+    tr = FakeTranscriber()
+    lab = SpeakerLabeler(embedder=lambda a: gate.wait(10) and vec(0))
+    live = manual(tr, make_session(tmp_path), emitted, labeler=lab)
+    Feeder(live, Track.OTHERS)(np.concatenate([silence(1), burst(2.5), silence(1.5)]))
+    t0 = time.monotonic()
+    live._step(True)  # final: waits at most EMBED_WAIT_S for the stuck embedding
+    took = time.monotonic() - t0
+    gate.set()
+    assert took < EMBED_WAIT_S + 1.5
+    assert [s.speaker for s in emitted] == ["Others"]  # fallback label
+    lab.close()
+
+
+def test_close_with_a_full_queue_stops_the_thread():
+    gate = threading.Event()
+    lab = SpeakerLabeler(embedder=lambda a: gate.wait(5) and vec(0), queue_size=2)
+    futs = [lab.submit(long_audio()) for _ in range(5)]
+    assert lab._q.full()
+    lab.close()
+    gate.set()
+    assert lab._thread is not None
+    lab._thread.join(3)
+    assert not lab._thread.is_alive()
+    assert all(f.result(3) is None or f.done() for f in futs if f is not None)

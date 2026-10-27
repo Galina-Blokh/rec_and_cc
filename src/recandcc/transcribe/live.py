@@ -50,6 +50,8 @@ from .live_speakers import SpeakerLabeler
 from .merge import ECHO_TOLERANCE_S, dedupe_echo, merge_tracks
 from .output import write_live_markdown
 
+EMBED_WAIT_S = 0.5  # max time a finished Others job waits for its speaker embeddings
+
 log = logging.getLogger("recandcc.transcribe.live")
 
 # --- tuning (see docs/ARCHITECTURE.md "Live transcription" for the measurements) -----------
@@ -110,7 +112,19 @@ class _Job:
     language: str | None = None
     lang_ready: threading.Event = field(default_factory=threading.Event)
     future: Future | None = None
-    embeddings: list[np.ndarray | None] = field(default_factory=list)  # per segment
+    emb_futs: list[Future | None] = field(default_factory=list)  # per segment, Others only
+    emb_deadline: float = 0.0  # time.monotonic() after which a missing embedding is skipped
+
+
+def _ready_embeddings(job: _Job, n: int) -> list[np.ndarray | None]:
+    out: list[np.ndarray | None] = []
+    for i in range(n):
+        f = job.emb_futs[i] if i < len(job.emb_futs) else None
+        try:
+            out.append(f.result(0) if f is not None and f.done() else None)
+        except Exception:  # noqa: BLE001 - labels are optional
+            out.append(None)
+    return out
 
 
 class _TrackBuf:
@@ -470,7 +484,9 @@ class LiveTranscriber:
                 max_end=job.end,
             )
             if job.track == Track.OTHERS and self._labeler is not None and not self._cancelled:
-                job.embeddings = [self._labeler.embed(_slice(audio, job, s)) for s in segs]
+                # never wait here: the pool is shared. _collect attaches what is ready.
+                job.emb_futs = [self._labeler.submit(_slice(audio, job, s)) for s in segs]
+                job.emb_deadline = time.monotonic() + EMBED_WAIT_S
             return segs
         finally:
             job.audio = None
@@ -483,6 +499,8 @@ class LiveTranscriber:
         now = self.clock()
         for tb in self._tracks.values():
             while tb.jobs and (fut := tb.jobs[0].future) is not None and fut.done():
+                if not self._embeddings_settled(tb.jobs[0], final):
+                    break  # keep per-track order; the deadline bounds this wait
                 job = tb.jobs.popleft()
                 try:
                     segs = fut.result()
@@ -502,7 +520,7 @@ class LiveTranscriber:
                     self._held.extend((s, now) for s in segs)
                 else:
                     new_others.extend(segs)
-                    embeddings.extend(job.embeddings or [None] * len(segs))
+                    embeddings.extend(_ready_embeddings(job, len(segs)))
         emit = self._labelled(new_others, embeddings)
         self._shown_others.extend(new_others)
         if new_others:  # only recent Others matter for the echo check: bound memory
@@ -516,6 +534,18 @@ class LiveTranscriber:
                 self.on_segments(emit)
             except Exception:
                 log.exception("live on_segments callback failed")
+
+    def _embeddings_settled(self, job: _Job, final: bool) -> bool:
+        """True when the job's embeddings are ready or their deadline passed (then the
+        missing ones fall back to the previous label). Bounded by EMBED_WAIT_S per job."""
+        pending = [f for f in job.emb_futs if f is not None and not f.done()]
+        if not pending:
+            return True
+        remaining = job.emb_deadline - time.monotonic()
+        if final and remaining > 0:
+            futures_wait(pending, timeout=remaining)
+            return True
+        return remaining <= 0
 
     def _labelled(self, segs: list[Segment], embeddings: list[np.ndarray | None]) -> list[Segment]:
         """Copies of the Others segments for display, labelled "Speaker N". The stored
