@@ -1,28 +1,26 @@
-"""CPU summary generator for machines without MLX (Windows, Linux): onnxruntime-genai.
+"""CPU summary generator for machines without MLX (Windows, Linux): ONNX Runtime itself.
 
 Same interface as summary.MlxGenerator; summary.create_generator picks it when mlx-lm can't
 run. It runs on the ``summary`` thread only (like the MLX one), never on UI or audio threads.
 
-Backend: onnxruntime-genai (Microsoft, MIT), which ships cp312 wheels on PyPI for Windows
-(x64, arm64) and Linux and builds on the onnxruntime the app already uses. llama-cpp-python
-was the first choice (a GGUF of the same model), but PyPI only has its source archive, so a
-Windows install would need a C++ toolchain.
+Backend: ``onnxruntime.InferenceSession`` on its CPU provider, which the app already depends on
+(cp312 wheels for Windows, Linux and Apple silicon; none for Intel Macs), with ``tokenizers``
+for the text. The GenAI layer is not used: its wheels ship telemetry code. The decoding loop
+(greedy, with a KV cache) is ours and sends nothing anywhere.
 
-Model: the same Qwen2.5 1.5B Instruct (Apache-2.0) as the MLX default, as the int4 ONNX
-export that Hugging Face's ``onnx-community`` publishes. Its files are pinned to one repo
-commit and their sha256s (CPU_MODELS), downloaded once into the app's model cache, and checked
-by size (and sha256 once per process) before every load; ``genai_config.json`` (not in that
-repo) is written by us. Once the files are there, nothing here touches the network. Logs
-never contain prompt or answer text.
+Model: the same Qwen2.5 1.5B Instruct (Apache-2.0) as the MLX default, as the int4 ONNX export
+that Hugging Face's ``onnx-community`` publishes. Its files are pinned to one repo commit and
+their sha256s (CPU_MODELS), downloaded once into the app's model cache, and checked by size
+(and sha256 once per process) before every load. Once the files are there, nothing here touches
+the network. Logs never contain prompt or answer text.
 """
 
 from __future__ import annotations
 
-import contextlib
 import gc
 import hashlib
+import importlib
 import importlib.util
-import json
 import logging
 import os
 import sys
@@ -31,10 +29,11 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import platformdirs
 
 from ..config import APP_NAME, DEFAULT_SUMMARY_MODEL, PREVIOUS_DEFAULT_SUMMARY_MODEL
@@ -44,15 +43,26 @@ log = logging.getLogger("recandcc.transcribe")
 
 MODELS_DIR = Path(platformdirs.user_cache_dir(APP_NAME, appauthor=False)) / "models"
 DOWNLOAD_TIMEOUT_S = 30.0
+DECODER = "onnx/model_q4.onnx"  # the pinned file that holds the graph and its weights
+TOKENIZER = "tokenizer.json"
+EOS_IDS = (151645, 151643)  # <|im_end|>, <|endoftext|>: the generation_config.json of Qwen2.5
 REPETITION_PENALTY = 1.1  # as in MlxGenerator
-CONFIG_NAME = "genai_config.json"
+REPETITION_WINDOW = 20  # the last tokens the penalty applies to: mlx-lm's default
+PREFILL_STEP = 512  # prompt tokens per run: the graph returns logits for every position
+QWEN_DEFAULT_SYSTEM = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
 NOT_ON_DISK = "the summary model is not on disk or can't be loaded"  # as in MlxGenerator
 TOO_LONG = "the transcript part is too long for the CPU summary model"
-CONTEXT_LENGTH = 32768  # Qwen2.5's; genai_config.json declares it too (see _context_length)
+CONTEXT_LENGTH = 32768  # Qwen2.5's
 STALE_PART_S = 3600.0  # a .part.<pid> file untouched this long is dead, whatever its pid
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _ERROR_ACCESS_DENIED = 5
 _STILL_ACTIVE = 259
+_DTYPES: dict[str, type] = {  # the ONNX tensor types a Qwen2 export uses
+    "tensor(int64)": np.int64,
+    "tensor(int32)": np.int32,
+    "tensor(float)": np.float32,
+    "tensor(float16)": np.float16,
+}
 
 
 @dataclass(frozen=True)
@@ -67,7 +77,6 @@ class CpuModel:
     repo: str
     revision: str  # full commit id
     files: tuple[ModelFile, ...]
-    config: dict[str, Any] = field(default_factory=dict)  # written as genai_config.json
 
     @property
     def folder(self) -> Path:
@@ -75,45 +84,6 @@ class CpuModel:
 
     def url(self, f: ModelFile) -> str:
         return f"https://huggingface.co/{self.repo}/resolve/{self.revision}/{f.path}"
-
-
-def _qwen2_config(onnx_file: str, layers: int, hidden: int, heads: int, kv_heads: int) -> dict:
-    """genai_config.json for a Qwen2.5 Instruct transformers.js export (separate key/value
-    caches that grow each step, position_ids input, greedy search)."""
-    names = {
-        "past_key_names": "past_key_values.%d.key",
-        "past_value_names": "past_key_values.%d.value",
-    }
-    return {
-        "model": {
-            "type": "qwen2",
-            "bos_token_id": 151643,
-            "eos_token_id": [151645, 151643],
-            "pad_token_id": 151643,
-            "vocab_size": 151936,
-            "context_length": 32768,
-            "decoder": {
-                "filename": onnx_file,
-                "head_size": hidden // heads,
-                "hidden_size": hidden,
-                "num_attention_heads": heads,
-                "num_hidden_layers": layers,
-                "num_key_value_heads": kv_heads,
-                "inputs": {
-                    "input_ids": "input_ids",
-                    "attention_mask": "attention_mask",
-                    "position_ids": "position_ids",
-                    **names,
-                },
-                "outputs": {
-                    "logits": "logits",
-                    "present_key_names": "present.%d.key",
-                    "present_value_names": "present.%d.value",
-                },
-            },
-        },
-        "search": {"do_sample": False, "num_beams": 1, "past_present_share_buffer": False},
-    }
 
 
 # Qwen2.5 1.5B Instruct, int4 (MatMulNBits) ONNX, ~1.8 GB. To update: take the new commit
@@ -124,12 +94,12 @@ QWEN2_5_1_5B = CpuModel(
     revision="d54957e3af1be04546436e874a60fe386041b244",
     files=(
         ModelFile(
-            "onnx/model_q4.onnx",
+            DECODER,
             "70c24509f760fed9a8f50391165c46a87660197028a42c4547763f1c173ddea6",
             1_787_566_590,
         ),
         ModelFile(
-            "tokenizer.json",
+            TOKENIZER,
             "a8506e7111b80c6d8635951a02eab0f4e1a8e4e5772da83846579e97b16f61bf",
             7_031_673,
         ),
@@ -139,12 +109,11 @@ QWEN2_5_1_5B = CpuModel(
             7_849,
         ),
     ),
-    config=_qwen2_config("onnx/model_q4.onnx", layers=28, hidden=1536, heads=12, kv_heads=2),
 )
 
 # summary.model (an MLX repo) -> its CPU build. Only the Qwen2.5 1.5B has one, so the current
 # default (the Qwen3.5 4B, no CPU build) and the previous default both map to it. Other models
-# have none: a local folder with a genai_config.json can still be given as summary.model.
+# have none: a local folder laid out like the pinned build can still be given as summary.model.
 CPU_MODELS: dict[str, CpuModel] = {
     DEFAULT_SUMMARY_MODEL: QWEN2_5_1_5B,
     PREVIOUS_DEFAULT_SUMMARY_MODEL: QWEN2_5_1_5B,
@@ -157,7 +126,10 @@ _mapped_logged: set[str] = set()  # summary models whose CPU mapping was logged 
 
 
 def cpu_available() -> bool:
-    return importlib.util.find_spec("onnxruntime_genai") is not None
+    """Whether onnxruntime and tokenizers (both installed with the app) are importable. Checked
+    without importing them; the model itself may still be unavailable (offline, a bad file)."""
+    names = ("onnxruntime", "tokenizers")
+    return all(importlib.util.find_spec(name) is not None for name in names)
 
 
 def _is_valid(path: Path, f: ModelFile) -> bool:
@@ -256,20 +228,9 @@ def _remove_stale_parts(folder: Path) -> None:
             log.debug("a stale download part could not be removed")
 
 
-def _write_atomic(path: Path, text: str) -> None:
-    """Write ``path`` whole or not at all: a temp file beside it, then os.replace."""
-    tmp = path.with_name(f".{path.name}.part.{os.getpid()}")
-    try:
-        tmp.write_text(text, "utf-8")
-        os.replace(tmp, path)
-    finally:
-        with contextlib.suppress(OSError):
-            tmp.unlink(missing_ok=True)
-
-
 def model_dir(model: CpuModel, on_download: Callable[[], None] | None = None) -> Path:
-    """Folder with ``model``'s verified files and genai_config.json, downloading missing files
-    once (``on_download`` runs before the first one). Raises if they can't be had."""
+    """Folder with ``model``'s verified files, downloading missing ones once (``on_download``
+    runs before the first one). Raises if they can't be had."""
     folder = model.folder
     with _lock:
         missing = [f for f in model.files if not _is_valid(folder / f.path, f)]
@@ -282,16 +243,17 @@ def model_dir(model: CpuModel, on_download: Callable[[], None] | None = None) ->
             t0 = time.monotonic()
             _download(model.url(f), folder / f.path, f)
             log.info("downloaded %s in %.1fs", f.path, time.monotonic() - t0)
-        config = folder / CONFIG_NAME
-        text = json.dumps(model.config, indent=2)
-        if not config.is_file() or config.read_text("utf-8") != text:
-            _write_atomic(config, text)
     return folder
+
+
+def _is_local_build(folder: Path) -> bool:
+    """A folder laid out like the pinned build (the decoder and its tokenizer) is used as is."""
+    return (folder / DECODER).is_file() and (folder / TOKENIZER).is_file()
 
 
 def resolve(model: str, on_download: Callable[[], None] | None = None) -> Path:
     """Local folder to load for ``summary.model`` on the CPU."""
-    if (Path(model) / CONFIG_NAME).is_file():
+    if _is_local_build(Path(model)):
         return Path(model)
     cpu = CPU_MODELS.get(model)
     if cpu is None:
@@ -312,35 +274,79 @@ def resolve(model: str, on_download: Callable[[], None] | None = None) -> Path:
         raise ModelUnavailable(NOT_ON_DISK) from e
 
 
-def _disable_telemetry(og: Any, ort: Any) -> None:
-    """Switch off each runtime's telemetry, best effort: a failing switch never blocks a summary.
-    ONNX Runtime's events are ETW on Windows, local. The GenAI 0.18 DLL also has a OneCollector
-    uploader (HTTPS). Its documented switch (``disable_telemetry_events``) stops the non-essential
-    events; whether anything else still leaves the machine is not verified."""
-    for module in (og, ort):
-        switch = getattr(module, "disable_telemetry_events", None)
-        if switch is None:
-            continue
-        try:
-            switch()
-        except Exception as e:  # noqa: BLE001 - telemetry must never block a summary
-            log.debug("a telemetry switch failed: %s", type(e).__name__)
+def chatml(messages: Messages) -> str:
+    """The Qwen2.5 chat template (tokenizer_config.json of the pinned build) for plain messages:
+    ChatML turns, the default system prompt when the first message isn't one, and the assistant
+    turn left open for the answer. The tests render the template itself and compare."""
+    system = {"role": "system", "content": QWEN_DEFAULT_SYSTEM}
+    turns = [*messages] if messages and messages[0]["role"] == "system" else [system, *messages]
+    text = "".join(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n" for m in turns)
+    return text + "<|im_start|>assistant\n"
 
 
-def _context_length(folder: Path) -> int:
-    """The context window that genai_config.json declares (CONTEXT_LENGTH when it doesn't)."""
-    try:
-        config = json.loads((folder / CONFIG_NAME).read_text("utf-8"))
-        return int(config["model"]["context_length"])
-    except (OSError, ValueError, KeyError, TypeError):
-        return CONTEXT_LENGTH
+@dataclass(frozen=True)
+class _Graph:
+    """The decoder a session runs, as its export names things: the layers, the cache's head
+    shape and dtype, each input's numpy type, and the outputs the loop reads (logits first, then
+    every layer's present key and value)."""
+
+    layers: int
+    kv_heads: int
+    head_dim: int
+    kv_dtype: type
+    input_dtypes: dict[str, type]
+    outputs: tuple[str, ...]
+    position_ids: bool
+
+
+def _read_graph(session: Any) -> _Graph:
+    """Read the Qwen2 key/value layout from the session's own inputs and outputs. Raises
+    ValueError for any other graph, which then fails at load, before anything runs."""
+    inputs = {i.name: i for i in session.get_inputs()}
+    outputs = {o.name for o in session.get_outputs()}
+    layers = 0
+    while f"past_key_values.{layers}.key" in inputs:
+        layers += 1
+    past = [f"past_key_values.{n}.{kv}" for n in range(layers) for kv in ("key", "value")]
+    present = [f"present.{n}.{kv}" for n in range(layers) for kv in ("key", "value")]
+    required = {"input_ids", "attention_mask", *past}
+    if not layers or not required <= inputs.keys() or set(inputs) - {*required, "position_ids"}:
+        raise ValueError("not a decoder with a key/value cache for each layer")
+    if not ({"logits", *present} <= outputs):
+        raise ValueError("the decoder doesn't return logits and each layer's present cache")
+    key = inputs[past[0]]
+    kv_heads, head_dim = key.shape[1], key.shape[3]
+    if not isinstance(kv_heads, int) or not isinstance(head_dim, int):
+        raise ValueError("the cache's head shape isn't fixed")
+    return _Graph(
+        layers=layers,
+        kv_heads=kv_heads,
+        head_dim=head_dim,
+        kv_dtype=_DTYPES[key.type],
+        input_dtypes={name: _DTYPES[i.type] for name, i in inputs.items()},
+        outputs=("logits", *present),
+        position_ids="position_ids" in inputs,
+    )
+
+
+def _pick(logits: np.ndarray, recent: list[int]) -> int:
+    """The greedy choice after mlx-lm's repetition penalty: each distinct token of the last
+    REPETITION_WINDOW (the prompt's included) has its logit divided by the penalty if positive,
+    multiplied if negative. Without a penalty this is plain argmax."""
+    scores = np.array(logits, dtype=np.float32)
+    seen = np.unique(np.asarray(recent[-REPETITION_WINDOW:], dtype=np.int64))
+    picked = scores[seen]
+    scores[seen] = np.where(picked < 0, picked * REPETITION_PENALTY, picked / REPETITION_PENALTY)
+    return int(np.argmax(scores))
+
+
+Cache = list[tuple[Any, Any]]  # (key, value) per layer, each [1, kv_heads, positions, head_dim]
 
 
 class CpuGenerator:
-    """The summary LLM through onnxruntime-genai on the CPU. Loaded on first use, used from one
-    thread (the summary thread), freed by close(). ``pause`` runs before each generated token,
-    so an answer yields to a recording that starts mid-way (as ``before_call`` does between
-    model calls)."""
+    """The summary LLM on the CPU through ONNX Runtime. Loaded on first use, used from one thread
+    (the summary thread), freed by close(). ``pause`` runs before each generated token, so an
+    answer yields to a recording that starts mid-way (as ``before_call`` does between calls)."""
 
     def __init__(
         self,
@@ -352,63 +358,85 @@ class CpuGenerator:
         self.model_name = model
         self.on_download = on_download
         self.pause = pause
-        self._model: Any = None
+        self._session: Any = None
         self._tokenizer: Any = None
-        self._context = CONTEXT_LENGTH
+        self._graph: Any = None
 
     def load(self) -> None:
         if not cpu_available():
-            raise SummaryUnavailable("local summaries need Apple silicon or onnxruntime-genai")
+            raise SummaryUnavailable("local summaries need Apple silicon or onnxruntime")
         try:  # before the download: a runtime that won't import fetches nothing
-            # The GenAI DLL reads this when it starts, so it is set before the import (seen in
-            # the 0.18 binary; not in the package docs).
-            os.environ["ORT_DISABLE_TELEMETRY"] = "1"
-            og: Any = importlib.import_module("onnxruntime_genai")
             ort: Any = importlib.import_module("onnxruntime")
+            tokenizers: Any = importlib.import_module("tokenizers")
         except ImportError as e:
-            log.info("onnxruntime-genai can't be imported: %s", type(e).__name__)
-            raise ModelUnavailable("onnxruntime-genai can't be imported here") from e
-        _disable_telemetry(og, ort)
+            log.info("the CPU summary runtime can't be imported: %s", type(e).__name__)
+            raise ModelUnavailable("onnxruntime can't be imported here") from e
         path = resolve(self.model_name, self.on_download)
         try:
-            self._model = og.Model(str(path))
-            self._tokenizer = og.Tokenizer(self._model)
-            self._context = _context_length(path)
+            session = ort.InferenceSession(str(path / DECODER), providers=["CPUExecutionProvider"])
+            tokenizer = tokenizers.Tokenizer.from_file(str(path / TOKENIZER))
+            graph = _read_graph(session)
         except Exception as e:  # noqa: BLE001 - a broken or unsupported model folder
-            self._model = self._tokenizer = None
             log.info("summary model %s failed to load: %s", self.model_name, type(e).__name__)
             raise ModelUnavailable(NOT_ON_DISK) from e
+        self._session, self._tokenizer, self._graph = session, tokenizer, graph
+
+    def _empty_cache(self) -> Cache:
+        g = self._graph
+        empty = np.zeros((1, g.kv_heads, 0, g.head_dim), dtype=g.kv_dtype)
+        return [(empty, empty)] * g.layers
+
+    def _run(self, ids: list[int], cache: Cache) -> tuple[np.ndarray, Cache]:
+        """Run ``ids`` after the cached positions: the last position's logits (a float32 copy)
+        and the cache grown by ``ids``."""
+        g = self._graph
+        start = int(cache[0][0].shape[2])
+        feed: dict[str, Any] = {
+            "input_ids": np.asarray([ids], dtype=np.int64),
+            "attention_mask": np.ones((1, start + len(ids)), dtype=np.int64),
+        }
+        if g.position_ids:
+            feed["position_ids"] = np.arange(start, start + len(ids), dtype=np.int64)[None, :]
+        for n, (key, value) in enumerate(cache):
+            feed[f"past_key_values.{n}.key"] = key
+            feed[f"past_key_values.{n}.value"] = value
+        feed = {name: np.asarray(v, dtype=g.input_dtypes[name]) for name, v in feed.items()}
+        outs = dict(zip(g.outputs, self._session.run(list(g.outputs), feed), strict=True))
+        grown = [(outs[f"present.{n}.key"], outs[f"present.{n}.value"]) for n in range(g.layers)]
+        return np.array(outs["logits"][0, -1], dtype=np.float32), grown
+
+    def _prefill(self, ids: list[int], cache: Cache) -> tuple[np.ndarray, Cache]:
+        """The prompt in PREFILL_STEP pieces, so the logits held at once stay small; the last
+        piece's last logits are the first answer token's."""
+        pieces = [ids[at : at + PREFILL_STEP] for at in range(0, len(ids), PREFILL_STEP)]
+        for piece in pieces[:-1]:
+            _, cache = self._run(piece, cache)
+        return self._run(pieces[-1], cache)
 
     def __call__(self, messages: Messages, max_tokens: int) -> str:
-        if self._model is None:
+        if self._session is None:
             self.load()
-        import onnxruntime_genai as og  # pyright: ignore[reportMissingImports]
-
-        tokenizer: Any = self._tokenizer
-        prompt = tokenizer.apply_chat_template(json.dumps(messages), add_generation_prompt=True)
-        ids = tokenizer.encode(prompt)
-        if len(ids) + max_tokens > self._context:  # refused, never cut: a cut prompt misleads
+        ids = self._tokenizer.encode(chatml(messages), add_special_tokens=False).ids
+        if len(ids) + max_tokens > CONTEXT_LENGTH:  # refused, never cut: a cut prompt misleads
             raise SummaryUnavailable(TOO_LONG)
-        params = og.GeneratorParams(self._model)
-        params.set_search_options(
-            max_length=len(ids) + max_tokens,
-            do_sample=False,
-            repetition_penalty=REPETITION_PENALTY,
-        )
-        gen = og.Generator(self._model, params)
-        gen.append_tokens(ids)
-        stream = tokenizer.create_stream()
-        out = []
-        while not gen.is_done():
+        logits, cache = self._prefill(ids, self._empty_cache())
+        recent = list(ids)
+        answer: list[int] = []
+        while len(answer) < max_tokens:
             if self.pause is not None:  # e.g. waits while a recording runs, as between calls
                 self.pause()
-            gen.generate_next_token()
-            out.append(stream.decode(gen.get_next_tokens()[0]))
-        return "".join(out).strip()
+            token = _pick(logits, recent)
+            if token in EOS_IDS:
+                break
+            answer.append(token)
+            recent.append(token)
+            if len(answer) < max_tokens:  # the logits for the next token; none after the last
+                logits, cache = self._run([token], cache)
+        return self._tokenizer.decode(answer, skip_special_tokens=True).strip()
 
     def close(self) -> None:
-        """Free the model (~2 GB of RAM) between sessions."""
-        if self._model is None:
+        """Free the session (~2 GB of RAM) between sessions."""
+        if self._session is None:
             return
-        self._model = self._tokenizer = None
+        self._session = self._tokenizer = self._graph = None
         gc.collect()

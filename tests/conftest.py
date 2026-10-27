@@ -23,7 +23,7 @@ def _no_diarization_model(request, monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_cpu_summary_model(tmp_path_factory):
     """Fast tests never download the CPU summary model or use the user's model cache, and
-    pick the generator as on a machine without onnxruntime-genai (the MLX fakes apply
+    pick the generator as on a machine without the CPU runtime (the MLX fakes apply
     everywhere); test_summary_cpu.py switches the CPU backend on with a fake."""
     from recandcc.transcribe import summary_cpu
 
