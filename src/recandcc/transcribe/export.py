@@ -11,6 +11,7 @@ text is never logged.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -101,27 +102,27 @@ def _write(path: Path, render) -> Path:
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         try:
+            with contextlib.suppress(OSError):  # a stale file must not block O_EXCL
+                tmp.unlink(missing_ok=True)
             os.close(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
             render(tmp)  # the library truncates and rewrites the existing file: mode kept
-            for attempt in range(_REPLACE_TRIES):
-                try:
-                    os.replace(tmp, path)
-                    return path
-                except PermissionError:
-                    if attempt + 1 == _REPLACE_TRIES:
-                        raise
-                    time.sleep(_REPLACE_WAIT_S)
         except ExportError:
             raise
-        except PermissionError:
-            raise ExportError(
-                f"{path.name} may be open in another app; close it and try again"
-            ) from None
         except Exception as e:
             raise ExportError(f"could not write {path.name} ({type(e).__name__})") from None
-        return path
+        for attempt in range(_REPLACE_TRIES):
+            try:
+                os.replace(tmp, path)
+                return path
+            except PermissionError:
+                if attempt + 1 < _REPLACE_TRIES:
+                    time.sleep(_REPLACE_WAIT_S)
+            except OSError as e:
+                raise ExportError(f"could not write {path.name} ({type(e).__name__})") from None
+        raise ExportError(f"{path.name} may be open in another app; close it and try again")
     finally:
-        tmp.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
 
 
 def export_docx(folder: Path, loaded=None) -> Path:

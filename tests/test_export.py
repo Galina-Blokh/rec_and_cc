@@ -393,3 +393,49 @@ def test_controller_export_of_a_list_uses_the_newest_finished_session(tmp_path, 
     ctrl.export_async([live / "transcript.md", done / "transcript.md"])
     assert ctrl.events.get(timeout=10)[2].startswith("Saved transcript.docx")
     assert calls == [done]
+
+
+def test_a_write_error_is_not_reported_as_a_file_in_use(session, monkeypatch):
+    real = export.os.open
+
+    def denied(path, *a, **kw):
+        if str(path).endswith(".tmp"):
+            raise PermissionError("read-only folder")
+        return real(path, *a, **kw)
+
+    monkeypatch.setattr(export.os, "open", denied)
+    with pytest.raises(export.ExportError, match=r"could not write.*PermissionError"):
+        export.export_docx(session)
+
+
+def test_a_failing_cleanup_does_not_hide_the_export_error(session, monkeypatch):
+    from pathlib import Path
+
+    def locked(src, dst):
+        raise PermissionError("in use")
+
+    def no_unlink(self, missing_ok=False):
+        raise PermissionError("held by antivirus")
+
+    monkeypatch.setattr(export.os, "replace", locked)
+    monkeypatch.setattr(export.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(Path, "unlink", no_unlink)
+    with pytest.raises(export.ExportError, match="open in another app"):
+        export.export_docx(session)
+
+
+def test_a_long_meeting_exports(tmp_path):
+    segs = [
+        {
+            "start": i,
+            "end": i + 1,
+            "text": f"line {i} שלום привет",
+            "speaker": "Me",
+            "language": "he",
+        }
+        for i in range(2000)
+    ]
+    (tmp_path / "transcript.json").write_text(
+        json.dumps({"segments": segs}, ensure_ascii=False), "utf-8"
+    )
+    assert len(Document(str(export.export_docx(tmp_path))).paragraphs) > 4000
