@@ -35,6 +35,7 @@ from ..config import (
     CONFIG_PATH,
     LOG_DIR,
     Config,
+    ConfigLockTimeout,
     load_config,
     normalize_languages,
     save_keys,
@@ -1097,10 +1098,37 @@ class Controller:
                     self._config_mtime = mtime  # our own write: nothing to reload
             except ValueError:  # invalid TOML (mid-edit?): don't overwrite the user's file
                 log.warning("config.toml could not be parsed; %s not saved", ", ".join(keys))
+                self._restore_from_disk(keys)
                 self.post_notice(f"{title} not saved", "config.toml could not be parsed")
+            except ConfigLockTimeout:
+                log.warning("settings not saved: config lock timed out")  # no traceback
+                self._restore_from_disk(keys)
+                self.post_notice("Settings not saved", "config.toml is locked by another process")
             except Exception:
                 log.exception("saving settings failed")
+                self._restore_from_disk(keys)
                 self.post_notice("Settings not saved", "config.toml could not be written")
+
+    def _restore_from_disk(self, keys) -> None:
+        """A failed write leaves config.toml as it was: put the menu's in-memory value of
+        exactly ``keys`` back to what the file says, so the menu doesn't show a change that
+        would silently vanish on restart. Caller holds ``_save_lock``."""
+        try:
+            disk = load_config()
+        except Exception:
+            return  # unreadable file: keep memory, the next successful reload corrects it
+        for key in keys:
+            if key == "transcription.languages":
+                tr, src = self.cfg.transcription, disk.transcription
+                with self._lang_lock:  # both together: save() pairs them
+                    tr._raw_languages = getattr(src, "_raw_languages", None)  # type: ignore[attr-defined]
+                    tr.languages = list(src.languages)
+                continue
+            *path, leaf = key.split(".")
+            dst, ref = self.cfg, disk
+            for name in path:
+                dst, ref = getattr(dst, name), getattr(ref, name)
+            setattr(dst, leaf, getattr(ref, leaf))
 
     def _setting(self, key: str):
         """The TOML value of a dotted config key, as the menu last set it."""
@@ -1161,7 +1189,8 @@ class Controller:
                         self.apply_settings(old)
                         with self._lang_lock:
                             tr._raw_languages = old_raw  # type: ignore[attr-defined]
-                        if isinstance(e, OSError):  # not the folder: the outer handler would say so
+                        if isinstance(e, OSError) and not isinstance(e, ConfigLockTimeout):
+                            # not the folder: the outer handler would say so
                             raise _ConfigWriteError(type(e).__name__, e.errno) from e
                         raise
                     if not edited:
@@ -1177,6 +1206,9 @@ class Controller:
             except ValueError as e:
                 log.warning("settings not saved: %s", type(e).__name__)  # no values in logs
                 self.post_notice("Settings not saved", str(e))
+            except ConfigLockTimeout:
+                log.warning("settings not saved: config lock timed out")
+                self.post_notice("Settings not saved", "config.toml is locked by another process")
             except _ConfigWriteError as e:
                 log.warning("settings not saved: config write %s (errno %s)", *e.args)
                 self.post_notice("Settings not saved", "config.toml could not be written")
