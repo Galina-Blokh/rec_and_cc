@@ -60,6 +60,23 @@ def test_en_ru_smoothing_is_the_same_with_hebrew_in_the_language_list():
     assert smooth_languages(regions, without_he, MIN_LANGUAGE_CONFIDENCE) == expected
 
 
+
+def test_a_real_hebrew_region_does_not_change_its_en_ru_neighbours():
+    """With a region where Hebrew clearly wins, that region becomes 'he' and the en/ru regions
+    around it keep the labels they get without 'he' configured."""
+    regions = [(0, 5), (5.5, 10), (10.5, 15)]
+    raw = [
+        [("ru", 0.95), ("en", 0.04), ("he", 0.001)],
+        [("he", 0.90), ("en", 0.06), ("ru", 0.04)],
+        [("en", 0.90), ("ru", 0.09), ("he", 0.01)],
+    ]
+    with_he = [language_confidence(p, ["en", "ru", "he"]) for p in raw]
+    without_he = [language_confidence(p, ["en", "ru"]) for p in raw]
+    assert [lang for lang, _ in with_he] == ["ru", "he", "en"]
+    assert smooth_languages(regions, with_he, MIN_LANGUAGE_CONFIDENCE) == ["ru", "he", "en"]
+    smoothed_without = smooth_languages(regions, without_he, MIN_LANGUAGE_CONFIDENCE)
+    assert [smoothed_without[0], smoothed_without[2]] == ["ru", "en"]
+
 def test_language_id_is_restricted_to_the_configured_languages():
     probs = [("en", 0.2), ("ru", 0.1), ("he", 0.3), ("ar", 0.35), ("yi", 0.05)]
     assert language_confidence(probs, ["en", "ru", "he"])[0] == "he"
