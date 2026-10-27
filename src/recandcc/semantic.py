@@ -63,11 +63,34 @@ TOKENIZER = ModelFile(
 
 
 class Embedder(Protocol):
+    """Optional extras: ``model_id`` (vectors of another model are re-embedded) and
+    ``ready()`` (True once ``embed`` won't block on a download or a model load)."""
+
     def embed(self, texts: list[str]) -> np.ndarray | None: ...
 
 
 _download_lock = threading.Lock()
 _last_failure = 0.0
+_verified: set[Path] = set()  # model files whose sha256 was checked in this process
+
+
+def _is_valid(path: Path, model: ModelFile) -> bool:
+    """On disk with the right size and, checked once per process, the right sha256.
+    A corrupt file is deleted so it downloads again."""
+    if not path.is_file() or path.stat().st_size != model.size:
+        return False
+    if path in _verified:
+        return True
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        while block := f.read(1 << 20):
+            digest.update(block)
+    if digest.hexdigest() != model.sha256:
+        log.warning("search model %s is corrupt; removing it", model.name)
+        path.unlink(missing_ok=True)
+        return False
+    _verified.add(path)
+    return True
 
 
 def model_path(model: ModelFile, download: bool = True) -> Path | None:
@@ -75,12 +98,12 @@ def model_path(model: ModelFile, download: bool = True) -> Path | None:
     on disk and can't be downloaded now. A model on disk is used without any network access."""
     global _last_failure
     path = MODELS_DIR / model.name
-    if path.is_file() and path.stat().st_size == model.size:
+    if _is_valid(path, model):
         return path
     if not download:
         return None
     with _download_lock:
-        if path.is_file() and path.stat().st_size == model.size:
+        if _is_valid(path, model):
             return path
         if _last_failure and time.monotonic() - _last_failure < RETRY_AFTER_S:
             return None
@@ -111,6 +134,7 @@ def _download(model: ModelFile, path: Path) -> None:
         if digest.hexdigest() != model.sha256:
             raise ValueError(f"sha256 mismatch ({digest.hexdigest()})")
         tmp.replace(path)
+        _verified.add(path)  # just checked while downloading
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -122,6 +146,12 @@ class OnnxEmbedder:
         self._lock = threading.Lock()
         self._loaded: tuple[Any, Any] | None = None
 
+    model_id = MODEL.name
+
+    def ready(self) -> bool:
+        """True once the model is loaded: ``embed`` then doesn't wait for a download."""
+        return self._loaded is not None
+
     def _load(self) -> tuple[Any, Any] | None:
         with self._lock:
             if self._loaded is None:
@@ -131,12 +161,19 @@ class OnnxEmbedder:
                 import onnxruntime as ort  # lazy: only when semantic search is on
                 from tokenizers import Tokenizer
 
-                tok = Tokenizer.from_file(str(t))
-                tok.enable_truncation(MAX_TOKENS)
-                tok.enable_padding()
-                opts = ort.SessionOptions()
-                opts.intra_op_num_threads = 2  # background work: leave cores to transcription
-                self._loaded = (ort.InferenceSession(str(m), opts), tok)
+                try:
+                    tok = Tokenizer.from_file(str(t))
+                    tok.enable_truncation(MAX_TOKENS)
+                    tok.enable_padding()
+                    opts = ort.SessionOptions()
+                    opts.intra_op_num_threads = 2  # background work: leave cores to transcription
+                    self._loaded = (ort.InferenceSession(str(m), opts), tok)
+                except Exception as e:  # noqa: BLE001 - unreadable model files
+                    log.warning("search model failed to load (%s); removing the files", e)
+                    for f in (m, t):  # so the next attempt downloads them again
+                        _verified.discard(f)
+                        f.unlink(missing_ok=True)
+                    return None
             return self._loaded
 
     def embed(self, texts: list[str]) -> np.ndarray | None:
