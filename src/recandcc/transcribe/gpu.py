@@ -12,9 +12,11 @@ and then once per token.
 from __future__ import annotations
 
 import importlib
+import importlib.metadata
 import importlib.util
 import logging
 import platform
+import re
 import sys
 import threading
 import time
@@ -114,31 +116,98 @@ def use_gpu(cfg: TranscriptionConfig) -> bool:
     return gpu_available()
 
 
+# The mlx-whisper release mlx_timing.py was copied from; another version keeps words off.
+VENDORED_TIMING_VERSION = "0.4.3"
+_version_warned = False
+
+
 def _stub_word_timestamps(*_args: object, **_kwargs: object) -> None:
     raise RuntimeError(
-        "word timestamps need numba and scipy, which RecAndCC does not install "
-        "(ADR 0011, follow-up 4)"
+        "word timestamps need numba and scipy, or mlx-whisper "
+        f"{VENDORED_TIMING_VERSION} for RecAndCC's numpy aligner (ADR 0011, follow-up 4)"
     )
+
+
+def _mlx_whisper_version() -> str | None:
+    """Installed mlx-whisper version, without importing it. ``mlx_whisper/_version.py`` comes
+    first: a PyInstaller bundle has no dist-info for importlib.metadata."""
+    try:
+        spec = importlib.util.find_spec("mlx_whisper")
+    except (ImportError, ValueError):
+        spec = None
+    for folder in (spec and spec.submodule_search_locations) or []:
+        try:
+            text = (Path(folder) / "_version.py").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if m := re.search(r"""^__version__\s*=\s*["']([^"']+)["']""", text, re.MULTILINE):
+            return m.group(1)
+    try:
+        return importlib.metadata.version("mlx-whisper")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _install_timing() -> None:
+    """Register ``mlx_whisper.timing`` before mlx_whisper imports the real one (which needs
+    numba and scipy): our numpy port ``mlx_timing`` for the version it was copied from, else
+    a stub that turns word timestamps off. With numba and scipy installed, the real one."""
+    if "mlx_whisper.timing" in sys.modules or (
+        importlib.util.find_spec("numba") is not None
+        and importlib.util.find_spec("scipy") is not None
+    ):
+        return
+    version = _mlx_whisper_version()
+    if version == VENDORED_TIMING_VERSION:
+        from . import mlx_timing
+
+        sys.modules["mlx_whisper.timing"] = mlx_timing
+        return
+    log.debug("mlx-whisper %s is not %s: stub word timing", version, VENDORED_TIMING_VERSION)
+    stub = types.ModuleType("mlx_whisper.timing")
+    stub.__dict__["add_word_timestamps"] = _stub_word_timestamps
+    sys.modules["mlx_whisper.timing"] = stub
+
+
+def mlx_word_timestamps() -> bool:
+    """Whether ``MlxWhisper.transcribe(..., words=True)`` works (not with the stub). Called
+    only when words are wanted (split_on_speaker_change), so a mismatch warns here, once.
+    Read-only: ``mlx_whisper.timing`` is registered only by ``import_mlx_whisper``."""
+    global _version_warned
+    if "mlx_whisper.transcribe" not in sys.modules:
+        try:
+            import_mlx_whisper()
+        except Exception:  # any setup failure just means no words, never a crash
+            log.debug("mlx_whisper import failed: no MLX word timestamps", exc_info=True)
+            return False
+    # What mlx_whisper.transcribe really calls.
+    owner = sys.modules.get("mlx_whisper.transcribe")
+    ok = owner is not None and getattr(owner, "add_word_timestamps", None) not in (
+        None,
+        _stub_word_timestamps,
+    )
+    if not ok and not _version_warned:
+        _version_warned = True
+        log.warning(
+            "mlx-whisper %s is not %s: MLX word timestamps (split_on_speaker_change) are off",
+            _mlx_whisper_version(),
+            VENDORED_TIMING_VERSION,
+        )
+    return ok
 
 
 def import_mlx_whisper() -> Any:
     """Import mlx_whisper without numba and scipy, which pyproject.toml excludes.
 
     ``mlx_whisper/transcribe.py`` imports ``timing.add_word_timestamps``, and ``timing.py``
-    imports numba and scipy, but only ``word_timestamps=True`` calls it. RecAndCC never asks
-    for word timestamps, so when numba or scipy is missing a stub ``mlx_whisper.timing`` is
-    registered first; it raises a clear error if word timestamps are ever requested. With
-    both installed the real module is used. Every mlx_whisper import in RecAndCC must go
-    through here first, since a direct one fails on the missing numba
-    (tests/test_mlx_imports.py enforces that, tests/test_no_torch.py checks that neither
-    library is imported).
+    imports numba and scipy (only ``word_timestamps=True`` calls it). So when either is
+    missing, ``_install_timing`` first registers ``mlx_timing`` (the same functions on numpy
+    kernels) as ``mlx_whisper.timing``, or a stub if the mlx-whisper version differs from the
+    one it was copied from. Every mlx_whisper import in RecAndCC must go through here first,
+    since a direct one fails on the missing numba (tests/test_mlx_imports.py enforces that,
+    tests/test_no_torch.py checks that neither library is imported).
     """
-    if "mlx_whisper.timing" not in sys.modules and (
-        importlib.util.find_spec("numba") is None or importlib.util.find_spec("scipy") is None
-    ):
-        stub = types.ModuleType("mlx_whisper.timing")
-        stub.__dict__["add_word_timestamps"] = _stub_word_timestamps
-        sys.modules["mlx_whisper.timing"] = stub
+    _install_timing()
     return importlib.import_module("mlx_whisper")
 
 
@@ -183,8 +252,9 @@ class MlxWhisper:
         self._thread.submit(_load).result()
         log.info("loaded MLX whisper %s on the GPU in %.1fs", self.repo, time.monotonic() - t0)
 
-    def transcribe(self, audio: np.ndarray, language: str) -> list[tuple[float, float, str]]:
-        """(start, end, text) per segment, relative to the start of ``audio``."""
+    def transcribe(self, audio: np.ndarray, language: str, words: bool = False) -> list[Any]:
+        """(start, end, text) per segment, relative to the start of ``audio``. With ``words``
+        (only when ``mlx_word_timestamps()``): (start, end, text, [(start, end, " word")])."""
 
         def run():
             with MLX_LOCK:
@@ -195,9 +265,20 @@ class MlxWhisper:
                     language=language,
                     condition_on_previous_text=False,
                     verbose=None,
+                    **({"word_timestamps": True} if words else {}),
                 )
             segments = cast(list[dict[str, Any]], result["segments"])  # untyped in mlx_whisper
-            return [(s["start"], s["end"], s["text"]) for s in segments]
+            if not words:
+                return [(float(s["start"]), float(s["end"]), s["text"]) for s in segments]
+            return [
+                (
+                    float(s["start"]),
+                    float(s["end"]),
+                    s["text"],
+                    [(float(w["start"]), float(w["end"]), w["word"]) for w in s.get("words", [])],
+                )
+                for s in segments
+            ]
 
         return self._thread.submit(run).result()
 

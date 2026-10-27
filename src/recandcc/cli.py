@@ -284,7 +284,11 @@ def cmd_autostart(args) -> int:
         autostart.disable()
     if args.action in ("on", "off"):
         load_config(CONFIG_PATH)  # creates the file on first run
-        save_keys(CONFIG_PATH, {"autostart": args.action == "on"})  # keeps other hand edits
+        try:
+            save_keys(CONFIG_PATH, {"autostart": args.action == "on"})  # keeps other hand edits
+        except OSError as e:  # incl. ConfigLockTimeout
+            print(f"Can't save the setting: {type(e).__name__}", file=sys.stderr)
+            return 1
     print(f"Launch at login: {autostart.describe()}")
     return 0
 
