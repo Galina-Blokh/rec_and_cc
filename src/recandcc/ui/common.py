@@ -286,6 +286,10 @@ def _privatize_new_folder(path: Path) -> None:
         log.debug("could not make the new transcripts folder private")
 
 
+# transcription keys a hand edit applies live (models and device need a restart)
+RELOADED_TRANSCRIPTION_KEYS = ("keep_audio", "audio_retention_days", "speaker_names")
+
+
 class Controller:
     _summaries_lock = threading.Lock()  # creating the SummaryQueue (class-wide: test fakes)
 
@@ -309,6 +313,8 @@ class Controller:
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
         self._save_lock = threading.Lock()  # menu writes to config.toml
+        self._dirty_lock = threading.Lock()  # guards _dirty (a leaf lock: nothing nested)
+        self._dirty: dict[str, int] = {}  # dotted key -> menu saves not yet written
         self._settings_lock = threading.Lock()  # one settings window at a time
         self._lang_lock = threading.Lock()  # transcription.languages + its raw spelling
         self._summaries = None  # SummaryQueue, created on the first summary
@@ -899,32 +905,89 @@ class Controller:
 
     def _maybe_reload_config(self) -> None:
         """Apply edits made to config.toml by hand (detection settings, output dir, hotkey,
-        languages). Under ``_save_lock`` so a menu write never interleaves with the read."""
+        languages, keep_audio, audio_retention_days, speaker_names, live_captions, [summary]).
+        Read and apply are one step under ``_save_lock``: a menu write never interleaves."""
+        hotkey_changed = False
         with self._save_lock:
             m = self._mtime()
             if m == self._config_mtime:
                 return
             self._config_mtime = m
+            before = self._reloadable(self.cfg)  # to spot menu changes made during the load
             try:
                 new = load_config()
             except Exception:
                 log.exception("config.toml is invalid; keeping current settings")
                 self.post_notice("Settings not applied", "config.toml could not be parsed")
                 return
-        was_listening = self.cfg.detection.room_listening
-        for f in fields(new.detection):
-            setattr(self.cfg.detection, f.name, getattr(new.detection, f.name))
-        if self.cfg.detection.room_listening and not was_listening:  # turned on by hand
-            self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
-        self.cfg.output_dir = new.output_dir
-        tr, new_tr = self.cfg.transcription, new.transcription
-        with self._lang_lock:  # both together: save() pairs them
-            tr._raw_languages = getattr(new_tr, "_raw_languages", None)  # type: ignore[attr-defined]
-            tr.languages = new_tr.languages
-        if new.hotkey != self.cfg.hotkey:
-            self.cfg.hotkey = new.hotkey
+            # Applied under the same lock: a menu or Settings-window save never runs between
+            # "file read" and "memory updated", so it can't write half-applied values. A field
+            # a menu click changed meanwhile keeps the click (its queued save writes it).
+            was_listening = self.cfg.detection.room_listening
+            now = self._reloadable(self.cfg)
+            with self._dirty_lock:
+                dirty = set(self._dirty)  # changed in the menu, save not written yet
+            for key, value in self._reloadable(new).items():
+                if now[key] != before[key] or self._dotted(key) in dirty:
+                    continue
+                owner, name = key
+                if owner == "languages":
+                    tr = self.cfg.transcription
+                    with self._lang_lock:  # both together: save() pairs them
+                        if (getattr(tr, "_raw_languages", None), tr.languages) == before[key]:
+                            tr._raw_languages = value[0]  # type: ignore[attr-defined]
+                            tr.languages = value[1]
+                else:
+                    if key == ("top", "hotkey") and value != now[key]:
+                        hotkey_changed = True
+                    setattr(self._reload_target(owner), name, value)
+            if self.cfg.detection.room_listening and not was_listening:  # turned on by hand
+                self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
+        if hotkey_changed:  # re-registering the listener may block: outside the lock
             self.apply_hotkey()  # reads cfg.hotkey under the hotkey lock
         log.info("config reloaded from %s", CONFIG_PATH)
+
+    @staticmethod
+    def _reloadable(cfg) -> dict:
+        """Every hot-reloadable setting as {(owner, name): value}, hotkey included."""
+        out: dict = {
+            ("top", "output_dir"): cfg.output_dir,
+            ("top", "live_captions"): cfg.live_captions,
+            ("top", "hotkey"): cfg.hotkey,
+        }
+        for f in fields(cfg.detection):
+            out[("detection", f.name)] = getattr(cfg.detection, f.name)
+        for f in fields(cfg.summary):
+            out[("summary", f.name)] = getattr(cfg.summary, f.name)
+        for name in RELOADED_TRANSCRIPTION_KEYS:
+            out[("transcription", name)] = getattr(cfg.transcription, name)
+        tr = cfg.transcription
+        out[("languages", "")] = (getattr(tr, "_raw_languages", None), list(tr.languages))
+        return out
+
+    @staticmethod
+    def _dotted(key: tuple[str, str]) -> str:
+        owner, name = key
+        if owner == "languages":
+            return "transcription.languages"
+        return name if owner == "top" else f"{owner}.{name}"
+
+    def _mark_dirty(self, keys, delta: int) -> None:
+        with self._dirty_lock:
+            for k in keys:
+                n = self._dirty.get(k, 0) + delta
+                if n > 0:
+                    self._dirty[k] = n
+                else:
+                    self._dirty.pop(k, None)
+
+    def _reload_target(self, owner: str):
+        return {
+            "top": self.cfg,
+            "detection": self.cfg.detection,
+            "summary": self.cfg.summary,
+            "transcription": self.cfg.transcription,
+        }[owner]
 
     # --- settings changed from the menu (main thread; saved on a worker thread)
     def toggle_language(self, code: str) -> None:
@@ -988,11 +1051,28 @@ class Controller:
         "transcription.audio_retention_days") to config.toml on a worker thread. Menu
         callbacks use this instead of ``cfg.save()``, which would overwrite hand edits."""
         kw = {"title": title}
-        t = threading.Thread(target=self.write_settings, args=keys, kwargs=kw, name="save-config")
+        self._mark_dirty(keys, 1)  # a config reload before the write must not undo the change
+
+        def run() -> None:
+            try:
+                self.write_settings(*keys, **kw)
+            finally:
+                self._mark_dirty(keys, -1)
+
+        t = threading.Thread(target=run, name="save-config")
         t.daemon = True
         t.start()
 
     def write_settings(self, *keys: str, title: str = "Settings") -> None:
+        """Blocking save of ``keys`` (see ``_write_settings``); marks them as pending so a
+        config reload meanwhile keeps the in-memory value."""
+        self._mark_dirty(keys, 1)
+        try:
+            self._write_settings(*keys, title=title)
+        finally:
+            self._mark_dirty(keys, -1)
+
+    def _write_settings(self, *keys: str, title: str = "Settings") -> None:
         """Blocking part of ``save_settings``: a read-modify-write of only ``keys``, so a hand
         edit made since the last reload is kept (and picked up by the next refresh). The values
         are read under ``_save_lock``: of two quick menu saves, the last one wins."""

@@ -8,8 +8,11 @@ window. Unknown keys are ignored, and missing keys take their default values.
 
 A menu change (or `recandcc autostart on/off`) writes only its own key, so other hand edits in
 the file are kept; like any save, it drops comments and rewrites the keys in a fixed order.
-Changes to `[detection]` are picked up while the app runs. Restart the app after changing
-`[transcription]` or `output_dir`.
+These hand edits are picked up while the app runs (a few seconds after you save the file):
+`[detection]`, `[summary]`, `output_dir`, `hotkey`, `live_captions`, and in `[transcription]`
+`languages`, `keep_audio`, `audio_retention_days` and `speaker_names`. Restart the app after
+changing any other `[transcription]` key (models, device, ...). Reload and menu saves never
+interleave, so a menu change made at the same moment is not lost.
 
 ## Top level
 
