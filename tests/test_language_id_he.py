@@ -1,8 +1,9 @@
 """Per-region language ID with Hebrew: smoothing rules on fake confidences (fast), and a slow
 accuracy check of the real small language-ID model on the synthetic he/en/ru `say` set.
 
-Run slow: uv run pytest -m slow tests/test_language_id_he.py -v -s
-Uses only models already on disk (skips otherwise); never downloads.
+Run slow: uv run pytest -m slow -rs tests/test_language_id_he.py -v -s
+Uses only models already on disk and never downloads; when the model or a `say` voice is
+missing it skips with the reason (shown by `-rs`).
 
 Stories: US-19.
 """
@@ -60,7 +61,6 @@ def test_en_ru_smoothing_is_the_same_with_hebrew_in_the_language_list():
     assert smooth_languages(regions, without_he, MIN_LANGUAGE_CONFIDENCE) == expected
 
 
-
 def test_a_real_hebrew_region_does_not_change_its_en_ru_neighbours():
     """With a region where Hebrew clearly wins, that region becomes 'he' and the en/ru regions
     around it keep the labels they get without 'he' configured."""
@@ -76,6 +76,7 @@ def test_a_real_hebrew_region_does_not_change_its_en_ru_neighbours():
     assert smooth_languages(regions, with_he, MIN_LANGUAGE_CONFIDENCE) == ["ru", "he", "en"]
     smoothed_without = smooth_languages(regions, without_he, MIN_LANGUAGE_CONFIDENCE)
     assert [smoothed_without[0], smoothed_without[2]] == ["ru", "en"]
+
 
 def test_language_id_is_restricted_to_the_configured_languages():
     probs = [("en", 0.2), ("ru", 0.1), ("he", 0.3), ("ar", 0.35), ("yi", 0.05)]

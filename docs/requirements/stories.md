@@ -218,7 +218,9 @@ while I decide.*
   Hebrew/English correctly; en/ru lines and `transcript.json` are unchanged.
 - **Given** the three languages, **then** per-region language ID is at least 95% correct on the
   synthetic he/en/ru set, and a short region with low confidence takes its neighbour's
-  language (en/ru behaviour is the same with or without `he`).
+  language (en/ru behaviour is the same with or without `he`). This is checked on synthetic
+  TTS only; accuracy on real Hebrew recordings is still open until the consented set has
+  Hebrew (#13).
 - **Given** `"iw"` or an unknown code in `languages`, **then** it is mapped to `he` or
   dropped with a log warning.
 - **Given** the menu **Languages** (English, Russian, Hebrew, Any language), **when** I tick
