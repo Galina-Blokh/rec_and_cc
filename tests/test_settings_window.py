@@ -357,6 +357,21 @@ def test_extra_languages_pass_through(tmp_path, monkeypatch):
 @mac_only
 def test_closing_before_the_window_starts_kills_it(tmp_path, monkeypatch):
     ctrl, _ = make_ctrl(tmp_path, monkeypatch)
+    fake_helper(tmp_path, monkeypatch, "import time\ntime.sleep(60)\n")
+    settings_window.close_settings()
+    assert settings_window.run_settings(ctrl.cfg) is None
+    assert settings_window._proc is None  # the stub helper was never even spawned
+
+
+@mac_only
+def test_closing_before_the_window_starts_with_the_real_helper(tmp_path, monkeypatch):
+    from recandcc.native import HelperNotFoundError, find_helper
+
+    try:
+        find_helper()
+    except HelperNotFoundError:
+        pytest.skip("rcc-audiotap not built (run native/macos/build.sh)")
+    ctrl, _ = make_ctrl(tmp_path, monkeypatch)
     settings_window.close_settings()
     assert settings_window.run_settings(ctrl.cfg) is None
 
