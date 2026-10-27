@@ -147,7 +147,7 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   to be transcribed. macOS menu only for now.
 - **Export latest transcript (DOCX + PDF)**: writes `transcript.docx` and `transcript.pdf`
   next to the newest transcript. Same as `recandcc export`. If the session has a
-  `summary.md`, the summary and action items come first. The export renders the summary's
+  `summary.md`, the summary and action items come first (their freshness follows the transcript text, start/end/text, not file times, so speaker renames and call-app names keep them; deleting `.summary-source` falls back to the file-time rule, which also applies to sessions summarised before this version). The export renders the summary's
   headings, bullets, numbered items and notes (Hebrew headings follow the text, right to left).
 - **Meeting notes…**: your past sessions, newest first, with title (the app that triggered
   it, or one you gave it), date and time, duration, speakers, languages and whether it is
@@ -278,8 +278,8 @@ the transcript is final, and waits while you are recording, so captions are neve
 sent anywhere. It is a draft: check names and dates against the transcript. On Windows, or
 offline before the model is downloaded, the summary is skipped with a notice. It waits for
 the speaker labels (a slow diarization delays it), a summary cut short by quitting is redone
-at the next start (a `.summary-pending` marker in the session folder), and after
-`recandcc name-speaker` the app redoes an existing `summary.md` with the new name once idle.
+at the next start (a `.summary-pending` marker in the session folder; a `.summary-source` file records a fingerprint of the transcript text the summary was made from), and after
+`recandcc name-speaker` the app redoes an existing `summary.md` with the new name once idle. Renaming a speaker in the menu, or call-app names, keeps the existing summary, whose text may still mention the old label. Old summaries are not given a fingerprint afterwards: one computed now could describe a transcript that already differs from what the summary was made from.
 
 ## Command line
 
