@@ -359,8 +359,10 @@ def test_closing_before_the_window_starts_kills_it(tmp_path, monkeypatch):
     ctrl, _ = make_ctrl(tmp_path, monkeypatch)
     fake_helper(tmp_path, monkeypatch, "import time\ntime.sleep(60)\n")
     settings_window.close_settings()
+    spawned = []
+    monkeypatch.setattr(settings_window.subprocess, "Popen", lambda *a, **k: spawned.append(a))
     assert settings_window.run_settings(ctrl.cfg) is None
-    assert settings_window._proc is None  # the stub helper was never even spawned
+    assert spawned == []  # quit came first: the stub helper was never even started
 
 
 @mac_only
