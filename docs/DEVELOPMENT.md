@@ -44,7 +44,7 @@ src/recandcc/
   autostart.py cli.py logging_setup.py
 native/macos/AudioTap/          SwiftPM: rcc-audiotap (monitor/capture/permissions/hotkey) + RecAndCC launcher
 tests/                          pytest suite
-scripts/                        dev demos (captions_demo.py)
+scripts/                        dev tools (captions_demo.py, eval.py)
 docs/                           this documentation
 ```
 
@@ -106,6 +106,8 @@ uv run ruff check . && uv run ruff format --check src tests
   (debounce, ask/always/ignore/timeout, stop conditions) run in milliseconds.
 - **Recorder tests** feed synthetic sine/silence sources.
 - **Transcription unit tests** use a fake model. The `slow` test runs real inference.
+- **Accuracy on real speech** (WER, language ID, DER, RTF) is measured with
+  `scripts/eval.py` on a local consented set; see [EVALUATION.md](EVALUATION.md).
 - **`test_mac_native.py`** runs only on macOS when `bin/rcc-audiotap` exists. It plays
   audio with `afplay`/`say` and checks that it is detected and captured.
 - **Traceability:** each test file's docstring names the user stories it covers
