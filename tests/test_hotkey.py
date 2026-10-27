@@ -348,3 +348,33 @@ def test_real_helper_reports_taken():
     finally:
         first.close()
     assert errors == ["taken"]
+
+
+def test_overlapping_applies_register_exactly_one_listener(tmp_path, monkeypatch):
+    import threading
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    ctrl, _ = make_ctrl(tmp_path)
+    ctrl.cfg.hotkey = "<cmd>+<shift>+r"
+    made: list[FakeListener] = []
+    start = threading.Barrier(2)
+
+    def factory(*a):
+        made.append(FakeListener(*a))
+        return made[-1]
+
+    def apply():
+        start.wait()
+        ctrl.apply_hotkey(factory=factory)  # startup and a config reload at the same time
+
+    threads = [threading.Thread(target=apply) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    assert [m.closed for m in made] == [False]  # one registration, nothing leaked
+    ctrl.apply_hotkey(factory=factory)  # unchanged: a no-op
+    assert len(made) == 1
+    ctrl.cfg.hotkey = "<ctrl>+<alt>+f5"
+    ctrl.apply_hotkey(factory=factory)
+    assert made[0].closed and not made[1].closed and len(made) == 2

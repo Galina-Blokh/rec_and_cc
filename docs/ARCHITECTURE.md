@@ -219,6 +219,29 @@ toggle goes through `Controller.set_room_listening`, which explains the always-o
 indicator, battery and consent each time it is turned on; the same notice appears at every
 start with room listening on and when a hand edit of `config.toml` turns it on.
 
+### Sensitivity: thresholds scaled, not a new trigger
+`sensitivity.py` maps `outside_sensitivity` / `inside_sensitivity` (0–100, unset = off) to the
+existing thresholds with pure functions (#7). Inside scales `min_active_s`, which `tick()`
+reads every poll. Outside scales `room_speech_s`, widens the window so that speech is at most
+half of it (every setting stays reachable by a real conversation) and adds a noise-floor
+margin. `RoomMonitor` gets the mapping as its `thresholds` callable and reads it on every VAD
+step, so a preset change applies without reopening the mic and `room.py` doesn't depend on
+`sensitivity.py`. The gate (`room.NoiseFloor`) runs on the `room-vad` worker before the VAD,
+per ~0.5 s step: the step's VAD speech counts in full if the 90th percentile of its 32 ms
+levels is at least the margin (12 dB at 0 down to 9 dB at 100) above the floor, otherwise
+not at all and Silero is skipped. Per step, not per window, so the dips between syllables
+don't cut a 65% conversation below the threshold. The floor is the 35th percentile of the
+per-32 ms levels of the last 20 s, independent of the VAD: a conversation is at the floor over
+half the time (pauses, syllable gaps), chatter of two or more people much less, so it sits
+under a conversation but on top of babble. It falls within a few quiet seconds and rises
+slowly; it restarts from the last 3 s when even their 30th percentile is more than half a
+margin above it (carried into a louder place), is cleared when the mic opens, and when
+`_on_frames` sees a wall-clock gap of over 5 s (sleep/wake). Outside a session that gap also drops the pre-roll and the speech history before the new block, so a session starting on wake never replays or triggers on pre-sleep audio; the floor reset is a marker through the VAD queue, so the callback never blocks. `reset()`, which the engine calls every tick while an app does audio, clears the floor in queue order too, so speaker bleed from playback is never learnt. Until 3 s of history exist nothing counts. The gate only decides what starts a session: while a room session's tap is attached, the worker skips it and freezes the floor, so the silence stop (`seconds_since_speech`) is plain VAD, as with no sensitivity set. The constants were
+tuned on seeded syllabic speech, a brown-noise fan and 2/4/8-talker babble
+(`test_sensitivity.py`). A room session's recorder replays the source's own pre-roll length
+(`_Tap.preroll_s`) to live transcription. Unset keeps every code path as it was.
+Not yet: live level meters, caption priority by sensitivity.
+
 ### Two tracks → speaker labels for free
 Mic → `Me`, system → `Others`. A mic track that joins mid-session (a media recording upgraded
 to a call) starts with silence up to that moment, so both tracks share one timeline. If you use speakers instead of headphones, the mic also picks
@@ -267,6 +290,17 @@ are deleted only after that, if `keep_audio = false`). No WAV (deleted) or `diar
 `platformdirs.user_cache_dir("RecAndCC")/models`; if that fails (offline) diarization is
 skipped, retried at most every 10 minutes, and transcripts keep `Others`. Once it is on
 disk, nothing touches the network (tested with all network access blocked).
+
+**Word-level split.** Whisper segments can span a speaker change. Opt-in
+(`split_on_speaker_change = false` by default, like `diarize_overlap`: word timing costs CPU
+time and is unmeasured). On the batch path (`live = false`, CLI, re-queue) the faster-whisper
+backend runs with word timestamps (requested only for the diarized tracks, decided once per
+session in `_word_tracks` with a single model-on-disk check; never for live phrases, whose
+latency matters, and never on MLX: its word timing needs numba and scipy, see
+ADR 0011), `merge.split_on_speaker_change` cuts a segment at the word boundary where the
+turn-dominant speaker changes, before `label_speakers`. Runs under 1 s and under 3 words are
+absorbed by neighbours; text is rebuilt from the words; segments without words and `Me` are
+untouched. Words live in `Segment.words` (memory only, not in `transcript.json`).
 
 **Speaker names (opt-in, `speaker_names`, `voices.py`).** Diarization also returns each
 speaker's centroid (unit mean of its window embeddings). With the option on, the final pass
@@ -317,6 +351,57 @@ plus ~0.16 s of language ID. CPU-only machines (Windows, `backend = "faster-whis
 `N = max(1, min(4, cores // 4))` workers × `cores // N` threads, float32 on macOS / int8
 elsewhere; CPU numbers for other worker splits are in git history (docs/ARCHITECTURE.md
 before the GPU backend).
+
+### Names from the call app (opt-in, macOS)
+
+`participants.py` + `transcribe/callnames.py`, helper subcommands `ax-status` and
+`participants` (`Accessibility.swift`). Concurrency: one daemon thread per recorded call session
+(started by the recorder only for call sessions with `names_from_call_app` and
+`speaker_names`; never on audio or engine threads, never under the engine lock), one helper
+process per ~15 s sample. `Recorder.stop()` signals the sampler before flushing and joins it
+(3 s at most) after releasing its lock, then keeps the union of names in the owner-only voices
+store (`voices/sessions/<hash>.names.json`; not in `session.json`, because the session folder may
+sync to a cloud). After the transcript is written the transcriber relabels one speaker only
+when it is certain (`callnames.plan`: name count equals non-`Me` speaker count, voice-matched
+speakers match names by shared word, one `Speaker N` and one name left, no disagreeing
+self-introduction). It rewrites the transcript only and never creates a voice profile from a
+call-app name. The menu toggle checks Accessibility trust on a worker thread and writes only
+its own key to `config.toml`. Helper runs are killed (and waited for) when the session stops. Only Zoom, new Teams and browser windows titled as a Meet/Teams/Zoom page are walked; a name must be in two samples in a row before it is kept (and kept after it scrolls out of view). With more than one call-titled browser window nothing is read from browsers (fail closed).
+
+Whose Accessibility grant is used? Checked on a Mac with `rcc-audiotap ax-status` started from
+Terminal while watching `log show --predicate 'subsystem == "com.apple.TCC"'`: tccd logged
+`Handling access request to kTCCServiceAccessibility, from Sub:{com.apple.Terminal}
+Resp:{identifier=com.apple.Terminal, ...}` for the helper process
+(`identifier=com.gblokh.recandcc.audiotap`). So the decision is made for the *responsible
+process* that spawned the helper (here Terminal, which had no grant, so the answer was
+"untrusted"), not for the helper binary. When RecAndCC.app spawns the helper the user therefore
+grants **RecAndCC** in System Settings > Accessibility, and a stranger process that runs
+`rcc-audiotap` from its own parent is judged by that parent's grant, not RecAndCC's. As defense
+in depth `participants` also refuses unless `--parent-pid` equals its real parent (a Python or
+RecAndCC process); this is not a security boundary, since any same-user process can run
+RecAndCC's Python. The same log shows `ax-status` only does a preflight (`preflight=true`),
+so it never prompts.
+
+Accessibility is only ever *checked* (`AXIsProcessTrusted`); the prompting API is never
+called (a test greps the Swift sources for it). The sole entry point towards the permission is
+the menu action, which shows a dialog and opens the Accessibility pane.
+
+Investigation (what the tree exposes). Read-only, from the Accessibility hierarchy of the
+app's windows; **not verified against live Zoom/Teams/Meet in this change** (no call app was
+available to the author), so treat the details as expected behaviour to confirm:
+
+| App | Where the names are | Needs open | Reliability |
+|---|---|---|---|
+| Zoom (native) | A separate "Participants" window (also a panel in the main window): an `AXTable`/`AXOutline` with one `AXRow` per person; the row's text is "Name" or "Name, Computer audio muted…" | the Participants panel | good; names can be shortened or carry "(Host)", "(Me)" suffixes |
+| Microsoft Teams (new Teams, WebView2) | The "People" pane: an `AXList` of `AXListItem`s inside web content; only exposed when Teams' accessibility is on (it is usually when VoiceOver/AX clients are active) | the People pane | medium; the web tree is virtualized and labels change between releases |
+| Google Meet (Chrome, Safari) | "People" side panel: `AXList` named "Participants" of `AXListItem`/`AXGroup` with `AXStaticText`; Chrome builds its web accessibility tree only after an AX client appears, so the first sample may be empty | the People panel | medium; same virtualization caveat, long lists show only visible rows |
+
+The helper therefore uses no app-specific selectors: it looks for a list-like element whose
+title/description mentions participants/people/attendees (also ru/he words) and reads the first
+text of each row (bounded: 4000 nodes, 3 s). No list means no names. The list does not say
+who is speaking, so several unknown speakers cannot be matched to several names; active-speaker
+highlighting could be a follow-up. The user's own entry ("(Me)", "(You)") and role suffixes are
+dropped; names also never override `Me`.
 
 ## Session lifecycle
 
