@@ -81,6 +81,14 @@ loss of accuracy in the final transcript too. Sessions recorded with `live = fal
 left untranscribed when the app quit, and `recandcc transcribe` always use the full
 post-session pass.
 
+## `[summary]`
+
+| Key | Default | Description |
+|---|---|---|
+| `enabled` | `false` | After each session's final transcript, write `summary.md` next to `transcript.md`: a short summary and an **Action items** list, in the meeting's main language (English, Russian and Hebrew headings; other languages get English headings). Runs a local LLM through mlx-lm on its own background thread, never while a recording is in progress (it waits, and pauses between chunks if a recording starts), Apple silicon only; a "Downloading the summary model" notice is shown before the one-time download; elsewhere, or when the model is missing and can't be downloaded (offline), the summary is skipped with a log line and a one-time "Summary skipped" notice. Long meetings are summarised in chunks and then merged. `recandcc summarize <session_dir>` writes one on demand, also when this is `false`. Summaries are drafts from a small model: check names and dates against the transcript |
+| `model` | `"mlx-community/Qwen2.5-3B-Instruct-4bit"` | mlx-lm model: a Hugging Face repo id or a local path. The default (~1.7 GB, ~2 GB RAM while it runs) is pinned to an exact repo commit in [`revisions.py`](../src/recandcc/transcribe/revisions.py) and downloaded once on first use, then loaded from disk without the network; another repo needs `transcription.allow_unpinned_models` to download |
+| `max_tokens` | `400` | Longest generated answer (the summary, the action list, each chunk's notes) |
+
 ## Example
 
 ```toml
@@ -99,4 +107,7 @@ ignore_apps = ["com.spotify.client", "com.apple.music", "coreaudiod", "recandcc"
 model = "large-v3-turbo"
 languages = ["en", "ru"]
 keep_audio = false
+
+[summary]
+enabled = true
 ```
