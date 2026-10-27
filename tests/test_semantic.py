@@ -1661,6 +1661,7 @@ def _reload_ctrl(cfg, new, sync_index=None):
         _lang_lock=threading.Lock(),
         _dirty_lock=threading.Lock(),
         _dirty={},
+        _unsaved=set(),
         _config_mtime=-1.0,
         _mtime=lambda: 1.0,
         post_notice=lambda *a: None,
