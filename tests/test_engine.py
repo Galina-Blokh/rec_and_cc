@@ -1,4 +1,4 @@
-"""Stories: US-01, US-02, US-03, US-04, US-05, US-06, US-07, US-16, US-17."""
+"""Stories: US-01, US-02, US-03, US-04, US-05, US-06, US-07, US-16, US-17, US-22."""
 
 import shutil
 from pathlib import Path
@@ -869,3 +869,139 @@ def test_save_cut_short_keeps_the_previous_session_json(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         s.save()
     assert SessionInfo.load(tmp_path).trigger_app is None and _no_temp(tmp_path)
+
+
+# --- room listening ----------------------------------------------------------------------
+class FakeRoom:
+    def __init__(self):
+        self.running = self.active = self.fail = False
+        self.opens: list[tuple] = []
+        self.closes = 0
+
+    def start(self, speech_s, window_s):
+        if self.fail:
+            raise OSError("no mic")
+        self.opens.append((speech_s, window_s))
+        self.running = True
+
+    def stop(self):
+        self.closes += self.running
+        self.running = self.active = False  # a reopened monitor starts from a fresh window
+
+
+def _room_harness(mode=Mode.AUTO, **det_kw):
+    h = _upgrade_harness() if mode == Mode.AUTO else Harness(mode)
+    for k, v in {"room_listening": True, **det_kw}.items():
+        setattr(h.cfg.detection, k, v)
+    h.room = h.eng.room = FakeRoom()
+    start = h.rec.start
+
+    def start_checked(kind, app=None):
+        assert not h.room.running, "the room mic must be closed before the recorder opens one"
+        return start(kind, app)
+
+    h.rec.start = start_checked
+    return h
+
+
+def test_room_listening_off_never_opens_the_mic():
+    h = _room_harness(room_listening=False)
+    h.room.active = True
+    h.run(30)
+    assert h.room.opens == [] and h.rec.starts == []
+    h.cfg.detection.room_listening = True
+    h.run(2)
+    assert h.room.opens == [(6.0, 15.0)]
+    h.cfg.detection.room_listening = False  # turned off while listening: the mic closes
+    h.run(2)
+    assert not h.room.running and h.room.closes == 1
+
+
+def test_room_speech_starts_a_room_session_and_hands_the_mic_over():
+    h = _room_harness()
+    h.run(2)
+    assert h.room.running and h.status == IDLE
+    h.room.active = True
+    h.eng.tick()
+    assert h.rec.starts == [(TriggerKind.ROOM, "Room")]
+    assert h.eng.state.kind == TriggerKind.ROOM and not h.room.running
+    h.run(120)  # no app to go inactive: only silence stops a room session
+    assert h.status == RECORDING and not h.room.running
+    h.rec.silence = 200
+    h.eng.tick()
+    assert h.status == IDLE and h.rec.stops == 1 and len(h.q.submitted) == 1
+    assert h.room.running  # listening again
+    h.rec.silence = 0
+    h.room.active = True  # a new conversation right after: not suppressed
+    h.eng.tick()
+    assert len(h.rec.starts) == 2
+
+
+def test_apps_take_precedence_over_room_speech():
+    h = _room_harness()
+    h.mon.procs = [ZOOM]
+    h.run(4)
+    assert h.rec.starts == [(TriggerKind.CALL, "zoom.us")] and not h.room.running
+    h.mon.procs = []
+    h.run(25)  # the call ended; the room monitor reopened
+    assert h.status == IDLE and h.room.running
+    h.room.active = True
+    h.eng.tick()
+    assert h.rec.starts[-1] == (TriggerKind.ROOM, "Room")
+    h.mon.procs = [ZOOM]  # a call starts during the room session: follow the call
+    h.run(4)
+    assert h.rec.upgrades == ["zoom.us"] and h.eng.state.kind == TriggerKind.CALL
+    assert h.rec.stops == 1  # same session continues
+    h.mon.procs = []
+    h.run(25)  # now the call's inactivity rule applies
+    assert h.status == IDLE and h.rec.stops == 2
+
+
+def test_stopped_room_session_stays_stopped_while_the_talk_goes_on():
+    h = _room_harness()
+    h.run(1)
+    h.room.active = True
+    h.eng.tick()
+    assert h.status == RECORDING
+    h.eng.stop()
+    h.eng.tick()
+    assert h.status == IDLE and h.room.running
+    for _ in range(40):
+        h.room.active = True
+        h.run(1)
+    assert len(h.rec.starts) == 1
+    h.room.active = False
+    h.run(25)  # the room was quiet for stop_after_inactive_s
+    h.room.active = True
+    h.eng.tick()
+    assert len(h.rec.starts) == 2
+
+
+def test_room_listening_follows_modes_and_mic_policy():
+    h = _room_harness(Mode.ASK)
+    h.run(1)
+    h.room.active = True
+    h.eng.tick()
+    assert h.prompts == [("Room", TriggerKind.ROOM)] and h.status == RECORDING
+    h.eng.respond("ignore")
+    h.eng.tick()
+    assert h.status == IDLE
+    h.eng.set_mode(Mode.OFF)
+    h.run(2)
+    assert not h.room.running
+    h.eng.set_mode(Mode.AUTO)
+    h.cfg.detection.record_mic = "never"  # a room session without the mic records nothing
+    h.run(2)
+    assert not h.room.running and len(h.rec.starts) == 1
+
+
+def test_room_mic_failure_backs_off_and_shutdown_closes_it():
+    h = _room_harness()
+    h.room.fail = True
+    h.run(30)
+    assert h.room.opens == [] and not h.room.running
+    h.room.fail = False
+    h.run(31)
+    assert len(h.room.opens) == 1 and h.room.running
+    h.eng.shutdown()
+    assert not h.room.running

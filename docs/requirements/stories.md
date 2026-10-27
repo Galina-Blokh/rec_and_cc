@@ -27,6 +27,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-16 | Permissions set up from the app | ✅ |
 | US-17 | Always on, visible state | ✅ |
 | US-18 | Runs on Windows | 🟡 untested on hardware (#5) |
+| US-22 | Room listening (opt-in) | 🟡 no pre-roll, locked screen unverified (#2) |
 
 ---
 
@@ -172,3 +173,26 @@ while I decide.*
 - **Then** WASAPI loopback capture, pycaw detection, a tray icon and registry autostart
   implement the same interfaces; CI runs the fast suite on Windows.
 - **Not yet:** a real-hardware test pass, per-app capture, installer (#5).
+
+### US-22 Room listening (opt-in)
+*As the owner, I want a conversation next to the laptop recorded without pressing anything,
+so that in-person meetings are captured like calls.* (#2)
+
+- **Given** `room_listening = false` (the default), **then** the microphone is never opened
+  while nothing records.
+- **Given** room listening is on and nothing records, **when** speech totals `room_speech_s`
+  (6 s) within `room_window_s` (15 s), **then** a `room` session starts (mode `auto`), or
+  starts and asks whether to keep it (mode `ask`); short remarks don't trigger it.
+- **Then** the room monitor's mic is closed before the recorder opens its own and reopened
+  after the session; voice detection never runs on the audio callback thread.
+- **Given** an app session is recording or pending, **then** room speech starts nothing; a
+  call that starts during a room session turns it into that call's session.
+- **Given** a room session, **then** it stops after `stop_after_silence_s` of silence; after
+  a manual stop or a discard it doesn't restart until the room was quiet for
+  `stop_after_inactive_s`.
+- **Given** the menu item "Listen for conversations in the room", **then** it switches the
+  setting (saved) and turning it on explains the always-on mic indicator and consent.
+- **Then** nothing about the room audio is logged beyond on/off states, and nothing leaves
+  the device.
+- **Not yet:** pre-roll of the first sentence, a VAD-based stop, `Speaker N` labels on the
+  mic track, locked-screen and battery measurements.

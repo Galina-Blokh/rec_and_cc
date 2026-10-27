@@ -42,6 +42,7 @@ class TriggerKind(StrEnum):
     CALL = "call"
     MEDIA = "media"
     MANUAL = "manual"
+    ROOM = "room"  # people talking near the laptop, no app involved (room listening)
 
 
 @dataclass(frozen=True)
