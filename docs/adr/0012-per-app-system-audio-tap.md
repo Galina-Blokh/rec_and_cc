@@ -27,7 +27,7 @@ and stop during a session. Detection already groups them under one pattern (`eng
   the target at start, the per-app tap can't be created, the source can't be made, or
   `bin/rcc-audiotap` predates `--pid`/`--match` (probed once per build, so a stale helper
   doesn't leave `Others` silent). The helper prints `scope: app|all`, and session.json
-  records the effective scope (`metrics.recording.system_audio_scope`).
+  records the effective scope (`metrics.recording.system_audio_scope`): `all→app` when a call joined a room session and `Others` switched to the call app mid-session, which happens only once the helper has reported `scope: app` and its first audio block has arrived.
 - **Daemon-played call apps** (`recorder.DAEMON_PLAYED_APPS`): FaceTime's call audio comes
   from `avconferenced`, not FaceTime.app. A FaceTime session uses the global tap; a FaceTime
   call joining a per-app media session adds `avconferenced` to the tap. The global fallback
