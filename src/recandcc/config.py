@@ -201,7 +201,9 @@ class SummaryConfig:
     # one-time ~1.7 GB model download.
     enabled: bool = False
     model: str = DEFAULT_SUMMARY_MODEL  # pinned in transcribe/revisions.py, or a local path
-    max_tokens: int = 400  # longest generated answer (summary, action list, chunk notes)
+    # Longest generated answer (summary, action list, chunk notes); thinking models get
+    # summary.THINKING_TOKENS more for their thought block.
+    max_tokens: int = 400
     # Per-language summary model, e.g. {he = "mlx-community/gemma-4-e4b-it-4bit"}: a transcript
     # whose main language (most speech time) is listed is summarised by that model, all others
     # by `model`. {} = `model` for every language.

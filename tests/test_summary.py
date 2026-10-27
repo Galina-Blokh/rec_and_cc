@@ -69,21 +69,66 @@ def test_prompts_ask_for_the_meetings_language(lang, name):
         assert "(part 2 of 3)" in user["content"]
 
 
-def test_main_language_is_the_one_with_the_most_text():
-    segs = [seg("hello", "en"), seg("это длинная фраза по-русски", "ru"), seg("ok", "en")]
-    assert summary.main_language(segs) == "ru"
+def test_main_language_is_the_one_with_the_most_speech_time():
+    segs = [seg("hello", "en"), Segment(2, 9, "это фраза", "Me", "ru"), seg("ok", "en", t=9)]
+    assert summary.main_language(segs) == "ru"  # 7 s of Russian, 4 s of English
     assert summary.main_language([seg("x", "")]) == "en"
 
 
 GEMMA = "mlx-community/gemma-4-e4b-it-4bit"
 
 
-def test_spoken_language_is_the_one_with_the_most_speech_time():
-    long_he = Segment(0, 30, "כן", "Me", "he")  # few characters, much speech
-    segs = [long_he, seg("a much longer English sentence here", "en", t=40)]
-    assert summary.spoken_language(segs) == "he"
-    assert summary.main_language(segs) == "en"  # the output language is unchanged
-    assert summary.spoken_language([seg("x", "")]) == "en"
+def test_mixed_meeting_uses_one_language_for_model_prompt_and_headings(tmp_path, monkeypatch):
+    """Long Hebrew speech with few characters, plus a wordy English line: Hebrew wins for
+    the model and for the summary's language."""
+    seen = []
+
+    class Gen(FakeGen):
+        def __init__(self, model, allow_unpinned=False, on_download=None):
+            super().__init__()
+            seen.append(model)
+
+        def __call__(self, messages, max_tokens):
+            seen.append(messages[0]["content"])
+            return super().__call__(messages, max_tokens)
+
+    monkeypatch.setattr(summary, "MlxGenerator", Gen)
+    cfg = Config()
+    cfg.summary.language_models = {"he": GEMMA}
+    segs = [Segment(0, 30, "כן", "Me", "he"), seg("a much longer English sentence", t=40)]
+    text = summary.summarize_session(make_session(tmp_path, segs), cfg).read_text("utf-8")
+    assert seen[0] == GEMMA and "Always answer in Hebrew" in seen[1]
+    assert text.startswith("# סיכום")
+
+
+def test_routed_model_unavailable_falls_back_to_the_default(tmp_path, monkeypatch, caplog):
+    made = []
+
+    class Gen(FakeGen):
+        def __init__(self, model, allow_unpinned=False, on_download=None):
+            super().__init__()
+            self.model = model
+            made.append(model)
+
+        def __call__(self, messages, max_tokens):
+            if self.model == GEMMA:  # offline, or an mlx-lm without Gemma 4
+                raise summary.ModelUnavailable("the summary model is not on disk")
+            return super().__call__(messages, max_tokens)
+
+    monkeypatch.setattr(summary, "MlxGenerator", Gen)
+    cfg = Config()
+    cfg.summary.language_models = {"he": GEMMA}
+    d = make_session(tmp_path, [Segment(0, 20, SPOKEN, "Me", "he")])
+    with caplog.at_level(logging.DEBUG, logger="recandcc"):
+        text = summary.summarize_session(d, cfg).read_text("utf-8")
+    assert made == [GEMMA, DEFAULT_SUMMARY_MODEL]
+    assert "by Qwen2.5-3B-Instruct-4bit;" in text
+    assert f"summary model {GEMMA} unavailable; using {DEFAULT_SUMMARY_MODEL}" in caplog.text
+    assert SPOKEN not in caplog.text
+    cfg.summary.language_models = {}  # the default itself unavailable: skipped as before
+    monkeypatch.setattr(cfg.summary, "model", GEMMA)
+    with pytest.raises(summary.ModelUnavailable):
+        summary.summarize_session(d, cfg)
 
 
 @pytest.mark.parametrize(
@@ -94,7 +139,7 @@ def test_spoken_language_is_the_one_with_the_most_speech_time():
         ({"he": GEMMA}, "en", DEFAULT_SUMMARY_MODEL),
     ],
 )
-def test_summary_model_is_routed_by_the_main_spoken_language(models, lang, expected):
+def test_summary_model_is_routed_by_the_main_language(models, lang, expected):
     cfg = Config()
     cfg.summary.language_models = models
     segs = [seg("hello", "en", t=0), Segment(5, 6, "שלום", "Me", lang)]
@@ -140,12 +185,15 @@ def test_gemma_thinking_is_stripped(raw, answer):
     assert summary.strip_thinking(raw) == answer
 
 
-def _fake_mlx_lm(monkeypatch, text: str, seen: list, thinking: bool):
-    """Fake mlx_lm that streams ``text``; returns a fake tokenizer (no real model loads)."""
+def _fake_mlx_lm(monkeypatch, text: str | list[str], seen: list, thinking: bool):
+    """Fake mlx_lm that streams ``text`` (or each of a list of texts, one per generation);
+    returns a fake tokenizer (no real model loads)."""
+    texts = [text] if isinstance(text, str) else list(text)
 
     def stream_generate(model, tokenizer, prompt, max_tokens, **kw):
         seen.append(max_tokens)
-        return iter(types.SimpleNamespace(text=c) for c in [text[:5], text[5:]])
+        t = texts.pop(0) if len(texts) > 1 else texts[0]
+        return iter(types.SimpleNamespace(text=c) for c in [t[:5], t[5:]])
 
     def apply_chat_template(messages, add_generation_prompt, **kw):
         seen.append(kw)
@@ -180,6 +228,24 @@ def test_generator_gives_a_thinking_model_room_and_strips_it(
     gen._model, gen._tokenizer = object(), _fake_mlx_lm(monkeypatch, RAW_GEMMA, calls, thinking)
     assert gen([{"role": "user", "content": "x"}], 400) == answer
     assert calls == seen
+
+
+def test_a_cut_off_thought_is_retried_once_without_thinking(monkeypatch, caplog):
+    cut = f"<|channel>thought\n{SPOKEN} and still thinking"
+    budget = 400 + summary.THINKING_TOKENS
+    for second, expected in [("Plain answer.", "Plain answer."), (cut, None)]:
+        calls: list = []
+        gen = summary.MlxGenerator(GEMMA)
+        gen._model, gen._tokenizer = object(), _fake_mlx_lm(monkeypatch, [cut, second], calls, True)
+        with caplog.at_level(logging.DEBUG, logger="recandcc"):
+            if expected is None:  # cut off again: no answer at all
+                with pytest.raises(summary.SummaryUnavailable, match="ran out of tokens"):
+                    gen([{"role": "user", "content": "x"}], 400)
+            else:
+                assert gen([{"role": "user", "content": "x"}], 400) == expected
+        assert calls == [{"enable_thinking": True}, budget, {"enable_thinking": False}, 400]
+    assert "thought cut off; retrying without" in caplog.text
+    assert SPOKEN not in caplog.text
 
 
 def test_thought_cut_off_writes_no_summary(tmp_path, caplog):

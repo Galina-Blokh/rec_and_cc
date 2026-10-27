@@ -271,8 +271,10 @@ the speaker labels (a slow diarization delays it), a summary cut short by quitti
 at the next start (a `.summary-pending` marker in the session folder), and after
 `recandcc name-speaker` the app redoes an existing `summary.md` with the new name once idle.
 
-Qwen2.5 summarises Hebrew badly. For Hebrew meetings, route them to Gemma 4 (Apache-2.0),
-which handles English, Russian and Hebrew; meetings in other languages keep the default:
+Qwen2.5 summarises Hebrew badly. Route Hebrew meetings to Gemma 4 (Apache-2.0) instead: on
+our short test meetings, Gemma 4 E4B got the facts right in English, Russian and Hebrew, and
+the lighter E2B got the Hebrew facts right with one action item assigned to the wrong
+person. Meetings in other languages keep the default:
 
 ```toml
 [summary.language_models]
@@ -280,9 +282,10 @@ he = "mlx-community/gemma-4-e4b-it-4bit"   # ~5.1 GB once, ~5 GB RAM while it ru
 # he = "mlx-community/gemma-4-e2b-it-4bit" # lighter (~3.6 GB), nearly as good
 ```
 
-The model is picked by the language with the most speech time, downloaded once (pinned) on
-the first meeting that needs it, and freed after each summary. Gemma thinks before it answers,
-so these summaries are slower; on an 8 GB Mac use E2B.
+The language with the most speech time picks the model (and the summary's language). The
+model is downloaded once (pinned) on the first meeting that needs it, and freed after each
+summary; if it can't be downloaded or loaded, the default model writes that summary. Gemma
+thinks before it answers, so these summaries are slower; on an 8 GB Mac use E2B.
 
 ## Command line
 

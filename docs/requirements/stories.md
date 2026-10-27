@@ -339,7 +339,9 @@ its transcript, so that I know what was decided and who does what without reread
   the E2B model), **when** a meeting's main spoken language (most speech time) is Hebrew,
   **then** that pinned model writes its summary in Hebrew, loaded only then and freed
   afterwards (one summary model in memory at a time), with its thought block stripped; other
-  meetings, and everyone with the default `{}`, keep `summary.model`.
+  meetings, and everyone with the default `{}`, keep `summary.model`. If the routed model
+  can't be downloaded or loaded, `summary.model` writes that summary instead. The same
+  measure (most speech time) picks the summary's language and headings.
 - **Then** logs never contain transcript or summary text.
 - **Given** a 1-hour en/ru meeting on an M-series Mac, **then** the summary is ready within
   ~1–2 min, offline.

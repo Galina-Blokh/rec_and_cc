@@ -72,17 +72,13 @@ class SummaryUnavailable(RuntimeError):
     fixed reason without any transcript text."""
 
 
+class ModelUnavailable(SummaryUnavailable):
+    """This summary model can't be downloaded or loaded (another one may still work)."""
+
+
 def main_language(segments: list[Segment]) -> str:
-    """The language with the most text ("en" if none is known)."""
-    chars: dict[str, int] = {}
-    for s in segments:
-        if s.language:
-            chars[s.language] = chars.get(s.language, 0) + len(s.text)
-    return max(chars, key=lambda k: chars[k]) if chars else "en"
-
-
-def spoken_language(segments: list[Segment]) -> str:
-    """The language with the most speech time ("en" if none is known): picks the model."""
+    """The language with the most speech time ("en" if none is known). It picks both the
+    summary's language (prompt, headings) and its model (summary_model)."""
     secs: dict[str, float] = {}
     for s in segments:
         if s.language:
@@ -91,8 +87,8 @@ def spoken_language(segments: list[Segment]) -> str:
 
 
 def summary_model(cfg: Config, segments: list[Segment]) -> str:
-    """``summary.language_models`` entry of the main spoken language, else ``summary.model``."""
-    return cfg.summary.language_models.get(spoken_language(segments), cfg.summary.model)
+    """``summary.language_models`` entry of the main language, else ``summary.model``."""
+    return cfg.summary.language_models.get(main_language(segments), cfg.summary.model)
 
 
 def download_notice(model: str) -> str:
@@ -231,28 +227,42 @@ def summarize_session(
     Raises SummaryUnavailable if no model can run (nothing is written then). Without
     ``generate``, the routed model (summary_model) is loaded on first use and freed when done,
     so only one summary model is ever in memory; ``on_download(model)`` runs before its
-    one-time download. ``before_call`` runs before each model call."""
+    one-time download. A routed model that can't be downloaded or loaded falls back once to
+    ``summary.model``. ``before_call`` runs before each model call."""
     directory = Path(directory)
     data = json.loads((directory / JSON_NAME).read_text(encoding="utf-8"))
     segments = [Segment(**s) for s in data.get("segments", [])]
     model = summary_model(cfg, segments)
     t0 = time.monotonic()
-    owned = None
-    if generate is None:  # the real model, freed again after this session
-        hook = None if on_download is None else lambda: on_download(model)
-        generate = owned = MlxGenerator(model, cfg.transcription.allow_unpinned_models, hook)
-    gen: Generator = generate
 
-    def call(messages: Messages, max_tokens: int) -> str:
-        if before_call is not None:
-            before_call()
-        return gen(messages, max_tokens)
+    def run(gen: Generator) -> tuple[str, str, list[str]]:
+        def call(messages: Messages, max_tokens: int) -> str:
+            if before_call is not None:
+                before_call()
+            return gen(messages, max_tokens)
 
-    try:
-        language, summary, items = summarize(segments, call, cfg.summary.max_tokens)
-    finally:
-        if owned is not None:
+        return summarize(segments, call, cfg.summary.max_tokens)
+
+    def run_model(name: str) -> tuple[str, str, list[str]]:
+        notice = on_download
+        hook = None if notice is None else lambda: notice(name)
+        owned = MlxGenerator(name, cfg.transcription.allow_unpinned_models, hook)
+        try:  # the real model, freed again after this session
+            return run(owned)
+        finally:
             owned.close()
+
+    if generate is not None:
+        language, summary, items = run(generate)
+    else:
+        try:
+            language, summary, items = run_model(model)
+        except ModelUnavailable:
+            if model == cfg.summary.model:
+                raise
+            log.info("summary model %s unavailable; using %s", model, cfg.summary.model)
+            model = cfg.summary.model
+            language, summary, items = run_model(model)
     path = atomic_write(directory / SUMMARY_NAME, format_summary(language, summary, items, model))
     log.info(
         "summary of %s written: %d action item(s), %s, in %.1fs",
@@ -328,7 +338,7 @@ class MlxGenerator:
             path = local_model_path(self.model_name, self.allow_unpinned, self.on_download)
         except Exception as e:  # noqa: BLE001 - offline, unpinned, broken cache
             log.info("summary model %s unavailable: %s", self.model_name, type(e).__name__)
-            raise SummaryUnavailable("the summary model is not on disk or can't be loaded") from e
+            raise ModelUnavailable("the summary model is not on disk or can't be loaded") from e
         from mlx_lm import load  # pyright: ignore[reportMissingImports]
 
         try:
@@ -336,7 +346,11 @@ class MlxGenerator:
                 self._model, self._tokenizer = load(path)[:2]
         except Exception as e:  # noqa: BLE001 - e.g. a model type this mlx-lm doesn't know
             log.info("summary model %s failed to load: %s", self.model_name, type(e).__name__)
-            raise SummaryUnavailable("this mlx-lm can't load the summary model") from e
+            raise ModelUnavailable("this mlx-lm can't load the summary model") from e
+        thinks = getattr(self._tokenizer, "has_thinking", None)  # see __call__
+        if thinks is None:
+            log.warning("this mlx-lm doesn't say whether %s is a thinking model", self.model_name)
+        log.debug("summary model %s thinks: %s", self.model_name, thinks)
 
     def __call__(self, messages: Messages, max_tokens: int) -> str:
         if self._model is None:
@@ -350,32 +364,38 @@ class MlxGenerator:
 
         model: Any = self._model
         tokenizer: Any = self._tokenizer
-        # mlx-lm's own detection; False for the default Qwen2.5, whose prompt stays unchanged
-        thinking = getattr(tokenizer, "has_thinking", False) is True
-        kw = {"enable_thinking": True} if thinking else {}
-        if thinking:  # room for the thought block before the answer
-            max_tokens += THINKING_TOKENS
-        prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, **kw)
-        steps = stream_generate(
-            model,
-            tokenizer,
-            prompt,
-            max_tokens=max_tokens,
-            prefill_step_size=PREFILL_STEP,
-            logits_processors=make_logits_processors(repetition_penalty=1.1),
-        )
-        out = []
-        while True:
-            with MLX_LOCK:  # the prefill, then one token at a time
-                step = next(steps, None)
-            if step is None:
-                text = "".join(out)
-                if not thinking:
-                    return text.strip()
-                start = getattr(tokenizer, "think_start", None) or CHANNEL_START
-                end = getattr(tokenizer, "think_end", None) or CHANNEL_END
-                return strip_thinking(text, start, end)
-            out.append(step.text)
+
+        def generate(think: bool | None, budget: int) -> str:
+            kw = {} if think is None else {"enable_thinking": think}
+            prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, **kw)
+            steps = stream_generate(
+                model,
+                tokenizer,
+                prompt,
+                max_tokens=budget,
+                prefill_step_size=PREFILL_STEP,
+                logits_processors=make_logits_processors(repetition_penalty=1.1),
+            )
+            out = []
+            while True:
+                with MLX_LOCK:  # the prefill, then one token at a time
+                    step = next(steps, None)
+                if step is None:
+                    return "".join(out)
+                out.append(step.text)
+
+        # mlx-lm's own detection (TokenizerWrapper.has_thinking; load() warns if it is missing,
+        # since a thinking model would then get no extra budget and no strip). False for the
+        # default Qwen2.5, whose prompt and budget stay unchanged.
+        if getattr(tokenizer, "has_thinking", False) is not True:
+            return generate(None, max_tokens).strip()
+        start = getattr(tokenizer, "think_start", None) or CHANNEL_START
+        end = getattr(tokenizer, "think_end", None) or CHANNEL_END
+        try:  # room for the thought block before the answer
+            return strip_thinking(generate(True, max_tokens + THINKING_TOKENS), start, end)
+        except SummaryUnavailable:  # the thought ran out of tokens: once more without it
+            log.info("summary model %s: thought cut off; retrying without", self.model_name)
+            return strip_thinking(generate(False, max_tokens), start, end)
 
     def close(self) -> None:
         """Free the model, so its 2-5 GB don't stay resident between sessions."""
