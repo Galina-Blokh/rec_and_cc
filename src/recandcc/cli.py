@@ -37,17 +37,22 @@ class _SingleInstance:
             if sys.platform == "win32":
                 import msvcrt
 
+                # msvcrt locks from the current position, which "a+" puts at EOF:
+                # lock byte 0 so every instance contends for the same byte.
+                self._f.seek(0)
                 msvcrt.locking(self._f.fileno(), msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
 
                 fcntl.flock(self._f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._f.seek(0)
+            self._f.truncate()
+            self._f.write(str(os.getpid()))
+            self._f.flush()
         except OSError:
+            self._f.close()
+            self._f = None
             return False
-        self._f.seek(0)
-        self._f.truncate()
-        self._f.write(str(os.getpid()))
-        self._f.flush()
         return True
 
 
