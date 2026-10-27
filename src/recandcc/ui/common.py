@@ -364,6 +364,9 @@ class Controller:
     ):
         self.cfg = cfg
         self.events: queue.Queue[tuple] = queue.Queue()
+        notice = cfg.summary.notice
+        if notice:  # load_config(migrate=True) switched or kept an old-default 3B: once
+            self.post_notice("Summary model", notice)
         self._lock = threading.Lock()
         self._perm: dict[str, str] = {}
         self._recent: list[Path] = []
