@@ -32,7 +32,14 @@ from . import voices
 from .chunking import Chunk, find_speech, load_track, merge_labelled, slice_chunk
 from .diarize import Diarizer, Turn, label_speakers
 from .gpu import MlxWhisper, hf_cache_folder, use_gpu
-from .merge import ME, OTHERS, language_confidence, merge_tracks, smooth_languages
+from .merge import (
+    ME,
+    OTHERS,
+    language_confidence,
+    merge_tracks,
+    smooth_languages,
+    split_on_speaker_change,
+)
 from .output import write_outputs
 from .revisions import (
     UnpinnedModelError,
@@ -359,8 +366,10 @@ class Transcriber:
                 conf,
                 chunk.language,
             )
+        speaker = SPEAKERS[chunk.track]
+        words = speaker == OTHERS and self.cfg.diarize and self.cfg.split_on_speaker_change
         return self.transcribe_audio(
-            piece, chunk.start, SPEAKERS[chunk.track], lang, max_end=chunk.end
+            piece, chunk.start, speaker, lang, max_end=chunk.end, words=words
         )
 
     # -- building blocks (also used by LiveTranscriber) --------------------------------------
@@ -400,15 +409,17 @@ class Transcriber:
         beam_size: int = 5,
         max_end: float | None = None,
         wait_for_model: bool = True,
+        words: bool = False,
     ) -> list[Segment]:
         """Transcribe one piece of audio (<= 30 s) in a fixed language. Segment times are
         ``offset`` + position in the piece, clipped to ``max_end``. Blocking; call it from a
         pool worker (see ``submit``) to run pieces in parallel. ``language`` picks the model
         (cfg.language_models); ``wait_for_model=False`` uses the main model while that one is
-        still loading (live)."""
+        still loading (live). ``words``: keep word timings in ``Segment.words`` (faster-whisper
+        only; never requested from MLX, whose word timestamps need numba and scipy)."""
         model = self._model_for(language, wait_for_model)
         if isinstance(model, MlxWhisper):
-            pieces = model.transcribe(audio, language)  # GPU thread; greedy + fallback
+            pieces = [(a, b, t, []) for a, b, t in model.transcribe(audio, language)]
         else:
             segments, _ = model.transcribe(
                 audio,
@@ -416,11 +427,12 @@ class Transcriber:
                 vad_filter=False,
                 beam_size=beam_size,
                 condition_on_previous_text=False,
+                word_timestamps=words,
             )
-            pieces = [(s.start, s.end, s.text) for s in segments]
+            pieces = [(s.start, s.end, s.text, getattr(s, "words", None) or []) for s in segments]
         end_cap = max_end if max_end is not None else offset + len(audio) / SAMPLE_RATE
         out = []
-        for start, end, raw in pieces:
+        for start, end, raw, ws in pieces:
             text = raw.strip()
             if text:
                 out.append(
@@ -430,6 +442,10 @@ class Transcriber:
                         text=text,
                         speaker=speaker,
                         language=language,
+                        words=[
+                            (round(offset + w.start, 3), round(offset + w.end, 3), w.word)
+                            for w in ws
+                        ],
                     )
                 )
         return out
@@ -614,6 +630,8 @@ class Transcriber:
                 names = voices.match_profiles(centroids, voices.load_profiles())
             except Exception:  # noqa: BLE001 - names are optional; numbers still work
                 log.exception("session %s: could not match voice profiles", session.id)
+        if turns and self.cfg.split_on_speaker_change:
+            segments = split_on_speaker_change(segments, turns)
         out, labels = label_speakers(segments, turns or [], names=names)
         try:  # opt-in only, in the private voices folder: lets `name-speaker` name them later
             if centroids and labels and Path(session.directory).exists():

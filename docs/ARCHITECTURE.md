@@ -182,6 +182,14 @@ are deleted only after that, if `keep_audio = false`). No WAV (deleted) or `diar
 skipped, retried at most every 10 minutes, and transcripts keep `Others`. Once it is on
 disk, nothing touches the network (tested with all network access blocked).
 
+**Word-level split.** Whisper segments can span a speaker change. When the faster-whisper
+backend ran with word timestamps (requested only for `Others` while `diarize` and
+`split_on_speaker_change` are on, never on MLX: its word timing needs numba and scipy, see
+ADR 0011), `merge.split_on_speaker_change` cuts a segment at the word boundary where the
+turn-dominant speaker changes, before `label_speakers`. Runs under 1 s and under 3 words are
+absorbed by neighbours; text is rebuilt from the words; segments without words and `Me` are
+untouched. Words live in `Segment.words` (memory only, not in `transcript.json`).
+
 **Speaker names (opt-in, `speaker_names`, `voices.py`).** Diarization also returns each
 speaker's centroid (unit mean of its window embeddings). With the option on, the final pass
 names a speaker whose centroid matches a voice profile (cosine ≥ 0.6 and 0.1 ahead of the

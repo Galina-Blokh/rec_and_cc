@@ -106,3 +106,99 @@ def merge_tracks(me: list[Segment], others: list[Segment], dedupe: bool = True) 
     if dedupe:
         me = dedupe_echo(me, others)
     return sorted([*me, *others], key=lambda s: (s.start, s.end))
+
+
+# -- splitting a segment where the speaker changes ---------------------------------------------
+
+MIN_RUN_S = 1.0  # a run of one speaker shorter than this ...
+MIN_RUN_WORDS = 3  # ... and with fewer words than this is flicker, absorbed by its neighbours
+
+
+def _word_speakers(words: Sequence[tuple[float, float, str]], turns: Sequence) -> list[int]:
+    """Diarized speaker of each word: most overlap, else the turn nearest its middle."""
+    out = []
+    for ws, we, _ in words:
+        overlap: dict[int, float] = {}
+        for t in turns:
+            o = min(we, t.end) - max(ws, t.start)
+            if o > 0:
+                overlap[t.speaker] = overlap.get(t.speaker, 0.0) + o
+        if overlap:
+            out.append(max(overlap, key=lambda k: overlap[k]))
+        else:
+            mid = (ws + we) / 2
+            out.append(min(turns, key=lambda t: max(t.start - mid, mid - t.end, 0.0)).speaker)
+    return out
+
+
+def _runs(
+    words: Sequence[tuple[float, float, str]], who: Sequence[int]
+) -> list[list]:  # [speaker, first, last+1]
+    runs: list[list] = []
+    for i, k in enumerate(who):
+        if runs and runs[-1][0] == k:
+            runs[-1][2] = i + 1
+        else:
+            runs.append([k, i, i + 1])
+    while len(runs) > 1:
+
+        def length(r):
+            return words[r[2] - 1][1] - words[r[1]][0]
+
+        weak = [r for r in runs if length(r) < MIN_RUN_S and r[2] - r[1] < MIN_RUN_WORDS]
+        if not weak:
+            break
+        r = min(weak, key=length)
+        i = runs.index(r)
+        nbrs = [j for j in (i - 1, i + 1) if 0 <= j < len(runs)]
+        j = max(nbrs, key=lambda n: length(runs[n]))
+        runs[j][1], runs[j][2] = min(runs[j][1], r[1]), max(runs[j][2], r[2])
+        del runs[i]
+        # coalesce neighbours that now share a speaker
+        for a in range(len(runs) - 2, -1, -1):
+            if runs[a][0] == runs[a + 1][0]:
+                runs[a][2] = runs[a + 1][2]
+                del runs[a + 1]
+    return runs
+
+
+def _join(raw: Sequence[str]) -> str:
+    """Words back to text: faster-whisper words carry their leading space; otherwise space-join."""
+    if any(w[:1].isspace() for w in raw[1:]):
+        return "".join(raw).strip()
+    return " ".join(w.strip() for w in raw)
+
+
+def split_on_speaker_change(
+    segments: Sequence[Segment], turns: Sequence, speaker: str = OTHERS
+) -> list[Segment]:
+    """Split each `speaker` ("Others") segment that has word timings wherever the diarized
+    speaker of consecutive words changes, at the word boundary. Runs shorter than MIN_RUN_S and
+    MIN_RUN_WORDS words are absorbed by their neighbours. The pieces keep the language and
+    rebuild the text from the words; segments without words, "Me" segments and segments with
+    one speaker are returned unchanged. `turns`: diarization turns (start, end, speaker)."""
+    if not turns:
+        return list(segments)
+    out: list[Segment] = []
+    for seg in segments:
+        runs = (
+            _runs(seg.words, _word_speakers(seg.words, turns))
+            if seg.speaker == speaker and len(seg.words) > 1
+            else []
+        )
+        if len(runs) < 2:
+            out.append(seg)
+            continue
+        for _, a, b in runs:
+            ws = seg.words[a:b]
+            out.append(
+                Segment(
+                    start=ws[0][0],
+                    end=ws[-1][1],
+                    text=_join([w[2] for w in ws]),
+                    speaker=seg.speaker,
+                    language=seg.language,
+                    words=list(ws),
+                )
+            )
+    return out

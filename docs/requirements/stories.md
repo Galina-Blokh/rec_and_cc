@@ -138,6 +138,10 @@ while I decide.*
   with noisy audio, **then** the number of speakers is estimated per session instead of fixed
   by a threshold, within `min_speakers` / `max_speakers` if set, and an hour still
   diarizes in seconds.
+- **Given** a transcript segment with word timings in which the speaker changes mid-way
+  (faster-whisper backend), **then** it is split at that word boundary and each part gets its
+  own speaker label, with flicker under about 1 s / 3 words ignored, the text kept word for
+  word, `Me` never split, and segments without word timings (MLX backend) unchanged.
 
 ### US-13 Readable transcripts in private folders
 - **Then** each session is saved under `<output_dir>/<date>/<time>_<app>/` with
