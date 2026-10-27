@@ -16,6 +16,15 @@ def _no_diarization_model(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _private_search_index(tmp_path, monkeypatch):
+    """Tests never touch the user's real search index (the Controller updates it after
+    every transcription)."""
+    from recandcc import search
+
+    monkeypatch.setattr(search, "INDEX_PATH", tmp_path / "search-index" / "search.sqlite3")
+
+
+@pytest.fixture(autouse=True)
 def _private_voices_dir(tmp_path_factory, monkeypatch):
     """No test reads or writes the user's real voice profiles."""
     from recandcc.transcribe import voices
