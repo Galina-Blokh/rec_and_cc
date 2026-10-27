@@ -150,8 +150,9 @@ def test_summary_timing_one_hour_meeting_offline(tmp_path: Path, monkeypatch, ca
     assert body and body not in ("None.", "Нет."), "empty summary"
     assert actions.startswith(("Action items", "Задачи"))
     items = [ln for ln in actions.splitlines()[1:] if ln.startswith("- ")]
-    # Qwen2.5-3B finds no action item in this planted-actions en/ru text (greedy: it is
-    # always "None."), so only the format is asserted; real quality needs the consented set.
+    # The default (Qwen3.5 4B) finds the planted action items; the Qwen2.5 models it replaced
+    # found none on this text (always "None."). Only the format is asserted here; real quality
+    # needs the consented set.
     assert items or actions.split("\n")[2] in ("None.", "Нет."), "malformed action list"
     assert all(len(i) > 3 and i[2:] not in ("None.", "Нет.") for i in items), "bad action items"
     assert chunk_counts and chunk_counts[0] > 1, "map-reduce path did not run"

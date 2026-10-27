@@ -66,16 +66,16 @@ All notable changes to RecAndCC are documented here. The format is based on
   open transcript / summary, reveal, rename (`title` in `session.json`) and delete to the
   Trash (#4).
 - Opt-in local meeting summaries (`[summary] enabled = true`, Apple silicon): `summary.md`
-  with a short summary and action items after each transcript, from a pinned Qwen2.5 1.5B
-  Instruct model (Apache-2.0) via mlx-lm; `recandcc summarize <session_dir>` (#4). The
+  with a short summary and action items after each transcript, from a pinned Apache-2.0
+  model via mlx-lm (Qwen3.5 4B by default, see Changed); `recandcc summarize <session_dir>` (#4). The
   larger Qwen2.5 3B is also pinned and selectable with `[summary] model`, but its Qwen
   Research licence allows non-commercial use only: it also needs
   `accept_qwen_research_licence = true` (a TOML boolean). Because of that licence, any
   config with the 3B and without that key, whether saved while it was the default or
-  chosen by hand, is migrated to the 1.5B: the app rewrites `summary.model` in
+  chosen by hand, is migrated to the default: the app rewrites `summary.model` in
   `config.toml` and shows a one-time notice. While only the pinned 3B is downloaded, the 3B is
   kept (offline summaries keep working) and a one-time notice explains how to switch.
-  Afterwards the old ~1.7 GB cache can be deleted. Both models are pinned to a Hugging Face
+  Afterwards the old ~1.7 GB cache can be deleted. The models are pinned to a Hugging Face
   commit (no separate checksum check).
 - Speaker names that carry over between sessions, from opt-in local voice profiles; name a
   speaker once from the CLI (#62), or from the macOS menu ("Name speakers…", "Forget all
@@ -93,6 +93,19 @@ All notable changes to RecAndCC are documented here. The format is based on
 - ADR 0011: stack and packaging after v0.1 (Proposed) (#57).
 
 ### Changed
+- Meeting summaries default to Qwen3.5 4B (`mlx-community/Qwen3.5-4B-MLX-4bit`, Apache-2.0,
+  pinned) instead of Qwen2.5 1.5B (maintainer decision, part of #4). Why: on the synthetic
+  mixed en/ru 1-hour fixture (`tests/test_summary_timing.py`) the maintainer's measurement was
+  that the 1.5B found none of the 3 planted action items, the 3B said "None.", and the 4B found
+  all 3. A re-run on this fixture listed all 3 distinct planted tasks (its two Russian turns
+  restate two of them). Cost: a ~3.0 GB download instead of ~0.9 GB, ~2.9-3.4 GB peak RAM
+  (2.9 GB measured on one machine), and summaries about 2.5x slower than with the 1.5B. Migration: a settings file that still holds the 1.5B (saved while
+  it was the default) moves to the 4B once, at the first start, recorded by a
+  `.summary-1p5b-migrated` file next to `config.toml`; a 1.5B set by hand after that is kept,
+  cached or not. Until then, the offline guard keeps the 1.5B while it is cached and the 4B
+  isn't, with a one-time notice. The 3B's migration now targets the 4B too. Hebrew
+  `summary.language_models` routing now hits the default anyway, so that entry is redundant
+  unless `model` changes.
 - The macOS environment no longer installs torch (#69) or numba, llvmlite and scipy (#77),
   which mlx-whisper declares but RecAndCC never uses: `.venv` shrinks from 1.3 GB to
   559 MB (part of #3).

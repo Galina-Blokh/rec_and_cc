@@ -25,7 +25,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
-from ..config import DEFAULT_SUMMARY_MODEL, QWEN_RESEARCH_SUMMARY_MODEL, Config
+from ..config import (
+    DEFAULT_SUMMARY_MODEL,
+    PREVIOUS_DEFAULT_SUMMARY_MODEL,
+    QWEN_RESEARCH_SUMMARY_MODEL,
+    Config,
+)
 from ..models import Segment, SessionInfo, is_rtl
 from .output import JSON_NAME, PDI, RLI, atomic_write, paragraphs
 
@@ -38,15 +43,15 @@ PENDING_MARKER = ".summary-pending"
 # Fingerprint of the transcript text a summary was made from. Unlike an mtime it survives a
 # speaker rename or call-app names (they rewrite transcript.json but not what was said).
 SOURCE_NAME = ".summary-source"
-# ~2-5k tokens (en..he): well inside Qwen2.5's 32k context, and each chunk's prompt prefill
-# (which holds gpu.MLX_LOCK) stays within ~1-2 s.
+# ~2-5k tokens (en..he): well inside the context of every offered model, and each chunk's
+# prompt prefill (which holds gpu.MLX_LOCK) stays within ~1-2 s.
 CHUNK_CHARS = 8_000
 PREFILL_STEP = 512  # prompt tokens per prefill step (lower peak memory than mlx-lm's 2048)
 # One-time download size of each offered (pinned) summary model, for the download notice.
 MODEL_SIZES = {
-    DEFAULT_SUMMARY_MODEL: "~0.9 GB",
+    DEFAULT_SUMMARY_MODEL: "~3.0 GB",
+    PREVIOUS_DEFAULT_SUMMARY_MODEL: "~0.9 GB",
     QWEN_RESEARCH_SUMMARY_MODEL: "~1.7 GB",
-    "mlx-community/Qwen3.5-4B-MLX-4bit": "~3.0 GB",
 }
 # Thought-block markers of thinking models (Qwen3/3.5; Gemma 4's channel). Summaries run
 # with thinking off; a thought block that still shows up is cut from every answer.
@@ -61,6 +66,8 @@ HEADINGS = {
     "he": ("סיכום", "משימות", "אין."),
 }
 NONE_MARK = "NONE"
+# A bullet made only of one of these (any case, no punctuation) says there is no task.
+NONE_WORDS = frozenset({NONE_MARK.casefold(), "nothing", "нет", "ничего", "אין"})
 
 Messages = list[dict[str, str]]
 
@@ -217,7 +224,12 @@ def action_items(answer: str) -> list[str]:
             items.append(line[1:].strip())
         elif line[:1].isdigit() and line.lstrip("0123456789")[:1] in ".)":
             items.append(line.lstrip("0123456789")[1:].strip())
-    return [i for i in items if i and i.upper() != NONE_MARK]
+    return [i for i in items if i and not _says_none(i)]
+
+
+def _says_none(item: str) -> bool:
+    """True if the bullet only says there is no task ("None.", "**NONE**", "Нет.", "אין.")."""
+    return "".join(ch for ch in item if ch.isalnum()).casefold() in NONE_WORDS
 
 
 def summarize(
@@ -360,6 +372,13 @@ def mlx_lm_available() -> bool:
     )
 
 
+def _template_reads_thinking_flag(tokenizer: Any) -> bool:
+    """Whether the chat template reads ``enable_thinking`` (Qwen3.5's does, Qwen2.5's doesn't).
+    Unlike ``has_thinking``, this doesn't depend on the mlx-lm version."""
+    template = getattr(tokenizer, "chat_template", None)
+    return isinstance(template, str) and "enable_thinking" in template
+
+
 class MlxGenerator:
     """The summary LLM through mlx-lm. Loaded on first use and used from one thread (the
     summary thread). gpu.MLX_LOCK is held for each prompt's prefill (~1-2 s per chunk) and then
@@ -432,16 +451,18 @@ class MlxGenerator:
                     return "".join(out)
                 out.append(step.text)
 
-        # A thinking model (mlx-lm's TokenizerWrapper.has_thinking, e.g. Qwen3.5) answers with
-        # thinking off: mlx-lm would turn it on by default. Missing or non-bool has_thinking =
-        # not a thinking model (load() warns when missing): the template's defaults, so the
-        # default Qwen2.5's prompt is unchanged. Thought markers are stripped either way.
+        # A thinking model answers with thinking off: mlx-lm's TokenizerWrapper.has_thinking
+        # (Qwen3.5) or a chat template that reads enable_thinking (Qwen3.5's does). Without the
+        # flag the template's default turns thinking on, so a missing has_thinking (another
+        # mlx-lm) must not be enough to lose it. Qwen2.5's template reads no flag: its prompt is
+        # unchanged. Thought markers are stripped either way.
         thinking = getattr(tokenizer, "has_thinking", False) is True
+        think = False if thinking or _template_reads_thinking_flag(tokenizer) else None
         markers = THOUGHT_MARKERS
         start, end = getattr(tokenizer, "think_start", None), getattr(tokenizer, "think_end", None)
         if thinking and isinstance(start, str) and isinstance(end, str):
             markers = (*markers, (start, end))
-        return strip_thinking(generate(False if thinking else None, max_tokens), markers)
+        return strip_thinking(generate(think, max_tokens), markers)
 
     def close(self) -> None:
         """Free the model, so its 1-3 GB don't stay resident between sessions."""
