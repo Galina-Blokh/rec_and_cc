@@ -536,3 +536,30 @@ def test_write_atomic_logs_chmod_failure(tmp_path, monkeypatch, caplog):
         config._write_atomic(path, b"a = 2\n")
     assert path.read_text() == "a = 2\n"
     assert "config.toml" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("exc", "message"),
+    [
+        (config.ConfigLockTimeout("locked"), "config.toml is locked by another process"),
+        (OSError(errno.EIO, "disk"), "config.toml could not be written"),
+    ],
+)
+def test_failed_menu_save_restores_the_old_value(tmp_path, monkeypatch, caplog, exc, message):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    before = path.read_text()
+
+    def fail(*_a):
+        raise exc
+
+    monkeypatch.setattr(common, "save_keys", fail)
+    assert ctrl.cfg.live_captions is True
+    ctrl.cfg.live_captions = False  # the click
+    ctrl.save_settings("live_captions")
+    _join()
+    assert ctrl.cfg.live_captions is True  # back to what config.toml says
+    assert path.read_text() == before
+    assert ctrl.events.get_nowait() == ("notice", "Settings not saved", message)
+    assert not ctrl._dirty  # dirty mark cleared
+    if isinstance(exc, config.ConfigLockTimeout):
+        assert all(r.exc_info is None for r in caplog.records)
