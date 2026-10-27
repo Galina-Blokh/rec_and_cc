@@ -143,6 +143,7 @@ class MacApp(rumps.App):
             rumps.MenuItem("Open transcripts folder", callback=self._open_folder),
             self.recent_menu,
             rumps.MenuItem("Search transcripts…", callback=self._search),
+            rumps.MenuItem("Export latest transcript (DOCX + PDF)", callback=self._export),
             rumps.MenuItem("Meeting notes…", callback=lambda _: ctrl.notes_async()),
             None,
             self.perm_menu,
@@ -380,6 +381,9 @@ class MacApp(rumps.App):
     def _open_folder(self, _sender) -> None:
         if err := open_output_folder(self.cfg.output_dir):
             self._notify("Can't open transcripts folder", err)
+
+    def _export(self, _sender) -> None:
+        self.ctrl.export_async()  # picks the newest finished session on a worker
 
     def _open_recent(self, sender) -> None:
         open_path(sender.path)

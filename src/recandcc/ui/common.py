@@ -128,6 +128,30 @@ def recent_transcripts(output_dir: Path, n: int = RECENT_COUNT) -> list[Path]:
         return []
 
 
+def latest_finished_session(output_dir: Path) -> Path | None:
+    """The transcript.md of the session that started last and has a transcript.json (a live
+    or still-transcribing one has only transcript.md). Walks <day>/<time>_<app> folders newest
+    first by name, not mtime (a re-transcribed old session isn't "latest"), and stops at the
+    first hit, so a big or synced library isn't scanned. Unreadable entries are skipped."""
+
+    def names(directory: Path) -> list[Path]:
+        try:
+            return sorted((d for d in directory.iterdir() if d.is_dir()), reverse=True)
+        except OSError:
+            return []
+
+    for day in names(Path(output_dir)):
+        for session in names(day):
+            try:
+                if (session / "transcript.json").is_file() and not (
+                    session / SessionInfo.DISCARD_MARKER
+                ).exists():
+                    return session / "transcript.md"
+            except OSError:
+                continue
+    return None
+
+
 def transcript_label(path: Path) -> str:
     """'2026-10-26 14:03 zoom-us' from .../2026-10-26/140312_zoom-us/transcript.md"""
     day, sess = path.parent.parent.name, path.parent.name
@@ -255,6 +279,7 @@ class Controller:
         self._lock = threading.Lock()
         self._perm: dict[str, str] = {}
         self._recent: list[Path] = []
+        self._export_lock = threading.Lock()
         self._refreshing = False
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
@@ -578,6 +603,52 @@ class Controller:
             self.events.put(("search", query, hits))
 
         threading.Thread(target=run, daemon=True, name="search").start()
+
+    def export_async(self, transcript: Path | None = None, fmt: str = "both") -> None:
+        """Export a session's transcript to DOCX + PDF off the UI thread; posts a ``notice``
+        (never the transcript text). One export at a time: a second click is ignored. None
+        means "the newest finished session", found on the worker (no file access on the UI
+        thread). Only session folders inside ``output_dir`` are exported (no symlinks out)."""
+        if not self._export_lock.acquire(blocking=False):
+            return
+
+        def run() -> None:
+            msg = "Export failed (see the log)"
+            try:
+                from ..transcribe.export import ExportError, export_session
+
+                skipped: list[str] = []
+                try:
+                    from .notes import inside
+
+                    target = transcript
+                    if target is None:
+                        target = latest_finished_session(self.cfg.output_dir)
+                    if target is None:
+                        raise ExportError("No finished transcripts yet")
+                    if not inside(target.parent, self.cfg.output_dir):
+                        raise ExportError("That session is outside the transcripts folder")
+                    paths = export_session(target.parent, fmt, skipped)
+                    if not all(p.is_file() for p in paths):  # e.g. the session was deleted
+                        raise ExportError("The session folder changed during the export")
+                    names = " and ".join(p.name for p in paths)
+                    msg = f"Saved {names} ({transcript_label(target)})"
+                    if skipped:
+                        msg += f". {skipped[0]}"
+                except ExportError as e:
+                    msg = str(e)
+            except Exception as e:  # noqa: BLE001
+                # the type only: a library error can quote the transcript
+                log.error("transcript export failed: %s", type(e).__name__)
+            finally:  # the notice is queued before the next export may start
+                self.events.put(("notice", "Export", msg))
+                self._export_lock.release()
+
+        try:
+            threading.Thread(target=run, daemon=True, name="export").start()
+        except Exception:
+            self._export_lock.release()
+            raise
 
     # --- live transcription (engine thread)
     def _on_session_start(self, session: SessionInfo) -> None:
