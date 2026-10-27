@@ -180,6 +180,7 @@ func runSettings(configPath: String) -> Never {
         _ = FileHandle.standardInput.readDataToEndOfFile()
         DispatchQueue.main.async { emitAndExit(nil) }
     }
-    app.run()
+    printJSON(["settings": "ready"])  // handlers are in: Python may now signal us
+    withExtendedLifetime((term, raise)) { app.run() }
     exit(0)
 }

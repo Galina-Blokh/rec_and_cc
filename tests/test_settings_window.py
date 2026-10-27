@@ -71,6 +71,10 @@ def _real_config_untouched():
     before = stamp()
     settings_window._closing.clear()
     yield
+    proc = settings_window._proc
+    if proc is not None and proc.poll() is None:
+        proc.kill()  # never leak a stub helper into the next test
+        proc.wait()
     settings_window._closing.clear()
     assert stamp() == before, "a test wrote the real config.toml"
 
@@ -79,6 +83,7 @@ def join_threads(name, timeout=5.0):
     for t in threading.enumerate():
         if t.name == name:
             t.join(timeout)
+            assert not t.is_alive(), f"{name} did not finish"
 
 
 def next_event(ctrl, kinds, timeout=10.0):
@@ -323,7 +328,19 @@ def test_baseline_is_the_snapshot_the_window_opened_with(tmp_path, monkeypatch):
 def test_timeout_is_cancelled_and_releases_the_lock(tmp_path, monkeypatch):
     ctrl, _ = make_ctrl(tmp_path, monkeypatch)
     fake_helper(tmp_path, monkeypatch, "import time\ntime.sleep(60)\n")
-    assert settings_window.run_settings(ctrl.cfg, timeout=0.3) is None
+    monkeypatch.setattr(settings_window, "SETTINGS_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(
+        settings_window,
+        "run_settings",
+        lambda cfg, _orig=settings_window.run_settings: _orig(cfg, timeout=0.3),
+    )
+    monkeypatch.setattr(common, "run_settings", settings_window.run_settings)
+    ctrl.open_settings_async()
+    deadline = time.monotonic() + 10
+    while ctrl._settings_lock.locked() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not ctrl._settings_lock.locked()
+    assert ctrl.events.empty()  # a timeout is a cancel: nothing saved, no fallback
 
 
 @mac_only
@@ -376,3 +393,19 @@ def test_concurrent_saves_leave_valid_toml(tmp_path):
     assert load_config(path).output_dir  # parses
     assert "unknown = 1" in path.read_text()
     assert [p.name for p in tmp_path.iterdir()] == ["c.toml"]  # no temp files left
+
+
+@mac_only
+def test_failed_write_rolls_back_and_keeps_the_mode(tmp_path, monkeypatch):
+    ctrl, path = make_ctrl(tmp_path, monkeypatch)
+
+    def boom(*_a, **_k):
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(common, "save_settings", boom)
+    fake_helper(tmp_path, monkeypatch, reply({"settings": "saved", "values": GOOD}))
+    ctrl.open_settings_async()
+    ev = next_event(ctrl, {"settings_saved", "settings_fallback", "notice"})
+    assert ev[0] == "notice"
+    assert ctrl.cfg.detection.mode == Mode.ASK  # not applied: the file was not written
+    assert ctrl.cfg.transcription.keep_audio is True and ctrl.cfg.live_captions is True

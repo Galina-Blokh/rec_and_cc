@@ -45,7 +45,13 @@ from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind, discard_session
 from ..recorder import make_private_dir
 from ..retention import purge_old_audio, purge_transcribed_audio
-from ..settings_window import SettingsUnavailable, close_settings, raise_settings, run_settings
+from ..settings_window import (
+    SettingsUnavailable,
+    close_settings,
+    raise_settings,
+    run_settings,
+    snapshot,
+)
 
 if TYPE_CHECKING:
     from ..transcribe.live import LiveTranscriber
@@ -605,13 +611,15 @@ class Controller:
         except Exception:
             log.exception("audio retention failed")
 
-    def _purge_leftover_audio(self) -> None:
+    def _purge_leftover_audio(self, startup: bool = True) -> None:
         """keep_audio = false: delete WAVs left behind by transcribed sessions (e.g. the app
         quit before a slow diarization finished and dropped them, or the delete failed)."""
         if self.cfg.transcription.keep_audio:
             return
         try:
-            purge_transcribed_audio(self.cfg.output_dir, ended_before=self._started_at)
+            purge_transcribed_audio(
+                self.cfg.output_dir, ended_before=self._started_at if startup else None
+            )
         except Exception:
             log.exception("deleting leftover audio failed")
 
@@ -795,21 +803,36 @@ class Controller:
                 updates = validate_settings(raw)
                 if "output_dir" in updates:
                     make_private_dir(updates["output_dir"])
+                fields = {k: v for k, v in updates.items() if k != "mode"}
                 with self._save_lock:
-                    # memory first: a menu save in between can't write the old values back
-                    self.apply_settings(updates)
+                    # Fields go live before the write (a menu save in between can't write the
+                    # old values back) and are rolled back if the write fails. The mode,
+                    # which can stop a recording, only changes once the file is written.
+                    old = validate_settings({k: snapshot(self.cfg)[k] for k in fields})
+                    self.apply_settings(fields)
                     edited = self._mtime() != self._config_mtime  # hand edit not reloaded yet
                     try:
-                        save_settings(updates, CONFIG_PATH)
-                    except FileNotFoundError:
-                        self.cfg.save(CONFIG_PATH)
-                        save_settings(updates, CONFIG_PATH)
+                        try:
+                            save_settings(updates, CONFIG_PATH)
+                        except FileNotFoundError:
+                            self.cfg.save(CONFIG_PATH)
+                            save_settings(updates, CONFIG_PATH)
+                    except Exception:
+                        self.apply_settings(old)
+                        raise
                     if not edited:
                         self._config_mtime = self._mtime()  # our own write: nothing to reload
+                    if "mode" in updates:
+                        self.apply_settings({"mode": updates["mode"]})
                 if "output_dir" in updates:
                     self.refresh_async(force=True)  # cloud-sync warning for the new folder
                 if updates.get("keep_audio") is False:
-                    self._purge_leftover_audio()  # opted out: delete what is already there
+                    threading.Thread(
+                        target=self._purge_leftover_audio,
+                        kwargs={"startup": False},
+                        daemon=True,
+                        name="purge-audio",
+                    ).start()  # opted out: delete audio already kept, off this thread
                 self.events.put(("settings_saved", updates))
             except SettingsUnavailable as e:
                 log.info("native settings unavailable: %s", e)

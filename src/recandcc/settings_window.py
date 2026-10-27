@@ -12,6 +12,7 @@ status 2 and no JSON, which ``run_settings`` reports as ``SettingsUnavailable``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import signal
@@ -31,6 +32,7 @@ SETTINGS_TIMEOUT_S = 15 * 60.0
 
 _proc_lock = threading.Lock()
 _proc: subprocess.Popen | None = None  # the open window's helper, so quitting can close it
+_ready = threading.Event()  # the open window printed "ready": its signal handlers are in
 _closing = threading.Event()  # set when the app quits: a window starting now is killed
 
 
@@ -52,12 +54,18 @@ def snapshot(cfg: Config) -> dict:
     }
 
 
+def _kill(proc: subprocess.Popen) -> None:
+    with contextlib.suppress(OSError):
+        proc.kill()
+
+
 def raise_settings() -> None:
     """Bring the open settings window to the front (SIGUSR1: the helper handles it)."""
     with _proc_lock:
         proc = _proc
-    if proc is not None and proc.poll() is None:
-        proc.send_signal(signal.SIGUSR1)
+    if proc is not None and _ready.is_set() and proc.poll() is None:
+        with contextlib.suppress(OSError):  # it may have just exited
+            proc.send_signal(signal.SIGUSR1)
 
 
 def close_settings() -> None:
@@ -66,8 +74,11 @@ def close_settings() -> None:
     with _proc_lock:
         proc = _proc
     if proc is not None and proc.poll() is None:
-        proc.terminate()  # never waits here: this runs on the UI thread during Quit
-        threading.Timer(2.0, proc.kill).start()  # in case it ignores SIGTERM
+        with contextlib.suppress(OSError):  # it may have just exited
+            proc.terminate()  # never waits here: this runs on the UI thread during Quit
+        killer = threading.Timer(2.0, _kill, args=(proc,))  # in case it ignores SIGTERM
+        killer.daemon = True
+        killer.start()
 
 
 def run_settings(cfg: Config, timeout: float = SETTINGS_TIMEOUT_S) -> dict | None:
@@ -103,15 +114,23 @@ def run_settings(cfg: Config, timeout: float = SETTINGS_TIMEOUT_S) -> dict | Non
         with _proc_lock:
             _proc = proc
             if _closing.is_set():
-                proc.kill()  # quit raced with the start: don't leave a Dock icon behind
-        timer = threading.Timer(timeout, proc.kill)
+                _kill(proc)  # quit raced with the start: don't leave a Dock icon behind
+        _ready.clear()
+        timer = threading.Timer(timeout, _kill, args=(proc,))
+        timer.daemon = True
         timer.start()
+        out: list[str] = []
         try:
-            stdout = proc.stdout.read() if proc.stdout else ""  # until the helper exits
+            for line in proc.stdout or ():  # until the helper exits
+                out.append(line)
+                if '"ready"' in line:
+                    _ready.set()
+            stdout = "".join(out)
             proc.wait()
             timed_out = not timer.is_alive() and proc.returncode == -signal.SIGKILL
         finally:
             timer.cancel()
+            _ready.clear()
             with _proc_lock:
                 _proc = None
             if proc.stdin is not None:
@@ -119,7 +138,7 @@ def run_settings(cfg: Config, timeout: float = SETTINGS_TIMEOUT_S) -> dict | Non
         if timed_out:
             log.warning("settings window timed out; treated as cancelled")
             return None
-    lines = [ln for ln in stdout.splitlines() if ln.strip()]
+    lines = [ln for ln in stdout.splitlines() if ln.strip() and '"ready"' not in ln]
     try:
         reply = json.loads(lines[-1])
         state = reply["settings"]
