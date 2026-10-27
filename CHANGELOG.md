@@ -12,6 +12,9 @@ All notable changes to RecAndCC are documented here. The format is based on
 - Opt-in semantic transcript search (`[search] semantic = true`): a pinned, checksum-verified
   multilingual sentence model, downloaded once, merged with full-text results (#4).
 - RecAndCC is licensed under the Apache License 2.0 (`LICENSE`, `NOTICE`); completes #17.
+- Per-language summary models (`summary.language_models`, default `{}`): e.g. Hebrew
+  meetings summarised by the pinned, Apache-2.0 `mlx-community/Qwen3.5-4B-MLX-4bit`
+  (thinking off), with a fallback to `summary.model` if it can't load (#6, #4).
 
 ### Fixed
 - A hung network-volume probe no longer blocks the warning for other folders (one probe per

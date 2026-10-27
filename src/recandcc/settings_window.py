@@ -40,15 +40,27 @@ class SettingsUnavailable(RuntimeError):
     """No usable native settings window (not macOS, helper missing or too old)."""
 
 
+def offered_models() -> tuple[str, ...]:
+    """The model picker's choices: the Whisper names the app offers, each pinned to a commit
+    (transcribe/revisions.py), so a pick never fetches an unpinned repo."""
+    from .transcribe.revisions import OFFERED_MODELS
+
+    return OFFERED_MODELS
+
+
 def snapshot(cfg: Config) -> dict:
-    """The values the window shows. Settings only, no transcript or audio content."""
+    """The values the window shows. Settings only, no transcript or audio content.
+    ``model`` is a choice saved in this window but not loaded until the app restarts."""
     tr = cfg.transcription
     return {
         "mode": str(cfg.detection.mode),
         "output_dir": str(cfg.output_dir),
         "languages": list(tr.languages),
         "keep_audio": tr.keep_audio,
+        "live": tr.live,
         "live_captions": cfg.live_captions,
+        "model": getattr(tr, "_pending_model", None) or tr.model,
+        "models": list(offered_models()),
         "speaker_names": tr.speaker_names,
         "hotkey": cfg.hotkey,
     }
