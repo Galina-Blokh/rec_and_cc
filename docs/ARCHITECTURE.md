@@ -43,8 +43,8 @@ across platforms.
 | `hotkey.py` | Global start/stop shortcut: parses `hotkey`, runs `rcc-audiotap hotkey` (macOS) or `RegisterHotKey` (Windows) |
 | `cloudsync.py` | Is `output_dir` synced to iCloud / OneDrive / File Provider? Local path checks only; the controller warns once per folder |
 | `permissions.py` | Query, request and open settings for mic and system-audio permissions |
-| `ui/` | `common.Controller` (platform-independent glue) + `mac.py` (rumps) / `tray.py` (pystray) |
-| `ui/captions*.py` | Live captions window: `captions.py` (pure logic: ordering, trimming, header) + `captions_mac.py` (floating non-activating NSPanel); Windows uses a Tk window in `tray.py` |
+| `ui/` | `common.Controller` (platform-independent glue) + `present.py` (pure presenter logic: menu titles and check marks, notice texts, the ask dialog script and its answers, toast placement) + `mac.py` (rumps) / `tray.py` (pystray) / `toast_mac.py`, thin shells that only apply it |
+| `ui/captions*.py` | Live captions window: `captions.py` (pure logic: ordering, trimming, header, panel frame, speaker colours) + `captions_mac.py` (floating non-activating NSPanel); Windows uses a Tk window in `tray.py` |
 | `autostart.py` | LaunchAgent (macOS) / HKCU Run key (Windows) |
 | `logging_setup.py`, `metrics.py` | Log file + crash reporting (`sys`/`threading.excepthook` → log with traceback, thread crash → `notice` toast at most once per thread name per minute; `faulthandler` → `<log dir>/faults.log`); per-session pipeline metrics in `session.json` `metrics` + one INFO summary line |
 | `search.py` | Transcript search: incremental SQLite FTS5 index of `transcript.json` segments in the app-data dir (owner-only, never in `output_dir`); `LIKE` fallback without FTS5 |

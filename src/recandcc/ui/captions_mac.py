@@ -62,7 +62,14 @@ from AppKit import (
 from Foundation import NSObject
 
 from ..models import Segment
-from .captions import CaptionBuffer, is_at_bottom, should_auto_hide
+from .captions import (
+    PLACEHOLDER_TEXT,
+    CaptionBuffer,
+    default_frame,
+    is_at_bottom,
+    should_auto_hide,
+    speaker_rgb,
+)
 from .captions import header_text as make_header
 
 log = logging.getLogger(__name__)
@@ -71,8 +78,6 @@ AUTOSAVE_NAME = "RecAndCCLiveCaptions"
 TEXT_PT = 16.0
 LABEL_PT = 13.0
 LABEL_COLUMN_PT = 64.0  # wrapped lines are indented to this tab stop
-DEFAULT_SIZE = (760.0, 190.0)
-BOTTOM_MARGIN_PT = 90.0
 BIG = 1.0e7
 BACKGROUND_TINT = 0.55  # black overlay alpha on the HUD material
 FONT, COLOR, PARA = (
@@ -80,10 +85,6 @@ FONT, COLOR, PARA = (
     NSForegroundColorAttributeName,
     NSParagraphStyleAttributeName,
 )
-
-# (r, g, b) per speaker label; anything else gets the "other" color.
-SPEAKER_RGB = {"Me": (0.55, 0.86, 0.62), "Others": (0.52, 0.74, 1.0)}
-OTHER_RGB = (0.85, 0.75, 0.5)
 
 
 def _rgb(rgb, alpha: float = 1.0):
@@ -272,15 +273,12 @@ class CaptionsPanel:
     @staticmethod
     def _default_frame():
         """Bottom-center of the main screen."""
-        w, h = DEFAULT_SIZE
         screen = NSScreen.mainScreen()
-        if screen is None:
-            return NSMakeRect(200, 120, w, h)
-        vf = screen.visibleFrame()
-        w = min(w, vf.size.width * 0.8)
-        x = vf.origin.x + (vf.size.width - w) / 2
-        y = vf.origin.y + BOTTOM_MARGIN_PT
-        return NSMakeRect(x, y, w, h)
+        visible = None
+        if screen is not None:
+            vf = screen.visibleFrame()
+            visible = (vf.origin.x, vf.origin.y, vf.size.width, vf.size.height)
+        return NSMakeRect(*default_frame(visible))
 
     def _render_header(self, elapsed: float | None = None, force: bool = False) -> None:
         text = self.header(elapsed)
@@ -318,15 +316,14 @@ class CaptionsPanel:
         out = NSMutableAttributedString.alloc().init()
         lines = self.buffer.lines
         if not lines:
-            placeholder = "Listening… captions appear a moment after each phrase."
             dim = NSColor.colorWithCalibratedWhite_alpha_(0.7, 1.0)
             return NSMutableAttributedString.alloc().initWithString_attributes_(
-                placeholder,
+                PLACEHOLDER_TEXT,
                 {FONT: text_font, COLOR: dim, PARA: para},
             )
         for i, ln in enumerate(lines):
             p = rtl_para if ln.rtl else para
-            color = _rgb(SPEAKER_RGB.get(ln.label, OTHER_RGB), 0.85)
+            color = _rgb(speaker_rgb(ln.label), 0.85)
             label = NSMutableAttributedString.alloc().initWithString_attributes_(
                 ln.label + "\t",
                 {FONT: label_font, COLOR: color, PARA: p},

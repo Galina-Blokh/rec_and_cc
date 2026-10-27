@@ -21,6 +21,13 @@ FINISHED_TEXT = "Recording finished — transcript saved"
 RLI, PDI = "\u2067", "\u2069"
 # Within this many points of the bottom counts as "at the bottom" (keep auto-scrolling).
 SCROLL_SLACK_PT = 24.0
+PLACEHOLDER_TEXT = "Listening… captions appear a moment after each phrase."
+DEFAULT_SIZE = (760.0, 190.0)  # panel width, height in points
+BOTTOM_MARGIN_PT = 90.0
+FALLBACK_ORIGIN = (200.0, 120.0)  # when there is no main screen
+# (r, g, b) per speaker label; anything else gets the "other" color.
+SPEAKER_RGB = {"Me": (0.55, 0.86, 0.62), "Others": (0.52, 0.74, 1.0)}
+OTHER_RGB = (0.85, 0.75, 0.5)
 
 
 @dataclass(frozen=True)
@@ -81,6 +88,23 @@ def is_at_bottom(visible_bottom: float, content_height: float, slack: float = SC
     """True when the viewport shows the end of the content (so new text should auto-scroll).
     ``visible_bottom`` = scroll offset + viewport height, in the same units as the content."""
     return visible_bottom >= content_height - slack
+
+
+def speaker_rgb(label: str) -> tuple[float, float, float]:
+    return SPEAKER_RGB.get(label, OTHER_RGB)
+
+
+def default_frame(
+    visible: tuple[float, float, float, float] | None,
+) -> tuple[float, float, float, float]:
+    """Initial panel frame ``(x, y, w, h)``: bottom-center of the screen's visible frame
+    (AppKit coordinates, origin bottom-left), at most 80% of its width."""
+    w, h = DEFAULT_SIZE
+    if visible is None:
+        return (*FALLBACK_ORIGIN, w, h)
+    vx, vy, vw, _vh = visible
+    w = min(w, vw * 0.8)
+    return (vx + (vw - w) / 2, vy + BOTTOM_MARGIN_PT, w, h)
 
 
 def should_auto_hide(ended_at: float | None, now: float, after: float = AUTO_HIDE_AFTER_S):
