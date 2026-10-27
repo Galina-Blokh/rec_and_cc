@@ -230,3 +230,21 @@ def test_room_sessions_request_words_on_the_mic_track(monkeypatch):
     t._transcribe_chunk(me, np.zeros(SAMPLE_RATE, np.float32), eng.Track.ME)
     t._transcribe_chunk(me, np.zeros(SAMPLE_RATE, np.float32))  # call session: Me never split
     assert [c["word_timestamps"] for c in model.calls] == [True, False]
+
+
+def test_split_track_follows_diarized_track_for_room_and_upgraded_sessions(tmp_path):
+    """The word split runs on exactly the track that gets diarized: Others in a call, Me in a room
+    session, and Me in a room session later upgraded to a call (started_as_room), which today
+    diarizes only the mic track. If both tracks get diarized one day, extend this together."""
+    from datetime import datetime
+
+    from recandcc.models import SessionInfo, TriggerKind
+
+    def session(kind, started_as_room=False):
+        return SessionInfo(
+            "s", tmp_path, datetime(2026, 10, 27), kind, started_as_room=started_as_room
+        )
+
+    assert eng.diarized_track(session(TriggerKind.CALL)) == eng.Track.OTHERS
+    assert eng.diarized_track(session(TriggerKind.ROOM)) == eng.Track.ME
+    assert eng.diarized_track(session(TriggerKind.CALL, started_as_room=True)) == eng.Track.ME
