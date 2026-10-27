@@ -31,14 +31,14 @@ import tempfile
 import time
 import unicodedata
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
-from recandcc.models import Segment, SessionInfo, Track, TriggerKind
+from recandcc.models import SAMPLE_RATE, Segment, SessionInfo, Track, TriggerKind
 
 FRAME_S = 0.01
 
@@ -64,26 +64,44 @@ def load_manifest(root: Path) -> list[Clip]:
     root = root.resolve()
     data = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     clips = []
-    for c in data["clips"]:
-        utts = [Utterance(**u) for u in c["utterances"]]
-        audio = (root / c["audio"]).resolve()
+    for n, c in enumerate(data["clips"]):
+        try:
+            cid, utts = c["id"], [Utterance(**u) for u in c["utterances"]]
+            audio = (root / c["audio"]).resolve()
+        except (KeyError, TypeError) as e:
+            raise ValueError(f"clip {c.get('id', n)}: bad manifest entry ({e})") from None
+        utts = [replace(u, language=lang_code(u.language)) for u in utts]
         if not audio.is_relative_to(root):  # e.g. "../Documents/..." or an absolute path
-            raise ValueError(f"clip {c['id']}: audio path is outside the eval folder")
+            raise ValueError(f"clip {cid}: audio path is outside the eval folder")
         duration = sf.info(str(audio)).duration
         for u in utts:
             if not (math.isfinite(u.start) and math.isfinite(u.end) and 0 <= u.start < u.end):
-                raise ValueError(f"clip {c['id']}: utterance times must be 0 <= start < end")
+                raise ValueError(f"clip {cid}: utterance times must be 0 <= start < end")
             if u.end > duration + 0.05:
-                raise ValueError(
-                    f"clip {c['id']}: utterance ends after the audio ({duration:.2f} s)"
-                )
-        clips.append(Clip(c["id"], audio, Track(c.get("track", "others")), utts))
+                raise ValueError(f"clip {cid}: utterance ends after the audio ({duration:.2f} s)")
+        clips.append(Clip(cid, audio, Track(c.get("track", "others")), utts))
     return clips
 
 
+def lang_code(tag: str) -> str:
+    """'ru-RU' / 'RU' -> 'ru', as the transcriber tags segments."""
+    return tag.strip().lower().split("-")[0].split("_")[0]
+
+
 # --------------------------------------------------------------------------------- WER
+APOSTROPHES = str.maketrans("\u2019\u02bc\u2018\u00b4\u0060", "'" * 5)
+BREVE = "\u0306"  # kept: й is и + breve
+
+
 def normalize(text: str) -> list[str]:
-    text = unicodedata.normalize("NFKC", text).lower().replace("ё", "е")
+    text = unicodedata.normalize("NFKC", text).lower().replace("ё", "е").translate(APOSTROPHES)
+    # drop accents and stress marks (мо́локо -> молоко), but keep й
+    text = "".join(
+        ch
+        for ch in unicodedata.normalize("NFD", text)
+        if ch == BREVE or not unicodedata.category(ch).startswith("M")
+    )
+    text = unicodedata.normalize("NFC", text)
     text = "".join(ch if ch.isalnum() or ch in "'-" or ch.isspace() else " " for ch in text)
     return [w.strip("'-") for w in text.split() if w.strip("'-")]
 
@@ -235,6 +253,7 @@ def run_clip(clip: Clip, transcriber, diarizer, root: Path | None = None) -> dic
             t0 = time.monotonic()  # may drop the audio (keep_audio = false)
             turns = diarizer.diarize_file(Path(tmp) / f"{clip.track}.wav")
             result["diarization_s"] = round(time.monotonic() - t0, 2)
+            result["diarization_ok"] = turns is not None
             if turns is not None:
                 ref = [(u.start, u.end, u.speaker) for u in clip.utterances]
                 result["diarization"] = der(ref, [(t.start, t.end, str(t.speaker)) for t in turns])
@@ -271,6 +290,7 @@ def summarize(results: list[dict]) -> dict:
         "der": round(errors / speech, 4) if speech else None,
         "rtf": round(sum(r["elapsed_s"] for r in timed) / audio, 3) if audio else None,
         "clips": len(results),
+        "clips_without_der": sum(1 for r in results if r.get("diarization_ok") is False),
     }
 
 
@@ -294,6 +314,8 @@ def main(argv: list[str] | None = None) -> int:
     clips = load_manifest(args.root.expanduser())
     transcriber = Transcriber(cfg)
     diarizer = None if args.no_diarize else Diarizer()
+    if diarizer is not None:  # load the model now, so it isn't counted in the first clip's time
+        diarizer.diarize(np.zeros(SAMPLE_RATE, dtype=np.float32))
     try:
         # one private (0700, created atomically) folder per run, removed by this run only
         with tempfile.TemporaryDirectory(prefix="rcc-eval-") as root:
@@ -306,6 +328,8 @@ def main(argv: list[str] | None = None) -> int:
     args.json.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     s = report["summary"]
     print(f"model {cfg.model}, {s['clips']} clips, RTF {s['rtf']}, DER {s['der']}")
+    if s["clips_without_der"]:
+        print(f"  warning: diarization failed on {s['clips_without_der']} clip(s), not in DER")
     for lang, v in s["languages"].items():
         print(f"  {lang:<4} WER {v['wer']}  language-ID {v['lid_accuracy']}  ({v['words']} words)")
     print(f"details: {args.json}")

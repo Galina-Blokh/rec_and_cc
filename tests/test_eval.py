@@ -44,6 +44,12 @@ def test_normalize_case_punctuation_and_yo():
     assert ev.normalize("Ещё — раз…") == ["еще", "раз"]
 
 
+def test_normalize_curly_apostrophes_and_stress_marks():
+    assert ev.normalize("Don\u2019t") == ev.normalize("don't") == ["don't"]
+    assert ev.normalize("мо\u0301локо йод") == ["молоко", "йод"]  # й keeps its breve
+    assert ev.normalize("Café") == ["cafe"]
+
+
 @pytest.mark.parametrize(
     ("ref", "hyp", "edits"),
     [
@@ -256,3 +262,82 @@ def test_manifest_rejects_bad_times(tmp_path, start, end, msg):
     (tmp_path / "manifest.json").write_text(json.dumps(bad), encoding="utf-8")
     with pytest.raises(ValueError, match=msg):
         ev.load_manifest(tmp_path)
+
+
+def write_set(root, clip):
+    sf.write(root / "c.wav", np.zeros(2 * SAMPLE_RATE, dtype=np.float32), SAMPLE_RATE)
+    (root / "manifest.json").write_text(json.dumps({"clips": [clip]}), encoding="utf-8")
+
+
+U = {"start": 0, "end": 1, "speaker": "A", "language": "ru-RU", "text": "да"}
+
+
+def test_manifest_language_tags_are_normalised(tmp_path):
+    write_set(tmp_path, {"id": "c", "audio": "c.wav", "utterances": [U]})
+    (clip,) = ev.load_manifest(tmp_path)
+    assert clip.utterances[0].language == "ru"
+
+
+@pytest.mark.parametrize(
+    "clip",
+    [
+        {"audio": "c.wav", "utterances": [U]},  # no id
+        {"id": "c", "utterances": [U]},  # no audio
+        {"id": "c", "audio": "c.wav", "utterances": [{**U, "who": "x"}]},  # unknown key
+    ],
+)
+def test_manifest_entry_errors_name_the_clip(tmp_path, clip):
+    write_set(tmp_path, clip)
+    with pytest.raises(ValueError, match="bad manifest entry"):
+        ev.load_manifest(tmp_path)
+
+
+class NoDiarizer:
+    def diarize_file(self, path):
+        return None  # model missing or failed
+
+
+def test_failed_diarization_is_counted(tmp_path):
+    write_set(tmp_path, {"id": "c", "audio": "c.wav", "utterances": [U]})
+    (clip,) = ev.load_manifest(tmp_path)
+    r = ev.run_clip(clip, FakeTranscriber([]), NoDiarizer(), tmp_path)
+    s = ev.summarize([r])
+    assert r["diarization_ok"] is False and s["der"] is None and s["clips_without_der"] == 1
+
+
+def test_main_wires_config_and_writes_scores_only(tmp_path, monkeypatch, capsys):
+    import recandcc.config as config
+    import recandcc.transcribe as transcribe
+    import recandcc.transcribe.diarize as diarize
+
+    write_set(tmp_path, {"id": "c", "audio": "c.wav", "utterances": [U]})
+    cfg = config.Config()
+    cfg.transcription.keep_audio = False
+    seen = {}
+
+    class Tr(FakeTranscriber):
+        def __init__(self, c):
+            super().__init__([seg(0, 1, "да", "ru")])
+            seen["cfg"] = c
+
+        def close(self):
+            seen["closed"] = True
+
+    class Di(FakeDiarizer):
+        def diarize(self, audio):
+            seen["warmed"] = True
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(config, "load_config", lambda: cfg)
+    monkeypatch.setattr(transcribe, "Transcriber", Tr)
+    monkeypatch.setattr(diarize, "Diarizer", Di)
+    out = tmp_path / "r.json"
+    assert ev.main([str(tmp_path), "--model", "small", "--json", str(out)]) == 0
+    c = seen["cfg"]
+    assert c.model == "small" and c.keep_audio is True and c.diarize is False
+    assert seen["warmed"] and seen["closed"]
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["summary"]["languages"]["ru"]["wer"] == 0.0
+    assert "да" not in out.read_text(encoding="utf-8") + capsys.readouterr().out  # no text
