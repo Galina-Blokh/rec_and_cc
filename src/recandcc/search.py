@@ -412,7 +412,8 @@ class TranscriptIndex:
         if ready is not None and not ready():
             self._kick_embed()  # never wait for a download or a model load here
             return []
-        q = embedder.embed([_yo(query)])
+        embed_query = getattr(embedder, "embed_query", None) or embedder.embed
+        q = embed_query([_yo(query)])  # None: the indexer holds the model; full-text only
         if q is None or not len(q):
             return []
         model, dim, q0 = self._model_id(), q.shape[1], q[0]
@@ -478,6 +479,8 @@ class TranscriptIndex:
         if self.embedder is None or limit <= 0 or not _TOKEN.search(query):
             return self._lexical(query, limit)
         lexical = self._lexical(query, limit * POOL)
+        if self.busy is not None and self.busy():  # a call is live: no ONNX, no O(n) scan
+            return lexical[:limit]
         try:
             semantic = self._semantic(query, limit * POOL)
         except Exception as e:  # noqa: BLE001 - semantic search is optional
@@ -623,7 +626,7 @@ def default_index(
     pauses background embedding while it is true (a recording). Turning semantic off also
     unloads the model."""
     global _default
-    close = False
+    dropped = None
     with _default_lock:
         if _default is None or _default.path != INDEX_PATH:
             _default = TranscriptIndex()
@@ -632,17 +635,23 @@ def default_index(
             _default.busy = busy
         if not semantic:
             if _default.embedder is not None:
+                dropped = _default.embedder
                 _default.set_embedder(None)
-                close = True
         elif _default.embedder is None:
             from .semantic import default_embedder
 
             _default.set_embedder(default_embedder())
         index = _default
-    if close:  # outside the lock: closing must never be able to wedge every search
-        from .semantic import close_default_embedder
-
-        close_default_embedder()
+    if dropped is not None:
+        # Close only if no concurrent default_index(True) re-attached the very object we
+        # dropped (closing it would disable the model that index now uses). The re-check and
+        # the close share one lock hold, so no re-attach slips between them; close() takes only
+        # the embedder's own state lock for a few assignments, so it cannot wedge a search.
+        with _default_lock:
+            if _default is None or _default.embedder is not dropped:
+                close = getattr(dropped, "close", None)
+                if close is not None:
+                    close()
     return index
 
 

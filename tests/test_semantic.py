@@ -12,6 +12,7 @@ import io
 import logging
 import shutil
 import sqlite3
+import statistics
 import sys
 import threading
 import time
@@ -22,6 +23,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from test_search import make_session, seg
+from test_search_latency import _factor
 
 from recandcc import search, semantic
 from recandcc.config import Config, load_config
@@ -488,6 +490,11 @@ def model_dir(tmp_path, monkeypatch):
     return tmp_path / "models"
 
 
+def _left(d: Path) -> list[str]:
+    """Files in the model dir, without the (deliberately kept, empty) download lock file."""
+    return sorted(p.name for p in d.iterdir() if p.name != ".download.lock")
+
+
 def _fake_model(data: bytes) -> semantic.ModelFile:
     return semantic.ModelFile(
         "m.onnx", "https://example.invalid/m.onnx", hashlib.sha256(data).hexdigest(), len(data)
@@ -522,7 +529,8 @@ def test_model_is_downloaded_once_and_verified(model_dir, monkeypatch):
     path = semantic.model_path(_fake_model(data))
     assert path is not None and path.read_bytes() == data and len(calls) == 1
     assert semantic.model_path(_fake_model(data)) == path and len(calls) == 1
-    assert [p.name for p in model_dir.iterdir()] == ["m.onnx"]  # no temp file left
+    # no temp file left (the empty lock file stays: deleting it would race another process)
+    assert _left(model_dir) == ["m.onnx"]
 
 
 def test_corrupt_file_of_the_right_size_is_replaced(model_dir, monkeypatch):
@@ -577,14 +585,14 @@ def test_oversized_download_is_aborted_and_deleted(model_dir, monkeypatch):
     )
     assert semantic.model_path(_fake_model(data)) is None
     assert len(reads) == 1  # stopped at the first block over the expected size
-    assert list(model_dir.iterdir()) == []
+    assert _left(model_dir) == []
 
 
 def test_short_download_is_rejected(model_dir, monkeypatch):
     data = b"weights" * 1000
     _urlopen(monkeypatch, data[:-1])
     assert semantic.model_path(_fake_model(data)) is None
-    assert list(model_dir.iterdir()) == []
+    assert _left(model_dir) == []
 
 
 def test_load_failure_of_verified_files_does_not_redownload(tmp_path, monkeypatch):
@@ -652,7 +660,7 @@ def test_bad_checksum_is_rejected(model_dir, monkeypatch):
     data = b"weights" * 1000
     _urlopen(monkeypatch, b"tampered" + data[8:])
     assert semantic.model_path(_fake_model(data)) is None
-    assert list(model_dir.iterdir()) == []
+    assert _left(model_dir) == []
 
 
 def test_non_https_url_is_refused(model_dir, monkeypatch):
@@ -975,7 +983,7 @@ def test_download_abandoned_midway_leaves_no_part_and_no_backoff(model_dir, monk
         return polls[0] < 2  # give up after the first block
 
     assert semantic.model_path(_fake_model(data), wait=wait) is None
-    assert list(model_dir.iterdir()) == [] and semantic._last_failure == 0.0
+    assert _left(model_dir) == [] and semantic._last_failure == 0.0
     assert semantic.model_path(_fake_model(data)) is not None  # next time it just downloads
 
 
@@ -1004,13 +1012,21 @@ class VecEmbedder:
         return out
 
 
-def _best_of(n, fn):
+def _median_of(n, fn):
+    """Median of ``n`` runs after one warm-up (first connection, page cache)."""
+    fn()
     times = []
     for _ in range(n):
         t0 = time.perf_counter()
         fn()
         times.append(time.perf_counter() - t0)
-    return min(times)
+    return statistics.median(times)
+
+
+def _budget() -> float:
+    """The US-20 budget with its Windows headroom / RCC_SEARCH_LATENCY_FACTOR (see
+    test_search_latency.py)."""
+    return SEMANTIC_BUDGET_S * _factor()
 
 
 def test_semantic_search_over_6000_segments_stays_in_budget(tmp_path):
@@ -1038,8 +1054,8 @@ def test_semantic_search_over_6000_segments_stays_in_budget(tmp_path):
     idx.embedder = Fixed()
     hits = idx._semantic("anything", 80)
     assert hits and hits[0].start == 1234.0 and len(hits) <= 80
-    t = _best_of(5, lambda: idx._semantic("anything", 80))
-    assert t < SEMANTIC_BUDGET_S
+    t = _median_of(7, lambda: idx._semantic("anything", 80))
+    assert t < _budget()
 
 
 def test_top_k_scan_matches_a_full_sort(tmp_path, monkeypatch):
@@ -1089,8 +1105,8 @@ def test_semantic_search_transcripts_100_sessions_stays_in_budget(out, monkeypat
     def run():
         assert search.search_transcripts(out, "budget", limit=50, semantic=True)
 
-    t = _best_of(5, run)
-    assert t < SEMANTIC_BUDGET_S
+    t = _median_of(7, run)
+    assert t < _budget()
 
 
 # --------------------------------------------------------------------------- locks, failures
@@ -1124,23 +1140,10 @@ def test_close_during_a_slow_load_deadlocks_nothing_and_later_calls_work(tmp_pat
     assert not closer.is_alive()  # close() didn't wait for the load
     monkeypatch.setattr(semantic, "_default", emb)
     search.default_index(True)
-    # close() runs after search._default_lock is released: block it and make sure that
-    # default_index(False) still returns, and that the lock is free while close() hangs
-    close_entered, close_release = threading.Event(), threading.Event()
-    real_close = emb.close
-
-    def slow_close():
-        close_entered.set()
-        assert close_release.wait(10)
-        real_close()
-
-    monkeypatch.setattr(emb, "close", slow_close)
+    # close() never waits for the load in flight (it takes only the embedder's state lock), so
+    # default_index(False) may call it under search._default_lock and still returns at once
     searcher = threading.Thread(target=lambda: search.default_index(False), daemon=True)
     searcher.start()
-    assert close_entered.wait(5)  # we are inside close() ...
-    assert search._default_lock.acquire(timeout=1)  # ... and the lock is not held
-    search._default_lock.release()
-    close_release.set()
     searcher.join(5)
     assert not searcher.is_alive()
     release.set()
@@ -1436,3 +1439,160 @@ def test_the_session_is_cpu_only(tmp_path, monkeypatch):
     )
     assert semantic.OnnxEmbedder().prepare() is True
     assert seen == [{"providers": ["CPUExecutionProvider"]}]
+
+
+# --------------------------------------------------------------------------- round 7
+def test_off_on_interleaving_never_closes_a_reattached_embedder(monkeypatch):
+    """default_index(False) drops the embedder, then a concurrent default_index(True)
+    re-attaches the same object before the close: it must stay usable."""
+    closed = []
+
+    class Emb(FakeEmbedder):
+        def close(self):
+            closed.append(self)
+
+    emb = Emb()
+    monkeypatch.setattr(semantic, "default_embedder", lambda: emb)
+    idx = search.default_index(True)
+    real_lock, armed = search._default_lock, []
+
+    class Lock:
+        """Fires a concurrent default_index(True) right after the first unlock of the off call."""
+
+        def __enter__(self):
+            real_lock.acquire()
+
+        def __exit__(self, *exc):
+            real_lock.release()
+            if armed:
+                armed.pop()
+                search.default_index(True)  # the interleaved "on"
+
+    monkeypatch.setattr(search, "_default_lock", Lock())
+    armed.append(1)
+    search.default_index(False)
+    assert idx.embedder is emb and closed == []  # re-attached: not closed
+    search.default_index(False)  # without interleaving it is closed
+    assert idx.embedder is None and closed == [emb]
+
+
+def test_hand_edited_semantic_setting_is_applied_to_a_running_app(tmp_path, monkeypatch):
+    from recandcc.ui.common import Controller
+
+    ctrl = SimpleNamespace(
+        cfg=Config(output_dir=tmp_path),
+        _save_lock=threading.Lock(),
+        _lang_lock=threading.Lock(),
+        _config_mtime=-1.0,
+        _mtime=lambda: 1.0,
+        post_notice=lambda *a: None,
+        apply_hotkey=lambda *a: None,
+    )
+    new = Config(output_dir=tmp_path)
+    new.search.semantic = True
+    monkeypatch.setattr("recandcc.ui.common.load_config", lambda *a, **k: new)
+    assert ctrl.cfg.search.semantic is False
+    Controller._maybe_reload_config(ctrl)  # type: ignore[arg-type]
+    assert ctrl.cfg.search.semantic is True
+
+
+def test_download_lock_serialises_two_processes_and_the_second_uses_the_file(
+    model_dir, monkeypatch
+):
+    """The second 'process' (a thread with its own lock object, as a second process has its
+    own file descriptor) waits, then uses the verified file instead of downloading again."""
+    data = b"weights" * 1000
+    model = _fake_model(data)
+    monkeypatch.setattr(semantic, "DOWNLOAD_LOCK_POLL_S", 0.01)
+    holder = semantic._FileLock(model_dir / ".download.lock")
+    assert holder.try_acquire()
+    other = semantic._FileLock(model_dir / ".download.lock")
+    assert not other.try_acquire()  # exclusive across descriptors
+    calls = _urlopen(monkeypatch, data)
+    got = []
+    t = threading.Thread(target=lambda: got.append(semantic.model_path(model)))
+    t.start()
+    time.sleep(0.1)
+    assert t.is_alive() and calls == []  # waiting for the holder
+    (model_dir / "m.onnx").write_bytes(data)  # the other process finishes
+    holder.release()
+    t.join(5)
+    assert got == [model_dir / "m.onnx"] and calls == []
+    assert other.try_acquire()  # released
+    other.release()
+
+
+def test_download_lock_wait_is_bounded_and_not_a_failure(model_dir, monkeypatch):
+    data = b"weights" * 1000
+    monkeypatch.setattr(semantic, "DOWNLOAD_LOCK_WAIT_S", 0.1)
+    monkeypatch.setattr(semantic, "DOWNLOAD_LOCK_POLL_S", 0.01)
+    holder = semantic._FileLock(model_dir / ".download.lock")
+    assert holder.try_acquire()
+    calls = _urlopen(monkeypatch, data)
+    assert semantic.model_path(_fake_model(data)) is None and calls == []
+    assert semantic._last_failure == 0.0  # no 10-minute backoff
+    holder.release()
+    assert semantic.model_path(_fake_model(data)) == model_dir / "m.onnx"
+
+
+def test_download_uses_a_per_process_temp_name(model_dir, monkeypatch):
+    import os
+
+    data = b"weights" * 1000
+    _urlopen(monkeypatch, data)
+    seen = []
+    real = Path.replace
+    monkeypatch.setattr(Path, "replace", lambda self, t: (seen.append(self.name), real(self, t))[1])
+    assert semantic.model_path(_fake_model(data)) is not None
+    assert seen == [f".m.onnx.part.{os.getpid()}"]
+
+
+def test_a_search_does_not_queue_behind_the_indexer(tmp_path, monkeypatch):
+    """The indexer holds the model's compute lock for a whole chunk: a search then returns
+    its full-text hits at once instead of waiting."""
+    import contextlib
+
+    _fake_onnx(monkeypatch, tmp_path, lambda name: contextlib.nullcontext())
+    emb = semantic.OnnxEmbedder()
+    assert emb.prepare() and emb.ready()
+    entered, release = threading.Event(), threading.Event()
+    real_run = emb._run
+
+    def slow_run(loaded, texts):
+        entered.set()
+        release.wait(10)
+        return real_run(loaded, texts)
+
+    monkeypatch.setattr(emb, "_run", slow_run)
+    indexer = threading.Thread(target=lambda: emb.embed(["chunk"] * 64))
+    indexer.start()
+    assert entered.wait(5)
+    try:
+        assert emb.embed_query(["q"]) is None  # does not block
+        out = tmp_path / "out"
+        make_session(out, 0, [seg(0, "the budget review")])
+        idx = TranscriptIndex(tmp_path / "idx" / "s.sqlite3", embedder=emb)
+        idx.sync(out)
+        t0 = time.perf_counter()
+        hits = idx.search("budget")
+        assert time.perf_counter() - t0 < 2.0 and hits
+    finally:
+        release.set()
+        indexer.join(5)
+    assert idx.wait_embedded(10)  # the index's own worker also embedded: the lock is free again
+    assert emb.embed_query(["q"]) is not None
+
+
+def test_a_busy_index_never_embeds_on_the_query_path(tmp_path, out):
+    emb = FakeEmbedder()
+    idx = make(tmp_path, emb)
+    make_session(out, 0, [seg(0, "invoice for the budget")])
+    sync(idx, out)
+    emb.calls.clear()
+    state = {"busy": True}
+    idx.busy = lambda: state["busy"]
+    assert idx.search("budget")  # full-text hit
+    assert emb.calls == []
+    state["busy"] = False
+    idx.search("budget")
+    assert emb.calls == [["budget"]]

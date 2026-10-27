@@ -765,6 +765,8 @@ class Controller:
         if self.cfg.detection.room_listening and not was_listening:  # turned on by hand
             self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
         self.cfg.output_dir = new.output_dir
+        for f in fields(new.search):  # [search] semantic: applies from the next search
+            setattr(self.cfg.search, f.name, getattr(new.search, f.name))
         tr, new_tr = self.cfg.transcription, new.transcription
         with self._lang_lock:  # both together: save() pairs them
             tr._raw_languages = getattr(new_tr, "_raw_languages", None)  # type: ignore[attr-defined]

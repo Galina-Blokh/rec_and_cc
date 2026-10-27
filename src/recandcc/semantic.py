@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
+import sys
 import threading
 import time
 import urllib.error
@@ -44,6 +46,8 @@ DOWNLOAD_TIMEOUT_S = 30.0
 LOAD_ATTEMPTS = 3  # a fresh file may be held for a moment (antivirus on Windows)
 LOAD_RETRY_PAUSE_S = 0.5
 LOAD_RETRY_AFTER_S = 60.0  # after a load that kept failing softly, don't try again for this long
+DOWNLOAD_LOCK_WAIT_S = 600.0  # wait this long for another process's download of the same file
+DOWNLOAD_LOCK_POLL_S = 0.2
 REOPEN_AFTER_PAUSE_S = 5.0  # a pause this long may outlive the server's idle timeout: reopen
 _SOFT_MARKERS = ("being used by another process", "sharing violation", "access is denied")
 # Windows messages are localised; the codes are not: ERROR_ACCESS_DENIED 5, SHARING_VIOLATION 32,
@@ -85,6 +89,9 @@ class Embedder(Protocol):
 
     def embed(self, texts: list[str]) -> np.ndarray | None: ...
 
+    # Optional: ``embed_query(texts)``: like ``embed`` but returns None instead of waiting
+    # when the embedder is busy (a search must not queue behind the indexer).
+
 
 _download_lock = threading.Lock()
 _last_failure = 0.0
@@ -110,6 +117,50 @@ def _is_valid(path: Path, model: ModelFile) -> bool:
     return True
 
 
+class _FileLock:
+    """Exclusive advisory lock on a file, shared between processes (the app and a CLI search):
+    fcntl on POSIX, msvcrt on Windows (as the single-instance lock in ``cli.py``)."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._f: Any = None
+
+    def try_acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        f = open(self.path, "a+")  # noqa: SIM115 - held open: it is the lock
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            f.close()
+            return False
+        self._f = f
+        return True
+
+    def release(self) -> None:
+        f, self._f = self._f, None
+        if f is None:
+            return
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            # POSIX: closing the descriptor drops the flock
+        except OSError:
+            pass
+        finally:
+            f.close()
+
+
 class _Abandoned(Exception):
     """The caller's ``wait`` said stop (a recording started and the setting was switched off)."""
 
@@ -132,7 +183,18 @@ def model_path(
             return path
         if _last_failure and time.monotonic() - _last_failure < RETRY_AFTER_S:
             return None
+        lock = _FileLock(MODELS_DIR / ".download.lock")
         try:
+            deadline = time.monotonic() + DOWNLOAD_LOCK_WAIT_S
+            while not lock.try_acquire():
+                # another process is downloading: use its result when it is done
+                if _is_valid(path, model):
+                    return path
+                if time.monotonic() >= deadline:
+                    return None  # not our failure: no backoff
+                time.sleep(DOWNLOAD_LOCK_POLL_S)
+            if _is_valid(path, model):  # the other process finished while we waited
+                return path
             _download(model, path, wait)
         except _Abandoned:
             return None  # not a failure: no backoff
@@ -140,6 +202,8 @@ def model_path(
             _last_failure = time.monotonic()
             log.warning("semantic search unavailable: can't download %s (%s)", model.name, e)
             return None
+        finally:
+            lock.release()
     return path
 
 
@@ -174,7 +238,7 @@ def _resumes_at(r: Any, offset: int) -> bool:
 
 def _download(model: ModelFile, path: Path, wait: Callable[[], bool] | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.part")
+    tmp = path.with_name(f".{path.name}.part.{os.getpid()}")  # per process, under the file lock
     log.info("downloading search model %s (%.0f MB, once)", model.name, model.size / 1e6)
     if not model.url.startswith("https://"):
         raise ValueError(f"refusing non-https model URL {model.url!r}")
@@ -373,6 +437,17 @@ class OnnxEmbedder:
         with self._compute:
             return self._run(loaded, texts)
 
+    def embed_query(self, texts: list[str]) -> np.ndarray | None:
+        """Like ``embed`` for a loaded model, but None at once if the indexer holds the
+        compute lock (a search then shows full-text results instead of queueing behind it)."""
+        loaded = self._loaded
+        if loaded is None or not self._compute.acquire(blocking=False):
+            return None
+        try:
+            return self._run(loaded, texts)
+        finally:
+            self._compute.release()
+
     @staticmethod
     def _run(loaded: tuple[Any, Any], texts: list[str]) -> np.ndarray:
         session, tok = loaded
@@ -406,9 +481,14 @@ def default_embedder() -> OnnxEmbedder:
         return _default
 
 
+def current_default_embedder() -> OnnxEmbedder | None:
+    """The process-wide embedder if it was ever created (never creates it)."""
+    with _default_lock:
+        return _default
+
+
 def close_default_embedder() -> None:
     """Unload the process-wide model, if it was ever created (semantic search turned off)."""
-    with _default_lock:
-        e = _default
+    e = current_default_embedder()
     if e is not None:
         e.close()
