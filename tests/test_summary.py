@@ -155,7 +155,7 @@ def test_routed_model_unavailable_falls_back_to_the_default(tmp_path, monkeypatc
     with caplog.at_level(logging.DEBUG, logger="recandcc"):
         text = summary.summarize_session(d, cfg).read_text("utf-8")
     assert made == [QWEN35, DEFAULT_SUMMARY_MODEL]
-    assert "by Qwen2.5-3B-Instruct-4bit;" in text
+    assert f"by {Path(DEFAULT_SUMMARY_MODEL).name};" in text
     assert f"summary model {QWEN35} unavailable; using {DEFAULT_SUMMARY_MODEL}" in caplog.text
     assert SPOKEN not in caplog.text
     cfg.summary.language_models = {}  # the default itself unavailable: skipped as before
@@ -299,11 +299,12 @@ def test_offered_summary_models_are_pinned_and_documented():
 
     assert DEFAULT_SUMMARY_MODEL in revisions.OFFERED_SUMMARY_MODELS
     root = Path(__file__).resolve().parents[1]
-    docs = [(root / d).read_text("utf-8") for d in ("README.md", "docs/CONFIGURATION.md")]
+    config_doc = (root / "docs/CONFIGURATION.md").read_text("utf-8")  # documents every model
     for model in revisions.OFFERED_SUMMARY_MODELS:
         assert re.fullmatch(r"[0-9a-f]{40}", revisions.HF_REVISIONS[model]), model
         assert model in summary.MODEL_SIZES
-        assert all(model.split("/")[1] in d for d in docs), model
+        assert model in config_doc, model
+    assert QWEN35 in (root / "README.md").read_text("utf-8")  # the Hebrew routing example
     assert summary.download_notice(QWEN35) == "Downloading the summary model (~3.0 GB, once)"
     assert summary.download_notice("me/custom") == "Downloading the summary model (once)"
 
