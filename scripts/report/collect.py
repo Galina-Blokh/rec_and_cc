@@ -40,7 +40,7 @@ except ZoneInfoNotFoundError:  # Windows without the tzdata package: report in U
     UK = UTC
 TIMEOUT = 120  # seconds for any one gh or git call
 RETRIES, BACKOFF = 3, 2.0  # retry rate-limited gh calls after 2, 4, 8 s
-RATE_LIMITED = re.compile(r"HTTP 429|HTTP 403|rate limit", re.I)
+RATE_LIMITED = re.compile(r"HTTP 429|rate limit", re.I)  # not a bare 403 (permissions)
 NOT_FOUND = re.compile(r"HTTP 404|Not Found")
 FULL_WALK = timedelta(hours=24)  # walk every list end to end at least this often
 MAX_RUN_REFRESH = 20  # unfinished runs refetched by id per collect
@@ -282,7 +282,7 @@ class GitHub:
             limited = out.returncode != 0 and RATE_LIMITED.search(out.stderr or "")
             if not limited or attempt == RETRIES:
                 break
-            # GitHub secondary rate limits (403/429); jitter so parallel workers spread out
+            # GitHub rate limits (429, or a 403 that says rate limit); jitter so parallel workers spread out
             time.sleep(BACKOFF * 2**attempt * random.uniform(0.5, 1.5))  # noqa: S311
         if out.returncode != 0:
             # gh's stderr never contains the token; keep only its first line.

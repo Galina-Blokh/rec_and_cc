@@ -438,6 +438,24 @@ def test_unfinished_run_refetches_are_capped(tmp_path, monkeypatch):
     assert [r["status"] for r in runs[2:]] == ["completed", "completed", "queued"]
 
 
+def test_a_permission_403_fails_at_once_without_retrying(tmp_path, monkeypatch):
+    monkeypatch.setattr(collect.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError))
+
+    def fake_run(args, **kwargs):
+        return collect.subprocess.CompletedProcess(
+            args, 1, "", "gh: Resource not accessible by integration (HTTP 403)"
+        )
+
+    monkeypatch.setattr(collect.subprocess, "run", fake_run)
+    gh = collect.GitHub("o/r", tmp_path)
+    try:
+        gh._api("actions/runs")
+        raise AssertionError("expected a failure")
+    except RuntimeError as exc:
+        assert "HTTP 403" in str(exc)
+    assert gh.calls == 1
+
+
 def test_pooled_pr_details_match_sequential(tmp_path, monkeypatch):
     pulls = [{"id": n, "number": n, "updated_at": f"u{n}"} for n in range(1, 8)]
 
