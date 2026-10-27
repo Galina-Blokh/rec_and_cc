@@ -338,10 +338,20 @@ def test_unlisted_package_keeps_its_key(fakes, mon, monkeypatch):
     assert [(p.pid, p.bundle_id) for p in mon.snapshot()] == [(0, "ms-teams.exe")]  # sticky
 
 
+def test_app_with_unreadable_path_is_not_demoted_to_a_listed_helper(fakes, mon):
+    teams_on_mic(fakes)
+    fakes.procs = [STARTER, TEAMS]
+    assert [p.bundle_id for p in mon.snapshot()] == ["ms-teams.exe"]
+    mon._table = None
+    fakes.procs = [STARTER, ns(pid=300, info={"name": "ms-teams.exe", "exe": None})]
+    assert [(p.pid, p.bundle_id) for p in mon.snapshot()] == [(300, "ms-teams.exe")]
+
+
 def test_unlisted_package_without_sticky_is_found_by_name(fakes, mon):
     teams_on_mic(fakes)
     fakes.procs = [ns(pid=300, info={"name": "ms-teams.exe", "exe": None})]  # path unreadable
     assert [(p.pid, p.bundle_id) for p in mon.snapshot()] == [(300, "ms-teams.exe")]
+    assert mon._chosen == {"msteams_8wekyb3d8bbwe": "ms-teams.exe"}  # remembered
 
 
 def test_no_walk_when_every_mic_user_already_plays_audio(fakes, mon):

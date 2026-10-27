@@ -246,13 +246,20 @@ class WinActivityMonitor(ActivityMonitor):
         for exe, full in mic:
             if "\\" not in full:
                 family = full.lower()
+                sticky = self._chosen.get(family, "")
                 if family in live:
                     exe = self._chosen[family] = live[family]
                     pid = procs[exe].pid
+                elif _named_after(sticky, family) and sticky in by_name:
+                    # The app still runs, even if its exe path was unreadable this walk and
+                    # only helpers are listed under the package: don't demote it to one.
+                    exe, pid = sticky, by_name[sticky]
                 elif cands := by_family.get(family):
                     exe, pid = self._choose(family, cands, procs)
                 else:
                     exe = self._resolve_unlisted(family, by_name) or exe
+                    if exe != full.split("_")[0].lower():
+                        self._chosen[family] = exe
                     pid = by_name.get(exe, 0)
             else:
                 pid = by_name.get(exe, 0)
