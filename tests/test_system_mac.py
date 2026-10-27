@@ -19,15 +19,17 @@ from recandcc.models import AppTarget
 
 class FakeProc:
     stderr_text = b""
+    stdout_bytes = b""
+    running = False  # poll(): exited (0) unless a test keeps the helper running
 
     def __init__(self, cmd, stdin, **_kw):
         self.cmd, self.stdin_mode = cmd, stdin
         self.stdin = io.BytesIO() if stdin == subprocess.PIPE else None
-        self.stdout, self.stderr = io.BytesIO(), io.BytesIO(self.stderr_text)
+        self.stdout, self.stderr = io.BytesIO(self.stdout_bytes), io.BytesIO(self.stderr_text)
         self.sent = b""
 
     def poll(self):
-        return 0
+        return None if self.running else 0
 
     def wait(self, timeout=None):
         return 0
@@ -135,18 +137,28 @@ def test_a_failed_support_probe_is_not_remembered(tmp_path, monkeypatch):
     assert len(calls) == 2
 
 
+APP, AUDIO = b"rcc-audiotap: scope: app\n", b"\0" * system_mac.BLOCK_BYTES
+
+
 @pytest.mark.parametrize(
-    ("stderr", "expected"),
+    ("stderr", "audio", "running", "expected"),
     [
-        (b"rcc-audiotap: scope: app\n", "app"),
-        (b"rcc-audiotap: scope: all\n", "all"),
-        (b"", "pending"),
+        (APP, AUDIO, True, "app"),
+        (b"rcc-audiotap: scope: all\n", AUDIO, True, "all"),
+        (b"", AUDIO, True, "pending"),  # no report
+        (APP, b"", True, "pending"),  # reported, but the device never started
+        (APP, AUDIO, False, "pending"),  # setup failed after the report: the helper exited
     ],
 )
-def test_confirmed_scope_waits_for_the_helpers_report(procs, monkeypatch, stderr, expected):
+def test_confirmed_scope_waits_for_the_helpers_report(
+    procs, monkeypatch, stderr, audio, running, expected
+):
     monkeypatch.setattr(FakeProc, "stderr_text", stderr)
+    monkeypatch.setattr(FakeProc, "stdout_bytes", audio)
+    monkeypatch.setattr(FakeProc, "running", running)
     source = MacSystemAudioSource(target=AppTarget(("us.zoom",)))
     source.start(lambda frames: None)
     assert source.confirmed_scope(0.5) == expected
+    monkeypatch.setattr(FakeProc, "running", False)  # stop(): no SIGTERM to a fake
     source.stop()
     assert MacSystemAudioSource().confirmed_scope(0) == "all"  # a global tap: known at once

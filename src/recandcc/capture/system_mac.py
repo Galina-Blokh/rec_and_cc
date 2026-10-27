@@ -6,6 +6,7 @@ import logging
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -67,6 +68,7 @@ class MacSystemAudioSource(AudioSource):
         # "app" until the helper reports otherwise ("scope: all" on stderr = it fell back).
         self.scope = "app" if self._target_args else "all"
         self._scope_known = threading.Event()  # the helper said "scope: app/all" (or global)
+        self._audio_started = threading.Event()  # the first audio block came in (tap is live)
         if not self._target_args:
             self._scope_known.set()
         self._proc: subprocess.Popen[bytes] | None = None
@@ -103,7 +105,7 @@ class MacSystemAudioSource(AudioSource):
             )
             self._reader = threading.Thread(
                 target=self._read_audio,
-                args=(self._proc, on_frames),
+                args=(self._proc, on_frames, self._audio_started),
                 name="mac-system-audio",
                 daemon=True,
             )
@@ -155,7 +157,11 @@ class MacSystemAudioSource(AudioSource):
             proc.stderr.close()
 
     @staticmethod
-    def _read_audio(proc: subprocess.Popen[bytes], on_frames: FrameCallback) -> None:
+    def _read_audio(
+        proc: subprocess.Popen[bytes],
+        on_frames: FrameCallback,
+        started: threading.Event | None = None,
+    ) -> None:
         assert proc.stdout is not None  # noqa: S101 - type narrowing: the pipe was requested in Popen
         pending = b""
         while True:
@@ -170,6 +176,8 @@ class MacSystemAudioSource(AudioSource):
                 continue
             frames = np.frombuffer(pending, dtype="<f4").astype(np.float32, copy=False)
             pending = b""
+            if started is not None:
+                started.set()  # cheap, never blocks
             try:
                 on_frames(frames)
             except Exception:
@@ -195,4 +203,17 @@ class MacSystemAudioSource(AudioSource):
                 self._scope_known.set()
 
     def confirmed_scope(self, timeout: float) -> str:
-        return self.scope if self._scope_known.wait(timeout) else "pending"
+        """ "app" only once the helper reported a per-app tap AND its audio flows (it prints
+        the scope before the device starts, so a later setup failure would end it silent),
+        with the helper still running; "pending" otherwise. A process tap delivers
+        buffers continuously (silence too), so the first one comes within milliseconds."""
+        deadline = time.monotonic() + timeout
+        if not self._scope_known.wait(timeout):
+            return "pending"
+        if self.scope != "app":
+            return self.scope
+        if not self._audio_started.wait(max(0.0, deadline - time.monotonic())):
+            return "pending"
+        with self._lock:
+            proc = self._proc
+        return "app" if proc is not None and proc.poll() is None else "pending"
