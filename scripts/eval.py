@@ -2,6 +2,8 @@
 
     uv run python scripts/eval.py ~/RecAndCC-eval                  # table + eval-results.json
     uv run python scripts/eval.py ~/RecAndCC-eval --model small --json out.json
+    uv run python scripts/eval.py ~/RecAndCC-eval --backend cpu    # faster-whisper on the CPU
+    uv run python scripts/eval.py ~/RecAndCC-eval --hypotheses ~/RecAndCC-eval/whisper-cpp
 
 The set lives outside git (see docs/EVALUATION.md): ``manifest.json`` lists WAV clips with
 reference utterances ``{start, end, speaker, language, text}``. Each clip is transcribed through
@@ -20,6 +22,12 @@ speaker turns come from the real diarizer. Reported per language and overall:
   capture feeds it (100 ms blocks); per emitted segment, seconds from the nominal capture
   time of the block holding its end (when that audio ended) to its emission. p50 / p90 / max
   (linear interpolation).
+- resources: wall time and peak resident memory of the whole run (plus MLX's own peak GPU
+  memory on the MLX path).
+
+``--backend mlx|cpu`` forces the MLX GPU path or faster-whisper on the CPU for this run only
+(the config on disk is not changed). ``--hypotheses DIR`` scores transcripts made by another
+tool (``<clip-id>.json`` segments or ``<clip-id>.txt``) instead of running the pipeline.
 
 Runs offline once the models are on disk. Prints scores only, never transcript text.
 """
@@ -27,6 +35,7 @@ Runs offline once the models are on disk. Prints scores only, never transcript t
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import math
 import shutil
@@ -325,6 +334,92 @@ def latency_summary(latencies: list[float]) -> dict:
     return out
 
 
+# --------------------------------------------------------------------------- hypotheses
+HYP_KEYS = {"start", "end", "text", "language", "speaker"}
+
+
+def load_hypothesis(clip: Clip, folder: Path) -> tuple[list[Segment] | None, str, dict]:
+    """Another tool's transcript of `clip`: (segments, or None for plain text; text; extras).
+
+    ``<id>.json``: ``{"segments": [{start, end, text, language?, speaker?}], "elapsed_s"?}``
+    (or the bare list); ``<id>.txt``: plain text, scored for WER only.
+    """
+    folder = folder.resolve()
+    for ext in (".json", ".txt"):
+        path = (folder / f"{clip.id}{ext}").resolve()
+        if not path.is_relative_to(folder):
+            raise ValueError(f"clip {clip.id}: hypothesis path is outside the folder")
+        if path.is_file():
+            break
+    else:
+        raise ValueError(f"clip {clip.id}: no {clip.id}.json or {clip.id}.txt in {folder}")
+    n, duration = -1, sf.info(str(clip.audio)).duration
+    try:
+        raw = path.read_text(encoding="utf-8-sig")  # tolerate a BOM (common on Windows)
+        if ext == ".txt":
+            return None, raw, {}
+        data = json.loads(raw)
+        items = data["segments"] if isinstance(data, dict) else data
+        elapsed = data.get("elapsed_s") if isinstance(data, dict) else None
+        if elapsed is not None and not (math.isfinite(float(elapsed)) and float(elapsed) >= 0):
+            raise BadHypothesis("elapsed_s must be a finite number >= 0")
+        extras = {"elapsed_s": None if elapsed is None else float(elapsed)}
+        segs = []
+        for n, i in enumerate(items):  # noqa: B007 - `n` names the segment in errors
+            if unknown := set(i) - HYP_KEYS:
+                raise BadHypothesis(f"unknown key {sorted(unknown)}")
+            s = Segment(
+                start=float(i["start"]),
+                end=float(i["end"]),
+                text=str(i["text"]),
+                speaker="" if i.get("speaker") is None else str(i["speaker"]),
+                language=lang_code(str(i.get("language") or "")),
+            )
+            if not (math.isfinite(s.start) and math.isfinite(s.end) and 0 <= s.start <= s.end):
+                raise BadHypothesis("times must be 0 <= start <= end")
+            if s.end > duration + 0.5:
+                raise BadHypothesis(f"segment ends after the audio ({duration:.2f} s)")
+            segs.append(s)
+    except (BadHypothesis, KeyError, TypeError, ValueError, AttributeError, UnicodeError) as e:
+        # Never a parser's message: it can quote a value, which may be transcript text.
+        why = str(e) if isinstance(e, BadHypothesis) else type(e).__name__
+        why += f" {e}" if isinstance(e, KeyError) else ""  # the missing key's name
+        where = f"segment {n}" if n >= 0 else "file"
+        raise ValueError(f"clip {clip.id}: bad hypothesis {where} ({why})") from None
+    return segs, "", extras
+
+
+class BadHypothesis(Exception):
+    """A malformed hypothesis file; the message never holds values from the file."""
+
+
+def score_hypothesis(clip: Clip, folder: Path, diarize: bool = True) -> dict:
+    """Score another tool's transcript of `clip` with the same metrics as a pipeline run.
+
+    Language ID is scored only when every segment has a language, DER only when every segment
+    of an "others" clip has a speaker (and `diarize`); otherwise they are n/a. A ``.txt``
+    file has no times, so its WER is over the whole clip, under the clip's language (or
+    "mixed")."""
+    segs, text, extras = load_hypothesis(clip, folder)
+    result: dict = {"id": clip.id, "track": str(clip.track)}
+    result["audio_s"], result["elapsed_s"] = sf.info(clip.audio).duration, extras.get("elapsed_s")
+    if segs is None:
+        utts = sorted(clip.utterances, key=lambda u: u.start)
+        ref = [w for u in utts for w in normalize(u.text)]
+        langs = {u.language for u in utts}
+        lang = langs.pop() if len(langs) == 1 else "mixed"
+        a = {"words": len(ref), "edits": word_edits(ref, normalize(text))}
+        result["text"] = {lang: {**a, "utts": len(utts), "lid_ok": 0}}
+        result["lid_scored"] = False
+        return result
+    result["text"] = text_scores(clip.utterances, segs)
+    result["lid_scored"] = bool(segs) and all(s.language for s in segs)
+    if diarize and clip.track is Track.OTHERS and segs and all(s.speaker for s in segs):
+        ref_turns = [(u.start, u.end, u.speaker) for u in clip.utterances]
+        result["diarization"] = der(ref_turns, [(s.start, s.end, s.speaker) for s in segs])
+    return result
+
+
 # ----------------------------------------------------------------------------- pipeline
 def run_clip(
     clip: Clip, transcriber, diarizer, root: Path | None = None, live: bool = False
@@ -371,13 +466,14 @@ def summarize(results: list[dict]) -> dict:
     langs: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     for r in results:
         for lang, a in r["text"].items():
-            for k, v in a.items():
+            lid_utts = a["utts"] if r.get("lid_scored", True) else 0
+            for k, v in [*a.items(), ("lid_utts", lid_utts)]:
                 langs[lang][k] += v
                 langs["all"][k] += v
     per_lang = {
         lang: {
             "wer": round(a["edits"] / a["words"], 4) if a["words"] else None,
-            "lid_accuracy": round(a["lid_ok"] / a["utts"], 4) if a["utts"] else None,
+            "lid_accuracy": round(a["lid_ok"] / a["lid_utts"], 4) if a["lid_utts"] else None,
             "words": int(a["words"]),
             "utterances": int(a["utts"]),
         }
@@ -397,6 +493,7 @@ def summarize(results: list[dict]) -> dict:
         "clips": len(results),
         "clips_without_der": sum(1 for r in results if r.get("diarization_ok") is False),
         "clips_without_live": sum(1 for r in results if r.get("live_ok") is False),
+        "clips_without_time": len(results) - len(timed),
     }
 
 
@@ -406,25 +503,87 @@ def live_line(v: dict) -> str:
     return f"p50 {v['p50_s']} s, p90 {v['p90_s']} s, max {v['max_s']} s ({v['segments']} segments)"
 
 
+def maxrss_mb(maxrss: int, platform: str) -> float:
+    """``ru_maxrss`` in MB: bytes on macOS, kilobytes on Linux."""
+    return round(maxrss / 2**20 if platform == "darwin" else maxrss / 1024, 1)
+
+
+def peak_memory_mb() -> float | None:
+    """Peak resident memory of this process so far, in MB; None where it can't be read."""
+    try:
+        import resource
+    except ImportError:  # Windows: psutil is installed there (pycaw needs it)
+        try:
+            info = importlib.import_module("psutil").Process().memory_info()
+        except Exception:  # noqa: BLE001 - n/a rather than a failed run
+            return None
+        peak = getattr(info, "peak_wset", None)
+        return round(peak / 2**20, 1) if peak else None
+    return maxrss_mb(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, sys.platform)
+
+
+def mlx_peak_mb() -> float | None:
+    """MLX's own peak GPU allocation in MB (Metal buffers may not show in the RSS)."""
+    try:
+        mx = importlib.import_module("mlx.core")
+        get = getattr(mx, "get_peak_memory", None) or mx.metal.get_peak_memory
+        return round(get() / 2**20, 1)
+    except Exception:  # noqa: BLE001 - n/a rather than a failed run
+        return None
+
+
+def na(v: object) -> object:
+    return "n/a" if v is None else v
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     p.add_argument("root", type=Path, help="eval set folder containing manifest.json")
     p.add_argument("--model", help="Whisper model (default: from config)")
     p.add_argument("--no-diarize", action="store_true", help="skip DER")
     p.add_argument("--live", action="store_true", help="also measure live caption latency")
+    p.add_argument(
+        "--backend",
+        choices=["auto", "mlx", "cpu"],
+        default="auto",
+        help="force MLX on the GPU or faster-whisper on the CPU (default: from config)",
+    )
+    p.add_argument("--hypotheses", type=Path, help="score <clip-id>.json/.txt from another tool")
     p.add_argument("--json", type=Path, default=Path("eval-results.json"))
     args = p.parse_args(argv)
+    if args.hypotheses and (args.model or args.live or args.backend != "auto"):
+        p.error("--hypotheses scores existing transcripts: no --model, --backend or --live")
+
+    t_start = time.monotonic()
+    clips = load_manifest(args.root.expanduser())
+    if args.hypotheses:
+        folder = args.hypotheses.expanduser()
+        results = [score_hypothesis(c, folder, not args.no_diarize) for c in clips]
+        report = {
+            "engine": f"hypotheses {folder.name}",
+            "backend": "external",
+            "language_id": "engine's own",
+            "wall_s": None,  # this script's own time and memory say nothing about the engine
+            "peak_memory_mb": None,
+        }
+        return write_report(args.json, report, results, t_start)
 
     from recandcc.config import load_config
     from recandcc.transcribe import Transcriber
     from recandcc.transcribe.diarize import Diarizer
+    from recandcc.transcribe.gpu import gpu_available
 
-    cfg = load_config().transcription
+    cfg = load_config().transcription  # changed in memory only, never saved
     cfg.diarize = False  # DER is measured on the diarizer directly
     cfg.keep_audio = True  # only a temporary copy; the clip itself is never touched
     if args.model:
         cfg.model = args.model
-    clips = load_manifest(args.root.expanduser())
+    if args.backend == "mlx":
+        if not gpu_available():
+            p.error("--backend mlx needs Apple silicon with mlx-whisper installed")
+        cfg.backend, cfg.device = "mlx", "auto"
+    elif args.backend == "cpu":
+        cfg.backend, cfg.device = "faster-whisper", "cpu"
     transcriber = Transcriber(cfg)
     diarizer = None if args.no_diarize else Diarizer()
     try:
@@ -437,21 +596,44 @@ def main(argv: list[str] | None = None) -> int:
         transcriber.close()
         if diarizer is not None:
             diarizer.close()
-    report = {"model": cfg.model, "summary": summarize(results), "clips": results}
-    args.json.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    gpu, dev = bool(getattr(transcriber, "gpu", False)), cfg.device
+    report = {
+        "engine": f"model {cfg.model}",
+        "model": cfg.model,
+        "backend": "mlx" if gpu else "faster-whisper" + ("" if dev == "auto" else f" ({dev})"),
+        "gpu_peak_memory_mb": mlx_peak_mb() if gpu else None,
+    }
+    return write_report(args.json, report, results, t_start)
+
+
+def write_report(path: Path, report: dict, results: list[dict], t_start: float) -> int:
+    if report["backend"] != "external":
+        report["wall_s"] = round(time.monotonic() - t_start, 2)
+        report["peak_memory_mb"] = peak_memory_mb()
+    report |= {"summary": summarize(results), "clips": results}
+    path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     s = report["summary"]
-    print(f"model {cfg.model}, {s['clips']} clips, RTF {s['rtf']}, DER {s['der']}")
+    head = f"{report['engine']} [{report['backend']}], {s['clips']} clips"
+    print(f"{head}, RTF {na(s['rtf'])}, DER {na(s['der'])}")
+    gpu_mem = report.get("gpu_peak_memory_mb")
+    mem = f"peak memory {na(report['peak_memory_mb'])} MB"
+    print(
+        f"  wall {na(report['wall_s'])} s, {mem}" + (f", MLX GPU {gpu_mem} MB" if gpu_mem else "")
+    )
+    if s["clips_without_time"]:
+        print(f"  warning: {s['clips_without_time']} clip(s) without a time, not in RTF")
     if s["clips_without_der"]:
         print(f"  warning: diarization failed on {s['clips_without_der']} clip(s), not in DER")
     for lang, v in s["languages"].items():
-        print(f"  {lang:<4} WER {v['wer']}  language-ID {v['lid_accuracy']}  ({v['words']} words)")
+        lid = na(v["lid_accuracy"])
+        print(f"  {lang:<5} WER {na(v['wer'])}  language-ID {lid}  ({v['words']} words)")
     if s["live"] is not None:
         clips = [(r["id"], r["live"]) for r in results if "live" in r]
         for name, v in [("all", s["live"]), *clips]:
             print(f"  live {name}: {live_line(v)}")
         if s["clips_without_live"]:
             print(f"  warning: live replay failed on {s['clips_without_live']} clip(s)")
-    print(f"details: {args.json}")
+    print(f"details: {path}")
     return 0
 
 

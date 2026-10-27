@@ -22,6 +22,7 @@ the numbers in them come from the commits and docs they link to (measured on an 
 | [0011](0011-stack-and-packaging-after-v0-1.md) | Stack and packaging after v0.1 | Proposed |
 | [0012](0012-per-app-system-audio-tap.md) | Optional per-app system-audio tap that follows the trigger app | Accepted |
 | [0013](0013-adaptive-speaker-count.md) | Adaptive speaker count (silhouette) instead of a fixed clustering threshold | Accepted |
+| [0014](0014-overlap-aware-segmentation.md) | Overlap-aware segmentation (pyannote segmentation-3.0) before the speaker embeddings | Accepted |
 
 ## Adding an ADR
 
