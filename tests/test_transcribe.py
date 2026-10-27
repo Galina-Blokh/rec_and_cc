@@ -180,6 +180,27 @@ def test_write_outputs_survive_lone_surrogates_and_noncharacters(tmp_path):
         assert "bad \ufffd and \ufffd here" in text.replace("\\ufffd", "\ufffd")
 
 
+def test_srt_collapses_bare_carriage_returns():
+    srt = format_srt([seg(0, 1, "one\r\r\rtwo\r\n\r\nthree")])
+    assert "Others: one\ntwo\nthree\n" in srt
+
+
+def test_atomic_write_warns_with_file_name_only(tmp_path, caplog):
+    from recandcc.transcribe.output import atomic_write
+
+    atomic_write(tmp_path / "f.txt", "secret\ud83d")
+    assert [r.getMessage() for r in caplog.records if r.levelname == "WARNING"] == [
+        "f.txt: unencodable characters replaced with '?'"
+    ]
+
+
+def test_session_metadata_write_survives_a_bad_name(tmp_path):
+    s = make_session(tmp_path)
+    s.trigger_app = "bad\ud83dname"
+    s.save()
+    assert (tmp_path / s.FILENAME).exists()
+
+
 def test_atomic_write_replaces_unencodable_text_as_last_resort(tmp_path):
     from recandcc.transcribe.output import atomic_write
 

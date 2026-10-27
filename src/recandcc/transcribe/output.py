@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import re
 import threading
@@ -17,6 +18,8 @@ PARAGRAPH_GAP_S = 2.0
 MD_NAME, JSON_NAME, SRT_NAME = "transcript.md", "transcript.json", "transcript.srt"
 # Unicode bidi controls for right-to-left (Hebrew) segments. transcript.json keeps the raw text.
 RLI, PDI, RLM = "\u2067", "\u2069", "\u200f"
+
+log = logging.getLogger(__name__)
 
 
 def fmt_hms(t: float) -> str:
@@ -70,7 +73,7 @@ def srt_text(seg: Segment) -> str:
     subtitle out right to left (label on the right, trailing punctuation on the left); RLM is
     understood by older players that don't know isolates."""
     # a blank line would end the cue early: collapse runs of newlines into one
-    body = re.sub(r"\s*\n\s*", "\n", seg.text.strip())
+    body = re.sub(r"\s*\n\s*", "\n", seg.text.strip().replace("\r\n", "\n").replace("\r", "\n"))
     line = f"{seg.speaker}: {body}"
     return RLM + line if is_rtl(seg.language, seg.text) else line
 
@@ -181,6 +184,10 @@ def atomic_write(path: Path, text: str, tries: int = 5) -> Path:
     """Write via a temp file + rename, so readers never see a half-written file."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            log.warning("%s: unencodable characters replaced with '?'", path.name)
         tmp.write_text(text, encoding="utf-8", errors="replace")
         for attempt in range(tries):
             try:
