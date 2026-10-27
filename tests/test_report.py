@@ -190,10 +190,147 @@ def test_sessions_count_prompts_and_dedupe_usage(tmp_path):
     (d / "s1" / "subagents" / "agent-x.jsonl").write_text(
         json.dumps(lines[1] | {"message": lines[1]["message"] | {"id": "m2"}})
     )
-    out = collect.summarize_sessions(collect.read_sessions([d]), {"b1": 1})
+    out = collect.claude_usage([d], {"b1": 1})
     assert (out["sessions"], out["subagents"], out["prompts"]) == (1, 1, 1)
     assert out["tokens"] == 12 and out["unlinked_cost"] == 0
     assert "secret" not in json.dumps(out)
+
+
+def test_streaming_session_totals_keep_the_summary_shape(tmp_path):
+    d = tmp_path / "proj"
+    d.mkdir()
+    big = {"input_tokens": 1_000_000, "output_tokens": 1_000_000}  # Opus 5.5: $24
+    small = {"output_tokens": 1_000_000, "cache_creation_input_tokens": 10}  # Haiku: ~$0.50
+
+    def rec(mid, model, usage, when, branch):
+        msg = {"id": mid, "model": model, "usage": usage}
+        return json.dumps(
+            {"type": "assistant", "timestamp": when, "gitBranch": branch, "message": msg}
+        )
+
+    lines = [
+        rec("a", "claude-opus-5-5", big, "2026-10-25T10:00:00Z", "b1"),
+        rec("a", "claude-opus-5-5", big, "2026-10-25T10:00:01Z", "b1"),  # repeated id: once
+        rec("b", "claude-haiku-5-5", small, "2026-10-26T10:00:00Z", "main"),
+        rec("c", "<synthetic>", big, "2026-10-26T10:00:00Z", "b1"),  # skipped
+        json.dumps({"type": "user", "message": {"content": [{"type": "tool_result"}]}}),
+        "not json",
+    ]
+    (d / "s.jsonl").write_text("\n".join(lines))
+    assert collect.claude_usage([d], {"b1": 7}) == {
+        "sessions": 1,
+        "subagents": 0,
+        "prompts": 0,
+        "tokens": 3_000_010,
+        "cost": 24.5,
+        "kinds": {"input": 1_000_000, "output": 2_000_000, "cache_read": 0, "cache_write": 10},
+        "by_model": [
+            {"model": "claude-opus-5-5", "tokens": 2_000_000, "cost": 24.0},
+            {"model": "claude-haiku-5-5", "tokens": 1_000_010, "cost": 0.5},
+        ],
+        "by_day": [
+            {"day": "2026-10-25", "tokens": 2_000_000, "cost": 24.0},
+            {"day": "2026-10-26", "tokens": 1_000_010, "cost": 0.5},
+        ],
+        "by_pr": {"7": {"tokens": 2_000_000, "cost": 24.0}},
+        "linked_cost": 24.0,
+        "unlinked_cost": 0.5,
+        "unlinked_share": 0.02,
+    }
+
+
+def _fake_api(gh, responses, log):
+    """Serve `gh._api` from {endpoint: JSON} and record each call: no subprocess, no network."""
+
+    def api(endpoint, paginate=False):
+        log.append(endpoint)
+        with gh._lock:
+            gh.calls += 1
+        return responses[endpoint]
+
+    gh._api = api
+
+
+def test_incremental_list_stops_at_cached_page_and_merges(tmp_path):
+    ep = "pulls?state=all&sort=updated&direction=desc&per_page=2"
+
+    def item(i, updated):
+        return {"id": i, "updated_at": updated}
+
+    gh, log = collect.GitHub("o/r", tmp_path), []
+    _fake_api(
+        gh,
+        {
+            f"{ep}&page=1": [item(4, "t4"), item(3, "t3")],
+            f"{ep}&page=2": [item(2, "t2"), item(1, "t1")],
+            f"{ep}&page=3": [],
+        },
+        log,
+    )
+    assert [i["id"] for i in gh.get_list(ep)] == [4, 3, 2, 1]  # cold: every page
+    assert len(log) == 3
+
+    # #5 is new and #3 changed; page 2 holds #4 cached unchanged, so page 3 is never asked for.
+    gh, log = collect.GitHub("o/r", tmp_path), []
+    _fake_api(
+        gh,
+        {
+            f"{ep}&page=1": [item(5, "t5"), item(3, "t3b")],
+            f"{ep}&page=2": [item(4, "t4"), item(2, "t2")],
+        },
+        log,
+    )
+    got = gh.get_list(ep)
+    assert [(i["id"], i["updated_at"]) for i in got] == [
+        (5, "t5"),
+        (3, "t3b"),
+        (4, "t4"),
+        (2, "t2"),
+        (1, "t1"),
+    ]
+    assert log == [f"{ep}&page=1", f"{ep}&page=2"] and gh.calls == 2
+
+    off, log = collect.GitHub("o/r", tmp_path, offline=True), []
+    _fake_api(off, {}, log)
+    assert off.get_list(ep) == got and not log
+
+
+def test_runs_list_reads_the_workflow_runs_key(tmp_path):
+    ep = "actions/runs?per_page=100"
+    gh, log = collect.GitHub("o/r", tmp_path), []
+    _fake_api(gh, {f"{ep}&page=1": {"workflow_runs": [{"id": 9, "updated_at": "t"}]}}, log)
+    assert gh.get_list(ep, key="workflow_runs") == [{"id": 9, "updated_at": "t"}]
+    assert len(log) == 1  # a short page is the last one
+
+
+def test_pooled_pr_details_match_sequential(tmp_path, monkeypatch):
+    pulls = [{"id": n, "number": n, "updated_at": f"u{n}"} for n in range(1, 8)]
+
+    def responses():
+        r = {"pulls?state=all&sort=updated&direction=desc&per_page=100&page=1": pulls}
+        r["issues?state=all&sort=updated&direction=desc&per_page=100&page=1"] = []
+        r["actions/runs?per_page=100&page=1"] = {"workflow_runs": []}
+        for n in range(1, 8):
+            r[f"pulls/{n}"] = {"number": n}
+            r[f"pulls/{n}/commits?per_page=100"] = [[{"sha": f"c{n}"}]]
+            r[f"pulls/{n}/reviews?per_page=100"] = [[{"id": n}]]
+            r[f"issues/{n}/comments?per_page=100"] = [[{"body": f"x{n}"}]]
+        return r
+
+    gh, log = collect.GitHub("o/r", tmp_path / "a"), []
+    _fake_api(gh, responses(), log)
+    pooled = collect.fetch_github(gh)
+    seq, seq_log = collect.GitHub("o/r", tmp_path / "b"), []
+    _fake_api(seq, responses(), seq_log)
+    sequential = collect.fetch_github(seq, workers=1)
+    assert pooled == sequential and list(pooled["detail"]) == list(range(1, 8))
+    assert pooled["detail"][3]["commits"] == [{"sha": "c3"}]
+    assert gh.calls == len(log) == 3 + 4 * 7
+
+    # Unchanged PRs are served from the per-PR stamp cache: only the three list calls remain.
+    again, again_log = collect.GitHub("o/r", tmp_path / "a"), []
+    _fake_api(again, responses(), again_log)
+    assert collect.fetch_github(again) == pooled and len(again_log) == 3
 
 
 def test_diff_lists_moved_headline_figures():

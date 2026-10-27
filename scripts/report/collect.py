@@ -21,7 +21,9 @@ import re
 import statistics
 import subprocess
 import sys
+import threading
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -115,7 +117,11 @@ def pearson(xs: list[float], ys: list[float]) -> float | None:
 
 
 class GitHub:
-    """`gh api` with an on-disk cache keyed by endpoint (and an `updated_at` stamp)."""
+    """`gh api` with an on-disk cache keyed by endpoint (and an `updated_at` stamp).
+
+    Safe to share between threads: each endpoint has its own cache file and `calls` is
+    guarded by a lock.
+    """
 
     def __init__(self, repo: str, cache: Path, offline: bool = False):
         self.repo = repo
@@ -123,6 +129,7 @@ class GitHub:
         self.cache.mkdir(parents=True, exist_ok=True)
         self.offline = offline
         self.calls = 0
+        self._lock = threading.Lock()
 
     def _path(self, key: str) -> Path:
         return self.cache / (re.sub(r"[^A-Za-z0-9_.-]+", "_", key) + ".json")
@@ -136,6 +143,46 @@ class GitHub:
                 return cached["data"]
         if self.offline:
             return []
+        data = self._api(endpoint, paginate)
+        if paginate:
+            pages = data or []
+            data = []
+            for page in pages:
+                data.extend(page.get("workflow_runs", []) if isinstance(page, dict) else page)
+        path.write_text(json.dumps({"stamp": stamp, "data": data}))
+        return data
+
+    def get_list(self, endpoint: str, key: str | None = None) -> list:
+        """Incremental fetch of a newest-first list endpoint.
+
+        Reads page by page and stops at the first page holding an item already cached
+        unchanged (same `id` and `updated_at`), then merges: fetched items replace cached
+        ones by id and come first. `key` names the list inside a dict page (`workflow_runs`).
+        """
+        path = self._path(endpoint)
+        cached = json.loads(path.read_text())["data"] if path.exists() else []
+        if self.offline:
+            return cached
+        known = {(i["id"], i.get("updated_at")) for i in cached}
+        m = re.search(r"per_page=(\d+)", endpoint)
+        per_page = int(m.group(1)) if m else 30
+        sep = "&" if "?" in endpoint else "?"
+        fresh: list = []
+        page = 1
+        while True:
+            data = self._api(f"{endpoint}{sep}page={page}")
+            items = (data or {}).get(key, []) if key else (data or [])
+            fresh.extend(items)
+            if len(items) < per_page or any((i["id"], i.get("updated_at")) in known for i in items):
+                break
+            page += 1
+        ids = {i["id"] for i in fresh}
+        merged = fresh + [i for i in cached if i["id"] not in ids]
+        path.write_text(json.dumps({"stamp": None, "data": merged}))
+        return merged
+
+    def _api(self, endpoint: str, paginate: bool = False):
+        """One `gh api` call (all pages slurped with `paginate`), parsed from JSON."""
         args = ["gh", "api", f"repos/{self.repo}/{endpoint}"]
         if paginate:
             args += ["--paginate", "--slurp"]
@@ -147,34 +194,32 @@ class GitHub:
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"gh api {endpoint} timed out after {TIMEOUT} s") from exc
-        self.calls += 1
+        with self._lock:
+            self.calls += 1
         if out.returncode != 0:
             # gh's stderr never contains the token; keep only its first line.
             first = (out.stderr.strip().splitlines() or ["unknown error"])[0]
             raise RuntimeError(f"gh api {endpoint} failed: {first}")
-        data = json.loads(out.stdout or "null")
-        if paginate:
-            pages = data or []
-            data = []
-            for page in pages:
-                data.extend(page.get("workflow_runs", []) if isinstance(page, dict) else page)
-        path.write_text(json.dumps({"stamp": stamp, "data": data}))
-        return data
+        return json.loads(out.stdout or "null")
 
 
-def fetch_github(gh: GitHub) -> dict:
-    pulls = gh.get("pulls?state=all&per_page=100")
-    detail = {}
-    for p in pulls:
-        n, stamp = p["number"], p["updated_at"]
-        detail[n] = {
-            "pr": gh.get(f"pulls/{n}", stamp, paginate=False),
-            "commits": gh.get(f"pulls/{n}/commits?per_page=100", stamp),
-            "reviews": gh.get(f"pulls/{n}/reviews?per_page=100", stamp),
-            "comments": gh.get(f"issues/{n}/comments?per_page=100", stamp),
-        }
-    issues = gh.get("issues?state=all&per_page=100")
-    runs = gh.get("actions/runs?per_page=100")
+def _pr_detail(gh: GitHub, p: dict) -> tuple[int, dict]:
+    n, stamp = p["number"], p["updated_at"]
+    return n, {
+        "pr": gh.get(f"pulls/{n}", stamp, paginate=False),
+        "commits": gh.get(f"pulls/{n}/commits?per_page=100", stamp),
+        "reviews": gh.get(f"pulls/{n}/reviews?per_page=100", stamp),
+        "comments": gh.get(f"issues/{n}/comments?per_page=100", stamp),
+    }
+
+
+def fetch_github(gh: GitHub, workers: int = 4) -> dict:
+    pulls = gh.get_list("pulls?state=all&sort=updated&direction=desc&per_page=100")
+    # Up to 4 PRs' details in flight; each endpoint writes only its own cache file.
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        detail = dict(pool.map(lambda p: _pr_detail(gh, p), pulls))
+    issues = gh.get_list("issues?state=all&sort=updated&direction=desc&per_page=100")
+    runs = gh.get_list("actions/runs?per_page=100", key="workflow_runs")
     return {"detail": detail, "issues": issues, "runs": runs}
 
 
@@ -248,31 +293,28 @@ def project_dirs(root: Path, base: Path) -> list[Path]:
     return sorted(d for d in base.iterdir() if d.is_dir() and d.name in wanted)
 
 
-def read_sessions(dirs: list[Path]) -> dict:
-    """Counts and token usage from session logs. Never keeps message text."""
-    seen: set[str] = set()
+def claude_usage(dirs: list[Path], branch_to_pr: dict) -> dict:
+    """Session counts and token/cost totals, folded into running sums while scanning the logs.
+
+    Keeps only per-session counts and the totals, never message text or usage records.
+    """
+    seen: set[str] = set()  # message ids already counted: logs repeat a message per block
     sessions: dict[str, dict] = {}
+    by_model: dict[str, dict] = defaultdict(lambda: {"tokens": 0, "cost": 0.0, "output": 0})
+    by_day: dict[str, dict] = defaultdict(lambda: {"tokens": 0, "cost": 0.0})
+    by_pr: dict[int, dict] = defaultdict(lambda: {"tokens": 0, "cost": 0.0})
+    kinds = Counter()
+    linked = unlinked = 0.0
     for d in dirs:
         for f in d.rglob("*.jsonl"):
             sub = "subagents" in f.parts
-            sid = f.stem
-            s = sessions.setdefault(
-                sid,
-                {"subagent": sub, "prompts": 0, "first": None, "last": None, "branches": Counter()},
-            )
-            s["usage"] = s.get("usage", [])
+            s = sessions.setdefault(f.stem, {"subagent": sub, "prompts": 0})
             with f.open(encoding="utf-8", errors="replace") as fh:
                 for line in fh:
                     try:
                         rec = json.loads(line)
                     except ValueError:
                         continue
-                    when = ts(rec.get("timestamp"))
-                    if when:
-                        s["first"] = min(filter(None, [s["first"], when]))
-                        s["last"] = max(filter(None, [s["last"], when]))
-                    if rec.get("gitBranch"):
-                        s["branches"][rec["gitBranch"]] += 1
                     msg = rec.get("message") or {}
                     if (
                         rec.get("type") == "user"
@@ -280,51 +322,40 @@ def read_sessions(dirs: list[Path]) -> dict:
                         and isinstance(msg.get("content"), str)
                     ):
                         s["prompts"] += 1
-                    if rec.get("type") == "assistant" and msg.get("usage"):
-                        mid = msg.get("id") or rec.get("uuid")
-                        if mid in seen:
-                            continue
-                        seen.add(mid)
-                        s["usage"].append(
-                            (msg.get("model", "unknown"), msg["usage"], when, rec.get("gitBranch"))
-                        )
-    return sessions
-
-
-def summarize_sessions(sessions: dict, branch_to_pr: dict) -> dict:
-    by_model: dict[str, dict] = defaultdict(lambda: {"tokens": 0, "cost": 0.0, "output": 0})
-    by_day: dict[str, dict] = defaultdict(lambda: {"tokens": 0, "cost": 0.0})
-    by_pr: dict[int, dict] = defaultdict(lambda: {"tokens": 0, "cost": 0.0})
-    kinds = Counter()
-    linked = unlinked = 0.0
-    for s in sessions.values():
-        for model, u, when, branch in s.get("usage", []):
-            if model.startswith("<"):
-                continue
-            tok = (
-                u.get("input_tokens", 0)
-                + u.get("output_tokens", 0)
-                + u.get("cache_read_input_tokens", 0)
-                + u.get("cache_creation_input_tokens", 0)
-            )
-            cost = price(model, u)
-            kinds["input"] += u.get("input_tokens", 0)
-            kinds["output"] += u.get("output_tokens", 0)
-            kinds["cache_read"] += u.get("cache_read_input_tokens", 0)
-            kinds["cache_write"] += u.get("cache_creation_input_tokens", 0)
-            by_model[model]["tokens"] += tok
-            by_model[model]["cost"] += cost
-            by_model[model]["output"] += u.get("output_tokens", 0)
-            if when:
-                by_day[day_key(when)]["tokens"] += tok
-                by_day[day_key(when)]["cost"] += cost
-            pr = branch_to_pr.get(branch or "")
-            if pr:
-                by_pr[pr]["tokens"] += tok
-                by_pr[pr]["cost"] += cost
-                linked += cost
-            else:
-                unlinked += cost
+                    if rec.get("type") != "assistant" or not msg.get("usage"):
+                        continue
+                    mid = msg.get("id") or rec.get("uuid")
+                    if mid in seen:
+                        continue
+                    seen.add(mid)
+                    model, u = msg.get("model", "unknown"), msg["usage"]
+                    if model.startswith("<"):
+                        continue
+                    tok = (
+                        u.get("input_tokens", 0)
+                        + u.get("output_tokens", 0)
+                        + u.get("cache_read_input_tokens", 0)
+                        + u.get("cache_creation_input_tokens", 0)
+                    )
+                    cost = price(model, u)
+                    kinds["input"] += u.get("input_tokens", 0)
+                    kinds["output"] += u.get("output_tokens", 0)
+                    kinds["cache_read"] += u.get("cache_read_input_tokens", 0)
+                    kinds["cache_write"] += u.get("cache_creation_input_tokens", 0)
+                    by_model[model]["tokens"] += tok
+                    by_model[model]["cost"] += cost
+                    by_model[model]["output"] += u.get("output_tokens", 0)
+                    when = ts(rec.get("timestamp"))
+                    if when:
+                        by_day[day_key(when)]["tokens"] += tok
+                        by_day[day_key(when)]["cost"] += cost
+                    pr = branch_to_pr.get(rec.get("gitBranch") or "")
+                    if pr:
+                        by_pr[pr]["tokens"] += tok
+                        by_pr[pr]["cost"] += cost
+                        linked += cost
+                    else:
+                        unlinked += cost
     total = sum(m["cost"] for m in by_model.values())
     return {
         "sessions": sum(1 for s in sessions.values() if not s["subagent"]),
@@ -778,7 +809,7 @@ def collect(
     prs = build_prs(raw, raw["runs"], now)
     issues = build_issues(raw["issues"], prs)
     branch_to_pr = {p["branch"]: p["number"] for p in prs}
-    claude = summarize_sessions(read_sessions(project_dirs(root, logs)), branch_to_pr)
+    claude = claude_usage(project_dirs(root, logs), branch_to_pr)
     commits = build_commits(ledger)
     return {
         "schema": 1,
