@@ -358,6 +358,7 @@ def test_queue_shutdown_without_wait_drops_sessions_not_started(tmp_path):
     release.set()
     q._thread.join(5)
     assert stub.order == ["a"] and q.pending() == 0
+    assert not q._thread.is_alive()  # the stop marker reached the dispatcher
 
 
 def test_queue_submit_racing_shutdown_is_never_stranded(monkeypatch, tmp_path):
@@ -401,6 +402,7 @@ def test_queue_submit_racing_shutdown_is_never_stranded(monkeypatch, tmp_path):
     stopper[0].join(5)
     q._thread.join(5)
     assert done == ["a"] and q.pending() == 0
+    assert not q._thread.is_alive()
 
 
 def test_queue_second_shutdown_still_waits_for_the_running_session(tmp_path):
@@ -420,3 +422,25 @@ def test_queue_second_shutdown_still_waits_for_the_running_session(tmp_path):
     threading.Timer(0.2, release.set).start()
     q.shutdown(wait=True)  # joins the dispatcher even though it was already closed
     assert stub.order == ["a"] and not q._thread.is_alive()
+
+
+def test_queue_repeated_shutdown_without_wait_keeps_the_stop_marker(tmp_path):
+    started, release = threading.Event(), threading.Event()
+
+    class Slow(StubTranscriber):
+        def transcribe_session(self, session, progress=None):
+            started.set()
+            release.wait(5)
+            return super().transcribe_session(session, progress)
+
+    stub = Slow()
+    q = TranscriptionQueue(stub)
+    q.submit(_s("a", tmp_path))
+    q.submit(_s("b", tmp_path))
+    assert started.wait(5)
+    q.shutdown(wait=False)  # drops "b", queues the stop marker
+    q.shutdown(wait=False)  # drains that marker again: it must be put back
+    release.set()
+    q._thread.join(5)
+    assert stub.order == ["a"] and q.pending() == 0
+    assert not q._thread.is_alive()
