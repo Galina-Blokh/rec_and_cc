@@ -94,6 +94,9 @@ post-session pass.
 | `model` | `"mlx-community/Qwen2.5-3B-Instruct-4bit"` | mlx-lm model: a Hugging Face repo id or a local path. The default (~1.7 GB, ~2 GB RAM while it runs) is pinned to an exact repo commit in [`revisions.py`](../src/recandcc/transcribe/revisions.py) and downloaded once on first use, then loaded from disk without the network; another repo needs `transcription.allow_unpinned_models` to download |
 | `max_tokens` | `400` | Longest generated answer (the summary, the action list, each chunk's notes) |
 
+Saving from the **Settings…** window or the **Languages** menu rewrites `config.toml`
+through a TOML library: values are kept, comments are not.
+
 ## Example
 
 ```toml

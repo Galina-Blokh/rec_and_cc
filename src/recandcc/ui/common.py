@@ -38,11 +38,19 @@ from ..config import (
     load_config,
     normalize_languages,
     save_keys,
+    save_settings,
+    validate_settings,
 )
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind, discard_session
 from ..recorder import make_private_dir
 from ..retention import purge_old_audio, purge_transcribed_audio
+from ..settings_window import (
+    SettingsUnavailable,
+    close_settings,
+    raise_settings,
+    run_settings,
+)
 
 if TYPE_CHECKING:
     from ..transcribe.live import LiveTranscriber
@@ -261,6 +269,18 @@ def as_str(text: str) -> str:
 
 
 # ----------------------------------------------------------------------- controller
+def _privatize_new_folder(path: Path) -> None:
+    """The folder picker can create a folder (0755 under the usual umask) just before Save.
+    An empty folder of ours is made owner-only; a folder with content is never touched."""
+    if os.name != "posix":
+        return
+    try:
+        if path.is_dir() and path.stat().st_uid == os.getuid() and not any(path.iterdir()):
+            path.chmod(0o700)
+    except OSError:
+        log.debug("could not make the new transcripts folder private")
+
+
 class Controller:
     _summaries_lock = threading.Lock()  # creating the SummaryQueue (class-wide: test fakes)
 
@@ -284,6 +304,7 @@ class Controller:
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
         self._save_lock = threading.Lock()  # menu writes to config.toml
+        self._settings_lock = threading.Lock()  # one settings window at a time
         self._lang_lock = threading.Lock()  # transcription.languages + its raw spelling
         self._summaries = None  # SummaryQueue, created on the first summary
         self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
@@ -324,6 +345,9 @@ class Controller:
             monitor,
             recorder,
             _LiveAwareQueue(self),
+            save_config=lambda: self.save_settings(
+                "detection.mode", "detection.app_modes", title="Mode"
+            ),
             on_prompt=self._on_prompt,
             on_notice=self.post_notice,
             on_state_change=lambda st: self.events.put(("state", st)),
@@ -929,7 +953,95 @@ class Controller:
         value = self.cfg
         for name in key.split("."):
             value = getattr(value, name)
-        return value
+        # a copy: the engine thread may add to app_modes while another thread serializes it
+        return dict(value) if isinstance(value, dict) else value
+
+    def open_settings_async(self) -> None:
+        """Menu "Settings…": the native window runs on a worker thread (it blocks until it is
+        closed); saved values are applied and written there, and the UI thread gets a
+        ``settings_saved`` event (captions panel) or ``settings_fallback``."""
+        if not self._settings_lock.acquire(blocking=False):
+            raise_settings()  # already open: bring it to the front
+            return
+
+        def run() -> None:
+            try:
+                raw = run_settings(self.cfg)
+                if not raw:  # cancelled, closed, or nothing changed
+                    return
+                updates = validate_settings(raw)
+                if "output_dir" in updates:
+                    _privatize_new_folder(updates["output_dir"])
+                    make_private_dir(updates["output_dir"])
+                fields = {k: v for k, v in updates.items() if k != "mode"}
+                with self._save_lock:
+                    # Fields go live before the write (a menu save in between can't write the
+                    # old values back) and are rolled back if the write fails. The mode,
+                    # which can stop a recording, only changes once the file is written.
+                    tr = self.cfg.transcription
+                    old = {
+                        "output_dir": self.cfg.output_dir,
+                        "live_captions": self.cfg.live_captions,
+                        "keep_audio": tr.keep_audio,
+                        "speaker_names": tr.speaker_names,
+                        "languages": list(tr.languages),
+                    }
+                    old = {k: v for k, v in old.items() if k in fields}
+                    old_raw = getattr(tr, "_raw_languages", None)
+                    self.apply_settings(fields)
+                    edited = self._mtime() != self._config_mtime  # hand edit not reloaded yet
+                    try:
+                        try:
+                            mtime = save_settings(updates, CONFIG_PATH)
+                        except FileNotFoundError:
+                            self.cfg.save(CONFIG_PATH)  # no file yet: write a fresh one
+                            mtime = save_settings(updates, CONFIG_PATH)
+                    except Exception:
+                        self.apply_settings(old)
+                        with self._lang_lock:
+                            tr._raw_languages = old_raw  # type: ignore[attr-defined]
+                        raise
+                    if not edited:
+                        self._config_mtime = mtime  # our own write: nothing to reload
+                    if "mode" in updates:
+                        self.apply_settings({"mode": updates["mode"]})
+                if "output_dir" in updates:
+                    self.refresh_async(force=True)  # cloud-sync warning for the new folder
+                self.events.put(("settings_saved", updates))
+            except SettingsUnavailable as e:
+                log.info("native settings unavailable: %s", e)
+                self.events.put(("settings_fallback",))
+            except ValueError as e:
+                log.warning("settings not saved: %s", type(e).__name__)  # no values in logs
+                self.post_notice("Settings not saved", str(e))
+            except OSError as e:
+                log.warning("settings not saved: %s (errno %s)", type(e).__name__, e.errno)
+                self.post_notice("Settings not saved", "the transcripts folder can't be created")
+            except Exception as e:
+                log.error("settings window failed: %s", type(e).__name__)  # no paths in logs
+                self.post_notice("Settings not saved", "config.toml could not be written")
+            finally:
+                self._settings_lock.release()
+
+        threading.Thread(target=run, daemon=True, name="settings-window").start()
+
+    def apply_settings(self, updates: dict) -> None:
+        """Make settings live in memory (any thread; no file I/O, the caller saves them)."""
+        cfg, tr = self.cfg, self.cfg.transcription
+        if "output_dir" in updates:
+            cfg.output_dir = updates["output_dir"]
+        if "live_captions" in updates:
+            cfg.live_captions = updates["live_captions"]
+        if "keep_audio" in updates:
+            tr.keep_audio = updates["keep_audio"]
+        if "speaker_names" in updates:
+            tr.speaker_names = updates["speaker_names"]
+        if "languages" in updates:
+            with self._lang_lock:
+                tr._raw_languages = None  # type: ignore[attr-defined]
+                tr.languages = list(updates["languages"])
+        if "mode" in updates and updates["mode"] != cfg.detection.mode:
+            self.engine.set_mode(updates["mode"], save=False)
 
     @property
     def permissions(self) -> dict[str, str]:
@@ -1014,6 +1126,7 @@ class Controller:
                 return
             self._shut = True
         log.info("shutting down")
+        close_settings()
         with self._hotkey_lock:
             hk, self._hotkey = self._hotkey, None
         if hk is not None:
