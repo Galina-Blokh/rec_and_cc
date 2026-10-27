@@ -50,7 +50,7 @@ def _import_path_modules():
     import sys
 
     names = ["recandcc.config", "recandcc.autostart", "recandcc.logging_setup", "recandcc.cli"]
-    names += ["recandcc.ui.common", "recandcc.transcribe.diarize"]
+    names += ["recandcc.ui.common", "recandcc.transcribe.diarize", "recandcc.semantic"]
     if sys.platform == "darwin":
         names.append("recandcc.ui.mac")
     for name in names:
