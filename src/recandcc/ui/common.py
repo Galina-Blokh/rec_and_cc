@@ -234,7 +234,7 @@ class Controller:
         self._refreshing = False
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
-        self._cloud_checked: Path | None = None  # output_dir last checked for cloud sync
+        self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
         # global shortcut
         self._hotkey_lock = threading.Lock()
         self._hotkey = None  # HotkeyListener / WinHotkeyListener
@@ -456,16 +456,17 @@ class Controller:
         self.events.put(("refreshed",))
 
     def _check_cloud_sync(self) -> None:
-        """Warn once per output folder (at startup and after it changes) if it is synced to
-        iCloud / OneDrive / ...: recordings would leave the device. Worker thread."""
+        """Warn once per output folder if it is synced to iCloud / OneDrive / ...: recordings
+        would leave the device. Runs on every refresh (worker thread; the check is local and
+        cheap), so a folder that becomes synced later is still reported."""
         out = Path(self.cfg.output_dir)
-        with self._lock:
-            if out == self._cloud_checked:
-                return
-            self._cloud_checked = out
         provider = cloud_sync_provider(out)
         if provider is None:
             return
+        with self._lock:
+            if out in self._cloud_warned:
+                return
+            self._cloud_warned.add(out)
         log.warning(
             "output folder %s is synced to %s; use a local folder to keep it", out, provider
         )

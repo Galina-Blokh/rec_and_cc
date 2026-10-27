@@ -1,21 +1,23 @@
 """Is a folder synced to a cloud drive? (iCloud Drive, OneDrive, Dropbox, Google Drive.)
 
 Used to warn when ``output_dir`` would upload recordings and transcripts off this device.
-Purely local and cheap: path checks plus a few ``stat`` calls, no subprocess, no network.
-The result is a hint for a warning, never a reason to refuse a folder.
+Purely local and cheap: path-prefix checks plus reading one small preferences file; no
+subprocess, no network, and no ``stat`` into a cloud mount (those can stall). The result is a
+hint for a warning, never a reason to refuse a folder, and not exhaustive.
 
-- macOS: anything under ``~/Library/Mobile Documents`` (iCloud Drive) or
-  ``~/Library/CloudStorage`` (File Provider: OneDrive, Dropbox, Google Drive, ...), and
-  ``~/Desktop`` / ``~/Documents`` when iCloud "Desktop & Documents Folders" is on. That
-  setting shows up as ``Desktop`` / ``Documents`` folders at the top of iCloud Drive
-  (``~/Library/Mobile Documents/com~apple~CloudDocs``).
-- Windows: anything under the folders in ``%OneDrive%``, ``%OneDriveConsumer%`` and
-  ``%OneDriveCommercial%`` (compared case-insensitively).
+- macOS: anything under ``~/Library/Mobile Documents`` (iCloud Drive),
+  ``~/Library/CloudStorage`` (File Provider: OneDrive, Dropbox, Google Drive, Box, ...),
+  ``~/Dropbox``, ``~/Google Drive`` or ``/Volumes/GoogleDrive``; and ``~/Desktop`` /
+  ``~/Documents`` when iCloud "Desktop & Documents Folders" is on, read from Finder's
+  ``FXICloudDriveDesktop`` / ``FXICloudDriveDocuments`` preferences.
+- Windows: anything under ``%OneDrive%``, ``%OneDriveConsumer%``, ``%OneDriveCommercial%``
+  or ``%USERPROFILE%\\Dropbox`` (compared case-insensitively).
 """
 
 from __future__ import annotations
 
 import os
+import plistlib
 import sys
 from collections.abc import Mapping
 from pathlib import Path, PurePath, PureWindowsPath
@@ -27,6 +29,11 @@ _PROVIDERS = {  # ~/Library/CloudStorage/<prefix>-<account>
     "Dropbox": "Dropbox",
     "GoogleDrive": "Google Drive",
     "Box": "Box",
+}
+_MAC_FOLDERS = {  # legacy (non-File-Provider) sync folders
+    "Dropbox": "Dropbox",
+    "Google Drive": "Google Drive",
+    "/Volumes/GoogleDrive": "Google Drive",
 }
 
 
@@ -45,6 +52,17 @@ def _resolve(path: Path) -> Path:
         return path.expanduser().absolute()
 
 
+def icloud_desktop_documents(home: Path) -> set[str]:
+    """Which of "Desktop" / "Documents" iCloud syncs, from Finder's preferences file."""
+    try:
+        prefs = home / "Library" / "Preferences" / "com.apple.finder.plist"
+        data = plistlib.loads(prefs.read_bytes())
+    except Exception:  # missing, unreadable or not a plist: assume not synced
+        return set()
+    keys = {"Desktop": "FXICloudDriveDesktop", "Documents": "FXICloudDriveDocuments"}
+    return {name for name, key in keys.items() if data.get(key) is True}
+
+
 def mac_provider(path: Path, home: Path | None = None) -> str | None:
     home = _resolve(home or Path.home())
     path = _resolve(Path(path))
@@ -58,14 +76,12 @@ def mac_provider(path: Path, home: Path | None = None) -> str | None:
             if name.startswith(prefix):
                 return label
         return name.split("-", 1)[0] or "a cloud drive"
+    for root, label in _MAC_FOLDERS.items():
+        if _under(path, home / root) is not None:  # an absolute root replaces home
+            return label
     rel = _under(path, home)
-    if rel is not None and rel.parts and rel.parts[0] in ("Desktop", "Documents"):
-        cloud_docs = lib / "Mobile Documents" / "com~apple~CloudDocs" / rel.parts[0]
-        try:
-            if cloud_docs.is_dir():
-                return f"{ICLOUD_DRIVE} (Desktop & Documents)"
-        except OSError:
-            pass
+    if rel is not None and rel.parts and rel.parts[0] in icloud_desktop_documents(home):
+        return f"{ICLOUD_DRIVE} (Desktop & Documents)"
     return None
 
 
@@ -81,6 +97,9 @@ def windows_provider(path: str | os.PathLike, env: Mapping[str, str] | None = No
         root = env.get(key) or env.get(key.upper())
         if root and _under(target, norm(root)) is not None:
             return "OneDrive"
+    profile = env.get("USERPROFILE")
+    if profile and _under(target, norm(PureWindowsPath(profile) / "Dropbox")) is not None:
+        return "Dropbox"
     return None
 
 
