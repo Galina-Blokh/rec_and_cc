@@ -35,8 +35,9 @@ from AppKit import (
     NSWindowStyleMaskNonactivatingPanel,
 )
 
-WIDTH, HEIGHT, MARGIN = 340.0, 70.0, 16.0
-SHOW_SECONDS = 6.0
+from .present import TOAST_SHOW_S, TOAST_SIZE, toast_expired, toast_origin
+
+WIDTH, HEIGHT = TOAST_SIZE
 
 
 class ToastPanel:
@@ -102,15 +103,14 @@ class ToastPanel:
         self._ensure_panel()
         self._title.setStringValue_(title)
         self._message.setStringValue_(message)
-        screen = NSScreen.mainScreen().visibleFrame()
-        x = screen.origin.x + screen.size.width - WIDTH - MARGIN
-        y = screen.origin.y + screen.size.height - HEIGHT - MARGIN
-        self._panel.setFrameOrigin_((x, y))
+        vf = NSScreen.mainScreen().visibleFrame()
+        visible = (vf.origin.x, vf.origin.y, vf.size.width, vf.size.height)
+        self._panel.setFrameOrigin_(toast_origin(visible))
         self._panel.orderFrontRegardless()
-        self._hide_at = time.monotonic() + SHOW_SECONDS
+        self._hide_at = time.monotonic() + TOAST_SHOW_S
 
     def tick(self) -> None:
-        if self._hide_at is not None and time.monotonic() >= self._hide_at:
+        if toast_expired(self._hide_at, time.monotonic()):
             self._hide_at = None
             if self._panel is not None:
                 self._panel.orderOut_(None)
