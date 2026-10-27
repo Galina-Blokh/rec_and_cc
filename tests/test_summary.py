@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import sys
 import threading
 import types
@@ -72,6 +73,122 @@ def test_main_language_is_the_one_with_the_most_text():
     segs = [seg("hello", "en"), seg("это длинная фраза по-русски", "ru"), seg("ok", "en")]
     assert summary.main_language(segs) == "ru"
     assert summary.main_language([seg("x", "")]) == "en"
+
+
+GEMMA = "mlx-community/gemma-4-e4b-it-4bit"
+
+
+def test_spoken_language_is_the_one_with_the_most_speech_time():
+    long_he = Segment(0, 30, "כן", "Me", "he")  # few characters, much speech
+    segs = [long_he, seg("a much longer English sentence here", "en", t=40)]
+    assert summary.spoken_language(segs) == "he"
+    assert summary.main_language(segs) == "en"  # the output language is unchanged
+    assert summary.spoken_language([seg("x", "")]) == "en"
+
+
+@pytest.mark.parametrize(
+    ("models", "lang", "expected"),
+    [
+        ({}, "he", DEFAULT_SUMMARY_MODEL),  # no routing: the old behaviour
+        ({"he": GEMMA}, "he", GEMMA),
+        ({"he": GEMMA}, "en", DEFAULT_SUMMARY_MODEL),
+    ],
+)
+def test_summary_model_is_routed_by_the_main_spoken_language(models, lang, expected):
+    cfg = Config()
+    cfg.summary.language_models = models
+    segs = [seg("hello", "en", t=0), Segment(5, 6, "שלום", "Me", lang)]
+    segs.append(Segment(10, 40, "x", "Speaker 1", lang))
+    assert summary.summary_model(cfg, segs) == expected
+
+
+def test_session_loads_only_the_routed_model_and_frees_it(tmp_path, monkeypatch):
+    made = []
+
+    class Gen(FakeGen):
+        def __init__(self, model, allow_unpinned=False, on_download=None):
+            super().__init__()
+            self.model, self.closed = model, False
+            made.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(summary, "MlxGenerator", Gen)
+    cfg = Config()
+    cfg.summary.language_models = {"he": GEMMA}
+    he = make_session(tmp_path / "he", [Segment(0, 20, "שלום לכולם", "Me", "he")])
+    text = summary.summarize_session(he, cfg).read_text("utf-8")
+    en = make_session(tmp_path / "en", [seg("hello")])
+    summary.summarize_session(en, cfg)
+    assert [(g.model, g.closed) for g in made] == [(GEMMA, True), (DEFAULT_SUMMARY_MODEL, True)]
+    assert "by gemma-4-e4b-it-4bit;" in text
+
+
+@pytest.mark.parametrize(
+    ("raw", "answer"),
+    [
+        (
+            "<|channel>thought\nThe user wants a summary...<channel|>Anna fixes signing.",
+            "Anna fixes signing.",
+        ),
+        ("<|channel>thought\na<channel|>x<|channel>thought\nb<channel|>\n Final. ", "Final."),
+        ("<|channel>thought\nstill thinking when the budget ran out", ""),
+        ("  plain answer\n", "plain answer"),
+    ],
+)
+def test_gemma_thinking_is_stripped(raw, answer):
+    assert summary.strip_thinking(raw) == answer
+
+
+def _fake_mlx_lm(monkeypatch, text: str, seen: list[int]):
+    """Fake mlx_lm that streams ``text``; returns a fake tokenizer (no real model loads)."""
+
+    def stream_generate(model, tokenizer, prompt, max_tokens, **kw):
+        seen.append(max_tokens)
+        return iter(types.SimpleNamespace(text=c) for c in [text[:5], text[5:]])
+
+    tok = types.SimpleNamespace(apply_chat_template=lambda m, add_generation_prompt: [1])
+    sample = types.SimpleNamespace(make_logits_processors=lambda **kw: [])
+    monkeypatch.setitem(
+        sys.modules, "mlx_lm", types.SimpleNamespace(stream_generate=stream_generate)
+    )
+    monkeypatch.setitem(sys.modules, "mlx_lm.sample_utils", sample)
+    return tok
+
+
+@pytest.mark.parametrize(
+    ("model", "budget", "answer"),
+    [(GEMMA, 400 + summary.THINKING_TOKENS, "Answer."), (DEFAULT_SUMMARY_MODEL, 400, None)],
+)
+def test_generator_gives_gemma_room_to_think_and_strips_it(monkeypatch, model, budget, answer):
+    raw = "<|channel>thought\nplan<channel|>Answer."
+    seen: list[int] = []
+    gen = summary.MlxGenerator(model)
+    gen._model, gen._tokenizer = object(), _fake_mlx_lm(monkeypatch, raw, seen)
+    assert gen([{"role": "user", "content": "x"}], 400) == (answer or raw)
+    assert seen == [budget]
+
+
+def test_offered_summary_models_are_pinned_and_documented():
+    from recandcc.transcribe import revisions
+
+    assert DEFAULT_SUMMARY_MODEL in revisions.OFFERED_SUMMARY_MODELS
+    root = Path(__file__).resolve().parents[1]
+    docs = [(root / d).read_text("utf-8") for d in ("README.md", "docs/CONFIGURATION.md")]
+    for model in revisions.OFFERED_SUMMARY_MODELS:
+        assert re.fullmatch(r"[0-9a-f]{40}", revisions.HF_REVISIONS[model]), model
+        assert model in summary.MODEL_SIZES
+        assert all(model.split("/")[1] in d for d in docs), model
+    assert summary.download_notice(GEMMA) == "Downloading the summary model (~5.2 GB, once)"
+    assert summary.download_notice("me/custom") == "Downloading the summary model (once)"
+
+
+def test_load_config_reads_summary_language_models(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(f'[summary]\nlanguage_models = {{ iw = "{GEMMA}", xx = "m" }}\n', "utf-8")
+    assert load_config(path).summary.language_models == {"he": GEMMA}
+    assert Config().summary.language_models == {}
 
 
 def test_chunks_stay_within_the_limit_and_keep_everything():

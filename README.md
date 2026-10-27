@@ -267,6 +267,18 @@ the speaker labels (a slow diarization delays it), a summary cut short by quitti
 at the next start (a `.summary-pending` marker in the session folder), and after
 `recandcc name-speaker` the app redoes an existing `summary.md` with the new name once idle.
 
+Qwen2.5 summarises Hebrew badly. For Hebrew meetings, route them to Gemma 4 (Apache-2.0),
+which handles English, Russian and Hebrew; meetings in other languages keep the default:
+
+```toml
+[summary.language_models]
+he = "mlx-community/gemma-4-e4b-it-4bit"   # ~5.2 GB once, ~5 GB RAM while it runs
+# he = "mlx-community/gemma-4-e2b-it-4bit" # lighter (~3.6 GB), nearly as good
+```
+
+The model is picked by the language with the most speech time, downloaded once (pinned) on
+the first meeting that needs it, and freed after each summary.
+
 ## Command line
 
 Everything the app does is also available from the terminal (`uv run recandcc …` in the
@@ -350,7 +362,7 @@ models load from disk without contacting anything (tested with all network acces
 | Each session's speaker voices (only with `speaker_names = true`) | `…/RecAndCC/voices/sessions/` | `%LOCALAPPDATA%\RecAndCC\voices\sessions\` |
 | Speaker-diarization model | `~/Library/Caches/RecAndCC/models/` | `%LOCALAPPDATA%\RecAndCC\Cache\models\` |
 | Whisper models (shared Hugging Face cache) | `~/.cache/huggingface/hub/models--*whisper*` | `%USERPROFILE%\.cache\huggingface\hub\` |
-| Summary model (only with summaries on) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-3B-Instruct-4bit` | not used |
+| Summary model (only with summaries on) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-3B-Instruct-4bit` (and `…--gemma-4-*` with `summary.language_models`) | not used |
 | Launch at login | `~/Library/LaunchAgents/com.gblokh.recandcc.plist` | registry `HKCU\…\CurrentVersion\Run\RecAndCC` |
 
 The folders RecAndCC creates for recordings (the transcripts folder, each day and each

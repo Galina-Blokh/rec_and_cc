@@ -48,7 +48,21 @@ HF_REVISIONS: dict[str, str] = {
     "mlx-community/ivrit-ai-whisper-large-v3-mlx": "097c0cb2bb4288a3c82f6d524a39c4ce09afa187",
     # Local summary LLM (mlx-lm, Apple silicon), see summary.py
     "mlx-community/Qwen2.5-3B-Instruct-4bit": "4f83f8f146fdf28b512a06562b671d7af4fab457",
+    # ... and the Hebrew-capable ones offered for summary.language_models (Gemma 4, Apache-2.0
+    # upstream). model.safetensors sha256 at these commits (HF API, LFS oid):
+    # e4b 932b8271fc3fe65adcc78b96c10c6268bbfb13e8f67d1358727c0d6ee97e1eff (5.1 GB),
+    # e2b 038e39a37a7667373d2c3991375446b10c96ae1d717a68674870343db376b76e (3.6 GB).
+    "mlx-community/gemma-4-e4b-it-4bit": "475b9088d29754a3379866cf5aeb6b41acd313c2",
+    "mlx-community/gemma-4-e2b-it-4bit": "238767527555cb75a05732a84dff5d6ba0dd6809",
 }
+
+# Summary models offered in the docs for summary.model / summary.language_models (tests
+# check each is pinned).
+OFFERED_SUMMARY_MODELS = (
+    "mlx-community/Qwen2.5-3B-Instruct-4bit",
+    "mlx-community/gemma-4-e4b-it-4bit",
+    "mlx-community/gemma-4-e2b-it-4bit",
+)
 
 # The same ivrit.ai model in both formats: CTranslate2 (faster-whisper) repo -> MLX repo. Either
 # name in `transcription.language_models` loads the build that fits the backend in use.

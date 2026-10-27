@@ -198,6 +198,10 @@ class SummaryConfig:
     enabled: bool = False
     model: str = DEFAULT_SUMMARY_MODEL  # pinned in transcribe/revisions.py, or a local path
     max_tokens: int = 400  # longest generated answer (summary, action list, chunk notes)
+    # Per-language summary model, e.g. {he = "mlx-community/gemma-4-e4b-it-4bit"}: a transcript
+    # whose main language (most speech time) is listed is summarised by that model, all others
+    # by `model`. {} = `model` for every language.
+    language_models: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -268,19 +272,20 @@ def normalize_languages(value) -> list[str]:
     return out
 
 
-def normalize_language_models(value) -> dict[str, str]:
-    """`transcription.language_models` with clean Whisper codes as keys ("iw" -> "he").
-    Unknown language codes and empty or non-string model names are dropped with a warning."""
+def normalize_language_models(value, key: str = "transcription.language_models") -> dict[str, str]:
+    """`transcription.language_models` (or `summary.language_models`, named by ``key``) with
+    clean Whisper codes as keys ("iw" -> "he"). Unknown language codes and empty or non-string
+    model names are dropped with a warning."""
     if not isinstance(value, dict):
-        log.warning("transcription.language_models must be a table; ignoring it")
+        log.warning("%s must be a table; ignoring it", key)
         return {}
     out: dict[str, str] = {}
-    for key, model in value.items():
-        code = language_code(key)
+    for lang, model in value.items():
+        code = language_code(lang)
         if code not in WHISPER_LANGUAGES:
-            log.warning("ignoring unknown language %r in transcription.language_models", key)
+            log.warning("ignoring unknown language %r in %s", lang, key)
         elif not isinstance(model, str) or not model.strip():
-            log.warning("ignoring transcription.language_models.%s: not a model name", key)
+            log.warning("ignoring %s.%s: not a model name", key, lang)
         else:
             out[code] = model.strip()
     return out
@@ -457,6 +462,9 @@ def load_config(path: Path | None = None) -> Config:
                 code,
             )
     summary = _build(SummaryConfig, data.pop("summary", {}))
+    summary.language_models = normalize_language_models(
+        summary.language_models, "summary.language_models"
+    )
     cfg = _build(Config, data)
     cfg.output_dir = Path(cfg.output_dir).expanduser()
     cfg.detection, cfg.transcription, cfg.summary = det, tr, summary

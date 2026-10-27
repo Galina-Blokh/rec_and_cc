@@ -1,7 +1,8 @@
 """Local meeting summaries: ``summary.md`` (short summary + action items) next to a transcript.
 
 Opt-in (``summary.enabled``). A small instruct model runs through mlx-lm on Apple silicon,
-pinned in revisions.py and loaded offline-first like Whisper (gpu.local_model_path). Long
+pinned in revisions.py and loaded offline-first like Whisper (gpu.local_model_path); with
+``summary.language_models`` the transcript's main spoken language picks it. Long
 transcripts are summarised map-reduce: notes per chunk, then the summary and the action list
 from the notes. Everything runs on one background ``summary`` thread; logs never contain
 transcript or summary text.
@@ -37,7 +38,17 @@ PENDING_MARKER = ".summary-pending"
 # (which holds gpu.MLX_LOCK) stays within ~1-2 s.
 CHUNK_CHARS = 8_000
 PREFILL_STEP = 512  # prompt tokens per prefill step (lower peak memory than mlx-lm's 2048)
-DOWNLOAD_NOTICE = "Downloading the summary model (~1.7 GB, once)"
+# Download sizes of the offered (pinned) summary models, for the one-time download notice.
+MODEL_SIZES = {
+    "mlx-community/Qwen2.5-3B-Instruct-4bit": "~1.7 GB",
+    "mlx-community/gemma-4-e4b-it-4bit": "~5.2 GB",
+    "mlx-community/gemma-4-e2b-it-4bit": "~3.6 GB",
+}
+# Gemma 4 writes a thought block before every answer, even with thinking off (prefilling an
+# empty thought channel or folding the system prompt into the user turn did not stop it). It
+# gets this many extra tokens for it, and only the text after the last CHANNEL_END is kept.
+THINKING_TOKENS = 1600
+CHANNEL_START, CHANNEL_END = "<|channel>", "<channel|>"
 MAX_ROUNDS = 3  # reduce rounds before the notes are cut to fit
 LANGUAGE_NAMES = {"en": "English", "ru": "Russian", "he": "Hebrew"}
 # (summary heading, action items heading, "none") per language; English otherwise.
@@ -67,6 +78,40 @@ def main_language(segments: list[Segment]) -> str:
         if s.language:
             chars[s.language] = chars.get(s.language, 0) + len(s.text)
     return max(chars, key=lambda k: chars[k]) if chars else "en"
+
+
+def spoken_language(segments: list[Segment]) -> str:
+    """The language with the most speech time ("en" if none is known): picks the model."""
+    secs: dict[str, float] = {}
+    for s in segments:
+        if s.language:
+            secs[s.language] = secs.get(s.language, 0.0) + max(0.0, s.end - s.start)
+    return max(secs, key=lambda k: secs[k]) if secs else "en"
+
+
+def summary_model(cfg: Config, segments: list[Segment]) -> str:
+    """``summary.language_models`` entry of the main spoken language, else ``summary.model``."""
+    return cfg.summary.language_models.get(spoken_language(segments), cfg.summary.model)
+
+
+def download_notice(model: str) -> str:
+    size = MODEL_SIZES.get(model)
+    return f"Downloading the summary model ({size + ', ' if size else ''}once)"
+
+
+def thinks(model: str) -> bool:
+    """Whether ``model`` (a repo id or local path) is a Gemma 4, which thinks before answering."""
+    return "gemma-4" in Path(model).name.lower()
+
+
+def strip_thinking(text: str) -> str:
+    """The answer after a Gemma 4 thought block; "" if the thought never ended."""
+    if CHANNEL_END in text:
+        return text.rsplit(CHANNEL_END, 1)[1].strip()
+    if CHANNEL_START in text:
+        log.warning("the summary model ran out of tokens before it answered")
+        return ""
+    return text.strip()
 
 
 def transcript_lines(segments: list[Segment]) -> list[str]:
@@ -179,24 +224,40 @@ def format_summary(language: str, summary: str, items: list[str], model: str) ->
     return "\n".join(out) + "\n"
 
 
-def summarize_session(directory: Path, cfg: Config, generate: Generator | None = None) -> Path:
+def summarize_session(
+    directory: Path,
+    cfg: Config,
+    generate: Generator | None = None,
+    on_download: Callable[[str], None] | None = None,
+    before_call: Callable[[], None] | None = None,
+) -> Path:
     """Write ``summary.md`` for the final transcript in ``directory``; returns its path.
-    Raises SummaryUnavailable if no model can run (nothing is written then)."""
+    Raises SummaryUnavailable if no model can run (nothing is written then). Without
+    ``generate``, the routed model (summary_model) is loaded on first use and freed when done,
+    so only one summary model is ever in memory; ``on_download(model)`` runs before its
+    one-time download. ``before_call`` runs before each model call."""
     directory = Path(directory)
     data = json.loads((directory / JSON_NAME).read_text(encoding="utf-8"))
     segments = [Segment(**s) for s in data.get("segments", [])]
+    model = summary_model(cfg, segments)
     t0 = time.monotonic()
     owned = None
     if generate is None:  # the real model, freed again after this session
-        generate = owned = MlxGenerator(cfg.summary.model, cfg.transcription.allow_unpinned_models)
+        hook = None if on_download is None else lambda: on_download(model)
+        generate = owned = MlxGenerator(model, cfg.transcription.allow_unpinned_models, hook)
+    gen: Generator = generate
+
+    def call(messages: Messages, max_tokens: int) -> str:
+        if before_call is not None:
+            before_call()
+        return gen(messages, max_tokens)
+
     try:
-        language, summary, items = summarize(segments, generate, cfg.summary.max_tokens)
+        language, summary, items = summarize(segments, call, cfg.summary.max_tokens)
     finally:
         if owned is not None:
             owned.close()
-    path = atomic_write(
-        directory / SUMMARY_NAME, format_summary(language, summary, items, cfg.summary.model)
-    )
+    path = atomic_write(directory / SUMMARY_NAME, format_summary(language, summary, items, model))
     log.info(
         "summary of %s written: %d action item(s), %s, in %.1fs",
         directory.name,
@@ -289,6 +350,9 @@ class MlxGenerator:
 
         model: Any = self._model
         tokenizer: Any = self._tokenizer
+        thinking = thinks(self.model_name)
+        if thinking:  # room for the thought block before the answer
+            max_tokens += THINKING_TOKENS
         prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
         steps = stream_generate(
             model,
@@ -303,7 +367,8 @@ class MlxGenerator:
             with MLX_LOCK:  # the prefill, then one token at a time
                 step = next(steps, None)
             if step is None:
-                return "".join(out).strip()
+                text = "".join(out)
+                return strip_thinking(text) if thinking else text.strip()
             out.append(step.text)
 
     def close(self) -> None:
@@ -366,24 +431,13 @@ class SummaryQueue:
             time.sleep(self.poll_s)
 
     def _job(self, directory: Path) -> None:
-        owned = None
-        gen = self.generate
-        if gen is None:
-            gen = owned = MlxGenerator(
-                self.cfg.summary.model,
-                self.cfg.transcription.allow_unpinned_models,
-                on_download=lambda: self.notify("Summary model", DOWNLOAD_NOTICE),
-            )
-
-        def gated(messages: Messages, max_tokens: int) -> str:
-            self._wait_idle()  # a recording started: pause between model calls
-            return gen(messages, max_tokens)
-
-        try:
-            summarize_session(directory, self.cfg, gated)
-        finally:
-            if owned is not None:
-                owned.close()
+        summarize_session(
+            directory,
+            self.cfg,
+            self.generate,
+            on_download=lambda model: self.notify("Summary model", download_notice(model)),
+            before_call=self._wait_idle,  # a recording started: pause between model calls
+        )
 
     def _loop(self) -> None:
         while True:
