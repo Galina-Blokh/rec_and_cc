@@ -77,7 +77,27 @@ RECENT_COUNT = 10
 SEARCH_LIMIT = 20
 HOTKEY_DEBOUNCE_S = 0.5
 NET_PROBE_WAIT_S = 2.0  # how long a refresh waits for the network-volume probe
+# Menu settings whose effect already happened outside config.toml when their save fails: the
+# login item was changed, the captions panel shown/hidden, Off stopped a recording, the room
+# mic closed, call-app participant sampling stopped. Putting the old value back would undo the
+# click only on paper (autostart, captions) or, worse, resume recording, reopen the mic or read
+# participant names the user just turned off. They keep the new value and stay "unsaved"
+# (``Controller._unsaved``): a config reload skips them and each refresh retries the save
+# until it succeeds.
+NO_ROLLBACK_KEYS = frozenset(
+    {
+        "autostart",
+        "live_captions",
+        "detection.mode",
+        "detection.app_modes",
+        "detection.room_listening",
+        "transcription.names_from_call_app",
+    }
+)
+UNSAVED_NOTE = "The change stays in effect and is saved as soon as config.toml can be written."
 NET_PROBE_RETRY_S = 300.0  # after a hung or failed probe
+NET_LOCAL_TTL_S = 600.0  # a folder probed as local is re-probed after this long
+NET_PROBE_MAX_THREADS = 4  # stuck probes (one per folder) allowed at once
 REFRESH_EVERY_S = 10.0
 PERM_KINDS = ("microphone", "system_audio")
 PERM_TITLES = {"microphone": "Microphone", "system_audio": "System audio"}
@@ -319,6 +339,9 @@ def _privatize_new_folder(path: Path) -> None:
 
 
 # transcription keys a hand edit applies live (models and device need a restart)
+RETENTION_KEY = "transcription.audio_retention_days"
+# Settings-window fields that are NO_ROLLBACK_KEYS: a successful window save writes them.
+WINDOW_KEYS = {"live_captions": "live_captions", "mode": "detection.mode"}
 RELOADED_TRANSCRIPTION_KEYS = ("keep_audio", "audio_retention_days", "speaker_names")
 
 
@@ -337,6 +360,9 @@ class Controller:
     ):
         self.cfg = cfg
         self.events: queue.Queue[tuple] = queue.Queue()
+        notice = cfg.summary.notice
+        if notice:  # load_config(migrate=True) switched or kept an old-default 3B: once
+            self.post_notice("Summary model", notice)
         self._lock = threading.Lock()
         self._perm: dict[str, str] = {}
         self._recent: list[Path] = []
@@ -348,11 +374,15 @@ class Controller:
         # guards _dirty; also spans the reload's snapshot+apply (only _lang_lock nests)
         self._dirty_lock = threading.Lock()
         self._dirty: dict[str, int] = {}  # dotted key -> menu saves not yet written
+        # NO_ROLLBACK_KEYS whose save failed: memory differs from config.toml until a save of
+        # the key succeeds (retried on every refresh); a reload never overwrites them.
+        self._unsaved: set[str] = set()  # guarded by _dirty_lock
         self._settings_lock = threading.Lock()  # one settings window at a time
         self._lang_lock = threading.Lock()  # transcription.languages + its raw spelling
         self._summaries = None  # SummaryQueue, created on the first summary
         self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
-        self._net_probe: threading.Thread | None = None
+        self._net_probes: dict[Path, threading.Thread] = {}  # one in-flight probe per folder
+        self._net_local: dict[Path, float] = {}  # local folder -> when to re-probe (monotonic)
         self._net_retry: dict[Path, float] = {}  # folder -> earliest next probe (monotonic)
         self._net_warned: set[Path] = set()  # network-volume output dirs already warned about
         # global shortcut
@@ -872,11 +902,26 @@ class Controller:
                     return
                 time.sleep(1)
 
-    def purge_audio_now(self) -> None:
+    def purge_audio_now(self, days: int | None = None) -> None:
+        """Delete expired audio. Without ``days``, use the in-memory retention, but not while
+        a menu save of it is pending: a value that may never be saved must not delete audio
+        (the save's own purge, or the next hourly run, follows)."""
+        if days is None:
+            with self._dirty_lock:
+                if RETENTION_KEY in self._dirty:
+                    return
+            days = self.cfg.transcription.audio_retention_days
         try:
-            purge_old_audio(self.cfg.output_dir, self.cfg.transcription.audio_retention_days)
+            purge_old_audio(self.cfg.output_dir, days)
         except Exception:
             log.exception("audio retention failed")
+
+    def save_retention(self) -> None:
+        """Menu "Delete audio after" (worker thread): save the in-memory retention, then purge
+        with the value that was written, only if the write succeeded."""
+        saved = self.write_settings(RETENTION_KEY)
+        if saved is not None:
+            self.purge_audio_now(saved[RETENTION_KEY])
 
     def _purge_leftover_audio(self) -> None:
         """keep_audio = false: delete WAVs left behind by transcribed sessions (e.g. the app
@@ -940,6 +985,7 @@ class Controller:
                 self._perm, self._recent = perm, recent
             if self.engine.state.status == IDLE:  # e.g. marked stale by `name-speaker`
                 self._resubmit_summaries()
+            self._retry_unsaved()  # last: it may wait on the config lock
         finally:
             with self._lock:
                 self._refreshing = False
@@ -949,16 +995,25 @@ class Controller:
         """Warn once per output folder on a network share (SMB/NFS/UNC...): audio and
         transcripts would leave the device. The path is in the notice, never in the log.
         The probe (stat/statfs) can hang forever on a dead hard mount, so it runs on its own
-        daemon thread and is waited for briefly; a late answer still posts the notice."""
+        daemon thread and is waited for briefly; a late answer still posts the notice.
+        Local results are cached per path for NET_LOCAL_TTL_S, so a share mounted over that
+        path later (or a retargeted symlink) is noticed after the TTL."""
         out = Path(self.cfg.output_dir)
         with self._lock:
             if out in self._net_warned:
                 return
-            if self._net_probe is not None and self._net_probe.is_alive():
-                return  # a previous probe is still stuck: don't pile up threads
+            if time.monotonic() < self._net_local.get(out, 0.0):
+                return  # known local: no thread, no statfs on every refresh
+            prev = self._net_probes.get(out)
+            if prev is not None and prev.is_alive():
+                return  # this folder's probe is still stuck: don't pile up threads
             if time.monotonic() < self._net_retry.get(out, 0.0):
                 return  # a recent probe of this folder hung or failed
-            self._net_probe = t = threading.Thread(
+            self._net_probes = {p: th for p, th in self._net_probes.items() if th.is_alive()}
+            if len(self._net_probes) >= NET_PROBE_MAX_THREADS:
+                log.debug("network probe skipped: too many stuck probes; retried next refresh")
+                return  # too many stuck shares already
+            self._net_probes[out] = t = threading.Thread(
                 target=self._probe_network_volume, args=(out,), daemon=True, name="ui-netprobe"
             )
         t.start()
@@ -970,6 +1025,8 @@ class Controller:
     def _probe_network_volume(self, out: Path) -> None:
         try:
             if cloud_sync_provider(out) is not None:
+                with self._lock:
+                    self._net_local[out] = time.monotonic() + NET_LOCAL_TTL_S
                 return  # the cloud-sync notice already covers it
             kind = network_volume(out)
         except Exception:  # noqa: BLE001 - best effort
@@ -979,6 +1036,10 @@ class Controller:
         if kind is PROBE_FAILED:  # errored, not "local": back off like a hung probe
             with self._lock:
                 self._net_retry[out] = time.monotonic() + NET_PROBE_RETRY_S
+            return
+        if kind is None:  # genuinely local (never PROBE_FAILED, which backs off above)
+            with self._lock:
+                self._net_local[out] = time.monotonic() + NET_LOCAL_TTL_S
             return
         if not isinstance(kind, str):
             return
@@ -1044,7 +1105,8 @@ class Controller:
             # lands either before the snapshot (seen) or after the apply (kept), never between.
             with self._dirty_lock:
                 now = self._reloadable(self.cfg)
-                dirty = set(self._dirty)  # changed in the menu, save not written yet
+                # changed in the menu, save not written yet (or failed: _unsaved)
+                dirty = set(self._dirty) | self._unsaved
                 for key, value in self._reloadable(new).items():
                     if now[key] != before[key] or self._dotted(key) in dirty:
                         continue
@@ -1091,6 +1153,18 @@ class Controller:
         if owner == "languages":
             return "transcription.languages"
         return name if owner == "top" else f"{owner}.{name}"
+
+    def _retry_unsaved(self) -> None:
+        """Save again the no-rollback keys whose save failed (refresh thread), quietly: the
+        failed save already told the user. Memory and config.toml agree once it succeeds."""
+        with self._dirty_lock:
+            keys = sorted(self._unsaved)
+        if keys:
+            self.write_settings(*keys, quiet=True)
+
+    def _unpin(self, keys) -> None:
+        with self._dirty_lock:
+            self._unsaved.difference_update(keys)
 
     def _mark_dirty(self, keys, delta: int) -> None:
         with self._dirty_lock:
@@ -1181,15 +1255,14 @@ class Controller:
         "transcription.audio_retention_days") to config.toml on a worker thread. Menu
         callbacks use this instead of ``cfg.save()``, which would overwrite hand edits.
         ``marked``: the caller already marked ``keys`` dirty (before changing memory)."""
-        kw = {"title": title}
         if not marked:
             self._mark_dirty(keys, 1)  # a config reload before the write must not undo the change
 
         def run() -> None:
             try:
-                self.write_settings(*keys, **kw)
+                self._write_settings(*keys, title=title)
             finally:
-                self._mark_dirty(keys, -1)
+                self._mark_dirty(keys, -1)  # one mark per pending save (see _restore_from_disk)
 
         t = threading.Thread(target=run, name="save-config")
         t.daemon = True
@@ -1199,19 +1272,26 @@ class Controller:
             self._mark_dirty(keys, -1)  # run() will never unmark
             raise
 
-    def write_settings(self, *keys: str, title: str = "Settings") -> None:
+    def write_settings(
+        self, *keys: str, title: str = "Settings", quiet: bool = False
+    ) -> dict | None:
         """Blocking save of ``keys`` (see ``_write_settings``); marks them as pending so a
-        config reload meanwhile keeps the in-memory value."""
+        config reload meanwhile keeps the in-memory value. Returns the values written, or
+        None if the save failed."""
         self._mark_dirty(keys, 1)
         try:
-            self._write_settings(*keys, title=title)
+            return self._write_settings(*keys, title=title, quiet=quiet)
         finally:
             self._mark_dirty(keys, -1)
 
-    def _write_settings(self, *keys: str, title: str = "Settings") -> None:
+    def _write_settings(
+        self, *keys: str, title: str = "Settings", quiet: bool = False
+    ) -> dict | None:
         """Blocking part of ``save_settings``: a read-modify-write of only ``keys``, so a hand
         edit made since the last reload is kept (and picked up by the next refresh). The values
-        are read under ``_save_lock``: of two quick menu saves, the last one wins."""
+        are read under ``_save_lock``: of two quick menu saves, the last one wins. Returns the
+        values written, or None on failure (``quiet``: no notice, for the retry of unsaved
+        keys)."""
         with self._save_lock:
             values = {key: self._setting(key) for key in keys}
             edited = self._mtime() != self._config_mtime  # changed on disk, not reloaded yet
@@ -1227,32 +1307,70 @@ class Controller:
                     self._config_mtime = mtime  # our own write: nothing to reload
             except ValueError:  # invalid TOML (mid-edit?): don't overwrite the user's file
                 log.warning("config.toml could not be parsed; %s not saved", ", ".join(keys))
-                self._restore_from_disk(keys)
-                self.post_notice(f"{title} not saved", "config.toml could not be parsed")
+                self._save_failed(
+                    values, f"{title} not saved", "config.toml could not be parsed", quiet
+                )
             except ConfigLockTimeout:
                 log.warning("settings not saved: config lock timed out")  # no traceback
-                self._restore_from_disk(keys)
-                self.post_notice("Settings not saved", "config.toml is locked by another process")
+                reason = "config.toml is locked by another process"
+                self._save_failed(values, "Settings not saved", reason, quiet)
             except Exception:
-                log.exception("saving settings failed")
-                self._restore_from_disk(keys)
-                self.post_notice("Settings not saved", "config.toml could not be written")
+                if quiet:
+                    log.warning("saving settings failed again")
+                else:
+                    log.exception("saving settings failed")
+                self._save_failed(
+                    values, "Settings not saved", "config.toml could not be written", quiet
+                )
+            else:
+                self._unpin(values)
+                if quiet:
+                    log.info("unsaved settings saved: %s", ", ".join(keys))
+                return values
+        return None
 
-    def _restore_from_disk(self, keys) -> None:
-        """A failed write leaves config.toml as it was: put the menu's in-memory value of
-        exactly ``keys`` back to what the file says, so the menu doesn't show a change that
-        would silently vanish on restart. Caller holds ``_save_lock``."""
+    def _save_failed(self, tried: dict, heading: str, reason: str, quiet: bool) -> None:
+        """A save of ``tried`` failed (caller holds ``_save_lock``): roll back what can be
+        rolled back; keep the rest pinned as unsaved, retried by each refresh."""
+        self._restore_from_disk(tried)
+        pinned = set(tried) & NO_ROLLBACK_KEYS
+        with self._dirty_lock:
+            self._unsaved |= pinned
+        if not quiet:
+            self.post_notice(heading, f"{reason}. {UNSAVED_NOTE}" if pinned else reason)
+
+    def _restore_from_disk(self, tried: dict) -> None:
+        """A failed write leaves config.toml as it was: put the menu's in-memory value of each
+        key in ``tried`` ({dotted key: value this save tried to write}) back to what the file
+        says, so the menu doesn't show a change that would silently vanish on restart. The
+        menu re-reads cfg on every tick (macOS ``_render``, tray rebuild), so it follows.
+
+        A key is left alone when a newer click owns it: memory no longer holds the value this
+        save tried to write, or another save of the key is still pending (each pending save
+        holds one ``_dirty`` mark; this one holds its own). That save writes the newer value,
+        or restores it if it fails too. Keys in ``NO_ROLLBACK_KEYS`` are never restored.
+        Caller holds ``_save_lock``."""
+        if not set(tried) - NO_ROLLBACK_KEYS:
+            return
         try:
-            disk = load_config()
+            disk = load_config()  # first: the checks below then sit right before the writes
         except Exception:
             return  # unreadable file: keep memory, the next successful reload corrects it
+        with self._dirty_lock:  # a leaf lock: read the counts, nothing nested
+            pending = {k: self._dirty.get(k, 0) for k in tried}
+        keys = [k for k in tried if k not in NO_ROLLBACK_KEYS and pending[k] <= 1]
         for key in keys:
             if key == "transcription.languages":
                 tr, src = self.cfg.transcription, disk.transcription
-                with self._lang_lock:  # both together: save() pairs them
+                with self._lang_lock:  # check and write together: toggle_language takes it too
+                    raw = getattr(tr, "_raw_languages", None)
+                    if (list(raw) if raw is not None else list(tr.languages)) != tried[key]:
+                        continue  # a newer click owns it
                     tr._raw_languages = getattr(src, "_raw_languages", None)  # type: ignore[attr-defined]
                     tr.languages = list(src.languages)
                 continue
+            if self._setting(key) != tried[key]:  # checked right before the write
+                continue  # a newer click owns it
             *path, leaf = key.split(".")
             dst, ref = self.cfg, disk
             for name in path:
@@ -1282,7 +1400,14 @@ class Controller:
 
         def run() -> None:
             try:
-                raw = run_settings(self.cfg)
+                try:
+                    raw = run_settings(self.cfg)
+                except OSError as e:  # temp dir / snapshot file: not the transcripts folder
+                    log.warning("could not open settings: %s (errno %s)", type(e).__name__, e.errno)
+                    self.post_notice(
+                        "Settings not saved", f"couldn't open settings: {type(e).__name__}"
+                    )
+                    return
                 if not raw:  # cancelled, closed, or nothing changed
                     return
                 updates = validate_settings(raw)
@@ -1324,6 +1449,7 @@ class Controller:
                         raise
                     if not edited:
                         self._config_mtime = mtime  # our own write: nothing to reload
+                    self._unpin(WINDOW_KEYS[k] for k in updates if k in WINDOW_KEYS)
                     if "mode" in updates:
                         self.apply_settings({"mode": updates["mode"]})
                 if "output_dir" in updates:

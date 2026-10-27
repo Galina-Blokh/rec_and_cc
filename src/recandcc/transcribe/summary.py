@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import gc
+import hashlib
 import importlib.util
 import json
 import logging
@@ -24,7 +25,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
-from ..config import Config
+from ..config import DEFAULT_SUMMARY_MODEL, QWEN_RESEARCH_SUMMARY_MODEL, Config
 from ..models import Segment, SessionInfo, is_rtl
 from .output import JSON_NAME, PDI, RLI, atomic_write, paragraphs
 
@@ -34,13 +35,17 @@ SUMMARY_NAME = "summary.md"
 # In a session folder while its summary is owed (queued, or stale after a speaker rename);
 # startup re-queues these, so a summary cut short by quitting is redone.
 PENDING_MARKER = ".summary-pending"
+# Fingerprint of the transcript text a summary was made from. Unlike an mtime it survives a
+# speaker rename or call-app names (they rewrite transcript.json but not what was said).
+SOURCE_NAME = ".summary-source"
 # ~2-5k tokens (en..he): well inside Qwen2.5's 32k context, and each chunk's prompt prefill
 # (which holds gpu.MLX_LOCK) stays within ~1-2 s.
 CHUNK_CHARS = 8_000
 PREFILL_STEP = 512  # prompt tokens per prefill step (lower peak memory than mlx-lm's 2048)
-# Download sizes of the offered (pinned) summary models, for the one-time download notice.
+# One-time download size of each offered (pinned) summary model, for the download notice.
 MODEL_SIZES = {
-    "mlx-community/Qwen2.5-3B-Instruct-4bit": "~1.7 GB",
+    DEFAULT_SUMMARY_MODEL: "~0.9 GB",
+    QWEN_RESEARCH_SUMMARY_MODEL: "~1.7 GB",
     "mlx-community/Qwen3.5-4B-MLX-4bit": "~3.0 GB",
 }
 # Thought-block markers of thinking models (Qwen3/3.5; Gemma 4's channel). Summaries run
@@ -62,6 +67,12 @@ Messages = list[dict[str, str]]
 
 class Generator(Protocol):
     def __call__(self, messages: Messages, max_tokens: int) -> str: ...
+
+
+def download_notice(model: str) -> str:
+    """The one-time download notice, with the size when ``model`` is a pinned one."""
+    size = MODEL_SIZES.get(model)
+    return f"Downloading the summary model ({size + ', ' if size else ''}once)"
 
 
 class SummaryUnavailable(RuntimeError):
@@ -105,11 +116,6 @@ def summary_model(cfg: Config, segments: list[Segment]) -> str:
         return model
     log.warning("ignoring unpinned summary.language_models model %s; using summary.model", model)
     return cfg.summary.model
-
-
-def download_notice(model: str) -> str:
-    size = MODEL_SIZES.get(model)
-    return f"Downloading the summary model ({size + ', ' if size else ''}once)"
 
 
 def strip_thinking(text: str, markers=THOUGHT_MARKERS) -> str:
@@ -221,6 +227,14 @@ def summarize(
     return language, summary, items
 
 
+def transcript_fingerprint(segments: list[dict]) -> str:
+    """Hash of each transcript.json segment's start, end and text (speaker labels excluded)."""
+    h = hashlib.sha256()
+    for seg in segments:
+        h.update(f"{seg.get('start')}\x1f{seg.get('end')}\x1f{seg.get('text')}\x1e".encode())
+    return h.hexdigest()
+
+
 def format_summary(language: str, summary: str, items: list[str], model: str) -> str:
     title, actions, none = HEADINGS.get(language, HEADINGS["en"])
 
@@ -280,7 +294,11 @@ def summarize_session(
             log.info("summary model %s unavailable; using %s", model, cfg.summary.model)
             model = cfg.summary.model
             language, summary, items = run_model(model)
+    with contextlib.suppress(OSError):  # an old fingerprint must not sit next to a new summary
+        (directory / SOURCE_NAME).unlink(missing_ok=True)
     path = atomic_write(directory / SUMMARY_NAME, format_summary(language, summary, items, model))
+    with contextlib.suppress(OSError):  # no fingerprint: export falls back to the mtime rule
+        atomic_write(directory / SOURCE_NAME, transcript_fingerprint(data.get("segments", [])))
     log.info(
         "summary of %s written: %d action item(s), %s, in %.1fs",
         directory.name,
@@ -413,7 +431,7 @@ class MlxGenerator:
         return strip_thinking(generate(False if thinking else None, max_tokens), markers)
 
     def close(self) -> None:
-        """Free the model, so its 2-3 GB don't stay resident between sessions."""
+        """Free the model, so its 1-3 GB don't stay resident between sessions."""
         if self._model is None:
             return
         self._model = self._tokenizer = None
@@ -472,7 +490,7 @@ class SummaryQueue:
             time.sleep(self.poll_s)
 
     def _job(self, directory: Path) -> None:
-        summarize_session(
+        summarize_session(  # reads cfg now: a config reload may have changed the model
             directory,
             self.cfg,
             self.generate,

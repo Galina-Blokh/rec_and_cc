@@ -17,7 +17,16 @@ from pathlib import Path
 import pytest
 
 from recandcc import cli
-from recandcc.config import DEFAULT_SUMMARY_MODEL, Config, load_config
+from recandcc import config as config_mod
+from recandcc.config import (
+    DEFAULT_SUMMARY_MODEL,
+    QWEN_RESEARCH_SUMMARY_MODEL,
+    SUMMARY_MODEL_KEPT,
+    SUMMARY_MODEL_SWITCHED,
+    Config,
+    SummaryConfig,
+    load_config,
+)
 from recandcc.models import Segment, SessionInfo, TriggerKind
 from recandcc.transcribe import gpu, summary
 from recandcc.transcribe.output import PDI, RLI, write_outputs
@@ -370,7 +379,7 @@ def test_summary_md_next_to_the_transcript(tmp_path):
     assert path == d / "summary.md"
     text = path.read_text("utf-8")
     assert text.startswith("# Краткое содержание\n\nWe agreed on the plan.\n\n## Задачи\n\nНет.")
-    assert "Qwen2.5-3B-Instruct-4bit" in text
+    assert "Qwen2.5-1.5B-Instruct-4bit" in text
 
 
 def test_hebrew_summary_is_right_to_left(tmp_path):
@@ -391,6 +400,176 @@ def test_summary_is_off_by_default(tmp_path):
     cfg = load_config(tmp_path / "config.toml")
     assert cfg.summary.enabled is False
     assert "[summary]" in (tmp_path / "config.toml").read_text("utf-8")
+
+
+def test_saved_old_default_model_follows_the_new_default(tmp_path):
+    # Config.save writes every key, so configs saved before this change hold the 3B without
+    # anyone choosing it: it is read as unset unless its licence was explicitly accepted.
+    path = tmp_path / "config.toml"
+    Config(summary=SummaryConfig(model=QWEN_RESEARCH_SUMMARY_MODEL)).save(path)
+    cfg = load_config(path)
+    assert cfg.summary.model == DEFAULT_SUMMARY_MODEL
+    cfg.save(path)
+    assert load_config(path).summary.model == DEFAULT_SUMMARY_MODEL
+
+
+def test_accepted_qwen_research_licence_keeps_the_3b(tmp_path):
+    path = tmp_path / "config.toml"
+    keep = SummaryConfig(model=QWEN_RESEARCH_SUMMARY_MODEL, accept_qwen_research_licence=True)
+    Config(summary=keep).save(path)
+    assert load_config(path).summary.model == QWEN_RESEARCH_SUMMARY_MODEL
+    Config(summary=SummaryConfig(model="me/custom-llm")).save(path)
+    assert load_config(path).summary.model == "me/custom-llm"  # other models untouched
+
+
+def _cache_model(cache: Path, repo: str, rev: str | None = None) -> None:
+    """A fake complete snapshot of ``repo`` (its pinned commit by default) in an HF cache."""
+    root = cache / ("models--" + repo.replace("/", "--"))
+    snap = root / "snapshots" / (rev or gpu.revision(repo) or "commit")
+    snap.mkdir(parents=True)
+    (snap / "model.safetensors").write_bytes(b"weights")  # a plain file: no symlink rights needed
+    (snap / "config.json").write_text("{}")
+
+
+def test_old_default_switch_is_saved_with_only_that_key(tmp_path):
+    path = tmp_path / "config.toml"
+    Config(summary=SummaryConfig(model=QWEN_RESEARCH_SUMMARY_MODEL)).save(path)
+    path.write_text(path.read_text("utf-8") + "\n[extra]\nhand = 1\n", "utf-8")
+    cfg = load_config(path, migrate=True)
+    assert cfg.summary.model == DEFAULT_SUMMARY_MODEL
+    text = path.read_text("utf-8")
+    assert DEFAULT_SUMMARY_MODEL in text and QWEN_RESEARCH_SUMMARY_MODEL not in text
+    assert "hand = 1" in text  # key-level save, not a full overwrite
+    assert load_config(path, migrate=True).summary.model == DEFAULT_SUMMARY_MODEL
+
+
+def test_cli_loads_switch_in_memory_only(tmp_path):
+    # a CLI command run first after the upgrade must not use up the app's one-time notice
+    path = tmp_path / "config.toml"
+    Config(summary=SummaryConfig(enabled=True, model=QWEN_RESEARCH_SUMMARY_MODEL)).save(path)
+    before = path.read_text("utf-8")
+    cfg = load_config(path)
+    assert cfg.summary.model == DEFAULT_SUMMARY_MODEL
+    assert cfg.summary.notice is None
+    assert path.read_text("utf-8") == before
+    assert load_config(path, migrate=True).summary.notice == SUMMARY_MODEL_SWITCHED
+    assert load_config(path, migrate=True).summary.notice is None  # once
+
+
+def test_cached_3b_is_kept_while_the_new_default_is_missing(tmp_path):
+    # offline users who already have the 3B must not lose summaries or face a surprise fetch
+    _cache_model(config_mod.HF_CACHE_DIR, QWEN_RESEARCH_SUMMARY_MODEL)
+    path = tmp_path / "config.toml"
+    Config(summary=SummaryConfig(model=QWEN_RESEARCH_SUMMARY_MODEL)).save(path)
+    before = path.read_text("utf-8")
+    cfg = load_config(path, migrate=True)
+    assert cfg.summary.model == QWEN_RESEARCH_SUMMARY_MODEL
+    assert cfg.summary.notice is None  # summaries off: nothing to say
+    assert path.read_text("utf-8") == before
+    _cache_model(config_mod.HF_CACHE_DIR, DEFAULT_SUMMARY_MODEL)  # both on disk: switch
+    assert load_config(path, migrate=True).summary.model == DEFAULT_SUMMARY_MODEL
+
+
+def test_kept_cached_3b_is_noticed_once(tmp_path):
+    # nothing downloads the 1.5B while the 3B is kept, so the user is told how to switch
+    _cache_model(config_mod.HF_CACHE_DIR, QWEN_RESEARCH_SUMMARY_MODEL)
+    path = tmp_path / "config.toml"
+    Config(summary=SummaryConfig(enabled=True, model=QWEN_RESEARCH_SUMMARY_MODEL)).save(path)
+    assert load_config(path).summary.notice is None  # CLI: no notice used up
+    cfg = load_config(path, migrate=True)
+    assert cfg.summary.model == QWEN_RESEARCH_SUMMARY_MODEL
+    assert cfg.summary.notice == SUMMARY_MODEL_KEPT
+    assert load_config(path, migrate=True).summary.notice is None  # once
+
+
+def test_unpinned_1_5b_snapshot_does_not_replace_a_cached_3b(tmp_path):
+    # another tool's copy of the 1.5B at a different commit wouldn't load offline
+    _cache_model(config_mod.HF_CACHE_DIR, QWEN_RESEARCH_SUMMARY_MODEL)
+    _cache_model(config_mod.HF_CACHE_DIR, DEFAULT_SUMMARY_MODEL, rev="2" * 40)
+    path = tmp_path / "config.toml"
+    Config(summary=SummaryConfig(model=QWEN_RESEARCH_SUMMARY_MODEL)).save(path)
+    assert load_config(path, migrate=True).summary.model == QWEN_RESEARCH_SUMMARY_MODEL
+
+
+def test_config_does_not_import_transcribe():
+    # AGENTS rule 8: config.py is a leaf; the summary pins live there and revisions.py uses them
+    src = Path(config_mod.__file__).read_text("utf-8")
+    assert "from .transcribe" not in src and "import recandcc.transcribe" not in src
+    for model, rev in config_mod.SUMMARY_MODEL_REVISIONS.items():
+        assert gpu.revision(model) == rev
+
+
+@pytest.mark.parametrize("value", ['"true"', '"false"', '"yes"', "1", "1.0"])
+def test_non_boolean_licence_acceptance_is_not_consent(tmp_path, value):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        f'[summary]\nmodel = "{QWEN_RESEARCH_SUMMARY_MODEL}"\n'
+        f"accept_qwen_research_licence = {value}\n",
+        "utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.summary.model == DEFAULT_SUMMARY_MODEL
+    assert cfg.summary.accept_qwen_research_licence is False
+    assert cfg.summary.notice is None  # CLI loads: in memory only
+    cfg = load_config(path, migrate=True)  # summaries off, but they tried to keep the 3B
+    assert cfg.summary.notice is not None
+    assert cfg.summary.notice.startswith(
+        "accept_qwen_research_licence must be a TOML boolean true, not a "
+    )
+    assert cfg.summary.notice.endswith(SUMMARY_MODEL_SWITCHED)
+    assert "notice" not in path.read_text("utf-8")  # runtime only, never saved
+
+
+def test_only_the_pinned_snapshot_counts_for_a_pinned_repo():
+    cache = config_mod.HF_CACHE_DIR
+    _cache_model(cache, QWEN_RESEARCH_SUMMARY_MODEL, rev="0" * 40)  # some other commit
+    assert config_mod.summary_model_on_disk(QWEN_RESEARCH_SUMMARY_MODEL) is False
+    _cache_model(cache, "me/unpinned", rev="1" * 40)  # unpinned: any snapshot
+    assert config_mod.summary_model_on_disk("me/unpinned") is True
+
+
+def test_interrupted_download_does_not_count_as_on_disk(tmp_path):
+    snap = config_mod.HF_CACHE_DIR / "models--a--b" / "snapshots" / "c"
+    snap.mkdir(parents=True)
+    try:
+        (snap / "model.safetensors").symlink_to(tmp_path / "missing-blob")
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    assert config_mod.summary_model_on_disk("a/b") is False
+    assert config_mod.summary_model_on_disk("no/such") is False
+
+
+def test_cache_check_without_huggingface_hub_uses_the_default_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_mod, "HF_CACHE_DIR", None)
+    monkeypatch.setitem(sys.modules, "huggingface_hub.constants", None)  # not importable
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))  # every platform
+    assert config_mod.summary_model_on_disk(QWEN_RESEARCH_SUMMARY_MODEL) is False
+    _cache_model(tmp_path / ".cache" / "huggingface" / "hub", QWEN_RESEARCH_SUMMARY_MODEL)
+    assert config_mod.summary_model_on_disk(QWEN_RESEARCH_SUMMARY_MODEL) is True
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_controller_notices_the_switch_once(tmp_path, monkeypatch, enabled):
+    from recandcc.ui import common
+    from recandcc.ui.common import Controller
+
+    class Monitor:
+        def snapshot(self):
+            return []
+
+    path = tmp_path / "config.toml"
+    old = SummaryConfig(enabled=enabled, model=QWEN_RESEARCH_SUMMARY_MODEL)
+    Config(output_dir=tmp_path, summary=old).save(path)
+    monkeypatch.setattr(common, "CONFIG_PATH", path)
+    cfg = load_config(path, migrate=True)
+    ctrl = Controller(cfg, monitor=Monitor(), recorder=object(), tq=object(), start_threads=False)
+    notices = []
+    while not ctrl.events.empty():
+        ev = ctrl.events.get()
+        if ev[0] == "notice":
+            notices.append(ev[1:])
+    expected = [("Summary model", SUMMARY_MODEL_SWITCHED)] if enabled else []
+    assert notices == expected  # summaries off: the model doesn't matter, no toast
 
 
 def _controller(cfg):
@@ -614,7 +793,26 @@ def test_first_download_posts_a_notice(tmp_path, monkeypatch):
     q = summary.SummaryQueue(Config(), notify=lambda *n: notices.append(n))
     q.submit(make_session(tmp_path, [seg("hello")]))
     q.join()
-    assert notices[0] == ("Summary model", "Downloading the summary model (~1.7 GB, once)")
+    assert notices[0] == ("Summary model", "Downloading the summary model (~0.9 GB, once)")
+
+
+@pytest.mark.parametrize(
+    ("model", "notice"),
+    [
+        (QWEN_RESEARCH_SUMMARY_MODEL, "Downloading the summary model (~1.7 GB, once)"),
+        ("me/custom-llm", "Downloading the summary model (once)"),
+    ],
+)
+def test_download_notice_names_the_chosen_models_size(model, notice):
+    assert summary.download_notice(model) == notice
+
+
+def test_default_summary_model_is_apache_and_the_3b_stays_pinned():
+    # Apache-2.0 default (#4); the non-commercial Qwen Research 3B is still selectable offline
+    assert DEFAULT_SUMMARY_MODEL == "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+    assert not Config().summary.enabled  # still opt-in
+    assert gpu.revision(DEFAULT_SUMMARY_MODEL) == "8b403126fc14f14cfc99bb4cfa72ecbc129ea677"
+    assert gpu.revision(QWEN_RESEARCH_SUMMARY_MODEL) == "4f83f8f146fdf28b512a06562b671d7af4fab457"
 
 
 def test_cache_miss_calls_the_download_hook(monkeypatch):
