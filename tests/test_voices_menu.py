@@ -465,3 +465,22 @@ def test_osascript_timeout_returns_empty(monkeypatch):
 
     monkeypatch.setattr(common.subprocess, "run", slow)
     assert common.osascript("x", common.DIALOG_TIMEOUT_S) == ""
+
+
+def test_posix_lock_gives_up_instead_of_hanging(monkeypatch):
+    import sys
+
+    if sys.platform == "win32":
+        pytest.skip("POSIX flock")
+    import fcntl
+
+    monkeypatch.setattr(voices, "LOCK_WAIT_S", 0.1)
+
+    def busy(f, op):
+        raise BlockingIOError("held")
+
+    monkeypatch.setattr(fcntl, "flock", busy)
+    with pytest.raises(OSError, match="in use by another process"), voices.store_lock():
+        pass
+    with voices.store_lock_best_effort():  # finalize carries on
+        pass

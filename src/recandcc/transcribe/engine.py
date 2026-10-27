@@ -735,7 +735,7 @@ class Transcriber:
         out, n_labels, n_named = list(segments), 0, 0
         speakers: dict[str, np.ndarray] = {}
         # Names, the generation check and the voice writes are one step against a forget
-        with voices.store_lock():
+        with voices.store_lock_best_effort():
             for track, track_turns in by_track.items():
                 centroids = getattr(track_turns, "centroids", {}) if self.cfg.speaker_names else {}
                 names: dict[int, str] = {}

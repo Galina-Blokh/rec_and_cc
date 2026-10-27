@@ -137,6 +137,22 @@ def _lock_windows(f) -> None:
             pause = min(pause * 2, 0.5)
 
 
+def _lock_posix(f) -> None:
+    """flock with a deadline (LOCK_WAIT_S), like Windows: a stuck CLI must not wedge the app."""
+    import fcntl
+
+    deadline, pause = time.monotonic() + LOCK_WAIT_S, 0.02
+    while True:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise OSError("the voice data is in use by another process; try again") from None
+            time.sleep(pause)
+            pause = min(pause * 2, 0.5)
+
+
 @contextlib.contextmanager
 def _file_lock(voices_dir: Path | None = None):
     """Exclusive lock on the voices folder across processes (and threads, with LOCK), taken
@@ -156,9 +172,7 @@ def _file_lock(voices_dir: Path | None = None):
             if os.name == "nt":
                 _lock_windows(f)
             else:
-                import fcntl
-
-                fcntl.flock(f, fcntl.LOCK_EX)
+                _lock_posix(f)
             _set_depth(d, 1)
             try:
                 yield
@@ -173,6 +187,19 @@ def _file_lock(voices_dir: Path | None = None):
 
 
 store_lock = _file_lock  # for callers that must act on the store atomically
+
+
+@contextlib.contextmanager
+def store_lock_best_effort(voices_dir: Path | None = None):
+    """``store_lock``, but when another process holds it for too long, carry on without it
+    (finalizing a transcript must not hang); the voice writes inside still take it and
+    report their own OSError."""
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(_file_lock(voices_dir))
+        except OSError:
+            log.warning("the voice store is busy; continuing without its lock")
+        yield
 
 
 def profiles_if_current(since: int | None, voices_dir: Path | None = None) -> list[Profile]:
@@ -543,6 +570,7 @@ __all__ = [
     "LOCK",
     "forget_generation",
     "store_lock",
+    "store_lock_best_effort",
     "has_user_names",
     "profiles_if_current",
     "MATCH_MARGIN",
