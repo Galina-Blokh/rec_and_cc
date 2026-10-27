@@ -1388,6 +1388,7 @@ def test_recording_busy_includes_the_transcription_backlog():
 
 
 def test_a_reused_rowid_between_scan_and_materialise_is_not_shown(tmp_path, out, monkeypatch):
+    monkeypatch.setattr(search, "CACHE_MAX_ROWS", 0)  # the streaming path (the cache keeps rows)
     make_session(out, 1, [seg(1, "the invoice is due")])
     idx = TranscriptIndex(tmp_path / "idx" / "s.sqlite3", embedder=FakeEmbedder())
     sync(idx, out)
@@ -1493,6 +1494,7 @@ def test_hand_edited_semantic_setting_is_applied_to_a_running_app(tmp_path, monk
     ctrl = SimpleNamespace(
         cfg=Config(output_dir=tmp_path),
         _save_lock=threading.Lock(),
+        _sync_index_lock=threading.Lock(),
         _lang_lock=threading.Lock(),
         _dirty_lock=threading.Lock(),
         _dirty={},
@@ -1501,6 +1503,7 @@ def test_hand_edited_semantic_setting_is_applied_to_a_running_app(tmp_path, monk
         _mtime=lambda: 1.0,
         post_notice=lambda *a: None,
         apply_hotkey=lambda *a: None,
+        _sync_index=lambda: None,
     )
     ctrl._reloadable = Controller._reloadable
     ctrl._dotted = Controller._dotted
@@ -1645,6 +1648,290 @@ def test_a_busy_index_never_embeds_on_the_query_path(tmp_path, out):
     state["busy"] = False
     idx.search("budget")
     assert emb.calls == [["budget"]]
+
+
+# --------------------------------------------------------------------------- audit of #87
+def _reload_ctrl(cfg, new, sync_index=None):
+    """A Controller stand-in that reloads ``new`` as the hand-edited config.toml."""
+    from recandcc.ui.common import Controller
+
+    ctrl = SimpleNamespace(
+        cfg=cfg,
+        _save_lock=threading.Lock(),
+        _sync_index_lock=threading.Lock(),
+        _lang_lock=threading.Lock(),
+        _dirty_lock=threading.Lock(),
+        _dirty={},
+        _unsaved=set(),
+        _config_mtime=-1.0,
+        _mtime=lambda: 1.0,
+        post_notice=lambda *a: None,
+        apply_hotkey=lambda *a: None,
+        _recording_busy=lambda: False,
+    )
+    ctrl._reloadable = Controller._reloadable
+    ctrl._dotted = Controller._dotted
+    ctrl._reload_target = lambda owner: Controller._reload_target(ctrl, owner)
+    ctrl._sync_index = sync_index or (lambda: Controller._sync_index(ctrl))  # type: ignore[arg-type]
+    return ctrl
+
+
+def test_hand_edit_switching_semantic_off_stops_embedding_at_once(tmp_path, out, monkeypatch):
+    """Regression (audit of #87): the reload only flipped the flag, and the embed worker kept
+    downloading and writing seg_vec text until the next search or the hourly sync."""
+    from recandcc.ui.common import Controller
+
+    class Slow(FakeEmbedder):
+        def embed(self, texts):
+            time.sleep(0.02)
+            return super().embed(texts)
+
+    for i in range(40):
+        make_session(out, i, [seg(1, f"invoice {i}")])
+    emb = Slow()
+    monkeypatch.setattr(semantic, "default_embedder", lambda: emb)
+    cfg = Config(output_dir=out)
+    cfg.search.semantic = True
+    idx = search.default_index(True)
+    idx.sync(out)
+    deadline = time.monotonic() + 10
+    while not emb.calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    new = Config(output_dir=out)  # semantic = false, edited by hand
+    monkeypatch.setattr("recandcc.ui.common.load_config", lambda *a, **k: new)
+    Controller._maybe_reload_config(_reload_ctrl(cfg, new))  # type: ignore[arg-type]
+    assert idx.wait_embedded(10)
+    deadline = time.monotonic() + 10
+    while (idx.embedder is not None or vector_rows(idx)) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert idx.embedder is None and vector_rows(idx) == 0
+    n = len(emb.calls)
+    assert idx.wait_embedded(10)  # worker idle: nothing more can arrive (no timing guess)
+    assert len(emb.calls) == n and vector_rows(idx) == 0  # nothing embedded while off
+
+
+def test_reload_without_a_semantic_change_does_not_sync(tmp_path, monkeypatch):
+    from recandcc.ui.common import Controller
+
+    synced = []
+    new = Config(output_dir=tmp_path)
+    new.hotkey = "<ctrl>+<alt>+x"
+    ctrl = _reload_ctrl(Config(output_dir=tmp_path), new, lambda: synced.append(1))
+    monkeypatch.setattr("recandcc.ui.common.load_config", lambda *a, **k: new)
+    Controller._maybe_reload_config(ctrl)  # type: ignore[arg-type]
+    for t in threading.enumerate():  # a spawned reload thread would have synced: wait for it
+        if t.name == "search-reload":
+            t.join(10)
+    assert synced == [] and ctrl.cfg.hotkey == "<ctrl>+<alt>+x"
+
+
+def test_pause_before_the_last_block_does_not_reopen_past_the_end(model_dir, monkeypatch):
+    """Regression (audit of #87): ``Range: bytes=<size>-`` got a 416, the complete download
+    was deleted and backed off for 10 minutes."""
+    import urllib.error
+
+    data = bytes(range(256)) * (3 << 12)  # 3 MiB: three 1 MiB blocks
+    offsets = []
+
+    def fake_open(url, offset):
+        offsets.append(offset)
+        if offset >= len(data):
+            raise urllib.error.HTTPError(url, 416, "Range Not Satisfiable", {}, None)  # type: ignore[arg-type]
+        status, rng = (206, f"bytes {offset}-{len(data) - 1}/{len(data)}") if offset else (200, "")
+        return _Resp(data[offset:], status, rng)
+
+    monkeypatch.setattr(semantic, "_open", fake_open)
+    monkeypatch.setattr(semantic, "REOPEN_AFTER_PAUSE_S", 0.01)
+    polls = [0]
+
+    def wait():
+        polls[0] += 1
+        if polls[0] == 3:  # a recording starts right before the last block is written
+            time.sleep(0.02)
+        return True
+
+    path = semantic.model_path(_fake_model(data), wait=wait)
+    assert path is not None and path.read_bytes() == data
+    assert semantic._last_failure == 0.0 and offsets == [0]
+
+
+def test_embedding_cannot_store_text_of_a_session_another_process_drops(tmp_path, out):
+    """Regression (audit of #87): the stamp check ran outside a transaction, so another
+    process could drop the session between check and write and leave its text in seg_vec."""
+    d = make_session(out, 1, [seg(1, "secret invoice")])
+    path = tmp_path / "idx" / "s.sqlite3"
+    cli = TranscriptIndex(path)
+    other = TranscriptIndex(path, embedder=FakeEmbedder())  # "the app" (no embed worker work)
+    cli.sync(out)
+    real = cli._connect
+    deleter: list[threading.Thread] = []
+
+    class Conn:
+        def __init__(self, db):
+            self.db = db
+
+        def execute(self, sql, *a):
+            r = self.db.execute(sql, *a)
+            if sql.startswith("SELECT stamp FROM sessions") and not deleter:
+                (d / search.TRANSCRIPT).unlink()  # the app deletes the meeting right now
+                t = threading.Thread(target=other.index_session, args=(d,))
+                deleter.append(t)
+                t.start()
+                t.join(0.3)  # without the transaction it finishes here, before our write
+            return r
+
+        def __getattr__(self, name):
+            return getattr(self.db, name)
+
+    cli._connect = lambda: Conn(real())  # type: ignore[method-assign]
+    cli.embedder = FakeEmbedder()
+    cli._embed_pending()
+    deleter[0].join(15)
+    assert other.wait_embedded(10)
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT count(*) FROM sessions").fetchone()[0] == 0
+        assert db.execute("SELECT text FROM seg_vec").fetchall() == []
+
+
+@pytest.mark.parametrize("value", ['"false"', '"true"', "1", '"yes"'])
+def test_non_bool_semantic_setting_is_off_with_a_warning(tmp_path, caplog, value):
+    """Regression (audit of #87): ``semantic = "false"`` is a truthy string and downloaded."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(f"[search]\nsemantic = {value}\n")
+    with caplog.at_level(logging.WARNING, logger="recandcc.config"):
+        assert load_config(cfg).search.semantic is False
+    assert "[search] semantic must be true or false" in caplog.text
+
+
+def test_download_lock_wait_is_bounded(model_dir, monkeypatch):
+    holder = semantic._FileLock(model_dir / ".download.lock")
+    assert holder.try_acquire()
+    monkeypatch.setattr(semantic, "DOWNLOAD_LOCK_POLL_S", 0.01)
+    calls = _urlopen(monkeypatch, b"x")
+    t0 = time.monotonic()
+    try:
+        assert semantic.model_path(_fake_model(b"x"), lock_wait_s=0.1) is None
+    finally:
+        holder.release()
+    assert time.monotonic() - t0 < 5 and calls == [] and semantic._last_failure == 0.0
+
+
+def test_run_lock_probe_sees_the_running_app(tmp_path):
+    from recandcc.cli import _SingleInstance
+
+    lock = tmp_path / "run.lock"
+    assert not _SingleInstance(lock).held_elsewhere()  # no app ever ran
+    app = _SingleInstance(lock)
+    assert app.acquire()
+    try:
+        assert _SingleInstance(lock).held_elsewhere()
+    finally:
+        assert app._f is not None
+        app._f.close()
+    assert not _SingleInstance(lock).held_elsewhere()
+
+
+def test_cli_search_never_downloads_while_the_app_runs(out, model_dir, monkeypatch, capsys):
+    """Regression (audit of #87): ``recandcc search`` downloaded during the app's recording
+    and could wait 600 s for its download lock. Now the app owns the download."""
+    from recandcc import cli
+
+    make_session(out, 1, [seg(1, "Please send the invoice")])
+    cfg = Config(output_dir=out)
+    cfg.search.semantic = True
+    monkeypatch.setattr(cli, "load_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(cli, "setup_logging", lambda **_k: None)
+    monkeypatch.setattr(cli, "app_running", lambda: True)
+    monkeypatch.setattr(semantic, "_default", None)
+    calls = _urlopen(monkeypatch, None)
+    t0 = time.monotonic()
+    assert cli.cmd_search(SimpleNamespace(query="invoice", limit=5)) == 0
+    assert search.default_index(True).wait_embedded(10)
+    assert time.monotonic() - t0 < 10 and calls == []
+    got = capsys.readouterr()
+    assert "invoice" in got.out and "full-text matches only" in got.err
+    assert "Downloading" not in got.err
+
+
+def test_sync_index_is_serialised_and_reads_the_setting_inside_the_lock():
+    """Two reload threads after a fast on->off flip: the last to run applies the current value."""
+    from recandcc.ui.common import Controller
+
+    cfg = Config()
+    cfg.search.semantic = True
+    ctrl = _reload_ctrl(cfg, cfg)
+    ctrl._sync_index = None  # use the real method below
+    seen: list[bool] = []
+    first_in = threading.Event()
+    release = threading.Event()
+
+    class Idx:
+        def __init__(self, flag):
+            self.flag = flag
+
+        def sync(self, _out):
+            seen.append(self.flag)
+
+    def fake_default_index(flag, _busy):
+        if not first_in.is_set():  # first thread: stall between reading the flag and syncing
+            first_in.set()
+            release.wait(5)
+        return Idx(flag)
+
+    import recandcc.search as search_mod
+
+    orig = search_mod.default_index
+    search_mod.default_index = fake_default_index
+    try:
+        t1 = threading.Thread(target=lambda: Controller._sync_index(ctrl))
+        t1.start()
+        assert first_in.wait(5)
+        cfg.search.semantic = False  # flipped while thread 1 is inside
+        t2 = threading.Thread(target=lambda: Controller._sync_index(ctrl))
+        t2.start()
+        release.set()
+        t1.join(5)
+        t2.join(5)
+    finally:
+        search_mod.default_index = orig
+    assert seen[-1] is False
+
+
+def test_blocked_write_skips_that_session_and_retries_it_later(tmp_path, out, monkeypatch):
+    """Another process holds the write lock past the timeout: the other sessions are still
+    embedded and the blocked one is retried by the next pass (not lost)."""
+    monkeypatch.setattr(search, "EMBED_BLOCKED_BACKOFF_S", 0.0)
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(
+        search.sqlite3, "connect", lambda path, **kw: real_connect(path, **{**kw, "timeout": 0.05})
+    )
+    make_session(out, 1, [seg(1, "alpha")])
+    make_session(out, 2, [seg(1, "beta")])
+    idx = make(tmp_path, FakeEmbedder())
+    gate = threading.Event()
+    holder = None
+    orig = idx._retry_embed_later
+
+    def retry():
+        gate.set()
+        assert holder is not None
+        holder.execute("ROLLBACK")  # the other process finishes before the retry pass
+        orig()
+
+    monkeypatch.setattr(idx, "_retry_embed_later", retry)
+    sync(idx, out)
+    # Re-run with the lock held from the start of the embed pass:
+    with sqlite3.connect(idx.path) as db:
+        db.execute("DELETE FROM seg_vec")
+        db.execute("DELETE FROM sem_sessions")
+    holder = real_connect(idx.path, isolation_level=None, check_same_thread=False)
+    holder.execute("BEGIN IMMEDIATE")
+    idx._kick_embed()
+    assert idx.wait_embedded(30)
+    assert gate.is_set()  # the blocked write was noticed and retried
+    assert vector_rows(idx) == 2  # both sessions embedded after the retry
+    assert holder is not None
+    holder.close()
 
 
 def test_corrupt_index_is_rebuilt_with_its_vectors(tmp_path, out):

@@ -52,7 +52,7 @@ def test_live_end_to_end(tmp_path):
 
     model = os.environ.get("RECANDCC_TEST_MODEL", "large-v3-turbo")
     # Two voices on the others track; diarization has its own test (test_diarize_integration).
-    t = Transcriber(TranscriptionConfig(model=model, diarize=False))
+    t = Transcriber(TranscriptionConfig(model=model, diarize=False, live_speaker_labels=False))
     t.ensure_loaded()  # don't count model loading
     got, lock = [], threading.Lock()
 
@@ -79,7 +79,9 @@ def test_live_end_to_end(tmp_path):
         print(f"[{s.start:6.2f}-{s.end:6.2f}] {s.speaker:6} {s.language}: {s.text}")
     print(f"live before finish: {len(before)} segments; finish() took {finish_s:.2f}s")
 
-    others_live = [s for s in before if s.speaker == "Others"]
+    # live captions label system audio "Speaker N" (or "Others"): pick it as "not Me"
+    others_live = [s for s in before if s.speaker != "Me"]
+    assert all(s.speaker == "Others" or s.speaker.startswith("Speaker ") for s in others_live)
     assert similarity(EN_OTHERS, " ".join(s.text for s in others_live if s.language == "en")) > 0.7
     assert similarity(RU_OTHERS, " ".join(s.text for s in others_live if s.language == "ru")) > 0.6
     # echo of the Others sentence on the mic is not shown live

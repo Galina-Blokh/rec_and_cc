@@ -5,7 +5,7 @@ The speaker model is downloaded once into the cache dir; after that the test run
 network access blocked (proxy to a closed port + urlopen patched to fail).
 Whisper model: RECANDCC_TEST_MODEL (default "large-v3-turbo", the app default, so it is cached).
 
-Stories: US-12.
+Stories: US-12, US-33.
 """
 
 from __future__ import annotations
@@ -216,13 +216,16 @@ def test_transcript_gets_speaker_labels(track, offline, tmp_path):
 
 
 def test_live_final_transcript_gets_speaker_labels(track, offline, tmp_path):
-    """Live path: captions keep "Others"; finish() returns / writes the labelled transcript."""
+    """Live path (real model): captions show "Speaker N"; finish() returns / writes the
+    batch-labelled transcript."""
     audio, truth, me = track
     session = _session(tmp_path, audio, me)
     session.ended_at = None
     mic, _ = sf.read(tmp_path / "me.wav", dtype="float32")
     model = os.environ.get("RECANDCC_TEST_MODEL", "large-v3-turbo")
-    t = Transcriber(TranscriptionConfig(model=model))
+    if diarize.shared_extractor(download=False) is None:  # warm: no load-timing flake
+        pytest.skip("speaker model not on disk")
+    t = Transcriber(TranscriptionConfig(model=model, live_speaker_labels=True))
     t.ensure_loaded()
     shown, lock = [], threading.Lock()
 
@@ -243,9 +246,57 @@ def test_live_final_transcript_gets_speaker_labels(track, offline, tmp_path):
         print(f"finish() incl. diarization: {time.monotonic() - t0:.2f}s")
     finally:
         t.close()
-    assert {s.speaker for s in shown} <= {"Me", "Others"}  # captions unchanged
+    # live captions; the stronger "Speaker N appears" check is the dedicated labeler test below
+    # (finish() no longer waits for embeddings, so a late one may stay "Others")
+    assert shown and all(
+        s.speaker == "Me" or s.speaker.startswith(("Others", "Speaker ")) for s in shown
+    )
     others = [s for s in segs if s.speaker != "Me"]
     labels = labels_per_phrase(truth, [(s.start, s.end, s.speaker) for s in others])
     check(truth, labels, min_ok=len(truth) - 1)
     md = (tmp_path / "transcript.md").read_text(encoding="utf-8")
     assert "Speaker 3:**" in md and "in progress" not in md
+
+
+def test_live_speaker_labels_distinguish_voices(tmp_path):
+    """Stories: US-33. With the real model, warmed up: two different voices get different live
+    "Speaker N" labels, and a voice that speaks again keeps its number."""
+    from recandcc.transcribe.live_speakers import SpeakerLabeler
+
+    if diarize.model_path(download=False) is None:
+        pytest.skip("speaker model not on disk")
+    lab = SpeakerLabeler()
+    lab.warm()
+    try:
+        deadline = time.monotonic() + 60
+        while lab._ready_at is None and time.monotonic() < deadline:  # the extractor load
+            time.sleep(0.05)
+        assert lab._ready_at is not None
+        order = [
+            "Samantha",
+            "Daniel",
+            "Samantha",
+            "Daniel",
+            "Samantha",
+        ]
+        texts = [  # a different sentence per turn: repeats are not identical audio
+            "The quarterly numbers look better than we expected this time.",
+            "I think we should move the launch to next Tuesday afternoon.",
+            "Our biggest customer renewed their contract for another two years.",
+            "Please send me the updated budget before the meeting on Friday.",
+            "We hired three engineers last month and they start in September.",
+        ]
+        got, t = [], 0.0
+        for voice, text in zip(order, texts, strict=True):
+            audio = tts(voice, text, tmp_path)
+            fut = lab.submit(audio)
+            assert fut is not None
+            emb = fut.result(30)
+            assert emb is not None, "no embedding: model missing or failed to load"
+            got.append(lab.label(emb, t, t + len(audio) / SAMPLE_RATE))
+            t += len(audio) / SAMPLE_RATE + 1.0
+    finally:
+        lab.close()
+    assert all(g.startswith("Speaker ") for g in got), got
+    assert got[0] != got[1]
+    assert got[0] == got[2] == got[4] and got[1] == got[3], got

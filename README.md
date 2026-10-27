@@ -9,7 +9,7 @@ account, nothing uploaded.
   so the transcript knows who spoke: `Me` / `Others`.
 - 🗣️ **Speaker labels** for the other side: in a 5-person call, `Others` is split into
   `Speaker 1`, `Speaker 2`, … in the final transcript (offline speaker diarization, a few
-  seconds per hour of audio). Live captions keep showing `Others`. Opt in to
+  seconds per hour of audio). Live captions label them too (`live_speaker_labels`), provisionally: a live `Speaker 2` can be a different person than the final transcript's `Speaker 2`, because both cluster independently. Opt in to
   `speaker_names` and name a speaker once (`recandcc name-speaker`): later sessions
   recognize that voice and write `Anna` instead of `Speaker 2`. Optionally (macOS,
   `names_from_call_app`, off by default) the name shown in the call app's open participants
@@ -141,11 +141,14 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   Windows the tray item opens a small window: type the words, press Enter, and
   double-click a match (time, speaker, snippet) to open it.
 - **Recent transcripts → Name speakers…** (only with `speaker_names = true`): pick a session
-  and a `Speaker N` (their first lines are shown to help), type a name. Same as
-  `recandcc name-speaker`.
+  and a `Speaker N` (their first lines are shown to help), type a name. On macOS, **Play
+  sample** in the name dialog plays a few seconds (up to 6 s) of that speaker from the
+  session's own audio while it is still kept (not while recording); the clip is a temp
+  file deleted after playback. Same as `recandcc name-speaker`. On Windows the tray shows
+  small windows for the same steps.
 - **Forget all voices…**: after a confirmation, deletes every voice profile and all saved
   session voices (`recandcc voices delete --all`), including those of sessions still waiting
-  to be transcribed. macOS menu only for now.
+  to be transcribed. Closing the confirmation, or leaving it until it times out, deletes nothing.
 - **Export latest transcript (DOCX + PDF)**: writes `transcript.docx` and `transcript.pdf`
   next to the newest transcript. Same as `recandcc export`. If the session has a
   `summary.md`, the summary and action items come first (their freshness follows the transcript text, start/end/text, not file times, so speaker renames and call-app names keep them; deleting `.summary-source` falls back to the file-time rule, which also applies to sessions summarised before this version). The export renders the summary's
@@ -185,7 +188,8 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
 ### Live captions
 
 While a session is being transcribed live, a small floating window at the bottom of the
-screen shows the text as it is spoken, one line per phrase, labelled `Me` / `Others`
+screen shows the text as it is spoken, one line per phrase, labelled `Me` and, for others,
+`Speaker 1`, `Speaker 2`, … (provisional; `Others` with `live_speaker_labels = false`)
 (English and Russian mixed freely). It stays on top of other windows, including full-screen
 video and Zoom, on every desktop, and never takes keyboard focus. Drag or resize it and it
 remembers where you put it. It scrolls along with new text unless you scroll up to reread
@@ -276,35 +280,42 @@ enabled = false              # true = summary.md with action items after each me
 
 With `[summary] enabled = true`, each finished transcript also gets a
 `summary.md` in its folder: a few sentences about the meeting and an **Action items** list
-(who does what, by when), written in the meeting's main language. The default model
-summarises English and Russian; for Hebrew meetings, route them to a Hebrew-capable model
-with `summary.language_models` (below). A small local model (Qwen2.5 1.5B Instruct, 4-bit, ~0.9 GB, Apache-2.0) does it
-in the background after the transcript is final, and waits while you are recording, so
-captions are never slowed; it is downloaded once, pinned to an exact version, and nothing is
-sent anywhere. It is a draft: check names and dates against the transcript. The larger
-`model = "mlx-community/Qwen2.5-3B-Instruct-4bit"` (~1.7 GB, also pinned) is under the Qwen
-Research licence: non-commercial use only. It was the default before, and older settings
-files hold it without anyone choosing it, so it is replaced by the default (saved to `config.toml`, with a one-time notice) unless
-you also set `accept_qwen_research_licence = true` under `[summary]` (after a switch, set
-`model` back to the 3B as well; only that line is rewritten, so comments stay). If the 3B is already
-downloaded and the new default isn't, it is kept for now, so offline summaries keep working. On Windows
-(and Linux) the same 1.5B model runs on the CPU through onnxruntime-genai, as a pinned,
-checksum-verified int4 ONNX build (~1.8 GB, downloaded once); it is much slower than on Apple
-silicon (about 10 minutes for an hour-long meeting on a fast CPU), and only the default model has
-a CPU build. Offline before the model is downloaded, or on an Intel Mac, the summary is skipped
-with a notice. It waits for
+(who does what, by when), written in the meeting's main language. The default model is
+Qwen3.5 4B (4-bit, Apache-2.0), a hybrid thinking model run with thinking off: ~3.0 GB
+download, ~2.9-3.4 GB of RAM while it runs (2.9 GB measured on one machine). Summaries take
+about 2.5x as long as with the 1.5B (measured on the synthetic one-hour meeting). The model
+writes English, Russian and Hebrew summaries; on our self-written test meetings its Hebrew
+summaries were fluent and got most owners and deadlines right, but not all. It runs in the
+background after the transcript is final, and waits while you are recording, so captions are
+never slowed; it is downloaded once, pinned to an exact version, and nothing is sent anywhere.
+It is a draft: check names and dates against the transcript. Settings files saved while the
+previous default, Qwen2.5 1.5B Instruct (Apache-2.0, ~0.9 GB), was the default hold it without
+anyone choosing it, so it moves to the 4B once, at the first start (saved to `config.toml`,
+with a one-time notice that says how to keep the 1.5B). A `.summary-1p5b-migrated` file next to
+`config.toml` records the move, so a 1.5B set by hand afterwards is kept, cached or not. Until
+the move, while the 1.5B is downloaded and the 4B isn't, the 1.5B is kept, so offline summaries
+keep working. The larger `model = "mlx-community/Qwen2.5-3B-Instruct-4bit"` (~1.7 GB,
+also pinned) is under the Qwen Research licence: non-commercial use only. It was the default
+before that, and older settings files hold it the same way, so it is replaced by the default
+(saved to `config.toml`, with a one-time notice) unless you also set
+`accept_qwen_research_licence = true` under `[summary]` (after a switch, set `model` back to the
+3B as well; only that line is rewritten, so comments stay). If the 3B is already downloaded and
+the new default isn't, it is kept for now, so offline summaries keep working. On Windows (and Linux) there is no MLX, so the CPU runs a pinned, checksum-verified int4 ONNX build of
+the Qwen2.5 1.5B through onnxruntime-genai (~1.8 GB, downloaded once). The default 4B and the old
+1.5B both map to it, because the 4B has no CPU build; other models are skipped there. It is much
+slower than on Apple silicon (about 10 minutes for an hour-long meeting on a fast CPU). Offline
+before the model is downloaded, or on an Intel Mac, the summary is skipped with a notice. It waits for
 the speaker labels (a slow diarization delays it), a summary cut short by quitting is redone
 at the next start (a `.summary-pending` marker in the session folder; a `.summary-source` file records a fingerprint of the transcript text the summary was made from), and after
 `recandcc name-speaker` the app redoes an existing `summary.md` with the new name once idle. Renaming a speaker in the menu, or call-app names, keeps the existing summary, whose text may still mention the old label. Old summaries are not given a fingerprint afterwards: one computed now could describe a transcript that already differs from what the summary was made from.
 
-Qwen2.5 summarises Hebrew badly. Route Hebrew meetings to Qwen3.5 4B (Apache-2.0) instead.
-On our self-written test meetings it wrote fluent Hebrew summaries and got most owners and
-deadlines right, but not all: check them against the transcript. Meetings in other
-languages keep the default:
+Hebrew meetings already get the default model, so `summary.language_models` needs no Hebrew
+entry. Add one only to keep Hebrew meetings on Qwen3.5 4B after you change `model` to another
+model; meetings in other languages keep `model`:
 
 ```toml
 [summary.language_models]
-he = "mlx-community/Qwen3.5-4B-MLX-4bit"   # ~3.0 GB once, ~3 GB RAM while it runs
+he = "mlx-community/Qwen3.5-4B-MLX-4bit"   # the default already; ~3.0 GB once, ~2.9-3.4 GB RAM while it runs
 ```
 
 The language with the most speech time picks the model (and the summary's language). The
@@ -341,7 +352,9 @@ open**, through the macOS Accessibility API: it only reads what is on screen and
 opens or changes anything; only the Zoom and Teams apps and, in a browser, a window showing a Meet/Teams/Zoom call page are read (never Slack, Discord, WhatsApp, FaceTime, Telegram and the like). A name counts only if it is in two samples in a row.
 A speaker is named only when it is certain: the panel shows exactly as many people as there
 are speakers besides `Me`, every speaker recognized by voice matches one of them, and one
-`Speaker N` and one name are left (a self-introduction that disagrees wins). Otherwise nothing
+`Speaker N` and one name are left (a self-introduction that disagrees wins). In a room
+recording a call joined, only the call's speakers count: the people in the room (you
+included, even as `Speaker N`) are never named after a participant. Otherwise nothing
 is guessed (`recandcc speakers` lists the names). This only relabels the transcript: no voice
 profile is saved from it (confirm with `recandcc name-speaker` to remember the voice). A
 recognized voice or `Me` is never overridden.
@@ -394,8 +407,8 @@ models load from disk without contacting anything (tested with all network acces
 | Each session's speaker voices (only with `speaker_names = true`) | `…/RecAndCC/voices/sessions/` | `%LOCALAPPDATA%\RecAndCC\voices\sessions\` |
 | Speaker-diarization model | `~/Library/Caches/RecAndCC/models/` | `%LOCALAPPDATA%\RecAndCC\Cache\models\` |
 | Whisper models (shared Hugging Face cache) | `~/.cache/huggingface/hub/models--*whisper*` | `%USERPROFILE%\.cache\huggingface\hub\` |
-| Summary model (only with summaries on) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-*-Instruct-4bit` (and `…--Qwen3.5-4B-MLX-4bit` with `summary.language_models`) | `%LOCALAPPDATA%\RecAndCC\Cache\models\onnx-community--Qwen2.5-1.5B-Instruct-*` |
-| Old summary model, unused after the switch to the 1.5B default (~1.7 GB, safe to delete unless you kept the 3B with `accept_qwen_research_licence = true`) | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-3B-Instruct-4bit` | not used |
+| Summary model (only with summaries on) | `~/.cache/huggingface/hub/models--mlx-community--Qwen3.5-4B-MLX-4bit` (~3.0 GB) | `%LOCALAPPDATA%\RecAndCC\Cache\models\onnx-community--Qwen2.5-1.5B-Instruct-*` (~1.8 GB) |
+| Older summary models: the Qwen2.5 1.5B (~0.9 GB) and 3B (~1.7 GB), used only while `model` still names one (see the summary section); otherwise safe to delete | `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-1.5B-Instruct-4bit`, `~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-3B-Instruct-4bit` | not used |
 | Launch at login | `~/Library/LaunchAgents/com.gblokh.recandcc.plist` | registry `HKCU\…\CurrentVersion\Run\RecAndCC` |
 
 The folders RecAndCC creates for recordings (the transcripts folder, each day and each

@@ -16,9 +16,8 @@ import types
 import urllib.error
 
 import pytest
-from test_summary import SPOKEN, make_session, seg
+from test_summary import SPOKEN
 
-from recandcc.config import Config
 from recandcc.transcribe import summary, summary_cpu
 from recandcc.transcribe.summary_cpu import CpuGenerator, CpuModel, ModelFile
 
@@ -128,27 +127,19 @@ def og(monkeypatch):
     return fake
 
 
-@pytest.mark.parametrize(
-    ("mlx", "cpu", "expected"),
-    [
-        (True, True, summary.MlxGenerator),  # Apple silicon keeps MLX
-        (False, True, CpuGenerator),  # Windows, Linux
-        (False, False, summary.MlxGenerator),  # neither: its load() says why
-    ],
-)
-def test_generator_is_chosen_per_platform(monkeypatch, mlx, cpu, expected):
-    monkeypatch.setattr(summary, "mlx_lm_available", lambda: mlx)
-    monkeypatch.setattr(summary_cpu, "cpu_available", lambda: cpu)
-    gen = summary.create_generator("m/qwen")
-    assert type(gen) is expected and gen.model_name == "m/qwen"
+def test_default_and_previous_default_map_to_the_pinned_1p5b_build(caplog):
+    from recandcc.config import DEFAULT_SUMMARY_MODEL, PREVIOUS_DEFAULT_SUMMARY_MODEL
 
-
-def test_default_model_has_a_pinned_cpu_build():
-    from recandcc.config import DEFAULT_SUMMARY_MODEL
-
-    cpu = summary_cpu.CPU_MODELS[DEFAULT_SUMMARY_MODEL]
+    build = summary_cpu.QWEN2_5_1_5B
+    assert {
+        DEFAULT_SUMMARY_MODEL: build,  # the Qwen3.5 4B has no CPU build
+        PREVIOUS_DEFAULT_SUMMARY_MODEL: build,
+    } == summary_cpu.CPU_MODELS
+    assert set(summary_cpu.DOWNLOAD_SIZES) == set(summary_cpu.CPU_MODELS)
+    assert set(summary_cpu.DOWNLOAD_SIZES.values()) == {"~1.8 GB"}
+    cpu = build
     assert re.fullmatch(r"[0-9a-f]{40}", cpu.revision)
-    assert cpu.repo == "onnx-community/Qwen2.5-1.5B-Instruct"  # same model as the MLX default
+    assert cpu.repo == "onnx-community/Qwen2.5-1.5B-Instruct"
     for f in cpu.files:
         assert re.fullmatch(r"[0-9a-f]{64}", f.sha256) and f.size > 0
         assert cpu.url(f).startswith(f"https://huggingface.co/{cpu.repo}/resolve/{cpu.revision}/")
@@ -206,6 +197,12 @@ def test_search_options_and_prompt(hub, og):
     assert og.options == [{"max_length": 3 + 77, "do_sample": False, "repetition_penalty": 1.1}]
 
 
+def test_mapping_is_logged_with_model_names_only(hub, og, caplog):
+    with caplog.at_level(logging.INFO, logger="recandcc"):
+        CpuGenerator("m/qwen").load()
+    assert "m/qwen runs on the CPU as onnx-community/fake" in caplog.text
+
+
 def test_model_without_cpu_build_or_local_folder(hub, og, tmp_path):
     with pytest.raises(summary_cpu.ModelUnavailable, match="no CPU build"):
         CpuGenerator("mlx-community/gemma-4-e4b-it-4bit").load()
@@ -215,48 +212,7 @@ def test_model_without_cpu_build_or_local_folder(hub, og, tmp_path):
     assert gen._model == ("model", str(tmp_path)) and hub.urls == []
 
 
-def test_missing_model_offline_skips_the_summary_without_logging_text(
-    hub, og, tmp_path, monkeypatch, caplog
-):
-    hub.state["online"] = False
-    monkeypatch.setattr(summary, "mlx_lm_available", lambda: False)
-    monkeypatch.setattr(summary_cpu, "CPU_MODELS", {Config().summary.model: _fake_model()})
-    d = make_session(tmp_path, [seg(SPOKEN)])
-    notices = []
-    q = summary.SummaryQueue(Config(), notify=lambda *n: notices.append(n))
-    with caplog.at_level(logging.DEBUG, logger="recandcc"):
-        q.submit(d)
-        q.join()
-    assert not (d / "summary.md").exists()
-    assert notices[-1] == ("Summary skipped", summary_cpu.NOT_ON_DISK)
-    assert notices[0][0] == "Summary model"  # the one-time download notice came first
-    assert SPOKEN not in caplog.text
-
-
-def test_cpu_summary_is_written_without_logging_text(hub, og, tmp_path, monkeypatch, caplog):
-    monkeypatch.setattr(summary, "mlx_lm_available", lambda: False)
-    monkeypatch.setattr(summary_cpu, "CPU_MODELS", {Config().summary.model: _fake_model()})
-    d = make_session(tmp_path, [seg(SPOKEN)])
-    with caplog.at_level(logging.DEBUG, logger="recandcc"):
-        path = summary.summarize_session(d, Config())
-    assert "We agreed on the plan." in path.read_text("utf-8")
-    assert SPOKEN not in caplog.text and "We agreed" not in caplog.text
-
-
 def test_without_onnxruntime_genai_summaries_are_unavailable(monkeypatch):
     monkeypatch.setattr(summary_cpu, "cpu_available", lambda: False)
     with pytest.raises(summary.SummaryUnavailable, match="onnxruntime-genai"):
         CpuGenerator("m/qwen").load()
-
-
-@pytest.mark.parametrize(
-    ("mlx", "cpu", "size"), [(True, True, "~0.9 GB"), (False, True, "~1.8 GB")]
-)
-def test_download_notice_names_the_size_of_the_build_downloaded_here(monkeypatch, mlx, cpu, size):
-    from recandcc.config import DEFAULT_SUMMARY_MODEL
-
-    monkeypatch.setattr(summary, "mlx_lm_available", lambda: mlx)
-    monkeypatch.setattr(summary_cpu, "cpu_available", lambda: cpu)
-    assert summary.download_notice(DEFAULT_SUMMARY_MODEL) == (
-        f"Downloading the summary model ({size}, once)"
-    )

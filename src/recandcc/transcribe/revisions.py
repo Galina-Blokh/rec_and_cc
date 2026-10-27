@@ -51,12 +51,6 @@ HF_REVISIONS: dict[str, str] = {
     # Local summary LLMs (mlx-lm, Apple silicon), see summary.py: pinned next to their names
     # in config.py (with their sha256), which the load-time summary-model migration needs.
     **SUMMARY_MODEL_REVISIONS,
-    # ... and the Hebrew-capable one offered for summary.language_models (opt-in): Qwen3.5 4B,
-    # Apache-2.0 (upstream Qwen/Qwen3.5-4B). For reference only (not checked at run time: the
-    # commit id already fixes the LFS content), model.safetensors sha256 at this commit per
-    # the HF API (LFS oid): 5fb9acd0246866381cf8c5c354c6db1019f6498eec4ccb4f5edcc71ffeacb2db
-    # (3,034,300,695 B, incl. vision weights that mlx-lm doesn't load).
-    "mlx-community/Qwen3.5-4B-MLX-4bit": "32f3e8ecf65426fc3306969496342d504bfa13f3",
 }
 
 # Summary models offered in the docs for summary.model / summary.language_models (tests

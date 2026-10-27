@@ -35,7 +35,7 @@ from typing import Any
 
 import platformdirs
 
-from ..config import APP_NAME
+from ..config import APP_NAME, DEFAULT_SUMMARY_MODEL, PREVIOUS_DEFAULT_SUMMARY_MODEL
 from .summary import Messages, ModelUnavailable, SummaryUnavailable
 
 log = logging.getLogger("recandcc.transcribe")
@@ -134,10 +134,14 @@ QWEN2_5_1_5B = CpuModel(
     config=_qwen2_config("onnx/model_q4.onnx", layers=28, hidden=1536, heads=12, kv_heads=2),
 )
 
-# summary.model (an MLX repo) -> its CPU build. Other models have none: a local folder with a
-# genai_config.json can still be given as summary.model.
-CPU_MODELS: dict[str, CpuModel] = {"mlx-community/Qwen2.5-1.5B-Instruct-4bit": QWEN2_5_1_5B}
-DOWNLOAD_SIZES = {"mlx-community/Qwen2.5-1.5B-Instruct-4bit": "~1.8 GB"}
+# summary.model (an MLX repo) -> its CPU build. Only the Qwen2.5 1.5B has one, so the current
+# default (the Qwen3.5 4B, no CPU build) and the previous default both map to it. Other models
+# have none: a local folder with a genai_config.json can still be given as summary.model.
+CPU_MODELS: dict[str, CpuModel] = {
+    DEFAULT_SUMMARY_MODEL: QWEN2_5_1_5B,
+    PREVIOUS_DEFAULT_SUMMARY_MODEL: QWEN2_5_1_5B,
+}
+DOWNLOAD_SIZES = {name: "~1.8 GB" for name in CPU_MODELS}
 
 _lock = threading.Lock()  # one download/check at a time (app summary thread vs. CLI calls)
 _verified: set[Path] = set()  # files whose sha256 was checked in this process
@@ -227,6 +231,7 @@ def resolve(model: str, on_download: Callable[[], None] | None = None) -> Path:
     if cpu is None:
         log.info("summary model %s has no CPU build", model)
         raise ModelUnavailable("the summary model has no CPU build")
+    log.info("summary model %s runs on the CPU as %s", model, cpu.repo)
     try:
         return model_dir(cpu, on_download)
     except Exception as e:  # noqa: BLE001 - offline, proxy, disk full, bad checksum ...

@@ -45,14 +45,14 @@ across platforms.
 | `transcribe/output.py` | Writes `transcript.md` / `.srt` / `.json` (right-to-left marks for Hebrew) |
 | `transcribe/queue.py` | Background transcription queue: one session at a time, in order |
 | `transcribe/_align_np.py` | Pure-numpy word-alignment kernels (DTW, median filter) for the MLX path, replacing mlx-whisper's numba/scipy ones (wired in a follow-up) |
-| `transcribe/diarize.py` | Offline speaker diarization of the `Others` track (speaker embeddings + clustering) and `Others` → `Speaker N` relabelling of the final transcript; one-time, checksum-verified model download |
+| `transcribe/diarize.py` | Offline speaker diarization of the `Others` track (the `Me` track too in room sessions: `engine.diarized_tracks`) (speaker embeddings + clustering) and `Others` → `Speaker N` relabelling of the final transcript; owns the CAM++ extractor shared with the live labels (`shared_extractor`); one-time, checksum-verified model download |
 | `hotkey.py` | Global start/stop shortcut: parses `hotkey`, runs `rcc-audiotap hotkey` (macOS) or `RegisterHotKey` (Windows) |
 | `cloudsync.py` | Is `output_dir` synced to iCloud / OneDrive / File Provider, or on a network volume (`statfs` / `GetDriveTypeW` / UNC)? Local checks only; the controller warns once per folder |
 | `participants.py` | Opt-in sampler of the call app's participant list via `rcc-audiotap participants` (macOS Accessibility) |
 | `permissions.py` | Query, request and open settings for mic and system-audio permissions |
 | `native.py` | Locates the native helper binary (`rcc-audiotap`) |
 | `settings_window.py` | Native settings window: runs `rcc-audiotap settings` with a JSON snapshot and saves the values it returns through `config` validation |
-| `retention.py` | Audio retention: deletes the WAV files of fully transcribed sessions (`audio_retention_days`); transcripts are kept |
+| `retention.py` | Audio retention: deletes the WAV files of fully transcribed sessions (`audio_retention_days`); transcripts are kept. A session whose slow diarization still needs its WAVs (a fresh `.labels-pending` marker, written by the transcriber until the late relabel ends) keeps them |
 | `ui/` | `common.Controller` (platform-independent glue) + `present.py` (pure presenter logic: menu titles and check marks, notice texts, the ask dialog script and its answers, toast placement) + `mac.py` (rumps) / `tray.py` (pystray) / `toast_mac.py`, thin shells that only apply it |
 | `ui/notes.py` | Meeting notes (pure logic, no UI imports): scan session folders newest first, row texts, `summary.md` excerpt, rename (`title` in `session.json`), delete to the Trash (Foundation / `SHFileOperationW`) or via `discard_session`, the macOS dialog scripts; the Windows window is `TkNotes` in `tray.py` |
 | `ui/captions*.py` | Live captions window: `captions.py` (pure logic: ordering, trimming, header, panel frame, speaker colours) + `captions_mac.py` (floating non-activating NSPanel); Windows uses a Tk window in `tray.py` |
@@ -66,7 +66,7 @@ across platforms.
 | `transcribe/revisions.py` | Pinned Hugging Face commit revisions for every offered Whisper model (MLX and faster-whisper) |
 | `transcribe/summary.py` | Opt-in `summary.md` (summary + action items) with a local LLM via mlx-lm: prompts in the meeting's main language, map-reduce over chunks, pinned offline-first model load (`gpu.local_model_path`); `create_generator` picks mlx-lm on Apple silicon, else `summary_cpu.py` |
 | `transcribe/summary_cpu.py` | The CPU summary generator for machines without MLX (Windows, Linux): onnxruntime-genai with a pinned, sha256-verified int4 ONNX build of the default Qwen2.5 1.5B, downloaded once to the app's model cache; runs on the summary thread only |
-| `search.py` | Transcript search: incremental SQLite FTS5 index of `transcript.json` segments in the app-data dir (owner-only, never in `output_dir`); `LIKE` fallback without FTS5. With `[search] semantic`, segment embeddings (`seg_vec`) are fused with the BM25 ranking by reciprocal rank |
+| `search.py` | Transcript search: incremental SQLite FTS5 index of `transcript.json` segments in the app-data dir (owner-only, never in `output_dir`); `LIKE` fallback without FTS5. With `[search] semantic`, segment embeddings (`seg_vec`) are fused with the BM25 ranking by reciprocal rank. Repeated queries score an in-process cache of the vector matrix plus each row's metadata (folder, time, speaker, text: no re-lookup by rowid), built lazily by a query once the embed worker is idle (one builder, non-blocking; chunked reads, so writers aren't held up) and capped at 100k rows: about 1.5 KB of float32 per 384-d segment plus ~0.3-0.5 KB of Python metadata and text, so ~190 MB at the cap (a cheap `count(*)` first, so an over-cap index never starts a build; the matrix is filled in place, no second copy). Every committed vector change (embed insert, reindex/delete of a session, semantic off) writes a fresh random token into `vec_version` in the same transaction and drops the cache after the commit (a generation counter refuses a cache built meanwhile); a query reuses the cache only while the token matches, so another process's writes (the CLI) are seen too. Triggers on `seg_vec` also replace the token, so an older app or CLI build on the same file (same schema version, unaware of the token) still invalidates the cache; the schema version is not bumped because a bump drops and re-embeds every transcript, and two builds with different versions would keep dropping each other's index. The cache holds each segment's text as well as its vector; the first semantic query after a change builds it on the query's own thread (the UI never waits: search runs off the main thread), a one-off delay that can take a few seconds on a large index. Turning semantic off releases it, and so does 15 idle minutes (`release_idle_cache`, called by the hourly index sync on the retention thread; the generation bump makes a build in flight discard its result; the next query rebuilds). No fresh cache (worker running, another build, over the cap, a write during the build): the query streams the vectors from SQLite as before; an index that can't be cached (over the cap, foreign vectors) is remembered per token, so queries don't retry the build until a write changes it |
 | `semantic.py` | Opt-in sentence embeddings: pinned, sha256-verified one-time model download, ONNX Runtime + `tokenizers` (already installed via faster-whisper); `embed()` blocks, so only worker threads call it, and it never downloads: the embed worker calls `prepare(wait)`, which downloads (outside every state lock, under a download lock) and loads, polling the `busy` signal between steps and per block so nothing starts during a recording. One lock order (`_load_lock` -> `_compute` -> `_lock`; `_lock` is held only for assignments) and `close()` takes only `_lock`: it unloads the model, cancels a load or download in flight (a generation counter) and resets failures without waiting, and `search.default_index` closes the dropped embedder under its own lock only if no concurrent call re-attached it (`close` never waits, so that is safe). `embed_query` (the search path) returns None instead of waiting when the indexer holds `_compute`, and a busy index skips the meaning ranking: search is full-text only then. The download runs under a cross-process file lock (`models/.download.lock`; fcntl / msvcrt) with a per-process `.part.<pid>` temp file. A load that fails with an OS-level error (file locked by antivirus, permissions, sharing violation) is soft: quick retries, then a 60 s backoff; only a verified file the runtime rejects as invalid marks the model broken until the next `close()` |
 | `cli.py` | `recandcc` command line |
 | `__main__.py` | `python -m recandcc` entry point |
@@ -85,7 +85,7 @@ The app is built around one rule: **real-time audio threads never block**. Every
 | `rcc-audiotap settings` (process) | SwiftUI window in an `NSApplication` with a regular activation policy; started by the menu on a worker thread, one JSON line on close | JSON snapshot file in, stdout line out |
 | hotkey reader | Reads the helper (restart with backoff) / Windows: `GetMessage` loop for `WM_HOTKEY`; calls `Controller.hotkey_pressed()` (debounced 0.5 s → `start_manual`/`stop` commands + `notice` event) | engine commands, event queue |
 | capture reader (per source) | Reads the pipe / PortAudio callback → `on_frames` (+ frame listeners, which only enqueue) | `queue.Queue` |
-| WAV writer (per track) | Writes PCM_16 WAV, so disk I/O never stalls capture | owns its file |
+| WAV writer (per track) | Writes PCM_16 WAV, so disk I/O never stalls capture; backlog bounded (below) | owns its file |
 | monitor reader | Parses JSON, keeps the latest snapshot (lock-protected) | `snapshot()` |
 | engine | `tick()` loop: the only thread that starts/stops the recorder and the room monitor; on exit it calls the activity monitor's `release_thread()`, so per-thread resources (Windows COM) are released on the thread that created them; `shutdown()` then calls `close()` | command queue + one lock |
 | room VAD (room listening on) | Mic frames (the capture thread only copies into the pre-roll ring and a queue) → Silero VAD per ~0.5 s step → sliding speech window | `SimpleQueue`; `triggered()` / `seconds_since_speech()` under its lock |
@@ -101,6 +101,30 @@ The app is built around one rule: **real-time audio threads never block**. Every
 - The engine holds one lock and never makes a blocking call while holding it. UI actions
   (`start_manual`, `stop`, `respond`) are queued as commands, so only the engine thread
   touches the recorder.
+- A track's writer backlog is bounded (`WRITER_BACKLOG_S` = 120 s of audio queued). On a
+  stalled disk the capture thread keeps calling `put_nowait`; past the bound it drops the
+  *newest* blocks (the queued audio is older and already in order) and keeps dropping until
+  the backlog falls 10 s below the bound (at most half of it), so a disk slightly slower than
+  real time gives one gap per stall, not choppy audio. It only counts them (no logging on the
+  capture thread); the writer logs one WARNING per track and session, `finish()` the total.
+  The dropped span is queued as silence once the writer catches up, so `me.wav` and
+  `others.wav` keep one timeline; frames arriving after the stop sentinel count as dropped.
+  Silence (padding, dropped spans) is queued as a sample count, not as zero arrays.
+- `_TrackWriter.finish()` joins for 5 s + 0.1 s per second of queued audio, capped at 15 s.
+  If the writer is still stuck it logs a WARNING and returns, so the engine thread is never
+  frozen; the daemon writer finishes and closes the WAV itself when the disk recovers (a quit
+  before that leaves the file without a final header). Session folders are unique, so a later
+  session never shares a file with it. `stop()` judges such a track by the samples it received
+  (its full timeline), never discards it as short or empty, and never deletes its folder.
+- Such a session is "still writing" (an in-memory set in `models.py`, plus a `.writing` file
+  as a hint for crash recovery) until a `writer-finalize` thread has joined its stuck writers.
+  The transcription queue waits for it up to 10 s on its own thread, then moves the job to the
+  back of the queue (dropped at shutdown, re-queued at the next start, where a leftover file
+  doesn't block). Live captions don't flush/diarize it; the queue transcribes the final WAVs.
+- `writer_dropped_s` per track goes into the session metrics; `Recorder.dropped_tracks()`
+  makes the engine post one "Some audio was not recorded" notice after that stop. Frames that
+  arrive after the stop sentinel (a reader outliving its stop timeout) count as `late_frames`,
+  logged at DEBUG, not as dropped.
 - AppKit objects are touched only on the main thread. Worker threads post events that the
   main-thread timer applies.
 - Engine → Controller: `on_session_start(session)` / `on_session_end(session | None, kept)`
@@ -280,9 +304,9 @@ and has similar text (`difflib` ratio ≥ 0.6).
 
 ### Speaker diarization: `Others` → `Speaker 1`, `Speaker 2`, …
 The system-audio track mixes everyone else on the call. Only the **final** transcript splits
-it; live captions keep `Others`, and `Me` is never touched (`diarize.py`), except in a
-room session, where the `Me` track is the one split (both tracks, numbered one after the
-other, when a call upgraded the room session):
+it, and `Me` is never touched (`diarize.py`), except in a room session, where the `Me`
+track is the one split (both tracks, numbered one after the other, when a call upgraded the
+room session). Live captions are labelled separately (below):
 
 1. Silero VAD (the one used for chunking) finds speech in `others.wav`. With the opt-in
    `diarize_overlap` ([ADR 0014](adr/0014-overlap-aware-segmentation.md)), pyannote
@@ -303,6 +327,30 @@ other, when a call upgraded the room session):
 4. Each `Others` segment takes the speaker it overlaps most (nearest one if none), numbered by
    first appearance. If only one speaker is found the label stays `Others`. A segment with
    ≥ 0.5 s of overlapped speech gets `"overlap": true` in `transcript.json` (only there).
+
+**Live labels** (`live_speakers.py`, display only): after Whisper, the pool thread asks a
+dedicated embedding thread (bounded queue of 8, dropped when full; same CAM++ model, loaded
+only if already on disk, never downloaded) for the embedding of each `Others` segment ≥ 1 s.
+The live worker then clusters them in time order: cosine ≥ 0.5 to a running-mean centroid,
+else a new speaker, at most 8. Only the copies sent to the captions are relabelled; stored
+segments, `transcript.md` and the final transcript are unchanged. Without the model, or for
+segments without an embedding, captions keep `Others` (or the previous label, inherited only if
+the previous segment ended within 1.5 s, else `Others`). One CAM++ extractor
+is shared with the offline Diarizer (`diarize.shared_extractor`, loaded once per process;
+live failures are remembered, no lock is held across `compute`, so a compute orphaned by a
+closed session blocks nobody); requests past their 0.5 s deadline are skipped, where the
+cold model load is not counted (at most 1.5 s, `LOAD_GRACE_S`), and a finished embedding wakes the live worker. Live numbers are
+provisional: they come from incremental clustering and can differ from the final transcript's
+labels (the offline diarization), e.g. one other voice is `Speaker 1` live but `Others` in
+the final transcript. The captions colour each `Speaker N` from a fixed palette. Room sessions (and calls that started as a room) show no live
+`Speaker N`, only `Me` / `Others`: the final transcript numbers `Me`'s speakers first, so live
+numbers would not match; this is decided at session start, so a call upgraded to a room
+mid-way keeps its live labels (and the final numbering may then differ from them). When the
+session stops, the live worker does not wait for pending embeddings: it uses the ones already
+done and shows `Others` / the previous label for the rest, so finishing is never delayed by
+display labels. The shared
+speaker model (~28 MB) stays loaded for the app's life, by design (it was already kept until
+quit before); there is no idle unloading.
 
 Why not sherpa-onnx's own pyannote pipeline (segmentation-3.0 + embeddings per 10 s window):
 on the same synthetic en/ru voices it took **20 s for 13 min** of audio and got 141/170
@@ -425,8 +473,13 @@ store (`voices/sessions/<hash>.names.json`; not in `session.json`, because the s
 sync to a cloud). After the transcript is written the transcriber relabels one speaker only
 when it is certain (`callnames.plan`: name count equals non-`Me` speaker count, voice-matched
 speakers match names by shared word, one `Speaker N` and one name left, no disagreeing
-self-introduction). It rewrites the transcript only and never creates a voice profile from a
-call-app name. The menu toggle checks Accessibility trust on a worker thread and writes only
+self-introduction). In a room session a call upgraded (`started_as_room`) the mic track is
+numbered too, so the owner can be a `Speaker N`: `_labelled` records each label's track on its
+segments (`Segment.track`, `"track"` in `transcript.json`; renames keep it), and
+`callnames.call_side` counts and offers only the "others" track's labels. A transcript without
+that (written before it, or a label of unknown/mixed track) fails closed, and `_rename`
+re-checks the track under `NAMING_LOCK`. It rewrites the transcript only and never creates a
+voice profile from a call-app name. The menu toggle checks Accessibility trust on a worker thread and writes only
 its own key to `config.toml`. Helper runs are killed (and waited for) when the session stops. Only Zoom, new Teams and browser windows titled as a Meet/Teams/Zoom page are walked; a name must be in two samples in a row before it is kept (and kept after it scrolls out of view). With more than one call-titled browser window nothing is read from browsers (fail closed).
 
 Whose Accessibility grant is used? Checked on a Mac with `rcc-audiotap ax-status` started from
@@ -486,7 +539,21 @@ discard / too short ─► cancel() (nothing written) ─► live_end ─► dir
 ```
 
 At startup, sessions with `transcribed = false` (for example after quitting mid-queue) are
-queued again. Discarding a session drops a `.discarded` marker in its folder before
+queued again. A session an earlier run never stopped (crash, force-quit, power loss:
+`session.json` still has no `ended_at`) is finished first, on the same worker thread: its
+`ended_at` becomes `started_at` plus its longest track (`soundfile` reads a WAV whose header
+was never finalised), tracks without frames leave `tracks` (the files stay), and
+`metrics.recording.recovered = true`. Left alone (and retried at the next start): a session
+with no frames at all or with a track that can't be read now (held open, evicted by a sync
+client); one that began after this start, or whose WAVs were written less than
+`RECOVER_QUIET_S` (120 s) before it, since another writer may own it (a folder synced from
+another Mac); the live session and those in flight, asked again just before each write; and
+one holding a `.recording.lock` whose pid is alive (`recandcc record` keeps one while it
+records; a lock whose process is gone, or written before the last boot so that its pid may
+now be another process, is deleted). `recorder.stop()` saves `ended_at` before the recording
+metrics, so a full disk can't orphan a session.
+
+Discarding a session drops a `.discarded` marker in its folder before
 `recorder.stop()` (or, if that fails, renames `session.json` to it); the files are then
 deleted one by one on a background thread, the marker last. If some file can't be deleted
 (Windows locks an open WAV) the user gets a notice, the leftover is never transcribed or

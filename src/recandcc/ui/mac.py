@@ -16,6 +16,7 @@ same timer feeds them to a floating ``CaptionsPanel`` (``captions_mac.py``) when
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 import subprocess
 import threading
@@ -24,9 +25,10 @@ import rumps  # pyright: ignore[reportMissingImports] - macOS-only dependency
 
 from .. import autostart
 from ..config import CONFIG_PATH
-from ..engine import RECORDING
+from ..engine import IDLE, RECORDING
 from ..models import Mode, TriggerKind
 from . import notes as notes_ui
+from . import sample
 from .common import (
     DIALOG_TIMEOUT_S,
     PERM_KINDS,
@@ -37,9 +39,9 @@ from .common import (
     SENSITIVITY_PRESETS,
     Controller,
     as_str,
+    ask_speaker_name,
     chooser_script,
     keep_prompt_text,
-    name_dialog_script,
     open_output_folder,
     open_path,
     osascript,
@@ -48,6 +50,7 @@ from .common import (
     transcript_label,
 )
 from .present import (
+    FORGET_VOICES_TEXT,
     MODE_LABELS,
     check,
     dialog_timeout,
@@ -94,6 +97,10 @@ class MacApp(rumps.App):
         self._recent_sig: tuple = ()
         self._naming_open = False  # a speaker chooser/name dialog is up
         self._naming_lock = threading.Lock()
+        self._sampler = sample.SamplePlayer(
+            allowed=lambda: self.ctrl.sample_allowed,
+            own_pid=lambda pid, own: self.ctrl.engine.set_own_pid(pid, own),
+        )
         # live captions (main thread only)
         self.captions = CaptionsPanel() if CaptionsPanel is not None else None
         self._live_id: str | None = None  # session currently being captioned
@@ -261,6 +268,8 @@ class MacApp(rumps.App):
 
     def _render(self) -> None:
         st = self.ctrl.engine.state
+        if st.status != IDLE:
+            self._sampler.stop()  # a session began: never record a speaker sample
         title = self.ctrl.title(st)
         if self.title != title:
             self.title = title
@@ -355,7 +364,7 @@ class MacApp(rumps.App):
     # ------------------------------------------------------------------ callbacks
     def _set_mode_cb(self, mode: Mode):
         def cb(_sender):
-            self.ctrl.engine.set_mode(mode)
+            self.ctrl.set_mode(mode)
             self._render()
 
         return cb
@@ -388,11 +397,10 @@ class MacApp(rumps.App):
         try:
             if autostart.is_enabled():
                 autostart.disable()
-                self.cfg.autostart = False
+                self.ctrl.menu_set("autostart", False)
             else:
                 autostart.enable()
-                self.cfg.autostart = True
-            self.ctrl.save_settings("autostart")
+                self.ctrl.menu_set("autostart", True)
         except Exception as e:
             log.exception("autostart toggle failed")
             self._notify("Launch at login", f"Failed: {e}")
@@ -438,9 +446,8 @@ class MacApp(rumps.App):
         self._render_retention()
 
     def _toggle_captions(self, sender) -> None:
-        self.cfg.live_captions = not self.cfg.live_captions
+        self.ctrl.menu_set("live_captions", not self.cfg.live_captions)
         sender.state = 1 if self.cfg.live_captions else 0
-        self.ctrl.save_settings("live_captions")
         self._apply_captions()
 
     def _apply_captions(self) -> None:
@@ -484,6 +491,7 @@ class MacApp(rumps.App):
     def _quit(self, _sender) -> None:
         self.timer.stop()
         self.title = "…"
+        self._sampler.close()  # stop a sample and delete its temp folder
         try:
             self.ctrl.shutdown()
         finally:
@@ -598,11 +606,9 @@ class MacApp(rumps.App):
                 if not (number.isdigit() and 0 < int(number) <= len(speakers)):
                     return
                 label = speakers[int(number) - 1][0]
-                if (
-                    name := osascript(name_dialog_script(label), DIALOG_TIMEOUT_S)
-                    .partition("text returned:")[2]
-                    .strip()
-                ):
+                clip = self.ctrl.speaker_clip(directory, label)  # None: no button
+                ask = functools.partial(osascript, timeout=DIALOG_TIMEOUT_S)
+                if name := ask_speaker_name(label, clip, ask, self._sampler.play):
                     dispatched = True  # the "named" event clears the guard
                     self.ctrl.name_speaker_async(directory, label, name)
             finally:
@@ -613,8 +619,7 @@ class MacApp(rumps.App):
 
     def _forget_voices(self, _sender) -> None:
         script = (
-            'display dialog "Delete all saved voice profiles and the voice data of every '
-            'session? Names already written into transcripts stay." with title "RecAndCC" '
+            f'display dialog {as_str(FORGET_VOICES_TEXT)} with title "RecAndCC" '
             'buttons {"Cancel", "Forget all voices"} default button "Cancel" with icon caution'
         )
 

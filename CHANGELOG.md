@@ -7,11 +7,22 @@ All notable changes to RecAndCC are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Live captions label other speakers `Speaker 1`, `Speaker 2`, … within a session instead of
+  `Others` (`diarize.live_speaker_labels`, on by default; display only, uses the downloaded
+  speaker model) (#1).
+- Custom DOCX/PDF export templates (`[export] template`): title format, section order and
+  headings, header/footer line, from a local TOML file; unchanged without one (US-25, #4). `###` headings in `summary.md` now parse as their own level (`h3`) so they no longer start the action items.
+- Windows tray: "Recent transcripts → Name speakers…" (with `speaker_names = true`) and
+  "Forget all voices…" (confirmed), the same Controller calls as the macOS menu (#1).
 - Opt-in semantic transcript search (`[search] semantic = true`): a pinned, checksum-verified
   multilingual sentence model, downloaded once, merged with full-text results (#4).
-- Meeting summaries on Windows and Linux: the default Qwen2.5 1.5B Instruct runs on the CPU
-  through onnxruntime-genai, as a pinned, checksum-verified int4 ONNX build downloaded once;
-  Apple silicon keeps MLX (#4).
+- Repeated semantic searches reuse an in-memory vector cache instead of re-reading every
+  stored vector from SQLite (up to 100,000 segments, ~190 MB at most; larger indexes stream as
+  before); it is dropped whenever vectors change, semantic is turned off, or it is unused for 15
+  minutes (#4).
+- Meeting summaries on Windows and Linux: the CPU runs a pinned, checksum-verified int4 ONNX
+  build of Qwen2.5 1.5B Instruct through onnxruntime-genai (the default Qwen3.5 4B has no CPU
+  build and maps to it), downloaded once (~1.8 GB); Apple silicon keeps MLX (#4).
 - RecAndCC is licensed under the Apache License 2.0 (`LICENSE`, `NOTICE`); completes #17.
 - Per-language summary models (`summary.language_models`, default `{}`): e.g. Hebrew
   meetings summarised by the pinned, Apache-2.0 `mlx-community/Qwen3.5-4B-MLX-4bit`
@@ -58,16 +69,16 @@ All notable changes to RecAndCC are documented here. The format is based on
   open transcript / summary, reveal, rename (`title` in `session.json`) and delete to the
   Trash (#4).
 - Opt-in local meeting summaries (`[summary] enabled = true`, Apple silicon): `summary.md`
-  with a short summary and action items after each transcript, from a pinned Qwen2.5 1.5B
-  Instruct model (Apache-2.0) via mlx-lm; `recandcc summarize <session_dir>` (#4). The
+  with a short summary and action items after each transcript, from a pinned Apache-2.0
+  model via mlx-lm (Qwen3.5 4B by default, see Changed); `recandcc summarize <session_dir>` (#4). The
   larger Qwen2.5 3B is also pinned and selectable with `[summary] model`, but its Qwen
   Research licence allows non-commercial use only: it also needs
   `accept_qwen_research_licence = true` (a TOML boolean). Because of that licence, any
   config with the 3B and without that key, whether saved while it was the default or
-  chosen by hand, is migrated to the 1.5B: the app rewrites `summary.model` in
+  chosen by hand, is migrated to the default: the app rewrites `summary.model` in
   `config.toml` and shows a one-time notice. While only the pinned 3B is downloaded, the 3B is
   kept (offline summaries keep working) and a one-time notice explains how to switch.
-  Afterwards the old ~1.7 GB cache can be deleted. Both models are pinned to a Hugging Face
+  Afterwards the old ~1.7 GB cache can be deleted. The models are pinned to a Hugging Face
   commit (no separate checksum check).
 - Speaker names that carry over between sessions, from opt-in local voice profiles; name a
   speaker once from the CLI (#62), or from the macOS menu ("Name speakers…", "Forget all
@@ -85,6 +96,19 @@ All notable changes to RecAndCC are documented here. The format is based on
 - ADR 0011: stack and packaging after v0.1 (Proposed) (#57).
 
 ### Changed
+- Meeting summaries default to Qwen3.5 4B (`mlx-community/Qwen3.5-4B-MLX-4bit`, Apache-2.0,
+  pinned) instead of Qwen2.5 1.5B (maintainer decision, part of #4). Why: on the synthetic
+  mixed en/ru 1-hour fixture (`tests/test_summary_timing.py`) the maintainer's measurement was
+  that the 1.5B found none of the 3 planted action items, the 3B said "None.", and the 4B found
+  all 3. A re-run on this fixture listed all 3 distinct planted tasks (its two Russian turns
+  restate two of them). Cost: a ~3.0 GB download instead of ~0.9 GB, ~2.9-3.4 GB peak RAM
+  (2.9 GB measured on one machine), and summaries about 2.5x slower than with the 1.5B. Migration: a settings file that still holds the 1.5B (saved while
+  it was the default) moves to the 4B once, at the first start, recorded by a
+  `.summary-1p5b-migrated` file next to `config.toml`; a 1.5B set by hand after that is kept,
+  cached or not. Until then, the offline guard keeps the 1.5B while it is cached and the 4B
+  isn't, with a one-time notice. The 3B's migration now targets the 4B too. Hebrew
+  `summary.language_models` routing now hits the default anyway, so that entry is redundant
+  unless `model` changes.
 - The macOS environment no longer installs torch (#69) or numba, llvmlite and scipy (#77),
   which mlx-whisper declares but RecAndCC never uses: `.venv` shrinks from 1.3 GB to
   559 MB (part of #3).
@@ -94,6 +118,19 @@ All notable changes to RecAndCC are documented here. The format is based on
   (#36, #54, #55).
 
 ### Fixed
+- Semantic search (#4): a hand edit of `[search] semantic = false` stops the embedding worker
+  and model download at once (not at the next search); a non-boolean value such as `"false"`
+  is treated as off with a warning; a download paused right before its last block no longer
+  ends in an HTTP 416 and a re-download; a meeting deleted while it was being embedded can't
+  leave its text in the index; `recandcc search` leaves the download to a running app and
+  waits at most 15 s for another process's download.
+- A recording cut off by a crash, force-quit or power loss is transcribed at the next start:
+  its end time comes from the audio on disk, and `session.json` marks it `recovered`. A full
+  disk at stop no longer keeps a session's end time off disk (#150).
+  A recovered session follows the normal retention rules: if it is already older than
+  `audio_retention_days`, the next hourly retention run deletes its audio once it is
+  transcribed. `recandcc record` keeps a `.recording.lock` in the session folder while it
+  records, so the app never finishes that session early.
 - PDF export no longer silently drops characters its font lacks: bidi controls are stripped
   and emoji or other uncovered glyphs become a visible placeholder (part of #4).
 - A summary stays at the top of DOCX/PDF exports after a speaker rename or call-app names:
@@ -106,6 +143,12 @@ All notable changes to RecAndCC are documented here. The format is based on
   delete is removed at the next start (#45).
 - A discarded session is never transcribed later, even if deleting it failed; the delete is
   retried at startup (#46, #56).
+- A stalled disk (network volume, slow USB, sleep) no longer grows memory without bound or
+  freezes the app when a recording stops: each track buffers at most 120 s for its writer
+  (overflow is logged and written as silence, so the tracks stay aligned), and stopping waits
+  at most 15 s before the writer finishes the file in the background (#150).
+- Such a session is transcribed only once its audio is final (never from a half-written
+  WAV), and a notice says when a stalled disk cost audio (#150).
 
 ## [0.1.0] — 2026-10-26
 

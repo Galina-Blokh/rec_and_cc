@@ -62,11 +62,52 @@ class _SingleInstance:
             raise
         return True
 
+    def held_elsewhere(self) -> bool:
+        """True if another process (the running app) holds the lock. Probes without writing."""
+        if not self.path.exists():
+            return False
+        try:
+            f = open(self.path, "a+")  # noqa: SIM115 - closed below
+        except OSError:
+            return False
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(f.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)  # dropped by close()
+        except OSError:
+            return True
+        finally:
+            f.close()
+        return False
+
+
+def app_running() -> bool:
+    return _SingleInstance(CONFIG_DIR / "run.lock").held_elsewhere()
+
+
+_ACQUIRE_RETRIES = 3
+_ACQUIRE_RETRY_S = 0.05
+
 
 def cmd_run(args) -> int:
     setup_logging()
     lock = _SingleInstance(CONFIG_DIR / "run.lock")
-    if not lock.acquire():
+    # held_elsewhere() probes hold the lock for a moment; don't mistake one for a running app
+    acquired = lock.acquire()
+    for _ in range(_ACQUIRE_RETRIES - 1):
+        if acquired:
+            break
+        time.sleep(_ACQUIRE_RETRY_S)
+        acquired = lock.acquire()
+    if not acquired:
         log.error("RecAndCC is already running (lock %s)", lock.path)
         print("RecAndCC is already running.", file=sys.stderr)
         return 1
@@ -114,13 +155,27 @@ def _transcribe_now(cfg, session) -> None:
 def cmd_record(args) -> int:
     setup_logging(to_file=False, level=logging.INFO if args.verbose else logging.WARNING)
     cfg = load_config()
-    from .models import TriggerKind
+    from .models import TriggerKind, hold_recording_lock
     from .recorder import Recorder
 
     rec = Recorder(cfg)
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     session = rec.start(TriggerKind.MANUAL, "manual", record_mic=False if args.no_mic else None)
+    # Held until this command is done (also through its transcription): the app's startup
+    # recovery never finishes a session a live `recandcc record` still owns.
+    try:
+        lock = hold_recording_lock(session.directory)
+    except OSError:
+        rec.stop()
+        raise
+    try:
+        return _record_session(args, cfg, rec, session, stop)
+    finally:
+        lock.unlink(missing_ok=True)  # also when stop() deleted a too-short session
+
+
+def _record_session(args, cfg, rec, session, stop: threading.Event) -> int:
     print(f"Recording to {session.directory} (tracks: {', '.join(map(str, session.tracks))})")
     live: LiveTranscriber | None = None
     transcriber: Transcriber | None = None
@@ -308,6 +363,7 @@ def cmd_autostart(args) -> int:
 
 
 SEMANTIC_CLI_WAIT_S = 120.0  # `search` is one-shot: wait this long for meaning matches
+SEMANTIC_CLI_LOCK_WAIT_S = 15.0  # ... but only this long for another process's model download
 
 
 def cmd_search(args) -> int:
@@ -316,14 +372,29 @@ def cmd_search(args) -> int:
     from .search import search_transcripts
     from .transcribe.output import fmt_hms
 
+    emb = None
+    wait_s = SEMANTIC_CLI_WAIT_S
+    if cfg.search.semantic:
+        from .semantic import MODEL, TOKENIZER, default_embedder, model_path
+
+        emb = default_embedder()
+        emb.lock_wait_s = SEMANTIC_CLI_LOCK_WAIT_S
+        on_disk = all(model_path(m, download=False) for m in (MODEL, TOKENIZER))
+        if not on_disk and app_running():
+            # The app downloads the model itself, pausing for recordings; a CLI download
+            # could run during a call and would only race it.
+            emb.downloads = False
+            wait_s = 0.0
     hits = search_transcripts(
         cfg.output_dir,
         args.query,
         args.limit,
         cfg.search.semantic,
-        wait_s=SEMANTIC_CLI_WAIT_S,
+        wait_s=wait_s,
         notify=lambda m: print(m, file=sys.stderr),
     )
+    if emb is not None and not emb.ready():
+        print("Semantic search model not available yet: full-text matches only.", file=sys.stderr)
     if not hits:
         print(f"No matches for {args.query!r}.")
         return 1
@@ -339,9 +410,20 @@ def cmd_export(args) -> int:
     setup_logging(to_file=False, level=logging.WARNING)
     from .transcribe.export import ExportError, export_session
 
+    template = ""
+    if CONFIG_PATH.exists():  # export never creates config.toml
+        try:
+            template = load_config().export.template
+        except Exception as e:  # noqa: BLE001 - a broken config must not stop an export
+            print(
+                f"Ignoring export.template: can't read config.toml ({type(e).__name__})",
+                file=sys.stderr,
+            )
     try:
         skipped: list[str] = []
-        paths = export_session(Path(args.session_dir).expanduser(), args.format, skipped)
+        paths = export_session(
+            Path(args.session_dir).expanduser(), args.format, skipped, template=template
+        )
     except ExportError as e:
         print(f"Can't export: {e}", file=sys.stderr)
         return 1

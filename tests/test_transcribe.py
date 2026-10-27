@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -161,6 +163,50 @@ def test_format_srt():
     assert srt.startswith("1\n00:00:01,500 --> 00:00:03,250\nOthers: Hi\n")
     assert "2\n01:01:01,001 --> 01:01:02,000\nMe: Bye\n" in srt
     assert fmt_srt_time(0) == "00:00:00,000"
+
+
+def test_srt_blank_line_in_text_does_not_split_the_cue():
+    srt = format_srt([seg(0, 1, "one\n\n\ntwo"), seg(1, 2, "next")])
+    assert "Others: one\ntwo\n\n2\n" in srt
+    assert "\n\n\n" not in srt
+
+
+def test_write_outputs_survive_lone_surrogates_and_noncharacters(tmp_path):
+    from recandcc.transcribe.output import write_outputs
+
+    s = make_session(tmp_path)
+    paths = write_outputs(s, [seg(0, 1, "bad \ud83d and \uffff here")], 1.0, "m")
+    assert [p.name for p in paths] == ["transcript.md", "transcript.json", "transcript.srt"]
+    for p in paths:
+        text = p.read_text("utf-8")
+        assert "bad \ufffd and \ufffd here" in text.replace("\\ufffd", "\ufffd")
+
+
+def test_srt_collapses_bare_carriage_returns():
+    srt = format_srt([seg(0, 1, "one\r\r\rtwo\r\n\r\nthree")])
+    assert "Others: one\ntwo\nthree\n" in srt
+
+
+def test_atomic_write_warns_with_file_name_only(tmp_path, caplog):
+    from recandcc.transcribe.output import atomic_write
+
+    atomic_write(tmp_path / "f.txt", "secret\ud83d")
+    assert [r.getMessage() for r in caplog.records if r.levelname == "WARNING"] == [
+        "f.txt: unencodable characters replaced with '?'"
+    ]
+
+
+def test_session_metadata_write_survives_a_bad_name(tmp_path):
+    s = make_session(tmp_path)
+    s.trigger_app = "bad\ud83dname"
+    s.save()
+    assert (tmp_path / s.FILENAME).exists()
+
+
+def test_atomic_write_replaces_unencodable_text_as_last_resort(tmp_path):
+    from recandcc.transcribe.output import atomic_write
+
+    assert atomic_write(tmp_path / "f.txt", "a\ud83db").read_text("utf-8") == "a?b"
 
 
 # -- Hebrew / right to left ------------------------------------------------------------------
@@ -554,3 +600,65 @@ def test_queue_repeated_shutdown_without_wait_keeps_the_stop_marker(tmp_path):
     q._thread.join(5)
     assert stub.order == ["a"] and q.pending() == 0
     assert not q._thread.is_alive()
+
+
+def test_queue_waits_for_a_writer_still_finishing_the_audio(monkeypatch, tmp_path):
+    from recandcc.models import clear_writing, mark_writing
+    from recandcc.transcribe import queue as qmod
+
+    monkeypatch.setattr(qmod, "WRITING_WAIT_S", 0.05)
+    monkeypatch.setattr(qmod, "WRITING_POLL_S", 0.01)
+    (tmp_path / "w").mkdir()
+    (tmp_path / "stale").mkdir()
+    (tmp_path / "stale" / SessionInfo.WRITING_MARKER).write_text("an earlier run")
+    mark_writing(tmp_path / "w")
+    stub, done = StubTranscriber(), threading.Event()
+    q = TranscriptionQueue(stub, on_done=lambda s, r: s.id == "w" and done.set())
+    q.submit(_s("w", tmp_path / "w"))
+    q.submit(_s("a", tmp_path))
+    q.submit(_s("stale", tmp_path / "stale"))  # its writer is gone: final as it gets
+    deadline = time.monotonic() + 5
+    while stub.order != ["a", "stale"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert stub.order == ["a", "stale"] and q.pending() == 1  # partial audio: not yet
+    clear_writing(tmp_path / "w")  # the disk recovered, the WAV is final
+    assert done.wait(5)
+    assert stub.order == ["a", "stale", "w"]
+    q.shutdown(wait=True)
+
+
+def test_queue_shutdown_leaves_a_still_writing_session_for_the_next_start(monkeypatch, tmp_path):
+    from recandcc.models import clear_writing, mark_writing
+    from recandcc.transcribe import queue as qmod
+
+    monkeypatch.setattr(qmod, "WRITING_WAIT_S", 30.0)
+    monkeypatch.setattr(qmod, "WRITING_POLL_S", 0.01)
+    mark_writing(tmp_path)
+    stub = StubTranscriber()
+    q = TranscriptionQueue(stub)
+    q.submit(_s("w", tmp_path))
+    t0 = time.monotonic()
+    q.shutdown(wait=True)  # returns at once: the job is dropped, not waited for or retried
+    assert time.monotonic() - t0 < 5
+    assert stub.order == [] and q.pending() == 0
+    clear_writing(tmp_path)
+
+
+def test_a_marker_that_cannot_be_deleted_does_not_hold_the_session_back(monkeypatch, tmp_path):
+    from recandcc import models
+    from recandcc.models import clear_writing, mark_writing
+
+    def locked(self, missing_ok=False):  # Windows: someone has the marker open
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(models, "_CLEAR_WAIT_S", 0.0)
+    mark_writing(tmp_path)
+    monkeypatch.setattr(Path, "unlink", locked)
+    clear_writing(tmp_path)  # retries, logs, never raises
+    monkeypatch.undo()
+    assert (tmp_path / SessionInfo.WRITING_MARKER).exists()
+    stub = StubTranscriber()
+    q = TranscriptionQueue(stub)
+    q.submit(_s("w", tmp_path))
+    q.shutdown(wait=True)
+    assert stub.order == ["w"]  # finalized in memory: transcribed despite the leftover file
