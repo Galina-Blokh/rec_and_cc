@@ -29,9 +29,9 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-18 | Runs on Windows | 🟡 untested on Windows hardware (none available; #5 not planned) |
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 no Hebrew test set, ivrit.ai routing not evaluated (#6) |
 | US-20 | Search my transcripts | ✅ search (summaries and export: see US-27, US-25) |
-| US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
+| US-21 | Speaker names remembered across sessions | 🟡 CLI (#62) and macOS menu (US-26, #76); self-intro hints (#81) and overlap segmentation (#96) shipped (#1) |
 | US-26 | Name speakers and forget voices from the menu | 🟡 macOS menu, first lines instead of an audio sample; Windows tray not yet (#1) |
-| US-31 | Speaker names from the call app's participant list | 🟡 claimed (#1 A.3): opt-in, macOS, one-to-one only |
+| US-31 | Speaker names from the call app's participant list | 🟡 shipped (#80, #1 A.3): opt-in, macOS, one-to-one only |
 | US-35 | Call-app names in a room recording a call joined | 🟡 claimed (#1): fake-tested; older transcripts stay unnamed |
 | US-25 | Export a transcript to DOCX and PDF | 🟡 CLI and macOS menu; Windows tray, templates planned (#4) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
@@ -40,8 +40,8 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-28 | Browse past meetings | 🟡 Windows window untested on Windows hardware (none available) |
 | US-32 | Find transcripts by meaning | 🟡 opt-in; no accuracy measurement on real transcripts yet (#4) |
 | US-29 | Right-to-left text readable in the Windows captions | 🟡 unit-tested, no hardware check (#6) |
-| US-30 | Change common settings in a window | 🟡 claimed (#3): macOS spike, not on Windows |
-| US-34 | Warn when recordings go to a network volume | 🟡 claimed (#3): detection is fake-tested, no real share or Windows drive checked |
+| US-30 | Change common settings in a window | 🟡 macOS settings window shipped (#86), not on Windows |
+| US-34 | Warn when recordings go to a network volume | 🟡 shipped (#110): detection is fake-tested, no real share or Windows drive checked |
 
 ---
 
@@ -230,9 +230,8 @@ while I decide.*
   one-time notice, and the load is retried after 5 minutes.
 - **Not yet:** a Hebrew evaluation set and WER (#6); `tests/test_hebrew_integration.py`
   covers he/en/ru switching, RTL outputs and a two-speaker dialogue on synthetic `say` audio.
-- **Not yet:** the Windows (Tk) captions only right-justify Hebrew lines; Tk does no bidi
-  reordering, so the label stays left of the Hebrew text and the glyph order is unverified
-  on real hardware (#6).
+- **Not yet:** the Windows (Tk) captions reorder Hebrew to visual order themselves
+  (`ui/bidi.py`, US-29), but the glyph order is unverified on real hardware (#6).
 
 ### US-20 Search my transcripts
 *As the owner, I want to find what was said in any past meeting, so that I don't have to
@@ -278,8 +277,9 @@ I don't have to work out who `Speaker 2` was every time.*
   never for `Me`; "I'm sure", "Я думаю", "This is Paris." or "אני מדבר" are not names), with
   `speaker_names` on or off, and
   nothing is renamed, stored or logged until I run `name-speaker`.
-- **Not yet:** naming from the menu with a voice sample, names from the call app, overlap
-  handling and an accuracy measurement on real speech (#1, #13).
+- **Not yet:** naming from the menu with a voice sample, and an accuracy measurement on real
+  speech and overlapping speech (#1, #13). Shipped since: overlap-aware segmentation (#96,
+  opt-in until measured on real meetings); names from the call app are under US-31 (#80).
 
 ### US-26 Name speakers and forget voices from the menu
 *As the owner, I want to name a speaker and delete all voice data from the menu, so that I
@@ -322,7 +322,8 @@ don't have to name them myself, without the app ever asking for more permission 
 - **Then** names appear nowhere in logs at INFO or above and nowhere outside the owner-only
   voices store (and a transcript they were used in).
 - **Not yet:** matching several speakers to several names (needs active-speaker highlighting),
-  self-introductions (A.4), tested layouts for each app version (see ARCHITECTURE).
+  tested layouts for each app version (see ARCHITECTURE). Shipped: the participant-list names
+  (#80); the self-introduction hints (A.4, #81) are under US-21.
 
 ### US-35 Call-app names in a room recording a call joined
 *As the owner, I want the remote speaker of a call that joined a room recording named after the
@@ -381,7 +382,9 @@ its transcript, so that I know what was decided and who does what without reread
   (re)written, also with `summary.enabled = false`.
 - **Then** logs never contain transcript or summary text.
 - **Given** a 1-hour en/ru meeting on an M-series Mac, **then** the summary is ready within
-  ~1–2 min, offline.
+  ~1–2 min, offline. Checked by the slow `test_summary_timing.py` (hard bound 120 s, a
+  synthetic ~9,000-word en/ru transcript, model from the local cache; interim result in
+  `docs/EVALUATION.md`).
 - **Not yet:** Windows/CPU backend (llama.cpp), a quality evaluation on real meetings (#4).
 
 ### US-22 Room listening (opt-in)
