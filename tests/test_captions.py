@@ -1,11 +1,17 @@
 """Live captions: platform-neutral logic (formatting, ordering, trimming, header, timers).
 
-Stories: US-11.
+Stories: US-11, US-19.
 """
+
+import sys
+
+import pytest
 
 from recandcc.models import Segment
 from recandcc.ui.captions import (
     FINISHED_TEXT,
+    PDI,
+    RLI,
     CaptionBuffer,
     CaptionLine,
     clean_text,
@@ -87,3 +93,30 @@ def test_should_auto_hide():
     assert not should_auto_hide(None, 100.0)
     assert not should_auto_hide(95.0, 100.0)
     assert should_auto_hide(90.0, 100.0)
+
+
+def test_hebrew_lines_are_right_to_left():
+    b = CaptionBuffer()
+    b.add([seg(0.0, "Hello", "Me"), seg(1.0, "שלום, אני ב-Zoom", lang="he")])
+    en, he = b.lines
+    assert not en.rtl and en.alignment == "left"
+    assert he.rtl and he.alignment == "right"
+    assert format_line(he) == f"Others  {RLI}שלום, אני ב-Zoom{PDI}"
+    assert CaptionLine(0.0, "Me", "שלום").rtl  # no language: decided by the text
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="AppKit captions panel")
+def test_mac_panel_lays_out_hebrew_right_to_left():
+    pytest.importorskip("AppKit")
+    from AppKit import NSParagraphStyleAttributeName, NSWritingDirectionRightToLeft
+
+    from recandcc.ui.captions_mac import CaptionsPanel
+
+    panel = CaptionsPanel()  # no window is created until show()
+    panel.buffer.add([seg(0.0, "Hello", "Me"), seg(1.0, "שלום", lang="he")])
+    text = panel._attributed()
+    first = text.attribute_atIndex_effectiveRange_(NSParagraphStyleAttributeName, 0, None)[0]
+    at = text.string().index("שלום")
+    style = text.attribute_atIndex_effectiveRange_(NSParagraphStyleAttributeName, at, None)[0]
+    assert first.baseWritingDirection() != NSWritingDirectionRightToLeft
+    assert style.baseWritingDirection() == NSWritingDirectionRightToLeft

@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 from dataclasses import fields
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,7 +34,7 @@ from ..config import CONFIG_PATH, LOG_DIR, Config, load_config
 from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind, discard_session
 from ..recorder import make_private_dir
-from ..retention import purge_old_audio
+from ..retention import purge_old_audio, purge_transcribed_audio
 
 if TYPE_CHECKING:
     from ..transcribe.live import LiveTranscriber
@@ -269,6 +270,7 @@ class Controller:
             on_session_start=self._on_session_start,
             on_session_end=self._on_session_end,
         )
+        self._started_at = datetime.now().astimezone()  # older sessions: not diarized now
         if start_threads:
             self.engine.start()
             threading.Thread(target=self._resubmit_unfinished, daemon=True, name="resubmit").start()
@@ -417,7 +419,20 @@ class Controller:
         except Exception:
             log.exception("audio retention failed")
 
+    def _purge_leftover_audio(self) -> None:
+        """keep_audio = false: delete WAVs left behind by transcribed sessions (e.g. the app
+        quit before a slow diarization finished and dropped them, or the delete failed)."""
+        if self.cfg.transcription.keep_audio:
+            return
+        try:
+            purge_transcribed_audio(self.cfg.output_dir, ended_before=self._started_at)
+        except Exception:
+            log.exception("deleting leftover audio failed")
+
     def _resubmit_unfinished(self) -> None:
+        # Purge first, on this same thread: once a re-queued session is transcribed, its
+        # diarization may still need the WAVs, and the purge must not see it as leftover.
+        self._purge_leftover_audio()
         try:
             for s in untranscribed_sessions(self.cfg.output_dir):
                 log.info("re-queueing untranscribed session %s", s.directory)
