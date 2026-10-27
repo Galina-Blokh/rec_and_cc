@@ -130,6 +130,28 @@ def test_a_live_cli_recording_lock_is_respected_and_a_stale_one_removed(tmp_path
     assert not (stale / RECORDING_LOCK).exists()
 
 
+def test_a_lock_from_before_the_last_boot_is_stale_even_if_its_pid_is_taken(tmp_path, monkeypatch):
+    import recandcc.models as models
+
+    d = _abandoned(tmp_path, "114002_manual")
+    lock = d / RECORDING_LOCK
+    lock.write_text(str(os.getpid()), encoding="utf-8")  # the pid now belongs to us
+    old = time.time() - 7200
+    os.utime(lock, (old, old))
+    monkeypatch.setattr(models, "boot_time", lambda: time.time() - 3600)  # rebooted since
+    got = recover_interrupted_sessions(tmp_path, started_before=datetime.now().astimezone())
+    assert [s.id for s in got] == ["114002_manual"] and not lock.exists()
+
+
+def test_boot_time_is_in_the_past():
+    from recandcc.models import boot_time
+
+    booted = boot_time()
+    assert booted is None or 0 < booted <= time.time()
+    if sys.platform in ("darwin", "win32"):
+        assert booted is not None
+
+
 def test_cli_record_holds_the_lock_while_recording(tmp_path, monkeypatch):
     from types import SimpleNamespace
 

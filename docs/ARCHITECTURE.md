@@ -485,8 +485,9 @@ client); one that began after this start, or whose WAVs were written less than
 `RECOVER_QUIET_S` (120 s) before it, since another writer may own it (a folder synced from
 another Mac); the live session and those in flight, asked again just before each write; and
 one holding a `.recording.lock` whose pid is alive (`recandcc record` keeps one while it
-records; a lock whose process is gone is deleted). `recorder.stop()` saves `ended_at` before
-the recording metrics, so a full disk can't orphan a session.
+records; a lock whose process is gone, or written before the last boot so that its pid may
+now be another process, is deleted). `recorder.stop()` saves `ended_at` before the recording
+metrics, so a full disk can't orphan a session.
 
 Discarding a session drops a `.discarded` marker in its folder before
 `recorder.stop()` (or, if that fails, renames `session.json` to it); the files are then

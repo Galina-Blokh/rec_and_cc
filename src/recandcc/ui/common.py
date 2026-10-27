@@ -273,7 +273,10 @@ def recover_interrupted_sessions(
                 continue
             if is_busy(d) or recording_lock_held(d):
                 continue
-            longest, newest, kept = 0.0, float("-inf"), {}
+        except Exception:  # noqa: BLE001 - unreadable: left alone
+            continue
+        longest, newest, kept = 0.0, float("-inf"), {}
+        try:
             for track, name in s.tracks.items():
                 p = d / name
                 newest = max(newest, p.stat().st_mtime)
@@ -281,7 +284,8 @@ def recover_interrupted_sessions(
                 if info.frames > 0:
                     kept[track] = name
                     longest = max(longest, info.frames / info.samplerate)
-        except Exception:  # noqa: BLE001 - unreadable now: left alone, retried next start
+        except Exception:  # noqa: BLE001 - unreadable now (or deleted): retried next start
+            log.debug("interrupted session %s: a track can't be read; left alone", d.name)
             continue
         if not kept or newest >= cutoff - RECOVER_QUIET_S:  # no audio, or written lately
             continue

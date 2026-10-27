@@ -121,7 +121,9 @@ def cmd_record(args) -> int:
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     session = rec.start(TriggerKind.MANUAL, "manual", record_mic=False if args.no_mic else None)
-    try:  # the app's startup recovery must not finish this session while it records
+    # Held until this command is done (also through its transcription): the app's startup
+    # recovery never finishes a session a live `recandcc record` still owns.
+    try:
         lock = hold_recording_lock(session.directory)
     except OSError:
         rec.stop()
