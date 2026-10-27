@@ -37,7 +37,7 @@ acceptance criteria.
       MLX / llama.cpp), SQLite FTS search, DOCX/PDF export. Done: search, summaries (Apple
       silicon), the meeting notes view and DOCX/PDF export (#75); left: export from the Windows
       tray, a Windows summary backend.
-- [ ] ~~**Windows for real**~~ ([#5](https://github.com/Galina-Blokh/rec_and_cc/issues/5)): hardware test pass, per-app capture, installer,
+- ~~**Windows for real**~~ ([#5](https://github.com/Galina-Blokh/rec_and_cc/issues/5)): hardware test pass, per-app capture, installer,
       signing. Not planned: closed, no Windows hardware available; the Windows backends stay
       as they are and CI keeps running the fast suite on Windows.
 - [ ] **Hebrew** ([#6](https://github.com/Galina-Blokh/rec_and_cc/issues/6)): he/en/ru language ID, Hebrew-tuned Whisper (e.g. ivrit.ai),

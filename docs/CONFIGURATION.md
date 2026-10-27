@@ -46,7 +46,7 @@ Changes to `[detection]` are picked up while the app runs. Restart the app after
 | `inside_sensitivity` | unset | 0–100: how readily app audio (calls, videos) starts a recording. Scales `min_active_s` the same way (12 s at 0, 0.75 s at 100 with the default 3 s). Unset = plain `min_active_s`. Presets: Quiet room = 75/50, Normal = 50/50, Noisy place = 25/50 (outside/inside), Off = both unset |
 | `call_apps` | Zoom, Teams, FaceTime, Slack, Discord, Telegram, WhatsApp, Skype, Webex | Patterns for call apps |
 | `media_apps` | browsers, QuickTime, VLC, Podcasts, TV | Patterns for media apps |
-| `ignore_apps` | Spotify, Music, system sounds, Siri, Voice Memos, RecAndCC itself, `afplay`, `rcc-audiotap` | Never trigger |
+| `ignore_apps` | Spotify, Music, system sounds (`com.apple.systemsound`, `coreaudiod`), Notification Center, Siri, Voice Memos, RecAndCC itself, `afplay`, `rcc-audiotap` | Never trigger |
 | `app_modes` | `{}` | Per-app mode overrides, e.g. `{"us.zoom" = "auto", "com.google.chrome" = "ask"}` |
 
 **Patterns** are case-insensitive substrings matched against the app's bundle id (macOS,

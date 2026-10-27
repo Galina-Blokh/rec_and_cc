@@ -240,8 +240,8 @@ open transcripts one by one.*
   transcript is re-indexed and a deleted or discarded session leaves the index.
 - **Then** the index is local and owner-only, outside `output_dir` (never synced), and logs
   never contain the searched or found text.
-- **Not yet:** summaries and action items with a local LLM, DOCX/PDF export
-  (#4).
+- **See also:** local summaries and action items (US-27) and DOCX/PDF export (US-25), both
+  shipped under #4.
 
 ### US-21 Speaker names remembered across sessions
 *As the owner, I want to name a speaker once and see that name in later transcripts, so that
