@@ -161,3 +161,18 @@ def test_mac_panel_without_a_window_survives_end_hide_and_tick():
     panel.tick()
     assert panel._started is None and panel._ended is None
     panel.end()  # no session: no-op
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="AppKit captions panel")
+def test_mac_panel_late_segment_after_auto_hide_keeps_captions_off():
+    pytest.importorskip("AppKit")
+    from recandcc.ui.captions_mac import CaptionsPanel
+
+    panel = CaptionsPanel()
+    panel.show("Zoom", display=False)
+    panel.end()
+    panel._ended -= 60
+    panel.tick()  # session state reset
+    assert panel._started is None
+    panel.append([seg(0.0, "late", "Me")])  # implicit start must honour display=False
+    assert panel._panel is None and panel.active

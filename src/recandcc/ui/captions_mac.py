@@ -115,6 +115,7 @@ class CaptionsPanel:
         self._started: float | None = None  # monotonic, for the clock
         self._ended: float | None = None  # monotonic, for auto-hide
         self._user_closed = False
+        self._display = True  # display flag of the latest show(); reused by implicit starts
         self._programmatic_close = False
         # PyObjC objects (untyped), created by _ensure_panel()
         self._panel: Any = None
@@ -142,6 +143,7 @@ class CaptionsPanel:
         self._started = time.monotonic()
         self._ended = None
         self._user_closed = False
+        self._display = display
         if not display:
             self.hide()
             return
@@ -162,7 +164,7 @@ class CaptionsPanel:
 
     def append(self, segments: Iterable[Segment]) -> None:
         if self._started is None:  # segments without live_start: start implicitly
-            self.show(self.title)
+            self.show(self.title, display=self._display)
         if self.buffer.add(segments) and self._panel is not None:
             self._render_text()
 
