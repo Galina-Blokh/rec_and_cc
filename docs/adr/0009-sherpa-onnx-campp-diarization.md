@@ -1,6 +1,6 @@
 # 0009. sherpa-onnx CAM++ diarization instead of pyannote
 
-- Status: Accepted
+- Status: Accepted (step 3's fixed threshold amended by [0013](0013-adaptive-speaker-count.md))
 - Date: 2026-10-26
 
 ## Context

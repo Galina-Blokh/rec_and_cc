@@ -27,7 +27,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-16 | Permissions set up from the app | ✅ |
 | US-17 | Always on, visible state | ✅ |
 | US-18 | Runs on Windows | 🟡 untested on hardware (#5) |
-| US-19 | Hebrew transcripts and right-to-left captions | 🟡 stock model, no Hebrew test set (#6) |
+| US-19 | Hebrew transcripts and right-to-left captions | 🟡 no Hebrew test set, ivrit.ai routing not evaluated (#6) |
 | US-20 | Search my transcripts | 🟡 search only; summaries, export planned (#4) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
 | US-25 | Export a transcript to DOCX and PDF | 🟡 CLI and macOS menu; Windows tray, templates planned (#4) |
@@ -135,6 +135,10 @@ while I decide.*
 - **Given** several people on the `Others` track, **then** the final transcript labels them
   `Speaker 1`, `Speaker 2`… in order of first appearance; `Me` is never relabelled.
 - **Given** one speaker, or no speaker model, **then** the label stays `Others`.
+- **Given** a large meeting (up to 20 other speakers, some with similar voices) or one speaker
+  with noisy audio, **then** the number of speakers is estimated per session instead of fixed
+  by a threshold, within `min_speakers` / `max_speakers` if set, and an hour still
+  diarizes in seconds.
 
 ### US-13 Readable transcripts in private folders
 - **Then** each session is saved under `<output_dir>/<date>/<time>_<app>/` with
@@ -199,8 +203,12 @@ while I decide.*
   or untick one, **then** `languages` is saved (codes added by hand and their spelling kept)
   and the next piece of audio is transcribed with it; unticking the last language is refused
   unless **Any language** is chosen.
-- **Not yet:** a Hebrew-tuned model (ivrit.ai) and per-language model routing, a Hebrew
-  evaluation set and WER (#6).
+- **Given** `language_models = { he = "ivrit-ai/whisper-large-v3-turbo-ct2" }`, **then**
+  Hebrew regions (live and final) are transcribed by that model, loaded once in the
+  background at a pinned revision, and en/ru regions by the default model; **given** it
+  can't be loaded, **then** Hebrew falls back to the default model with a log warning and a
+  one-time notice, and the load is retried after 5 minutes.
+- **Not yet:** a Hebrew evaluation set and WER (#6).
 - **Not yet:** the Windows (Tk) captions only right-justify Hebrew lines; Tk does no bidi
   reordering, so the label stays left of the Hebrew text and the glyph order is unverified
   on real hardware (#6).
