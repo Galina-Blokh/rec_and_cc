@@ -48,7 +48,7 @@ class WinLoopbackSource(AudioSource):
         raise RuntimeError(f"No WASAPI loopback device found for {speakers['name']!r}")
 
     def start(self, on_frames: FrameCallback) -> None:
-        import pyaudiowpatch as pyaudio
+        import pyaudiowpatch as pyaudio  # pyright: ignore[reportMissingImports] - Windows-only dependency
 
         with self._lock:
             if self._stream is not None:

@@ -40,6 +40,8 @@ PRIVATE_DIR_MODE = 0o700  # owner-only on POSIX; Windows gets an owner-only DACL
 @cache
 def _current_user_sid() -> str:
     """SID of the user running the app, e.g. ``S-1-5-21-...-1001`` (Windows only)."""
+    if sys.platform != "win32":  # also narrows the Win32-only ctypes names for pyright
+        raise OSError("Windows only")
     import ctypes
     from ctypes import wintypes
 
@@ -90,6 +92,8 @@ def owner_only_sddl(user_sid: str) -> str:
 
 def _win_mkdir_owner_only(path: Path) -> None:
     """Create one folder with an owner-only DACL in a single call (no permissive window)."""
+    if sys.platform != "win32":  # also narrows the Win32-only ctypes names for pyright
+        raise OSError("Windows only")
     import ctypes
     from ctypes import wintypes
 
