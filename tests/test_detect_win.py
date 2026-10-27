@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import collections
 import os
 import sys
 import threading
 import types
-from unittest.mock import MagicMock
 
 import pytest
 
+from recandcc.config import Config, DetectionConfig
 from recandcc.detect import win
 from recandcc.detect.win import WinActivityMonitor
+from recandcc.engine import Engine
 from recandcc.models import AudioProcess
 
 OWN_EXE = r"C:\Python312\python.exe"
@@ -78,6 +80,30 @@ def mic_tree(packaged: dict, nonpackaged: dict) -> dict:
     return node
 
 
+class FakeComtypes(types.ModuleType):
+    """COM apartments are per thread: every CoInitialize needs a CoUninitialize there."""
+
+    def __init__(self):
+        super().__init__("comtypes")
+        self.depth: collections.Counter = collections.Counter()
+        self.inits, self.unbalanced, self.fail_uninit = 0, [], False
+
+    def CoInitialize(self):
+        self.inits += 1
+        self.depth[threading.get_ident()] += 1
+
+    def CoUninitialize(self):
+        if self.fail_uninit:
+            raise OSError("RPC_E_CHANGED_MODE")
+        tid = threading.get_ident()
+        if self.depth[tid] == 0:
+            self.unbalanced.append(tid)
+        self.depth[tid] -= 1
+
+    def balanced(self) -> bool:
+        return not self.unbalanced and not any(self.depth.values())
+
+
 IN_USE = {"LastUsedTimeStart": 133_000_000, "LastUsedTimeStop": 0}
 STOPPED = {"LastUsedTimeStart": 133_000_000, "LastUsedTimeStop": 133_000_500}
 
@@ -85,7 +111,7 @@ STOPPED = {"LastUsedTimeStart": 133_000_000, "LastUsedTimeStop": 133_000_500}
 @pytest.fixture
 def fakes(monkeypatch):
     """Install fake Windows modules; tests fill in sessions, registry and processes."""
-    state = types.SimpleNamespace(sessions=[], procs=[], comtypes=MagicMock())
+    state = types.SimpleNamespace(sessions=[], procs=[], comtypes=FakeComtypes())
     pycaw = types.ModuleType("pycaw")
     pycaw_pycaw = types.ModuleType("pycaw.pycaw")
     pycaw_pycaw.AudioUtilities = types.SimpleNamespace(GetAllSessions=lambda: state.sessions)
@@ -178,6 +204,33 @@ def test_mic_merges_with_output_and_skips_own_exe(fakes, mon):
     }
 
 
+TEAMS_DIR = r"C:\Program Files\WindowsApps\MSTeams_24243.1309.3132.617_x64__8wekyb3d8bbwe"
+
+
+def test_packaged_mic_user_maps_to_its_running_exe(fakes, mon):
+    """The consent store says "MSTeams_8wekyb3d8bbwe"; WASAPI and the app lists say
+    "ms-teams.exe". Both must end up as one app, keyed by the exe name."""
+    fakes.winreg.tree = mic_tree(
+        {"MSTeams_8wekyb3d8bbwe": IN_USE, "Clipchamp.Clipchamp_yxz26nhyzhsrt": IN_USE}, {}
+    )
+    fakes.sessions = [FakeSession(proc("ms-teams.exe", 300))]
+    ns = types.SimpleNamespace
+    fakes.procs = [
+        ns(pid=1, info={"name": "System", "exe": None}),
+        ns(pid=2, info={"name": "x.exe", "exe": r"C:\WindowsApps\x.exe"}),  # no package dir
+        ns(pid=299, info={"name": "MSTeams_autostarter.exe", "exe": TEAMS_DIR + r"\a.exe"}),
+        ns(pid=300, info={"name": "ms-teams.exe", "exe": TEAMS_DIR + r"\ms-teams.exe"}),
+    ]
+    assert by_name(mon.snapshot()) == {
+        "ms-teams.exe": AudioProcess(300, "ms-teams.exe", "ms-teams.exe", True, True),
+        "clipchamp.clipchamp": AudioProcess(0, *["clipchamp.clipchamp"] * 2, True, False),
+    }
+    fakes.sessions = []  # mic only: the first process of the package is used
+    assert [(p.pid, p.bundle_id) for p in mon.snapshot() if p.pid] == [
+        (299, "msteams_autostarter.exe")
+    ]
+
+
 def test_pid_lookup(fakes, mon, monkeypatch):
     fakes.procs = [
         types.SimpleNamespace(pid=1, info={"name": None}),
@@ -201,24 +254,44 @@ def test_registry_unavailable_still_reports_output(fakes, mon, monkeypatch, capl
 
 
 # ------------------------------------------------------------------ COM lifetime
-def test_com_initialised_once_per_thread_and_closed(fakes, mon):
-    mon.snapshot()
-    mon.snapshot()
-    assert fakes.comtypes.CoInitialize.call_count == 1
-    t = threading.Thread(target=mon.snapshot)
+def run_in_thread(fn):
+    t = threading.Thread(target=fn)
     t.start()
     t.join()
-    assert fakes.comtypes.CoInitialize.call_count == 2  # per thread
+
+
+def test_com_is_per_thread_and_balanced(fakes, mon):
+    mon.snapshot()
+    mon.snapshot()
+    assert fakes.comtypes.inits == 1
+    run_in_thread(lambda: (mon.snapshot(), mon.close(), mon.close()))  # what the engine does
+    assert fakes.comtypes.inits == 2
     mon.close()
     mon.close()  # idempotent
-    assert fakes.comtypes.CoUninitialize.call_count == 1
+    assert fakes.comtypes.balanced()
+    run_in_thread(mon.snapshot)
+    mon.close()  # another thread cannot release that apartment
+    assert not fakes.comtypes.balanced()
+
+
+def test_engine_releases_com_on_its_own_thread(fakes, mon, monkeypatch):
+    polled = threading.Event()
+    snapshot = mon.snapshot
+    monkeypatch.setattr(mon, "snapshot", lambda: (snapshot(), polled.set())[0])
+    eng = Engine(Config(detection=DetectionConfig(poll_interval_s=0.01)), mon, None)
+    eng.start()
+    try:
+        assert polled.wait(5)
+    finally:
+        eng.shutdown()
+    assert fakes.comtypes.inits == 1 and fakes.comtypes.balanced()
 
 
 def test_close_uninit_error_is_swallowed(fakes, mon):
     WinActivityMonitor().close()  # never initialised: nothing to undo
-    assert fakes.comtypes.CoUninitialize.call_count == 0
+    assert fakes.comtypes.balanced()
     mon.snapshot()
-    fakes.comtypes.CoUninitialize.side_effect = OSError("RPC_E_CHANGED_MODE")
+    fakes.comtypes.fail_uninit = True
     mon.close()
     mon.snapshot()
-    assert fakes.comtypes.CoInitialize.call_count == 2  # state was reset despite the error
+    assert fakes.comtypes.inits == 2  # state was reset despite the error

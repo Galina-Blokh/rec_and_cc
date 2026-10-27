@@ -1,3 +1,5 @@
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -19,12 +21,15 @@ class FakeMonitor:
     def __init__(self):
         self.procs: list[AudioProcess] = []
         self.closed = False
+        self.threads = {"snapshot": set(), "close": []}
 
     def snapshot(self):
+        self.threads["snapshot"].add(threading.current_thread().name)
         return list(self.procs)
 
     def close(self):
         self.closed = True
+        self.threads["close"].append(threading.current_thread().name)
 
 
 class FakeRecorder:
@@ -431,6 +436,20 @@ def test_thread_and_shutdown():
     h.eng.shutdown()
     assert h.status == IDLE and h.rec.stops == 1 and len(h.q.submitted) == 1
     assert h.mon.closed
+
+
+def test_monitor_closed_on_the_engine_thread():
+    """Per-thread monitor resources (Windows COM) are released by the thread that polled."""
+    h = Harness(Mode.AUTO)  # fake clock: no recording starts, only polling
+    h.cfg.detection.poll_interval_s = 0.01
+    h.eng.start()
+    deadline = time.monotonic() + 2
+    while not h.mon.threads["snapshot"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    h.eng.shutdown()
+    assert h.mon.threads["snapshot"] == {"engine"}
+    assert h.mon.threads["close"][0] == "engine"  # then once more from shutdown()'s caller
+    h.eng.shutdown()  # a second shutdown is harmless
 
 
 # --- a call starting during a media recording -------------------------------------------

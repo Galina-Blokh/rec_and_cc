@@ -280,13 +280,21 @@ class Engine:
         self._wake.set()
 
     def _run(self) -> None:
-        while not self._stop_evt.is_set():
+        try:
+            while not self._stop_evt.is_set():
+                try:
+                    self.tick()
+                except Exception:
+                    log.exception("engine tick failed")
+                self._wake.wait(max(0.05, float(self.det.poll_interval_s)))
+                self._wake.clear()
+        finally:
+            # Close on the thread that polled: per-thread resources (Windows COM) must be
+            # released there. shutdown() closes again from its caller; close() is idempotent.
             try:
-                self.tick()
+                self.monitor.close()
             except Exception:
-                log.exception("engine tick failed")
-            self._wake.wait(max(0.05, float(self.det.poll_interval_s)))
-            self._wake.clear()
+                log.exception("monitor close failed")
 
     def _state_locked(self) -> EngineState:
         mode = Mode(self.det.mode)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sys
 import threading
-import time
 import types
 from unittest.mock import MagicMock
 
@@ -47,8 +46,8 @@ class FakePyAudio:
         if self.env.open_error:
             raise self.env.open_error
         self.env.stream = stream = MagicMock(kw=kwargs)
-        if self.env.fail_close:
-            stream.stop_stream.side_effect = OSError("device unplugged")
+        for method in self.env.failing:
+            getattr(stream, method).side_effect = OSError("device unplugged")
         return stream
 
     def terminate(self):
@@ -60,7 +59,7 @@ def pa(monkeypatch):
     others = {"index": 5, "name": "Headset [Loopback]"}  # skipped: not the default output
     env = types.SimpleNamespace(speakers=SPEAKERS, loopbacks=[others, LOOPBACK], instances=[])
     env.stream = env.open_error = None
-    env.fail_close = False
+    env.failing = ()
     mod = types.ModuleType("pyaudiowpatch")
     mod.paWASAPI, mod.paFloat32, mod.paContinue = "wasapi", "float32", "continue"
     mod.PyAudio = lambda: FakePyAudio(env)
@@ -134,19 +133,39 @@ def test_mono_16k_passes_through_and_survives_callback_errors(pa, caplog):
     assert "loopback frame callback failed" in caplog.text
 
 
+class StepClock:
+    """Fake monotonic clock that counts reads, so the test can wait for worker polls."""
+
+    def __init__(self):
+        self.now, self.reads = 100.0, 0
+        self.cond = threading.Condition()
+
+    def __call__(self):
+        with self.cond:
+            self.reads += 1
+            self.cond.notify_all()
+            return self.now
+
+    def advance_and_wait(self, dt, polls=2):
+        """Advance, then wait until a worker poll has surely seen the new time."""
+        with self.cond:
+            self.now += dt
+            target = self.reads + polls  # the next read sees `now`; the one after ends it
+            assert self.cond.wait_for(lambda: self.reads >= target, 5)
+
+
 def test_silence_gaps_are_zero_filled(pa, monkeypatch):
     """Loopback sends nothing while nothing plays; the worker pads to wall-clock time."""
-    now = [100.0]
-    monkeypatch.setattr(system_win, "time", types.SimpleNamespace(monotonic=lambda: now[0]))
+    clock = StepClock()
+    monkeypatch.setattr(system_win, "time", types.SimpleNamespace(monotonic=clock))
     src, sink = WinLoopbackSource(), Sink()
     src.start(sink)
     try:
-        time.sleep(0.3)  # a few empty polls: no gap yet, nothing emitted
+        clock.advance_and_wait(0.0)  # t0 read and an empty poll: no gap, nothing emitted
         assert sink.total == 0
-        now[0] += 0.2  # below GAP_FILL_S: still nothing
-        time.sleep(0.3)
+        clock.advance_and_wait(0.2)  # below GAP_FILL_S: still nothing
         assert sink.total == 0
-        now[0] += 0.8  # 1 s behind wall clock
+        clock.advance_and_wait(0.8)  # 1 s behind wall clock
         out = sink.wait_samples(SAMPLE_RATE)
     finally:
         src.stop()
@@ -173,12 +192,23 @@ def test_start_is_idempotent_and_stop_releases_everything(pa):
     src.stop()
 
 
-def test_stream_close_error_is_logged(pa, caplog):
-    pa.fail_close = True
+@pytest.mark.parametrize(
+    "failing, message",
+    [
+        (("stop_stream",), "stopping loopback stream failed"),
+        (("close",), "closing loopback stream failed"),
+        (("stop_stream", "close"), "closing loopback stream failed"),
+    ],
+)
+def test_stream_errors_on_stop_are_logged_and_cleanup_continues(pa, caplog, failing, message):
+    pa.failing = failing
     src = WinLoopbackSource()
     src.start(Sink())
-    src.stop()
-    assert "closing loopback stream failed" in caplog.text and pa.instances[0].terminated
+    worker = src._worker
+    src.stop()  # does not raise
+    assert message in caplog.text
+    pa.stream.close.assert_called_once()  # attempted even when stop_stream() raised
+    assert pa.instances[0].terminated and not worker.is_alive()
 
 
 def test_open_failure_cleans_up_and_reraises(pa):

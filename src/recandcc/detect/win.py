@@ -136,6 +136,32 @@ class WinActivityMonitor(ActivityMonitor):
             log.debug("process lookup for %s failed", exe_lower, exc_info=True)
         return 0
 
+    def _packaged_exes(self, families: set[str]) -> dict[str, list[tuple[str, int]]]:
+        """Package family (lowercase) -> [(exe_name_lower, pid)] of its running processes.
+
+        The consent store names packaged apps by family (``MSTeams_8wekyb3d8bbwe``) while
+        WASAPI sessions and the app lists use exe names (``ms-teams.exe``). Packaged apps run
+        from ``...\\WindowsApps\\<Name>_<Version>_<Arch>_<ResourceId>_<PublisherId>\\``, and
+        the family name is ``<Name>_<PublisherId>``.
+        """
+        found: dict[str, list[tuple[str, int]]] = {}
+        try:
+            import psutil
+
+            for p in psutil.process_iter(["name", "exe"]):
+                parts = (p.info.get("exe") or "").split("\\")
+                low = [x.lower() for x in parts]
+                if "windowsapps" not in low[:-2]:
+                    continue
+                fields = low[low.index("windowsapps") + 1].split("_")
+                family = f"{fields[0]}_{fields[-1]}"
+                if family in families:
+                    exe = (p.info.get("name") or parts[-1]).lower()
+                    found.setdefault(family, []).append((exe, p.pid))
+        except Exception:
+            log.debug("packaged app lookup failed", exc_info=True)
+        return found
+
     def snapshot(self) -> list[AudioProcess]:
         self._ensure_com()
         try:
@@ -148,9 +174,14 @@ class WinActivityMonitor(ActivityMonitor):
         except Exception:
             log.exception("reading microphone consent store failed")
             mic = []
+        families = {full.lower() for _, full in mic if "\\" not in full}
+        packaged = self._packaged_exes(families) if families else {}
         for exe, full in mic:
             if os.path.normcase(full) == self._own_exe:
                 continue
+            pid = 0
+            if cands := packaged.get(full.lower()):
+                exe, pid = next((c for c in cands if c[0] in procs), cands[0])
             existing = procs.get(exe)
             if existing:
                 procs[exe] = AudioProcess(
@@ -162,7 +193,7 @@ class WinActivityMonitor(ActivityMonitor):
                 )
             else:
                 procs[exe] = AudioProcess(
-                    pid=self._pid_for_exe(exe),
+                    pid=pid or self._pid_for_exe(exe),
                     bundle_id=exe,
                     name=exe,
                     input_active=True,

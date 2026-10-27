@@ -124,7 +124,10 @@ class WinLoopbackSource(AudioSource):
         if stream is not None:
             try:
                 stream.stop_stream()
-                stream.close()
+            except Exception:
+                log.exception("stopping loopback stream failed")
+            try:
+                stream.close()  # even if stop failed, so the device handle is released
             except Exception:
                 log.exception("closing loopback stream failed")
         if worker is not None:

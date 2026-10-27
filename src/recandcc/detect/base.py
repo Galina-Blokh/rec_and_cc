@@ -13,4 +13,6 @@ class ActivityMonitor(ABC):
         """Processes currently doing audio input and/or output. Must be cheap (called ~1/s)."""
 
     def close(self) -> None:  # noqa: B027 — optional hook
-        """Release resources (helper processes, COM objects)."""
+        """Release resources (helper processes, COM objects).
+
+        Idempotent. The engine calls it on its polling thread and again from shutdown()."""
