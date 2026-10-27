@@ -9,6 +9,7 @@ transcript or summary text.
 
 from __future__ import annotations
 
+import gc
 import importlib.util
 import json
 import logging
@@ -28,7 +29,11 @@ from .output import JSON_NAME, PDI, RLI, atomic_write, paragraphs
 log = logging.getLogger("recandcc.transcribe")
 
 SUMMARY_NAME = "summary.md"
-CHUNK_CHARS = 12_000  # ~3-8k tokens (en..he): well inside Qwen2.5's 32k context
+# ~2-5k tokens (en..he): well inside Qwen2.5's 32k context, and each chunk's prompt prefill
+# (which holds gpu.MLX_LOCK) stays within ~1-2 s.
+CHUNK_CHARS = 8_000
+PREFILL_STEP = 512  # prompt tokens per prefill step (lower peak memory than mlx-lm's 2048)
+DOWNLOAD_NOTICE = "Downloading the summary model (~1.7 GB, once)"
 MAX_ROUNDS = 3  # reduce rounds before the notes are cut to fit
 LANGUAGE_NAMES = {"en": "English", "ru": "Russian", "he": "Hebrew"}
 # (summary heading, action items heading, "none") per language; English otherwise.
@@ -129,6 +134,8 @@ def _reduce(lines: list[str], generate: Generator, language: str, max_tokens: in
             for i, c in enumerate(chunks, 1)
         ]
         chunks = chunk_lines(notes)
+    if len(chunks) > 1 or (chunks and len(chunks[0]) > CHUNK_CHARS):
+        log.debug("summary notes still %d chunks after %d rounds; cut", len(chunks), MAX_ROUNDS)
     return chunks[0][:CHUNK_CHARS] if chunks else ""
 
 
@@ -206,11 +213,18 @@ def mlx_lm_available() -> bool:
 
 class MlxGenerator:
     """The summary LLM through mlx-lm. Loaded on first use and used from one thread (the
-    summary thread); each GPU step holds gpu.MLX_LOCK so Whisper can interleave."""
+    summary thread). gpu.MLX_LOCK is held for each prompt's prefill (~1-2 s per chunk) and then
+    for one generated token at a time, so Whisper can interleave."""
 
-    def __init__(self, model: str, allow_unpinned: bool = False) -> None:
+    def __init__(
+        self,
+        model: str,
+        allow_unpinned: bool = False,
+        on_download: Callable[[], None] | None = None,
+    ) -> None:
         self.model_name = model
         self.allow_unpinned = allow_unpinned
+        self.on_download = on_download
         self._model: Any = None
         self._tokenizer: Any = None
 
@@ -220,7 +234,7 @@ class MlxGenerator:
         from .gpu import MLX_LOCK, local_model_path
 
         try:
-            path = local_model_path(self.model_name, self.allow_unpinned)
+            path = local_model_path(self.model_name, self.allow_unpinned, self.on_download)
         except Exception as e:  # noqa: BLE001 - offline, unpinned, broken cache
             log.info("summary model %s unavailable: %s", self.model_name, type(e).__name__)
             raise SummaryUnavailable("the summary model is not on disk or can't be loaded") from e
@@ -247,33 +261,53 @@ class MlxGenerator:
             tokenizer,
             prompt,
             max_tokens=max_tokens,
+            prefill_step_size=PREFILL_STEP,
             logits_processors=make_logits_processors(repetition_penalty=1.1),
         )
         out = []
         while True:
-            with MLX_LOCK:  # one token at a time, so live captions keep flowing
+            with MLX_LOCK:  # the prefill, then one token at a time
                 step = next(steps, None)
             if step is None:
                 return "".join(out).strip()
             out.append(step.text)
 
     def close(self) -> None:
+        """Free the model, so its ~2 GB don't stay resident between sessions."""
+        if self._model is None:
+            return
         self._model = self._tokenizer = None
+        gc.collect()
+        import mlx.core as mx  # pyright: ignore[reportMissingImports]
+
+        from .gpu import MLX_LOCK
+
+        with MLX_LOCK:
+            clear = getattr(mx, "clear_cache", None) or mx.metal.clear_cache
+            clear()
 
 
 class SummaryQueue:
     """Summarises finished sessions one at a time on a daemon ``summary`` thread.
-    ``on_skip(reason)`` is called once per distinct reason when no model can run."""
+
+    It never competes with a recording for the GPU: while ``busy()`` is true (the engine is
+    recording or asking) it waits before a session and between model calls. ``notify(title,
+    message)`` gets a one-time notice per skip reason and before the model's first download.
+    """
 
     def __init__(
         self,
         cfg: Config,
-        on_skip: Callable[[str], None] | None = None,
+        notify: Callable[[str, str], None] | None = None,
+        busy: Callable[[], bool] | None = None,
         generate: Generator | None = None,
+        poll_s: float = 1.0,
     ) -> None:
         self.cfg = cfg
-        self.on_skip = on_skip
+        self.notify = notify or (lambda title, message: None)
+        self.busy = busy or (lambda: False)
         self.generate = generate
+        self.poll_s = poll_s
         self._q: queue.Queue[Path] = queue.Queue()
         self._skipped: set[str] = set()
         threading.Thread(target=self._loop, name="summary", daemon=True).start()
@@ -284,16 +318,41 @@ class SummaryQueue:
     def join(self) -> None:
         self._q.join()
 
+    def _wait_idle(self) -> None:
+        while self.busy():
+            time.sleep(self.poll_s)
+
+    def _job(self, directory: Path) -> None:
+        owned = None
+        gen = self.generate
+        if gen is None:
+            gen = owned = MlxGenerator(
+                self.cfg.summary.model,
+                self.cfg.transcription.allow_unpinned_models,
+                on_download=lambda: self.notify("Summary model", DOWNLOAD_NOTICE),
+            )
+
+        def gated(messages: Messages, max_tokens: int) -> str:
+            self._wait_idle()  # a recording started: pause between model calls
+            return gen(messages, max_tokens)
+
+        try:
+            summarize_session(directory, self.cfg, gated)
+        finally:
+            if owned is not None:
+                owned.close()
+
     def _loop(self) -> None:
         while True:
             directory = self._q.get()
             try:
-                summarize_session(directory, self.cfg, self.generate)
+                self._wait_idle()
+                self._job(directory)
             except SummaryUnavailable as e:
                 log.info("summary of %s skipped: %s", directory.name, e)
-                if self.on_skip and str(e) not in self._skipped:
+                if str(e) not in self._skipped:
                     self._skipped.add(str(e))
-                    self.on_skip(str(e))
+                    self.notify("Summary skipped", str(e))
             except Exception as e:  # noqa: BLE001 - never kill the thread
                 # the type only: a model error could quote the transcript
                 log.error("summary of %s failed: %s", directory.name, type(e).__name__)

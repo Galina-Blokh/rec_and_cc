@@ -225,7 +225,7 @@ With `[summary] enabled = true` (Apple silicon), each finished transcript also g
 `summary.md` in its folder: a few sentences about the meeting and an **Action items** list
 (who does what, by when), written in the meeting's main language (English, Russian or
 Hebrew). A small local model (Qwen2.5 3B, 4-bit, ~1.7 GB) does it in the background after
-the transcript is final; it is downloaded once, pinned to an exact version, and nothing is
+the transcript is final, and waits while you are recording, so captions are never slowed; it is downloaded once, pinned to an exact version, and nothing is
 sent anywhere. It is a draft: check names and dates against the transcript. On Windows, or
 offline before the model is downloaded, the summary is skipped with a notice.
 

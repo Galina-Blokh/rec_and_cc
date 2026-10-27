@@ -5,7 +5,8 @@ on the CPU, which is what keeps live captions close to the speech. MLX isn't saf
 from several threads at once, so every GPU call goes through one dedicated thread; callers on
 the CPU worker pool (VAD, language ID with the small CPU model, bookkeeping) just wait for
 their result, so CPU and GPU work overlap. ``MLX_LOCK`` serialises those calls with the
-other MLX user, the local summary model (summary.py), which takes it once per token.
+other MLX user, the local summary model (summary.py), which holds it for a prompt prefill
+and then once per token.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import sys
 import threading
 import time
 import types
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, cast
@@ -49,7 +50,9 @@ def mlx_repo(model: str) -> str:
     return MLX_REPOS.get(model, f"mlx-community/whisper-{model}-mlx")
 
 
-def local_model_path(repo: str, allow_unpinned: bool = False) -> str:
+def local_model_path(
+    repo: str, allow_unpinned: bool = False, on_download: Callable[[], None] | None = None
+) -> str:
     """Local snapshot path of ``repo``, downloading it only if it isn't on disk yet.
 
     Passing the local path to mlx_whisper (instead of the repo id) means loading never
@@ -69,6 +72,8 @@ def local_model_path(repo: str, allow_unpinned: bool = False) -> str:
         # download it, or finish the interrupted download (a pinned one, or an opted-in one).
         check_download_allowed(repo, rev, allow_unpinned)
         log.info("model %s not on disk yet; downloading it once", repo)
+        if on_download is not None:
+            on_download()
     except Exception:
         # A snapshot that is present but unreadable or corrupt must not go online: surface it.
         log.warning(

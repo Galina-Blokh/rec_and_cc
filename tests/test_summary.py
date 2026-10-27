@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import logging
 import queue
+import sys
+import types
 from datetime import datetime
 from pathlib import Path
 
@@ -96,6 +98,30 @@ def test_long_transcript_is_mapped_to_notes_then_reduced(monkeypatch):
     assert notes >= 5 and gen.calls[notes:] == ["summary", "actions"]
 
 
+def test_two_chunks_at_the_limit_give_two_notes_calls():
+    line = "Me: " + "x" * 3_995  # 3999 characters
+    lines = [line] * 3  # two fit one 8000-character chunk, three don't
+    assert [len(c) for c in summary.chunk_lines(lines)] == [7_999, 3_999]
+    gen = FakeGen()
+    summary._reduce(lines, gen, "en", 400)
+    assert gen.calls == ["notes", "notes"]
+
+
+def test_notes_longer_than_a_chunk_are_reduced_again(monkeypatch, caplog):
+    monkeypatch.setattr(summary, "CHUNK_CHARS", 100)
+    calls: list[int] = []
+
+    def gen(messages, max_tokens):
+        calls.append(1)
+        return "- " + "n" * 60  # two notes don't fit one chunk: another round
+
+    with caplog.at_level(logging.DEBUG, logger="recandcc"):
+        text = summary._reduce(["Me: " + "a" * 90] * 4, gen, "en", 400)
+    # round 1: 4 chunks -> 4 notes (4 chunks of 62); rounds 2 and 3: 4 -> 4 again
+    assert len(calls) == 12 and len(text) <= 100
+    assert "after 3 rounds; cut" in caplog.text
+
+
 def test_action_items_are_parsed_and_none_means_empty():
     answer = "Here they are:\n- one\n* two\n3. three\n4) four\n-\n- NONE"
     assert summary.action_items(answer) == ["one", "two", "three", "four"]
@@ -138,11 +164,12 @@ def _controller(cfg):
     ctrl.events, ctrl.cfg = queue.Queue(), cfg
     ctrl.refresh_async = lambda force=False: None
     ctrl._index_session = lambda directory: None
+    ctrl.engine = types.SimpleNamespace(state=types.SimpleNamespace(status="idle"))
     return ctrl
 
 
 def test_controller_summarises_only_when_enabled(tmp_path, monkeypatch):
-    monkeypatch.setattr(summary, "MlxGenerator", lambda *a: FakeGen())
+    monkeypatch.setattr(summary, "MlxGenerator", lambda *a, **k: FakeGen())
     d = make_session(tmp_path, [seg("Let's ship on Monday.")])
     ctrl = _controller(Config(output_dir=tmp_path))
     ctrl._on_transcribed(SessionInfo.load(d), [])
@@ -163,13 +190,13 @@ def test_missing_model_offline_is_skipped_with_one_notice(tmp_path, monkeypatch,
     monkeypatch.setattr(gpu, "local_model_path", offline)
     d = make_session(tmp_path, [seg(SPOKEN)])
     notices = []
-    q = summary.SummaryQueue(Config(), on_skip=notices.append)
+    q = summary.SummaryQueue(Config(), notify=lambda *n: notices.append(n))
     with caplog.at_level(logging.DEBUG, logger="recandcc"):
         q.submit(d)
         q.submit(d)
         q.join()
     assert not (d / "summary.md").exists()
-    assert notices == ["the summary model is not on disk or can't be loaded"]
+    assert notices == [("Summary skipped", "the summary model is not on disk or can't be loaded")]
     assert "summary of 100000_zoom skipped" in caplog.text
     assert SPOKEN not in caplog.text
 
@@ -200,16 +227,65 @@ def test_logs_never_contain_transcript_or_summary_text(tmp_path, caplog):
     assert SPOKEN not in caplog.text
 
 
+def test_summaries_wait_while_recording_and_pause_between_chunks(tmp_path, monkeypatch):
+    monkeypatch.setattr(summary, "CHUNK_CHARS", 200)
+    gen, polls = FakeGen(), []
+
+    def busy():
+        polls.append(len(gen.calls))
+        # recording for the first 3 polls; a new recording after the first model call
+        return len(polls) <= 3 or (len(gen.calls) == 1 and polls.count(1) < 3)
+
+    d = make_session(tmp_path, [seg("word " * 30, t=i * 5) for i in range(10)])
+    q = summary.SummaryQueue(Config(), busy=busy, generate=gen, poll_s=0.001)
+    q.submit(d)
+    q.join()
+    assert polls[:4] == [0, 0, 0, 0]  # nothing ran while recording
+    assert polls.count(1) == 3  # paused after the first chunk until the recording ended
+    assert (d / "summary.md").exists()
+
+
+def test_first_download_posts_a_notice(tmp_path, monkeypatch):
+    def download(repo, allow_unpinned=False, on_download=None):
+        on_download()
+        raise ConnectionError("offline")
+
+    monkeypatch.setattr(summary, "mlx_lm_available", lambda: True)
+    monkeypatch.setattr(gpu, "local_model_path", download)
+    notices = []
+    q = summary.SummaryQueue(Config(), notify=lambda *n: notices.append(n))
+    q.submit(make_session(tmp_path, [seg("hello")]))
+    q.join()
+    assert notices[0] == ("Summary model", "Downloading the summary model (~1.7 GB, once)")
+
+
+def test_cache_miss_calls_the_download_hook(monkeypatch):
+    def snapshot_download(repo, revision=None, local_files_only=False):
+        if local_files_only:
+            raise FileNotFoundError(repo)
+        return "/cache/model"
+
+    fake = types.SimpleNamespace(snapshot_download=snapshot_download)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake)
+    hook = []
+    path = gpu.local_model_path(DEFAULT_SUMMARY_MODEL, on_download=lambda: hook.append(1))
+    assert (path, hook) == ("/cache/model", [1])
+
+
 def test_cli_summarize(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "load_config", lambda: Config())
     d = make_session(tmp_path, [seg("hello")])
     monkeypatch.setattr(summary, "mlx_lm_available", lambda: False)
     assert cli.main(["summarize", str(d)]) == 1
     assert "Apple silicon" in capsys.readouterr().err
-    monkeypatch.setattr(summary, "MlxGenerator", lambda *a: FakeGen())
+    monkeypatch.setattr(summary, "MlxGenerator", lambda *a, **k: FakeGen())
     assert cli.main(["summarize", str(d)]) == 0
     assert capsys.readouterr().out.strip() == str(d / "summary.md")
     assert cli.main(["summarize", str(tmp_path / "missing")]) == 1
+    (d / "transcript.json").write_text('{"segments": [{"text": "' + SPOKEN + '"}]}')
+    capsys.readouterr()
+    assert cli.main(["summarize", str(d)]) == 1  # a TypeError: its type only, never the text
+    assert capsys.readouterr().err.strip() == "Can't summarize the session: TypeError"
 
 
 @pytest.mark.slow

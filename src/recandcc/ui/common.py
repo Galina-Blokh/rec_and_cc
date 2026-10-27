@@ -396,7 +396,9 @@ class Controller:
             from ..transcribe.summary import SummaryQueue
 
             summaries = self._summaries = SummaryQueue(
-                self.cfg, on_skip=lambda reason: self.post_notice("Summary skipped", reason)
+                self.cfg,
+                notify=self.post_notice,
+                busy=lambda: self.engine.state.status != IDLE,  # never during a recording
             )
         summaries.submit(directory)
 

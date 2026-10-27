@@ -252,7 +252,8 @@ its transcript, so that I know what was decided and who does what without reread
 - **Given** `summary.enabled = false` (default), **then** no summary is generated and no
   summary model is downloaded or loaded.
 - **Given** `summary.enabled = true` on Apple silicon, **when** a session's final transcript
-  is written, **then** a background job (never on the audio or UI threads) writes
+  is written, **then** a background job (never on the audio or UI threads, and never while
+  a recording is in progress: it waits, and pauses between chunks) writes
   `summary.md` next to `transcript.md`: a short summary and an **Action items** list, in the
   meeting's main language (English, Russian or Hebrew headings; Hebrew right to left).
 - **Given** a transcript longer than the model's context, **then** it is summarised in

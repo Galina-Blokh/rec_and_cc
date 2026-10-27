@@ -188,8 +188,9 @@ def cmd_summarize(args) -> int:
     except SummaryUnavailable as e:
         print(f"No summary: {e}.", file=sys.stderr)
         return 1
-    except (OSError, ValueError) as e:
-        print(f"Can't read the transcript: {type(e).__name__}", file=sys.stderr)
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as e:
+        # the type only: the message could quote the transcript
+        print(f"Can't summarize the session: {type(e).__name__}", file=sys.stderr)
         return 1
     print(path)
     return 0
