@@ -873,6 +873,45 @@ class Controller:
             return
         self.save_settings("transcription.languages", title="Languages")
 
+    def toggle_call_app_names(self) -> None:
+        """Menu "Use names from the call app" (macOS), from the main thread; never blocks.
+        Off is immediate. On needs `speaker_names` and Accessibility trust, checked silently on
+        a worker; without trust the UI is asked (a "call_names_confirm" event) to explain and,
+        if the user agrees, ``confirm_call_app_names`` opens System Settings > Accessibility:
+        the only way the user is ever pointed to that permission."""
+        tr = self.cfg.transcription
+        if tr.names_from_call_app:
+            self._set_call_app_names(False)
+        elif not tr.speaker_names:
+            self.post_notice(
+                "Names from the call app", "Turn on transcription.speaker_names first."
+            )
+        else:
+            threading.Thread(target=self._check_ax_trust, daemon=True, name="ax-trust").start()
+
+    def _check_ax_trust(self) -> None:
+        from .. import participants
+
+        if participants.ax_trusted():
+            self._set_call_app_names(True)
+        else:
+            self.events.put(("call_names_confirm",))
+
+    def confirm_call_app_names(self) -> None:
+        """The user agreed to the explanation: open the Accessibility pane and switch on."""
+
+        def run() -> None:
+            from .. import participants
+
+            participants.open_accessibility_settings()
+            self._set_call_app_names(True)
+
+        threading.Thread(target=run, daemon=True, name="ax-settings").start()
+
+    def _set_call_app_names(self, on: bool) -> None:
+        self.cfg.transcription.names_from_call_app = on
+        self.save_settings("transcription.names_from_call_app", title="Names from the call app")
+
     def save_settings(self, *keys: str, title: str = "Settings") -> None:
         """Save the in-memory value of each dotted key ("live_captions",
         "transcription.audio_retention_days") to config.toml on a worker thread. Menu

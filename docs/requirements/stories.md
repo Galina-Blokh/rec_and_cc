@@ -30,6 +30,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 no Hebrew test set, ivrit.ai routing not evaluated (#6) |
 | US-20 | Search my transcripts | 🟡 search only; summaries, export planned (#4) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
+| US-31 | Speaker names from the call app's participant list | 🟡 claimed (#1 A.3): opt-in, macOS, one-to-one only |
 | US-25 | Export a transcript to DOCX and PDF | 🟡 CLI and macOS menu; Windows tray, templates planned (#4) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
 | US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
@@ -268,6 +269,30 @@ I don't have to work out who `Speaker 2` was every time.*
   nothing is renamed, stored or logged until I run `name-speaker`.
 - **Not yet:** naming from the menu with a voice sample, names from the call app, overlap
   handling and an accuracy measurement on real speech (#1, #13).
+
+### US-31 Speaker names from the call app's participant list
+*As the owner, I want `Speaker 2` named after the person shown in Zoom/Teams/Meet, so that I
+don't have to name them myself, without the app ever asking for more permission on its own.*
+
+- **Given** `names_from_call_app = false` (default) or `speaker_names = false` or Windows,
+  **then** nothing is read from any other app.
+- **Given** it is on and Accessibility is granted, **when** a call is recorded and the call
+  app's participants panel is open, **then** the visible names are sampled every ~15 s on a
+  worker thread and kept in the owner-only voices store (not in the session folder); in a
+  only Zoom, Teams and browser call windows are read, and a name must be in two samples in a row; the panel is never opened or clicked for me.
+- **Given** Accessibility is not granted, **then** nothing is read and macOS never shows its
+  prompt because of RecAndCC: trust is only checked silently. Only **menu → Use names from the
+  call app** explains why and opens System Settings > Accessibility.
+- **Given** the participant names are exactly as many as the speakers besides `Me`, every
+  voice-matched speaker matches one of them, and one `Speaker N` and one name remain,
+  **then** that speaker is relabelled in the transcript (no voice profile is created from it).
+  Otherwise (several unknowns, mismatched spellings such as "Robert" vs "Bob Smith", extra
+  names, a disagreeing self-introduction) nothing is assigned and `recandcc speakers` lists the
+  names. `Me` is never renamed.
+- **Then** names appear nowhere in logs at INFO or above and nowhere outside the owner-only
+  voices store (and a transcript they were used in).
+- **Not yet:** matching several speakers to several names (needs active-speaker highlighting),
+  self-introductions (A.4), tested layouts for each app version (see ARCHITECTURE).
 
 ### US-25 Export a transcript to DOCX and PDF
 *As the owner, I want a transcript as a Word or PDF file, so that I can share or print it.*

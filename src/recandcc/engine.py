@@ -806,6 +806,10 @@ class Engine:
         self._session_end(session, False)
         # Also when stop() failed or dropped it as too short: whatever it wrote must go.
         session = session or started
+        if session is not None:  # a discarded call must not leave its participants' names behind
+            from . import participants
+
+            participants.forget(session.id)
         # Already gone (stop() dropped it as too short): don't schedule a delete, as the next
         # session may reuse the name. Only the engine thread creates folders, so no race here.
         if session is None or not session.directory.exists():
