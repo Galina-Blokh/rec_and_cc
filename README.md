@@ -9,7 +9,9 @@ account, nothing uploaded.
   so the transcript knows who spoke: `Me` / `Others`.
 - 🗣️ **Speaker labels** for the other side: in a 5-person call, `Others` is split into
   `Speaker 1`, `Speaker 2`, … in the final transcript (offline speaker diarization, a few
-  seconds per hour of audio). Live captions keep showing `Others`.
+  seconds per hour of audio). Live captions keep showing `Others`. Opt in to
+  `speaker_names` and name a speaker once (`recandcc name-speaker`): later sessions
+  recognize that voice and write `Anna` instead of `Speaker 2`.
 - 🌍 **English and Russian** are detected automatically, even when the language switches
   mid-meeting.
 - 🧠 Local Whisper (`large-v3-turbo`) on the **Apple-silicon GPU** (MLX), with CPU threads
@@ -211,6 +213,9 @@ repo):
 | `recandcc devices` | List audio devices |
 | `recandcc autostart on\|off\|status` | Launch at login |
 | `recandcc config` | Show the config path and contents |
+| `recandcc speakers <session_dir>` | List a transcript's speakers with their first lines |
+| `recandcc name-speaker <session_dir> "Speaker 2" "Anna"` | Name a speaker: rewrites that transcript and saves Anna's voice profile, so later sessions say `Anna` (needs `speaker_names = true`) |
+| `recandcc voices list\|delete <name>\|delete --all` | List or delete saved voice profiles |
 
 ## Privacy & consent
 
@@ -246,6 +251,8 @@ models load from disk without contacting anything (tested with all network acces
 | Recordings (`*.wav`), transcripts (`transcript.md/.json/.srt`), `session.json` | `~/Documents/Transcribes/` (or your `output_dir`) | `Documents\Transcribes\` |
 | Settings (`config.toml`) | `~/Library/Application Support/RecAndCC/` | `%LOCALAPPDATA%\RecAndCC\` |
 | Logs (events, app names, file paths) | `~/Library/Logs/RecAndCC/` | `%LOCALAPPDATA%\RecAndCC\Logs\` |
+| Voice profiles (only with `speaker_names = true`; biometric data, owner-only) | `~/Library/Application Support/RecAndCC/voices/` | `%LOCALAPPDATA%\RecAndCC\voices\` |
+| Per-session speaker voices (`speakers.json`, only with `speaker_names = true`) | beside each transcript | beside each transcript |
 | Speaker-diarization model | `~/Library/Caches/RecAndCC/models/` | `%LOCALAPPDATA%\RecAndCC\Cache\models\` |
 | Whisper models (shared Hugging Face cache) | `~/.cache/huggingface/hub/models--*whisper*` | `%USERPROFILE%\.cache\huggingface\hub\` |
 | Launch at login | `~/Library/LaunchAgents/com.gblokh.recandcc.plist` | registry `HKCU\…\CurrentVersion\Run\RecAndCC` |
@@ -271,7 +278,8 @@ macOS:
 
 ```bash
 rm -rf ~/Documents/Transcribes                    # recordings + transcripts (or your output_dir)
-rm -rf ~/Library/Application\ Support/RecAndCC    # settings
+uv run recandcc voices delete --all               # voice profiles only (also removed below)
+rm -rf ~/Library/Application\ Support/RecAndCC    # settings + voice profiles
 rm -rf ~/Library/Logs/RecAndCC                    # logs
 rm -rf ~/Library/Caches/RecAndCC                  # speaker model
 rm -rf ~/.cache/huggingface/hub/models--*whisper* # Whisper models (if no other app uses them)

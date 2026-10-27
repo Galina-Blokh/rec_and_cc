@@ -13,3 +13,11 @@ def _no_diarization_model(request, monkeypatch):
         from recandcc.transcribe import diarize
 
         monkeypatch.setattr(diarize, "model_path", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def _private_voices_dir(tmp_path_factory, monkeypatch):
+    """No test reads or writes the user's real voice profiles."""
+    from recandcc.transcribe import voices
+
+    monkeypatch.setattr(voices, "VOICES_DIR", tmp_path_factory.mktemp("voices"))
