@@ -330,6 +330,7 @@ def cmd_name_speaker(args) -> int:
 def cmd_voices(args) -> int:
     from .transcribe import voices
 
+    voices.prune_session_voices()  # of sessions whose folder was deleted
     if args.action == "list":
         profiles = voices.load_profiles()
         for p in profiles:

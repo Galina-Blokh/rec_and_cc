@@ -125,7 +125,9 @@ Menu items:
 - **Open live transcript**: opens the current (or last) live session's `transcript.md`.
 - **Recent transcripts**: the last 10, click to open.
 - **Search transcripts…**: full-text search across all your transcripts (English, Russian,
-  any language); pick a match to open its transcript. Same as `recandcc search`.
+  any language); pick a match to open its transcript. Same as `recandcc search`. On
+  Windows the tray item opens a small window: type the words, press Enter, and
+  double-click a match (time, speaker, snippet) to open it.
 - **Open transcripts folder**
 - **Permissions**: status and "Grant…" actions.
 - **Launch at login**: starts RecAndCC every time you log in. Turn it on once.
@@ -311,6 +313,11 @@ local folder (for example `~/Transcribes`) if recordings must stay on this devic
   hourly check, whichever comes first. Removed or replaced text is overwritten in
   `search.sqlite3`, so it can't be recovered from the file. To remove the whole index at
   once, delete `search.sqlite3`; it is rebuilt from the transcripts on the next search.
+  With `speaker_names` on, its stored speaker voices are deleted the next time a transcript
+  is written or a `recandcc voices` command runs.
+- `recandcc voices delete <name>` deletes that profile and removes the named voice from every
+  session's stored voices too; renaming a speaker (`Anna` → `Bob`) takes that session's voice
+  out of Anna's profile.
 
 ### Delete everything
 

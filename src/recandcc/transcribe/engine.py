@@ -528,9 +528,10 @@ class Transcriber:
                 lbl: centroids[k] for k, lbl in labels.items() if k in centroids and lbl != ME
             }
             if speakers and Path(session.directory).exists():
-                voices.write_session_voices(session.id, speakers)
+                voices.write_session_voices(session, speakers)
             else:  # never leave voices of an older transcript of this session behind
                 voices.delete_session_voices(session.id)
+            voices.prune_session_voices()  # of sessions whose folder was deleted
         except OSError:
             log.exception("session %s: could not update speaker voices", session.id)
         if not turns:

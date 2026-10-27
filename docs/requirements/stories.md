@@ -210,7 +210,7 @@ while I decide.*
 open transcripts one by one.*
 
 - **Given** transcripts in `output_dir`, **when** I search for words (menu **Search
-  transcripts…** on macOS, or `recandcc search "<words>"`), **then** I get the segments that
+  transcripts…** in the macOS menu or the Windows tray, or `recandcc search "<words>"`), **then** I get the segments that
   contain all of them, best match first, each with its session, time in the recording,
   speaker and a snippet; choosing one opens its transcript.
 - **Given** English or Russian text, **then** matching ignores case and diacritics and
@@ -220,8 +220,8 @@ open transcripts one by one.*
   transcript is re-indexed and a deleted or discarded session leaves the index.
 - **Then** the index is local and owner-only, outside `output_dir` (never synced), and logs
   never contain the searched or found text.
-- **Not yet:** summaries and action items with a local LLM, DOCX/PDF export, a notes window,
-  a search window on Windows (#4).
+- **Not yet:** summaries and action items with a local LLM, DOCX/PDF export, a notes window
+  (#4).
 
 ### US-21 Speaker names remembered across sessions
 *As the owner, I want to name a speaker once and see that name in later transcripts, so that
