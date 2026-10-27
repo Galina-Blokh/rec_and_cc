@@ -115,8 +115,12 @@ def test_language_id_accuracy_on_the_synthetic_mixed_set(tmp_path, monkeypatch):
 
     langs = ["en", "ru", "he"]
     tr = Transcriber(TranscriptionConfig(languages=langs))
+    # Private hooks on purpose: this measures the language-ID model alone, without the main
+    # model's re-check that transcribe() adds for regions below MIN_LANGUAGE_CONFIDENCE.
     tr._lid_model = tr._load(LANGUAGE_ID_MODEL)  # only the language-ID model, offline
     ok = total = 0
+    lowest = 1.0
+    errors: list[str] = []
     try:
         for clip in manifest["clips"]:
             audio = load_track(tmp_path / clip["audio"])
@@ -129,10 +133,16 @@ def test_language_id_accuracy_on_the_synthetic_mixed_set(tmp_path, monkeypatch):
                 if not votes:
                     continue
                 piece = audio[int(s * SAMPLE_RATE) : int(e * SAMPLE_RATE)]
-                lang, _ = tr._detect(tr._lid_model, piece, langs)
-                ok += lang == max(votes, key=votes.__getitem__)
+                lang, conf = tr._detect(tr._lid_model, piece, langs)
+                truth = max(votes, key=votes.__getitem__)
+                lowest = min(lowest, conf)
+                if lang == truth:
+                    ok += 1
+                else:
+                    errors.append(f"{truth}->{lang}@{conf:.2f}")
                 total += 1
     finally:
         tr.close()
-    print(f"language-ID accuracy {ok}/{total}")
-    assert total >= 30 and ok / total >= 0.95
+    print(f"language-ID accuracy {ok}/{total}, lowest confidence {lowest:.2f}, errors {errors}")
+    assert total >= 30  # the 7-clip set has 40 regions; fewer means the set changed
+    assert ok / total >= 0.95
