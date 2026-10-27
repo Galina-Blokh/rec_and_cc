@@ -29,7 +29,6 @@ from .. import autostart
 from ..config import CONFIG_PATH
 from ..engine import PROMPTING, RECORDING
 from ..models import Mode, TriggerKind
-from ..recorder import make_private_dir
 from .captions import CaptionBuffer, header_text, should_auto_hide
 from .common import (
     ONBOARDING_TEXT,
@@ -39,6 +38,7 @@ from .common import (
     PROMPT_BUTTONS,
     Controller,
     keep_prompt_text,
+    open_output_folder,
     open_path,
     reveal_logs,
     transcript_label,
@@ -284,8 +284,8 @@ class TrayApp:
         )
 
     def _open_folder(self) -> None:
-        make_private_dir(self.cfg.output_dir)  # owner-only, like the session folders
-        open_path(self.cfg.output_dir)
+        if err := open_output_folder(self.cfg.output_dir):
+            self._notify("Can't open transcripts folder", err)
 
     def _toggle_captions(self) -> None:
         self.cfg.live_captions = not self.cfg.live_captions
