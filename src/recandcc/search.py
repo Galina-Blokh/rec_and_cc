@@ -100,7 +100,30 @@ def _is_corrupt(e: sqlite3.Error) -> bool:
     if isinstance(code, int):
         return code & 0xFF in _CORRUPT_CODES
     msg = str(e)
-    return "file is not a database" in msg or "disk image is malformed" in msg
+    return (
+        "file is not a database" in msg
+        or "disk image is malformed" in msg
+        or msg.startswith("fts5: corruption")
+    )
+
+
+def _quick_ok(db: sqlite3.Connection) -> bool:
+    ok = db.execute("PRAGMA quick_check(1)").fetchone()
+    return ok is not None and ok[0] == "ok"
+
+
+def _fts_ok(db: sqlite3.Connection) -> bool:
+    """FTS5's own check of its shadow tables: the quick_check of an older SQLite doesn't look
+    inside them, so damage there (SQLITE_CORRUPT_VTAB) would pass it."""
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'seg_fts'").fetchone() is None:
+        return True
+    try:
+        db.execute("INSERT INTO seg_fts(seg_fts) VALUES ('integrity-check')")
+    except sqlite3.DatabaseError as e:
+        if not _is_corrupt(e):
+            raise
+        return False
+    return True
 
 
 _TABLES = ("sessions", "seg_fts", "seg_plain", "seg_vec", "sem_sessions", "roots")
@@ -203,8 +226,7 @@ class TranscriptIndex:
                 return False  # already gone: the next connection recreates it
             try:
                 with contextlib.closing(sqlite3.connect(self.path, timeout=10)) as db:
-                    ok = db.execute("PRAGMA quick_check(1)").fetchone()
-                corrupt = ok is None or ok[0] != "ok"
+                    corrupt = not (_quick_ok(db) and _fts_ok(db))
             except sqlite3.DatabaseError as e:
                 if not _is_corrupt(e):
                     raise

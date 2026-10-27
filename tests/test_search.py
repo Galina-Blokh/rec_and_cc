@@ -14,6 +14,7 @@ import stat
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -374,6 +375,23 @@ def test_search_on_a_corrupt_index_rebuilds_it_instead_of_failing(tmp_path, out)
     assert idx.search("budget") == []  # empty until the next sync, not an error
     idx.sync(out)
     assert len(idx.search("budget")) == 1
+
+
+@pytest.mark.parametrize("old_sqlite", [False, True])
+def test_damaged_fts5_index_is_rebuilt(tmp_path, out, monkeypatch, old_sqlite):
+    """Damage inside the FTS5 shadow tables (SQLITE_CORRUPT_VTAB) is a corrupt index too,
+    also where quick_check (an older SQLite) doesn't see it."""
+    make_session(out, 1, [seg(float(i), f"the quarterly budget {i}") for i in range(50)])
+    idx = index(tmp_path, True)
+    idx.sync(out)
+    with closing(sqlite3.connect(idx.path)) as db:
+        db.execute("UPDATE seg_fts_data SET block = substr(block, 1, 20) WHERE id > 10")
+        db.commit()
+    if old_sqlite:
+        monkeypatch.setattr(search, "_quick_ok", lambda db: True)
+    assert idx.search("budget") == []  # rebuilt, not an error
+    assert idx.sync(out) == 1
+    assert len(idx.search("budget")) == 20
 
 
 def test_recovery_never_deletes_a_healthy_index(tmp_path, out):
