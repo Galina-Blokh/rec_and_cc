@@ -33,7 +33,8 @@ acceptance criteria.
       Tauri or native-UI rewrite. Review and staged plan: [ADR 0011](adr/0011-stack-and-packaging-after-v0-1.md)
       (keep the Python core, package it properly, switch engines only past a benchmark gate).
 - [ ] **Summaries, action items, search, export** ([#4](https://github.com/Galina-Blokh/rec_and_cc/issues/4)): local LLM (e.g. Qwen via
-      MLX / llama.cpp), SQLite FTS search, DOCX/PDF export.
+      MLX / llama.cpp), SQLite FTS search, DOCX/PDF export. Done: search, summaries (Apple
+      silicon) and the meeting notes view; left: export, a Windows summary backend.
 - [ ] **Windows for real** ([#5](https://github.com/Galina-Blokh/rec_and_cc/issues/5)): hardware test pass, per-app capture, installer,
       signing.
 - [ ] **Hebrew** ([#6](https://github.com/Galina-Blokh/rec_and_cc/issues/6)): he/en/ru language ID, Hebrew-tuned Whisper (e.g. ivrit.ai),
