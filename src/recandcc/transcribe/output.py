@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 from dataclasses import asdict
 from pathlib import Path
 
@@ -139,7 +141,7 @@ def write_live_markdown(session: SessionInfo, segments: list[Segment], duration:
 
 def atomic_write(path: Path, text: str) -> Path:
     """Write via a temp file + rename, so readers never see a half-written file."""
-    tmp = path.with_name(f".{path.name}.tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
     return path

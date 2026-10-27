@@ -44,7 +44,7 @@ def test_menu_naming_updates_profile_and_transcript_like_the_cli(tmp_path, monke
     assert "Carl" in {s["speaker"] for s in data["segments"]}
     (profile,) = voices.load_profiles()
     assert profile.name == "Carl" and float(profile.centroid @ CARL) > 0.9
-    assert named_notice("Speaker 2", "Carl", None)[0] == "Speaker named"
+    assert named_notice(None)[0] == "Speaker named"
 
 
 def test_naming_is_refused_when_speaker_names_is_off(tmp_path, monkeypatch):
@@ -55,7 +55,7 @@ def test_naming_is_refused_when_speaker_names_is_off(tmp_path, monkeypatch):
     _, _, _, error = ctrl.events.get(timeout=5)
     assert error and voices.load_profiles() == []
     assert "Speaker 1:** hello" in (tmp_path / "transcript.md").read_text(encoding="utf-8")
-    assert named_notice("Speaker 1", "Bob", error)[0] == "Can't name the speaker"
+    assert named_notice(error)[0] == "Can't name the speaker"
 
 
 def test_session_without_voice_data_has_no_speakers_to_name(tmp_path, monkeypatch):
@@ -90,3 +90,54 @@ def test_names_are_never_logged(tmp_path, monkeypatch, caplog):
     ctrl.forget_voices_async()
     ctrl.events.get(timeout=5)
     assert "Zebulon" not in caplog.text and "hello" not in caplog.text
+
+
+def test_unexpected_error_still_posts_a_name_free_outcome(tmp_path, monkeypatch):
+    _final(tmp_path, monkeypatch, speaker_names=True)
+    monkeypatch.setattr(voices, "name_speaker", lambda *a: (_ for _ in ()).throw(TypeError("x")))
+    ctrl = controller()
+    ctrl.name_speaker_async(tmp_path, "Speaker 2", "Zebulon")
+    _, _, _, error = ctrl.events.get(timeout=5)
+    assert error and "Zebulon" not in error and "Speaker 2" not in error
+    assert "Zebulon" not in " ".join(named_notice(None) + named_notice(error))
+
+
+def test_forget_waits_for_a_running_naming(tmp_path, monkeypatch):
+    import threading
+
+    from recandcc.ui import common
+
+    _final(tmp_path, monkeypatch, speaker_names=True)
+    ctrl = controller()
+    started, release = threading.Event(), threading.Event()
+    real = voices.name_speaker
+
+    def slow(*args):
+        started.set()
+        release.wait(5)
+        return real(*args)
+
+    monkeypatch.setattr(voices, "name_speaker", slow)
+    ctrl.name_speaker_async(tmp_path, "Speaker 2", "Carl")
+    assert started.wait(5)
+    ctrl.forget_voices_async()
+    assert common.VOICE_LOCK.locked() and ctrl.events.empty()  # forget is waiting
+    release.set()
+    assert ctrl.events.get(timeout=5)[0] == "named"
+    assert ctrl.events.get(timeout=5) == ("forgot", 1)
+    assert voices.load_profiles() == []  # the forget came last: nothing came back
+
+
+def test_choice_label_flattens_multiline_hints():
+    label = speaker_choice_label(1, "Speaker 1", ["hello\nthere", "a\r\n b"])
+    assert "\n" not in label and "\r" not in label
+
+
+def test_two_namings_of_one_session_both_survive(tmp_path, monkeypatch):
+    _final(tmp_path, monkeypatch, speaker_names=True)
+    ctrl = controller()
+    ctrl.name_speaker_async(tmp_path, "Speaker 1", "Anna")
+    ctrl.name_speaker_async(tmp_path, "Speaker 2", "Carl")
+    assert [ctrl.events.get(timeout=5)[3] for _ in range(2)] == [None, None]
+    data = json.loads((tmp_path / "transcript.json").read_text(encoding="utf-8"))
+    assert {"Anna", "Carl"} <= {s["speaker"] for s in data["segments"]}

@@ -84,6 +84,7 @@ class MacApp(rumps.App):
         self._onboarded = False
         self._delegate = None
         self._recent_sig: tuple = ()
+        self._naming_open = False  # a speaker chooser/name dialog is up
         # live captions (main thread only)
         self.captions = CaptionsPanel() if CaptionsPanel is not None else None
         self._live_id: str | None = None  # session currently being captioned
@@ -211,7 +212,7 @@ class MacApp(rumps.App):
             elif kind == "speakers":
                 self._pick_speaker(ev[1], ev[2])
             elif kind == "named":
-                self._notify(*named_notice(ev[1], ev[2], ev[3]))
+                self._notify(*named_notice(ev[3]))
             elif kind == "forgot":
                 self._notify(*forgot_notice(ev[1]))
             elif kind == "refreshed":
@@ -473,6 +474,8 @@ class MacApp(rumps.App):
         threading.Thread(target=run, daemon=True, name="name-speakers-pick").start()
 
     def _pick_speaker(self, directory, speakers) -> None:
+        if self._naming_open:  # one naming flow at a time
+            return
         if notice := speakers_notice(speakers):
             self._notify(*notice)
             return
@@ -483,16 +486,21 @@ class MacApp(rumps.App):
         )
 
         def run():
-            number = osascript(pick).partition(".")[0]
-            if not (number.isdigit() and 0 < int(number) <= len(speakers)):
-                return
-            label = speakers[int(number) - 1][0]
-            ask = (
-                f'display dialog {as_str(f"Name for {label}:")} default answer "" '
-                'with title "RecAndCC" buttons {"Cancel", "Save"} default button "Save"'
-            )
-            if name := osascript(ask).partition("text returned:")[2].strip():
-                self.ctrl.name_speaker_async(directory, label, name)
+            try:
+                number = osascript(pick).partition(".")[0]
+                if not (number.isdigit() and 0 < int(number) <= len(speakers)):
+                    return
+                label = speakers[int(number) - 1][0]
+                ask = (
+                    f'display dialog {as_str(f"Name for {label}:")} default answer "" '
+                    'with title "RecAndCC" buttons {"Cancel", "Save"} default button "Save"'
+                )
+                if name := osascript(ask).partition("text returned:")[2].strip():
+                    self.ctrl.name_speaker_async(directory, label, name)
+            finally:
+                self._naming_open = False
+
+        self._naming_open = True
 
         threading.Thread(target=run, daemon=True, name="name-speaker-dialog").start()
 

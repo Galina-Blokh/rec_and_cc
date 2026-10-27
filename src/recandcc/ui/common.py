@@ -237,6 +237,11 @@ def as_str(text: str) -> str:
 
 
 # ----------------------------------------------------------------------- controller
+# Menu actions that change voice data run one at a time (a naming that outlives a
+# "Forget all voices" would bring the data back).
+VOICE_LOCK = threading.Lock()
+
+
 class Controller:
     def __init__(
         self,
@@ -446,13 +451,19 @@ class Controller:
             error = None
             try:
                 if not self.speaker_names_enabled:
-                    raise ValueError("voice profiles are off (transcription.speaker_names)")
-                from ..transcribe import voices
+                    error = "Voice profiles are off (transcription.speaker_names)."
+                else:
+                    from ..transcribe import voices
 
-                voices.name_speaker(Path(directory), label, name)
-            except (OSError, ValueError, KeyError) as e:
+                    with VOICE_LOCK:  # not while "Forget all voices" or another naming runs
+                        voices.name_speaker(Path(directory), label, name)
+            except Exception as e:  # noqa: BLE001 - always post an outcome
                 log.error("could not name a speaker: %s", type(e).__name__)
-                error = str(e) or type(e).__name__
+                # fixed text: the library's messages quote the name, and notices may be logged
+                error = (
+                    "The name could not be saved: it may be reserved, used by another "
+                    "speaker of this session, or the voice data is gone."
+                )
             self.events.put(("named", label, name, error))
 
         threading.Thread(target=run, daemon=True, name="name-speaker").start()
@@ -465,7 +476,8 @@ class Controller:
             try:
                 from ..transcribe import voices
 
-                result = voices.delete_all_profiles()
+                with VOICE_LOCK:
+                    result = voices.delete_all_profiles()
             except Exception as e:  # noqa: BLE001
                 log.error("could not delete the voices: %s", type(e).__name__)
                 result = e
