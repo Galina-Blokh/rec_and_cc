@@ -54,9 +54,6 @@ All notable changes to RecAndCC are documented here. The format is based on
   delete is removed at the next start (#45).
 - A discarded session is never transcribed later, even if deleting it failed; the delete is
   retried at startup (#46, #56).
-- The language-ID model setting is validated before loading (#61); a missing import in the
-  macOS menu (#68).
-- A flaky live-captions controller test (#32).
 
 ## [0.1.0] — 2026-10-26
 
@@ -88,6 +85,8 @@ videos.
 - **CI** on macOS and Windows, and an advisory AI review of every pull request by the Cursor
   agent (four parallel reviewers), hardened against prompt injection from PR content.
 
+- **Crash reports** in a local `faults.log`, a **Reveal logs** menu item, and per-session
+  pipeline metrics in `session.json` (#21).
 ### Fixed
 - UTF-8 file I/O on Windows.
 - Crash when requesting the system-audio permission.
