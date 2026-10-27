@@ -187,6 +187,13 @@ capture your room. If a call starts while a video is already being recorded, the
 becomes a call: the microphone joins in, lined up in time, and the recording follows the call
 instead of stopping when the video ends. You can change this with `record_mic` in the settings.
 
+System audio (`Others`) is everything the Mac plays, so a notification sound or a video in
+another tab ends up in the recording too. On macOS, `system_audio_scope = "app"` records only
+the app that started the session (Zoom, the browser tab's browser…) and its helper
+processes; if a call starts during a video, both apps are recorded. Manual recordings always
+take everything, and so does FaceTime (its calls play through a system process). It is off
+by default until it has been checked with Zoom, Teams and Meet calls.
+
 ## Settings
 
 `~/Library/Application Support/RecAndCC/config.toml` (Windows:
@@ -274,8 +281,15 @@ The folders RecAndCC creates for recordings (the transcripts folder, each day an
 session) are readable only by you (`0700` on macOS). A transcripts folder that already
 existed keeps its permissions; tighten it with `chmod 700 ~/Documents/Transcribes`.
 `~/Documents` may be synced by iCloud Drive ("Desktop & Documents Folders") on macOS, and
-`Documents` by OneDrive folder backup on Windows; set `output_dir` to a folder outside it if
-recordings must stay on this computer only.
+`Documents` by OneDrive folder backup on Windows. RecAndCC checks `output_dir` locally (no network)
+while it runs: if it lies in iCloud Drive (including "Desktop & Documents"),
+`~/Library/CloudStorage` (OneDrive, Dropbox, Google Drive, Box), `~/Dropbox`, `~/Google Drive`,
+`~/OneDrive*`, `~/Box`, `~/Box Sync` (case-insensitive, also through symlinks),
+or on Windows a OneDrive folder (including `Documents` / `Desktop` moved by OneDrive folder
+backup) or `%USERPROFILE%\Dropbox`, also through symlinks and junctions, it logs a warning and shows a
+one-time notification, and `recandcc config` prints the same warning. Other sync tools (for
+example a Google Drive drive letter on Windows) are not detected. Set `output_dir` to a
+local folder (for example `~/Transcribes`) if recordings must stay on this device only.
 
 ### Retention
 

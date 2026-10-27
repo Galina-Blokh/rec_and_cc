@@ -105,6 +105,10 @@ class DetectionConfig:
     # nothing is lost while you decide. Unanswered prompt: "record" keeps it, "ignore" discards.
     ask_timeout_action: str = "record"
     record_mic: str = "calls"  # "always" | "calls" | "never"
+    # "all": the Others track records everything the Mac plays. "app": only the app that
+    # triggered the session (macOS; falls back to "all" for manual sessions, when the app has
+    # no audio process yet, and on Windows).
+    system_audio_scope: str = "all"
     # Room listening (opt-in): while idle, keep the mic open and start a "room" session when
     # people talk near the laptop: room_speech_s of speech within room_window_s.
     room_listening: bool = False
