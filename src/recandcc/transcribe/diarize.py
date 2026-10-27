@@ -708,8 +708,10 @@ class Diarizer:
         with self._lock:
             self.segmentation, self._segmenter = False, None
 
-    def diarize(self, audio: np.ndarray) -> list[Turn] | None:
-        """Speaker turns of a 16 kHz mono track; None if diarization is unavailable."""
+    def diarize(self, audio: np.ndarray, hints: tuple[int, int] | None = None) -> list[Turn] | None:
+        """Speaker turns of a 16 kHz mono track; None if diarization is unavailable.
+        `hints`: (min_speakers, max_speakers) for this track instead of the Diarizer's."""
+        lo, hi = hints if hints is not None else (self.min_speakers, self.max_speakers)
         t0 = time.monotonic()
         loaded = self._load()
         if loaded is None:
@@ -738,8 +740,8 @@ class Diarizer:
         labels = cluster_embeddings(
             embeddings,
             np.where(mixed, 0.0, [e - s for s, e in windows]),
-            min_speakers=self.min_speakers,
-            max_speakers=self.max_speakers,
+            min_speakers=lo,
+            max_speakers=hi,
         )
         clean = ~mixed if not mixed.all() else mixed
         turns = Turns(centroids=speaker_centroids(embeddings[clean], labels[clean]))
@@ -760,28 +762,32 @@ class Diarizer:
         )
         return turns
 
-    def diarize_file(self, path: Path) -> list[Turn] | None:
+    def diarize_file(self, path: Path, hints: tuple[int, int] | None = None) -> list[Turn] | None:
         from .chunking import load_track
 
-        return self.diarize(load_track(Path(path)))
+        return self.diarize(load_track(Path(path)), hints)
 
-    def submit(self, path: Path, timing: dict | None = None) -> Future:
+    def submit(
+        self, path: Path, timing: dict | None = None, hints: tuple[int, int] | None = None
+    ) -> Future:
         """Diarize the WAV at `path` in the background. The future's result is the turns, or
         None when unavailable or failed; it never raises (errors are logged). When it ran,
         `timing` gets ``elapsed_s`` (and ``model_load_s`` if the model was loaded for it)
-        before the result is set."""
+        before the result is set. `hints`: (min, max) speakers for this track only."""
         with self._lock:
             if self._jobs is None:
                 self._jobs = ThreadPoolExecutor(1, thread_name_prefix="diarize")
-            return self._jobs.submit(self._safe, Path(path), timing)
+            return self._jobs.submit(self._safe, Path(path), timing, hints)
 
-    def _safe(self, path: Path, timing: dict | None = None) -> list[Turn] | None:
+    def _safe(
+        self, path: Path, timing: dict | None = None, hints: tuple[int, int] | None = None
+    ) -> list[Turn] | None:
         try:
             if not path.exists():
                 log.info("no audio to diarize (%s was deleted)", path.name)
                 return None
             t0 = time.monotonic()
-            turns = self.diarize_file(path)
+            turns = self.diarize_file(path, hints)
             if timing is not None and turns is not None:
                 timing["elapsed_s"] = round(time.monotonic() - t0, 2)
                 load, self.load_s = self.load_s, None
