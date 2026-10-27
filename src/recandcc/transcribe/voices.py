@@ -101,21 +101,28 @@ def _write_private(path: Path, data: dict) -> None:
             d.chmod(0o700)  # mkdir's mode is filtered by the umask
     # unique per process and thread (the app and the CLI may both write), like SessionInfo
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    tmp.unlink(missing_ok=True)  # a stale one from a crash may have other permissions
+    _retry(lambda: tmp.unlink(missing_ok=True))  # a stale one may have other permissions
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
-        for attempt in range(REPLACE_TRIES):
-            try:
-                os.replace(tmp, path)
-                return
-            except PermissionError:  # Windows: antivirus or a reader has the file open
-                if attempt + 1 == REPLACE_TRIES:
-                    raise
-                time.sleep(0.05 * (attempt + 1))
+            f.flush()
+            os.fsync(f.fileno())  # the new file is complete before it replaces the old one
+        _retry(lambda: os.replace(tmp, path))
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def _retry(op) -> None:
+    """Run `op`, retrying a PermissionError (Windows: antivirus or a reader holds the file)."""
+    for attempt in range(REPLACE_TRIES):
+        try:
+            op()
+            return
+        except PermissionError:
+            if attempt + 1 == REPLACE_TRIES:
+                raise
+            time.sleep(0.05 * (attempt + 1))
 
 
 def _vector(c) -> list[float]:
@@ -158,8 +165,12 @@ def _fold(name: str, centroid, sign: int, voices_dir: Path | None) -> Profile | 
     old = next((p for p in load_profiles(voices_dir) if _key(p.name) == _key(name)), None)
     c = _unit(centroid)
     total, count = np.zeros_like(c), 0
-    if old is not None and old.total is not None and old.total.shape == c.shape:
+    if old is not None and old.total is not None:
+        if old.total.shape != c.shape:  # another kind of vector: never mix or reset them
+            raise ValueError(f"the voice doesn't fit the profile of {name!r}")
         total, count = old.total, old.count
+    elif sign < 0:
+        return None  # nothing to take out of
     total, count = total + sign * c, count + sign
     if count <= 0:
         path.unlink(missing_ok=True)
@@ -194,10 +205,12 @@ def delete_profile(name: str, voices_dir: Path | None = None) -> bool:
 
 
 def delete_all_profiles(voices_dir: Path | None = None) -> int:
-    """Every profile and every session's speaker voices; returns the number of profiles."""
+    """Every profile, every session's speaker voices and any temp file left by a crash
+    (they hold voice data too); returns the number of profiles."""
     d = _dir(voices_dir)
     profiles = list(d.glob("*.json")) if d.is_dir() else []
-    for f in [*profiles, *_session_files(voices_dir)]:
+    stale = [*d.glob(".*.tmp"), *d.glob("sessions/.*.tmp")] if d.is_dir() else []
+    for f in [*profiles, *_session_files(voices_dir), *stale]:
         f.unlink(missing_ok=True)
     return len(profiles)
 
@@ -239,18 +252,31 @@ def _session_files(voices_dir: Path | None) -> list[Path]:
     return sorted(d.glob("*.json")) if d.is_dir() else []
 
 
+def _deleted(directory: Path) -> bool:
+    """True only if `directory` is surely deleted: its parent (the day folder) or, when that
+    is gone too, the parent's parent (output_dir) can be listed and lacks it. An unmounted
+    drive, an offline share or a permission error is never taken for a deletion."""
+    for parent, child in ((directory.parent, directory.name), (directory.parent.parent, None)):
+        try:
+            names = os.listdir(parent)
+        except OSError:
+            continue
+        return (child or directory.parent.name) not in names
+    return False
+
+
 def prune_session_voices(voices_dir: Path | None = None) -> int:
-    """Delete the voices of sessions whose folder was deleted; returns how many."""
+    """Delete the voices of sessions whose folder was deleted; returns how many. Files that
+    can't be read or name no folder (written before folders were stored) are kept."""
     n = 0
     for f in _session_files(voices_dir):
         try:
             directory = json.loads(f.read_text(encoding="utf-8")).get("directory")
-            gone = not directory or not (Path(directory) / SessionInfo.FILENAME).exists()
+            if isinstance(directory, str) and directory and _deleted(Path(directory)):
+                f.unlink()
+                n += 1
         except (OSError, ValueError, AttributeError):
-            gone = True  # unreadable or without a folder: nothing can use it
-        if gone:
-            f.unlink(missing_ok=True)
-            n += 1
+            log.warning("could not check session voices %s", f.name)
     if n:
         log.info("deleted the voices of %d deleted session(s)", n)
     return n

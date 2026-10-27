@@ -268,21 +268,64 @@ def test_deleting_a_name_strips_it_from_session_voices(tmp_path, monkeypatch, ca
     assert cli.main(["voices", "delete", "carl"]) == 1
 
 
+def _sessions(*ids):
+    return sorted(voices._session_path(i, None).name for i in ids)
+
+
 def test_voices_of_deleted_sessions_are_pruned(tmp_path, monkeypatch, capsys):
-    gone, kept = tmp_path / "gone", tmp_path / "kept"
-    gone.mkdir()
-    kept.mkdir()
+    out = tmp_path / "out"
+    gone, kept, other_day = out / "d1" / "gone", out / "d1" / "kept", out / "d2" / "s3"
+    for d in (gone, kept, other_day):
+        d.mkdir(parents=True)
     s = make_session(gone)
     voices.write_session_voices(replace(s, id="s2"), {"Speaker 1": BOB})
+    voices.write_session_voices(replace(s, id="s3", directory=other_day), {"Speaker 1": BOB})
     sessions = voices.VOICES_DIR / "sessions"
     (sessions / "legacy.json").write_text(json.dumps({"session_id": "s0", "speakers": {}}))
+    (sessions / "broken.json").write_text("{")
     shutil.rmtree(gone)
     _final(kept, monkeypatch, speaker_names=True)  # a transcript write prunes
-    assert [f.name for f in sessions.iterdir()] == [voices._session_path("s1", None).name]
-    assert cli.main(["voices", "list"]) == 0 and voices.read_session_voices("s1")
-    shutil.rmtree(kept)
+    legacy_and_broken = ["broken.json", "legacy.json"]  # no folder known / unreadable: kept
+    assert sorted(f.name for f in sessions.iterdir()) == sorted(
+        [*_sessions("s1", "s3"), *legacy_and_broken]
+    )
+    shutil.rmtree(other_day.parent)  # the whole day folder: output_dir shows it is gone
     assert cli.main(["voices", "list"]) == 0  # every voices command prunes too
-    assert not list(sessions.iterdir())
+    assert sorted(f.name for f in sessions.iterdir()) == sorted(
+        [*_sessions("s1"), *legacy_and_broken]
+    )
+
+
+def test_an_unreachable_output_dir_prunes_nothing(tmp_path, monkeypatch):
+    out = tmp_path / "drive" / "Transcribes"
+    session = out / "2026-10-27" / "rec"
+    session.mkdir(parents=True)
+    _final(session, monkeypatch, speaker_names=True)
+    shutil.rmtree(tmp_path / "drive")  # like an unmounted drive or an offline share
+    assert voices.prune_session_voices() == 0 and voices.read_session_voices("s1")
+    if os.name != "nt":
+        session.mkdir(parents=True)
+        _final(session, monkeypatch, speaker_names=True)
+        shutil.rmtree(session)
+        session.parent.chmod(0)  # can't be listed: not taken for a deletion
+        try:
+            assert voices.prune_session_voices() == 0
+        finally:
+            session.parent.chmod(0o700)
+        assert voices.prune_session_voices() == 1
+
+
+def test_profile_shapes_never_mix_and_a_crash_leaves_no_voice_data(tmp_path):
+    voices.save_profile("Anna", ANNA, tmp_path)
+    with pytest.raises(ValueError):
+        voices._fold("Anna", ANNA[:10], -1, tmp_path)
+    assert voices.load_profiles(tmp_path)[0].count == 1
+    assert voices._fold("Zed", ANNA, -1, tmp_path) is None  # nothing to take out of
+    (tmp_path / "sessions").mkdir()
+    for stale in (tmp_path / ".x.json.1.2.tmp", tmp_path / "sessions" / ".y.json.1.2.tmp"):
+        stale.write_text("[0.1]")
+    assert voices.delete_all_profiles(tmp_path) == 1
+    assert not list(tmp_path.rglob("*.*"))
 
 
 def test_real_diarization_attaches_speaker_centroids():
