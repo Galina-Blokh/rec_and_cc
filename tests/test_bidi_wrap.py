@@ -109,8 +109,11 @@ def test_english_and_digit_only_chunk_keeps_order_and_stays_in_the_rtl_line():
     only_ltr = [c for c in logical if not any("֐" <= ch <= "׿" for ch in c)]
     assert only_ltr  # the sample really has a chunk without Hebrew
     for c in only_ltr:
-        assert visual_rtl(c) == c  # reading order kept: no letters or digits reversed
-        assert visual_rtl(c) in shown
+        v = visual_rtl(c)
+        # inside an RTL paragraph the runs go right to left, but every word and number keeps
+        # its own reading order (nothing is character-reversed)
+        assert v in shown and sorted(v.split()) == sorted(c.split())
+    assert "2024-05-01 hello" in shown
     # every piece, including that chunk, is inserted as text of the rtl paragraph: the caller
     # tags all pieces of an RTL line with "rtl" (right-justified), so nothing here is a label
     assert [lab for _, lab in parts].count(True) == 1
