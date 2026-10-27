@@ -223,6 +223,29 @@ toggle goes through `Controller.set_room_listening`, which explains the always-o
 indicator, battery and consent each time it is turned on; the same notice appears at every
 start with room listening on and when a hand edit of `config.toml` turns it on.
 
+### Sensitivity: thresholds scaled, not a new trigger
+`sensitivity.py` maps `outside_sensitivity` / `inside_sensitivity` (0–100, unset = off) to the
+existing thresholds with pure functions (#7). Inside scales `min_active_s`, which `tick()`
+reads every poll. Outside scales `room_speech_s`, widens the window so that speech is at most
+half of it (every setting stays reachable by a real conversation) and adds a noise-floor
+margin. `RoomMonitor` gets the mapping as its `thresholds` callable and reads it on every VAD
+step, so a preset change applies without reopening the mic and `room.py` doesn't depend on
+`sensitivity.py`. The gate (`room.NoiseFloor`) runs on the `room-vad` worker before the VAD,
+per ~0.5 s step: the step's VAD speech counts in full if the 90th percentile of its 32 ms
+levels is at least the margin (12 dB at 0 down to 9 dB at 100) above the floor, otherwise
+not at all and Silero is skipped. Per step, not per window, so the dips between syllables
+don't cut a 65% conversation below the threshold. The floor is the 35th percentile of the
+per-32 ms levels of the last 20 s, independent of the VAD: a conversation is at the floor over
+half the time (pauses, syllable gaps), chatter of two or more people much less, so it sits
+under a conversation but on top of babble. It falls within a few quiet seconds and rises
+slowly; it restarts from the last 3 s when even their 30th percentile is more than half a
+margin above it (carried into a louder place), is cleared when the mic opens, and when
+`_on_frames` sees a wall-clock gap of over 5 s (sleep/wake). Outside a session that gap also drops the pre-roll and the speech history before the new block, so a session starting on wake never replays or triggers on pre-sleep audio; the floor reset is a marker through the VAD queue, so the callback never blocks. `reset()`, which the engine calls every tick while an app does audio, clears the floor in queue order too, so speaker bleed from playback is never learnt. Until 3 s of history exist nothing counts. The gate only decides what starts a session: while a room session's tap is attached, the worker skips it and freezes the floor, so the silence stop (`seconds_since_speech`) is plain VAD, as with no sensitivity set. The constants were
+tuned on seeded syllabic speech, a brown-noise fan and 2/4/8-talker babble
+(`test_sensitivity.py`). A room session's recorder replays the source's own pre-roll length
+(`_Tap.preroll_s`) to live transcription. Unset keeps every code path as it was.
+Not yet: live level meters, caption priority by sensitivity.
+
 ### Two tracks → speaker labels for free
 Mic → `Me`, system → `Others`. A mic track that joins mid-session (a media recording upgraded
 to a call) starts with silence up to that moment, so both tracks share one timeline. If you use speakers instead of headphones, the mic also picks

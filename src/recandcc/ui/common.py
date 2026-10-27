@@ -27,7 +27,7 @@ import time
 from dataclasses import fields
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from .. import hotkey as hotkey_mod
 from ..cloudsync import cloud_sync_provider, warning_text
@@ -45,6 +45,8 @@ from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind, discard_session
 from ..recorder import make_private_dir
 from ..retention import purge_old_audio, purge_transcribed_audio
+from ..sensitivity import PRESETS as SENSITIVITY_PRESETS
+from ..sensitivity import apply_preset, current_preset, room_trigger
 from ..settings_window import (
     SettingsUnavailable,
     close_settings,
@@ -56,6 +58,7 @@ if TYPE_CHECKING:
     from ..transcribe.live import LiveTranscriber
 
 log = logging.getLogger(__name__)
+CFG_HOTKEY = object()  # apply_hotkey(): use cfg.hotkey
 
 RECENT_COUNT = 10
 SEARCH_LIMIT = 20
@@ -310,6 +313,10 @@ class Controller:
         self._cloud_warned: set[Path] = set()  # cloud-synced output dirs already warned about
         # global shortcut
         self._hotkey_lock = threading.Lock()
+        # Serializes whole apply_hotkey calls (startup and a config reload can overlap), and
+        # what is registered, so the same shortcut is never registered twice.
+        self._apply_hotkey_lock = threading.Lock()
+        self._hotkey_text: str | None = None
         self._hotkey = None  # HotkeyListener / WinHotkeyListener
         self._hotkey_label = ""  # "⌘⇧R" while the shortcut is (being) registered
         self._last_hotkey = float("-inf")
@@ -354,7 +361,8 @@ class Controller:
             permission_status=permission_status,
             on_session_start=self._on_session_start,
             on_session_end=self._on_session_end,
-            room_monitor=RoomMonitor(cfg.detection),  # mic only if room_listening
+            # mic only if room_listening; thresholds follow the outside sensitivity
+            room_monitor=RoomMonitor(cfg.detection, thresholds=room_trigger),
         )
         self._started_at = datetime.now().astimezone()  # older sessions: not diarized now
         if start_threads:
@@ -364,15 +372,27 @@ class Controller:
             threading.Thread(target=self._resubmit_unfinished, daemon=True, name="resubmit").start()
             threading.Thread(target=self._retention_loop, daemon=True, name="retention").start()
             self.refresh_async(force=True)
-            self.apply_hotkey(cfg.hotkey)
+            self.apply_hotkey()
 
     # --- global shortcut
-    def apply_hotkey(self, text: str | None, factory=None) -> None:
-        """(Re)register the global shortcut; ``""`` disables it. Blocks briefly while the old
-        listener shuts down, so call it off the main thread. ``factory`` is for tests."""
+    def apply_hotkey(self, text: str | None | object = CFG_HOTKEY, factory=None) -> None:
+        """(Re)register the global shortcut; ``""`` disables it. By default the configured
+        ``cfg.hotkey``, read under the lock, so of two overlapping calls the later one wins and
+        the same shortcut is never registered twice. Blocks briefly while the old listener
+        shuts down, so call it off the main thread. ``factory`` is for tests."""
+        with self._apply_hotkey_lock:
+            spec = cast("str | None", self.cfg.hotkey if text is CFG_HOTKEY else text)
+            with self._hotkey_lock:
+                current = self._hotkey_text if (self._hotkey is not None or not spec) else None
+            if current is not None and spec == current and not getattr(self, "_shut", False):
+                return  # already registered (or already disabled)
+            self._apply_hotkey_locked(spec, factory)
+
+    def _apply_hotkey_locked(self, text: str | None, factory=None) -> None:
         factory = factory or hotkey_mod.create_listener
         with self._hotkey_lock:
             old, self._hotkey, self._hotkey_label = self._hotkey, None, ""
+            self._hotkey_text = None
         if old is not None:
             with contextlib.suppress(Exception):
                 old.close()
@@ -386,6 +406,8 @@ class Controller:
             return
         if parsed is None:
             log.info("global shortcut disabled")
+            with self._hotkey_lock:
+                self._hotkey_text = text or ""
             return
         with self._hotkey_lock:  # before the listener exists: its on_error may fire at once
             self._hotkey_label = parsed.label()
@@ -396,6 +418,7 @@ class Controller:
             listener = None
         with self._hotkey_lock:
             self._hotkey = listener
+            self._hotkey_text = text if listener is not None else None
             if listener is None:
                 self._hotkey_label = ""
 
@@ -852,7 +875,7 @@ class Controller:
             tr.languages = new_tr.languages
         if new.hotkey != self.cfg.hotkey:
             self.cfg.hotkey = new.hotkey
-            self.apply_hotkey(new.hotkey)
+            self.apply_hotkey()  # reads cfg.hotkey under the hotkey lock
         log.info("config reloaded from %s", CONFIG_PATH)
 
     # --- settings changed from the menu (main thread; saved on a worker thread)
@@ -1114,6 +1137,17 @@ class Controller:
                     "RecAndCC has no microphone access — grant it in the Permissions menu.",
                 )
 
+    def set_sensitivity(self, preset: str) -> None:
+        """Sensitivity menu: apply a preset from ``sensitivity.PRESETS`` in memory (the engine
+        and the room monitor read it on their next tick) and save only these two keys."""
+        apply_preset(self.cfg.detection, preset)
+        self.save_settings(
+            "detection.outside_sensitivity", "detection.inside_sensitivity", title="Sensitivity"
+        )
+
+    def sensitivity_preset(self) -> str | None:
+        return current_preset(self.cfg.detection)
+
     def toggle_recording(self) -> None:
         if self.engine.state.status == RECORDING:
             self.engine.stop()
@@ -1127,11 +1161,18 @@ class Controller:
             self._shut = True
         log.info("shutting down")
         close_settings()
-        with self._hotkey_lock:
-            hk, self._hotkey = self._hotkey, None
-        if hk is not None:
-            with contextlib.suppress(Exception):
-                hk.close()
+        # Wait for an apply_hotkey in progress (a listener it is creating would leak), then
+        # close what is registered; later applies see _shut and register nothing.
+        got = self._apply_hotkey_lock.acquire(timeout=5)
+        try:
+            with self._hotkey_lock:
+                hk, self._hotkey = self._hotkey, None
+            if hk is not None:
+                with contextlib.suppress(Exception):
+                    hk.close()
+        finally:
+            if got:
+                self._apply_hotkey_lock.release()
         self.engine.shutdown()
         try:
             self.tq.shutdown(wait=False)
@@ -1164,6 +1205,8 @@ class _LiveAwareQueue:
 
 
 ROOM_ITEM = "Listen for conversations in the room"
+SENSITIVITY_ITEM = "Sensitivity"
+SENSITIVITY_HINT = "Room only (apps stay at 50); all but Off gate out noise"
 ROOM_LISTENING_NOTICE = (
     "While idle, the microphone stays on (orange dot) to notice conversations near the "
     "laptop, also while the screen is locked, which costs some battery; nothing leaves the "
@@ -1191,6 +1234,9 @@ PROMPT_BUTTONS = (("Discard", "ignore"), ("Always", "always"), ("Keep", "record"
 __all__ = [
     "PROMPT_BUTTONS",
     "ROOM_ITEM",
+    "SENSITIVITY_HINT",
+    "SENSITIVITY_ITEM",
+    "SENSITIVITY_PRESETS",
     "ROOM_LISTENING_NOTICE",
     "keep_prompt_text",
     "Controller",
