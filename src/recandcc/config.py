@@ -202,18 +202,24 @@ SUMMARY_MODEL_SWITCHED = (
 
 
 def summary_model_on_disk(repo: str) -> bool:
-    """Whether a snapshot of ``repo`` with its weights is in the local Hugging Face cache.
-    Only looks at the disk (never the network), and never raises."""
+    """Whether the snapshot of ``repo`` that would be loaded, with its weights, is in the
+    local Hugging Face cache: the pinned commit's (transcribe/revisions.py), or any snapshot
+    for an unpinned repo. Only looks at the disk (never the network), and never raises."""
     cache = HF_CACHE_DIR
     if cache is None:
         try:
             from huggingface_hub.constants import HF_HUB_CACHE
-        except ImportError:
-            return False
+        except ImportError:  # same fallback as transcribe/gpu.hf_cache_folder
+            HF_HUB_CACHE = "~/.cache/huggingface/hub"
         cache = Path(HF_HUB_CACHE)
+    from .transcribe.revisions import revision  # lazy: only for the 3B migration
+
     snapshots = Path(cache).expanduser() / ("models--" + repo.replace("/", "--")) / "snapshots"
+    rev = revision(repo)
     try:
         # .exists() follows the symlink to the blob, so an interrupted download doesn't count
+        if rev is not None:
+            return (snapshots / rev / "model.safetensors").exists()
         return any((snap / "model.safetensors").exists() for snap in snapshots.iterdir())
     except OSError:
         return False
@@ -450,8 +456,12 @@ def save_settings(updates: dict, path: Path | None = None) -> float:
     )
 
 
-def load_config(path: Path | None = None) -> Config:
-    """Load config, creating a default file on first run. Unknown keys are ignored."""
+def load_config(path: Path | None = None, *, migrate: bool = False) -> Config:
+    """Load config, creating a default file on first run. Unknown keys are ignored.
+
+    ``migrate=True`` (only the app's startup load) also saves one-time setting migrations
+    to the file and flags them for a notice; other loads (CLI commands, config reloads)
+    apply them in memory only, so the app still shows the notice when it next starts."""
     path = CONFIG_PATH if path is None else path
     if not path.exists():
         cfg = Config()
@@ -489,19 +499,20 @@ def load_config(path: Path | None = None) -> Config:
                 code,
             )
     summary = _build(SummaryConfig, data.pop("summary", {}))
-    _migrate_summary_model(summary, path)
+    _migrate_summary_model(summary, path, persist=migrate)
     cfg = _build(Config, data)
     cfg.output_dir = Path(cfg.output_dir).expanduser()
     cfg.detection, cfg.transcription, cfg.summary = det, tr, summary
     return cfg
 
 
-def _migrate_summary_model(summary: SummaryConfig, path: Path) -> None:
+def _migrate_summary_model(summary: SummaryConfig, path: Path, *, persist: bool) -> None:
     """Replace the old default 3B (non-commercial; Config.save wrote it into every
     config.toml) with the current default, unless its licence was accepted. Kept when the 3B
     is on disk and the new default isn't, so an offline user's summaries keep working. The
-    switch is written to config.toml (that key only) and flagged with
-    ``summary._switched_from`` for a one-time notice (ui.common.Controller)."""
+    switch applies in memory; with ``persist`` (the app's startup load) it is also written
+    to config.toml (that key only) and flagged with ``summary._switched_from`` for a
+    one-time notice (ui.common.Controller)."""
     if summary.model != QWEN_RESEARCH_SUMMARY_MODEL or summary.accept_qwen_research_licence:
         return
     if summary_model_on_disk(QWEN_RESEARCH_SUMMARY_MODEL) and not summary_model_on_disk(
@@ -521,6 +532,8 @@ def _migrate_summary_model(summary: SummaryConfig, path: Path) -> None:
         DEFAULT_SUMMARY_MODEL,
     )
     summary.model = DEFAULT_SUMMARY_MODEL
+    if not persist:
+        return
     summary._switched_from = QWEN_RESEARCH_SUMMARY_MODEL  # type: ignore[attr-defined]
     try:
         save_keys(path, {"summary.model": DEFAULT_SUMMARY_MODEL})

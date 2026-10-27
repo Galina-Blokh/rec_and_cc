@@ -58,7 +58,7 @@ def cmd_run(args) -> int:
         log.error("RecAndCC is already running (lock %s)", lock.path)
         print("RecAndCC is already running.", file=sys.stderr)
         return 1
-    cfg = load_config()
+    cfg = load_config(migrate=True)  # saves one-time migrations; the Controller notices them
     log.info(
         "starting RecAndCC (mode=%s, output=%s, pid=%d)",
         cfg.detection.mode,
