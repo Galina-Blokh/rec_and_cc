@@ -362,7 +362,9 @@ its transcript, so that I know what was decided and who does what without reread
   (re)written, also with `summary.enabled = false`.
 - **Then** logs never contain transcript or summary text.
 - **Given** a 1-hour en/ru meeting on an M-series Mac, **then** the summary is ready within
-  ~1–2 min, offline.
+  ~1–2 min, offline. Checked by the slow `test_summary_timing.py` (hard bound 120 s, a
+  synthetic ~9,000-word en/ru transcript, model from the local cache; interim result in
+  `docs/EVALUATION.md`).
 - **Not yet:** Windows/CPU backend (llama.cpp), a quality evaluation on real meetings (#4).
 
 ### US-22 Room listening (opt-in)
