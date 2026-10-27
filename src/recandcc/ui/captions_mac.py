@@ -115,6 +115,7 @@ class CaptionsPanel:
         self._started: float | None = None  # monotonic, for the clock
         self._ended: float | None = None  # monotonic, for auto-hide
         self._user_closed = False
+        self._display = True  # display flag of the latest show(); reused by implicit starts
         self._programmatic_close = False
         # PyObjC objects (untyped), created by _ensure_panel()
         self._panel: Any = None
@@ -142,6 +143,7 @@ class CaptionsPanel:
         self._started = time.monotonic()
         self._ended = None
         self._user_closed = False
+        self._display = display
         if not display:
             self.hide()
             return
@@ -162,7 +164,7 @@ class CaptionsPanel:
 
     def append(self, segments: Iterable[Segment]) -> None:
         if self._started is None:  # segments without live_start: start implicitly
-            self.show(self.title)
+            self.show(self.title, display=self._display)
         if self.buffer.add(segments) and self._panel is not None:
             self._render_text()
 
@@ -184,13 +186,14 @@ class CaptionsPanel:
     def tick(self, elapsed: float | None = None) -> None:
         """Main-thread timer hook: refresh the clock; auto-hide a finished session.
         ``elapsed`` overrides the panel's own clock (e.g. the engine's recording time)."""
-        if self._panel is None or self._started is None:
+        if self._started is None:
             return
         if should_auto_hide(self._ended, time.monotonic()):
             self.hide()
             self._started = self._ended = None
             return
-        self._render_header(elapsed=elapsed)
+        if self._panel is not None:  # captions off / never shown: nothing to refresh
+            self._render_header(elapsed=elapsed)
 
     def header(self, elapsed: float | None = None) -> str:
         if elapsed is None and self._started is not None:
@@ -281,6 +284,8 @@ class CaptionsPanel:
         return NSMakeRect(*default_frame(visible))
 
     def _render_header(self, elapsed: float | None = None, force: bool = False) -> None:
+        if self._panel is None:  # captions off, never shown, or torn down
+            return
         text = self.header(elapsed)
         if force or text != self._last_header:
             self._last_header = text
