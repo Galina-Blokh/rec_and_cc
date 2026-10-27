@@ -244,7 +244,8 @@ I don't have to work out who `Speaker 2` was every time.*
 - **Given** a `Speaker N` who introduces themself in their first 2 minutes ("I'm Anna",
   "Меня зовут Анна", "קוראים לי דנה"), **when** I run `recandcc speakers <session>`,
   **then** it shows `suggested: Anna (said: …)` next to that label (at most one per label,
-  never for `Me`; "I'm sure" or "Я думаю" are not names), with `speaker_names` on or off, and
+  never for `Me`; "I'm sure", "Я думаю", "This is Paris." or "אני מדבר" are not names), with
+  `speaker_names` on or off, and
   nothing is renamed, stored or logged until I run `name-speaker`.
 - **Not yet:** naming from the menu with a voice sample, names from the call app, overlap
   handling and an accuracy measurement on real speech (#1, #13).

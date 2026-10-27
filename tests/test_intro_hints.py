@@ -31,10 +31,15 @@ def seg(start, speaker, text, language="en"):
         ("Hi everyone, this is Carl speaking.", "Carl"),
         ("Меня зовут Анна.", "Анна"),
         ("Привет, я Анна, из отдела продаж.", "Анна"),
-        ("Это Борис.", "Борис"),
+        ("Привет, это Борис.", "Борис"),
+        ("Это Борис из бухгалтерии.", "Борис"),
+        ("Hello. This is Anna speaking.", "Anna"),
+        ("Hi all, I'm Dr. Smith.", "Dr. Smith"),
+        ("I'm Prof Lee from the lab", "Prof. Lee"),
         ("קוראים לי דנה", "דנה"),
-        ("שלום, אני יוסי.", "יוסי"),
+        ("שלום, קוראים לי יוסי.", "יוסי"),
         ("שמי מיכל ואני מהצוות", "מיכל"),
+        ("השם שלי רון", "רון"),
     ],
 )
 def test_introductions_in_three_languages(text, name):
@@ -55,9 +60,16 @@ def test_introductions_in_three_languages(text, name):
         "Я Иду домой.",
         "Это хорошо.",
         "Это Понял?",
+        "I'm Late.",
+        "Sorry, I'm Busy.",
+        "I'm Dr.",
+        "This is Paris.",  # a place as often as a person
+        "Так, это Москва.",
+        "Это Анна.",
         "אני חושב שכן.",
         "שלום, אני חושב שכן.",
-        "אני דנה.",  # "אני" without a greeting: too often an adjective or verb follows
+        "שלום, אני מדבר.",  # "אני" + a verb or adjective, far more often than a name
+        "שלום, אני דנה.",
         "",
     ],
 )
@@ -73,12 +85,15 @@ def test_one_hint_per_label_only_in_its_first_minutes_and_never_me():
         seg(9, "Speaker 1", "My name is Olga."),  # a second intro: the first one wins
         seg(300, "Speaker 2", "Hello."),
         seg(430, "Speaker 2", "My name is Bob."),  # 130 s after Speaker 2 first spoke
-        seg(20, "Speaker 3", "Это Анна."),  # hints are per label
+        seg(20, "Speaker 3", "Привет, это Анна."),  # hints are per label
         seg(30, "Carl", "I'm Carl."),  # already named
         seg(40, "Others", "I'm Dora."),  # not diarized
     ]
     hints = intro_hints(segments)
-    assert hints == {"Speaker 1": Hint("Anna", "I'm Anna."), "Speaker 3": Hint("Анна", "Это Анна.")}
+    assert hints == {
+        "Speaker 1": Hint("Anna", "I'm Anna."),
+        "Speaker 3": Hint("Анна", "Привет, это Анна."),
+    }
     assert intro_hints(segments, window=200)["Speaker 2"].name == "Bob"
 
 
