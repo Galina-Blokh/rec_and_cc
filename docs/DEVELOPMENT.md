@@ -96,9 +96,9 @@ scripts/review_lanes.sh /tmp/pr.diff security                # one lane
 ## Testing
 
 ```bash
-uv run pytest                    # fast suite (~11 s): no models, no network
-uv run pytest -m slow            # + real Whisper integration test (en/ru speech made with `say`)
-RECANDCC_TEST_MODEL=large-v3-turbo uv run pytest -m slow   # same with the production model
+uv run pytest                    # fast suite (~11 s): no models, no network; coverage floor (see below)
+uv run pytest -m slow --no-cov   # + real Whisper integration test (en/ru speech made with `say`)
+RECANDCC_TEST_MODEL=large-v3-turbo uv run pytest -m slow --no-cov   # same with the production model
 uv run ruff check . && uv run ruff format --check src tests
 ```
 
@@ -110,6 +110,13 @@ uv run ruff check . && uv run ruff format --check src tests
   audio with `afplay`/`say` and checks that it is detected and captured.
 
 CI (`.github/workflows/ci.yml`) runs lint on Linux and the fast suite on macOS and Windows.
+
+**Coverage.** Every `pytest` run measures coverage (`pytest-cov`, configured in
+`pyproject.toml`) and fails below the floor (`[tool.coverage.report] fail_under`, 70%). The
+AppKit/pystray shells (`ui/mac.py`, `ui/tray.py`, `ui/captions_mac.py`, `ui/toast_mac.py`) and
+`cli.py` are not counted; keep their logic in `ui/common.py` / `ui/captions.py` so it's
+testable. Raise the floor when you add tests; never lower it to get a PR green. Use `--no-cov`
+for a subset run (`-m slow`, a single file), which would otherwise miss the floor.
 It uses `--locked`, so commit `uv.lock` with every dependency change (`uv add` / `uv lock`);
 Dependabot (`.github/dependabot.yml`) proposes weekly updates.
 

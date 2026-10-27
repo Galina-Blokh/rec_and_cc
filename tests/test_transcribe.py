@@ -7,6 +7,7 @@ import threading
 from datetime import datetime, timedelta
 
 import numpy as np
+import pytest
 import soundfile as sf
 
 from recandcc.config import TranscriptionConfig
@@ -302,3 +303,55 @@ def test_queue_order_and_errors(tmp_path):
     assert [d[0] for d in done] == ["a", "bad", "b"]
     assert isinstance(done[1][1], ValueError)
     assert q.pending() == 0
+
+
+def test_queue_finalize_replaces_transcription_and_falls_back_on_failure(tmp_path):
+    stub, done = StubTranscriber(), []
+    q = TranscriptionQueue(stub, on_done=lambda s, r: done.append((s.id, r)))
+    q.submit(_s("live", tmp_path), finalize=lambda: [seg(0, 1, "from live")])
+
+    def broken():
+        raise RuntimeError("live failed")
+
+    q.submit(_s("fallback", tmp_path), finalize=broken)
+    q.shutdown(wait=True)
+    assert stub.order == ["fallback"]  # only the failed live session was transcribed
+    assert done[0][1][0].text == "from live"
+    assert done[1][1][0].text == "fallback"
+
+
+def test_queue_survives_a_failing_callback_and_rejects_work_after_shutdown(tmp_path):
+    stub, calls = StubTranscriber(), []
+
+    def on_done(s, r):
+        calls.append(s.id)
+        raise RuntimeError("UI gone")
+
+    q = TranscriptionQueue(stub, on_done=on_done)
+    q.submit(_s("a", tmp_path))
+    q.submit(_s("b", tmp_path))
+    q.shutdown(wait=True)
+    assert calls == ["a", "b"]
+    with pytest.raises(RuntimeError):
+        q.submit(_s("c", tmp_path))
+
+
+def test_queue_shutdown_without_wait_drops_sessions_not_started(tmp_path):
+    started, release = threading.Event(), threading.Event()
+
+    class Slow(StubTranscriber):
+        def transcribe_session(self, session, progress=None):
+            started.set()
+            release.wait(5)
+            return super().transcribe_session(session, progress)
+
+    stub = Slow()
+    q = TranscriptionQueue(stub)
+    for sid in ["a", "b", "c"]:
+        q.submit(_s(sid, tmp_path))
+    assert started.wait(5)
+    q.shutdown(wait=False)
+    assert q.pending() == 1  # only the session in progress is left
+    release.set()
+    q._thread.join(5)
+    assert stub.order == ["a"] and q.pending() == 0
