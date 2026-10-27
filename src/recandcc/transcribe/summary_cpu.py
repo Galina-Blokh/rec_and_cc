@@ -36,14 +36,7 @@ from typing import Any
 import platformdirs
 
 from ..config import APP_NAME
-from . import summary as _summary
-from .summary import Messages, SummaryUnavailable
-
-# A model that can't be downloaded or loaded (summary.ModelUnavailable, so a routed model
-# falls back to summary.model; plain SummaryUnavailable before that routing exists).
-ModelUnavailable: type[SummaryUnavailable] = getattr(
-    _summary, "ModelUnavailable", SummaryUnavailable
-)
+from .summary import Messages, ModelUnavailable, SummaryUnavailable
 
 log = logging.getLogger("recandcc.transcribe")
 

@@ -13,6 +13,9 @@ All notable changes to RecAndCC are documented here. The format is based on
   through onnxruntime-genai, as a pinned, checksum-verified int4 ONNX build downloaded once;
   Apple silicon keeps MLX (#4).
 - RecAndCC is licensed under the Apache License 2.0 (`LICENSE`, `NOTICE`); completes #17.
+- Per-language summary models (`summary.language_models`, default `{}`): e.g. Hebrew
+  meetings summarised by the pinned, Apache-2.0 `mlx-community/Qwen3.5-4B-MLX-4bit`
+  (thinking off), with a fallback to `summary.model` if it can't load (#6, #4).
 
 ### Fixed
 - A hung network-volume probe no longer blocks the warning for other folders (one probe per
@@ -91,6 +94,8 @@ All notable changes to RecAndCC are documented here. The format is based on
   (#36, #54, #55).
 
 ### Fixed
+- PDF export no longer silently drops characters its font lacks: bidi controls are stripped
+  and emoji or other uncovered glyphs become a visible placeholder (part of #4).
 - A summary stays at the top of DOCX/PDF exports after a speaker rename or call-app names:
   freshness follows the transcript text (`.summary-source` fingerprint), not its mtime (audit
   by rec-and-cc-7e). The CLI `recandcc name-speaker` still marks the summary pending so the app

@@ -8,11 +8,13 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import shutil
 import sqlite3
 import stat
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -327,3 +329,191 @@ def test_osascript_takes_the_script_on_stdin_not_argv(monkeypatch):
     assert common.osascript('choose from list {"the [budget] secret"}') == "ok"
     [(argv, stdin)] = calls
     assert "secret" not in " ".join(argv) and "secret" in stdin
+
+
+# ------------------------------------------------------------------ robustness (#151)
+def _corrupt(path: Path, how: str) -> None:
+    if how == "garbage":
+        path.write_bytes(b"this is not an sqlite file\x00" * 200)
+    else:  # truncated mid-file: the header still promises the lost pages
+        with path.open("r+b") as f:
+            f.truncate(path.stat().st_size // 2)
+
+
+@pytest.mark.parametrize("how", ["garbage", "truncated"])
+@pytest.mark.parametrize("fts", BACKENDS)
+def test_corrupt_index_file_is_rebuilt_by_the_next_sync(tmp_path, out, fts, how, caplog):
+    make_session(out, 1, [seg(0, "the quarterly budget")])
+    for n in range(2, 12):  # enough pages that a half-truncated file is missing some
+        make_session(out, n, [seg(float(i), f"filler line {n} {i} " * 8) for i in range(30)])
+    idx = index(tmp_path, fts)
+    idx.sync(out)
+    for side in (b"-wal", b"-shm", b"-journal"):
+        Path(os.fsdecode(bytes(idx.path) + side)).write_bytes(b"stale")
+    _corrupt(idx.path, how)
+    caplog.set_level(logging.DEBUG)
+    fresh = TranscriptIndex(idx.path, fts=fts)  # a new process (the CLI) ...
+    assert fresh.sync(out) == 11
+    assert [h.start for h in fresh.search("budget")] == [0.0]
+    assert not Path(str(idx.path) + "-wal").exists()
+    assert not Path(str(idx.path) + "-shm").exists()
+    assert not Path(str(idx.path) + "-journal").exists()
+    _corrupt(idx.path, how)  # ... and an index already in use (the app)
+    assert idx.sync(out) == 11
+    assert [h.start for h in idx.search("budget")] == [0.0]
+    assert stat.S_IMODE(idx.path.stat().st_mode) == 0o600 or sys.platform == "win32"
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings and all(str(tmp_path) not in r.getMessage() for r in warnings)
+    assert all("budget" not in r.getMessage() for r in caplog.records)
+
+
+def test_search_on_a_corrupt_index_rebuilds_it_instead_of_failing(tmp_path, out):
+    make_session(out, 1, [seg(0, "the quarterly budget")])
+    idx = index(tmp_path, True)
+    idx.sync(out)
+    _corrupt(idx.path, "garbage")
+    assert idx.search("budget") == []  # empty until the next sync, not an error
+    idx.sync(out)
+    assert len(idx.search("budget")) == 1
+
+
+@pytest.mark.parametrize("old_sqlite", [False, True])
+def test_damaged_fts5_index_is_rebuilt(tmp_path, out, monkeypatch, old_sqlite):
+    """Damage inside the FTS5 shadow tables (SQLITE_CORRUPT_VTAB) is a corrupt index too,
+    also where quick_check (an older SQLite) doesn't see it."""
+    make_session(out, 1, [seg(float(i), f"the quarterly budget {i}") for i in range(50)])
+    idx = index(tmp_path, True)
+    idx.sync(out)
+    with closing(sqlite3.connect(idx.path)) as db:
+        db.execute("UPDATE seg_fts_data SET block = substr(block, 1, 20) WHERE id > 10")
+        db.commit()
+    if old_sqlite:
+        monkeypatch.setattr(search, "_quick_ok", lambda db: True)
+    assert idx.search("budget") == []  # rebuilt, not an error
+    assert idx.sync(out) == 1
+    assert len(idx.search("budget")) == 20
+
+
+def test_recovery_never_deletes_a_healthy_index(tmp_path, out):
+    """Two processes racing the recovery: the slower one finds the file already rebuilt (it
+    opens and checks fine now) and must not delete it."""
+    make_session(out, 1, [seg(0, "the quarterly budget")])
+    idx = index(tmp_path, True)
+    idx.sync(out)
+    before = idx.path.stat().st_ino
+    assert idx._recover() is False
+    assert idx.path.stat().st_ino == before and len(idx.search("budget")) == 1
+
+
+def test_locked_index_is_not_mistaken_for_a_corrupt_one(tmp_path, out, monkeypatch):
+    make_session(out, 1, [seg(0, "the quarterly budget")])
+    idx = index(tmp_path, True)
+    idx.sync(out)
+
+    def locked(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(idx, "_open", locked)
+    with pytest.raises(sqlite3.OperationalError):
+        idx.search("budget")
+    assert idx.path.exists() and idx.path.stat().st_size > 0
+
+
+@pytest.mark.parametrize("how", ["recovered", "deleted", "emptied"])
+def test_index_survives_another_process_resetting_the_file(tmp_path, out, how):
+    """The app's index keeps working after the CLI recovered (deleted) the file, after the
+    user deleted it by hand, or when a racing connect left an empty file without tables."""
+    a = make_session(out, 1, [seg(0, "the quarterly budget")])
+    app = index(tmp_path, True)
+    app.sync(out)
+    assert len(app.search("budget")) == 1
+    if how == "recovered":
+        _corrupt(app.path, "garbage")
+        assert TranscriptIndex(app.path, fts=True)._recover()  # the CLI deletes it, exits
+    else:
+        app.path.unlink()
+        if how == "emptied":
+            sqlite3.connect(app.path).close()  # an empty database, 0644, no tables
+    assert app.search("budget") == []  # empty until the next sync, not an error
+    assert stat.S_IMODE(app.path.stat().st_mode) == 0o600 or sys.platform == "win32"
+    assert app.sync(out) == 1
+    assert [h.folder for h in app.search("budget")] == [a]
+    app.index_session(a)
+    assert [h.folder for h in app.search("budget")] == [a]
+
+
+def test_search_returns_nothing_while_a_corrupt_file_cant_be_reset(tmp_path, out, monkeypatch):
+    """Windows: an open reader keeps the file from being deleted; the search is empty and the
+    next one tries again."""
+    make_session(out, 1, [seg(0, "the quarterly budget")])
+    idx = index(tmp_path, True)
+    idx.sync(out)
+    _corrupt(idx.path, "garbage")
+    real_unlink = Path.unlink
+
+    def in_use(self, *a, **k):
+        if self == idx.path:
+            raise PermissionError(13, "in use")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", in_use)
+    assert idx.search("budget") == []
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    assert idx.search("budget") == []  # reset now
+    idx.sync(out)
+    assert len(idx.search("budget")) == 1
+
+
+def test_deleted_output_folder_drops_its_sessions(tmp_path, out):
+    """``rm -rf`` of the transcripts folder (its parent still there) is a deletion: no text
+    of it stays searchable."""
+    make_session(out, 1, [seg(0, "the quarterly budget")])
+    idx = index(tmp_path, True)
+    assert idx.sync(out) == 1
+    shutil.rmtree(out)
+    assert idx.sync(out) == 0
+    assert idx.search("budget") == []
+
+
+@pytest.mark.parametrize("gone", ["volume", "file"])
+def test_unreachable_output_dir_keeps_the_index(tmp_path, gone):
+    vol = tmp_path / "Volumes" / "Drive"
+    out = vol / "out" if gone == "volume" else tmp_path / "out"
+    a = make_session(out, 1, [seg(0, "the quarterly budget")])
+    make_session(out, 2, [seg(0, "the travel plan")])
+    idx = index(tmp_path, True)
+    assert idx.sync(out) == 2
+    moved = vol if gone == "volume" else out
+    away = tmp_path / "unmounted"
+    moved.rename(away)  # an unmounted drive (its folder gone too) or an offline share
+    if gone == "file":
+        out.write_text("")  # not a directory
+    assert idx.sync(out) == 0
+    assert [h.folder for h in idx.search("budget")] == [a]
+    if gone == "file":
+        out.unlink()
+    away.rename(moved)  # back online: nothing to re-read
+    assert idx.sync(out) == 0
+    assert [h.folder for h in idx.search("budget")] == [a]
+
+
+@pytest.mark.parametrize("stub", ["missing", "empty"])
+def test_unmounted_mount_point_keeps_the_index(tmp_path, out, monkeypatch, stub):
+    """``output_dir`` is itself a mount point: unmounted, it is gone (its parent stays) or an
+    empty stub folder (autofs) on another device than the one indexed."""
+    a = make_session(out, 1, [seg(0, "the quarterly budget")])
+    real_dev = search._dev
+    mounted = {"on": True}
+
+    def dev(p):
+        return 4242 if Path(p) == out and mounted["on"] else real_dev(p)
+
+    monkeypatch.setattr(search, "_dev", dev)
+    idx = index(tmp_path, True)
+    assert idx.sync(out) == 1
+    mounted["on"] = False
+    shutil.rmtree(out)
+    if stub == "empty":
+        out.mkdir()
+    assert idx.sync(out) == 0
+    assert [h.folder for h in idx.search("budget")] == [a]
