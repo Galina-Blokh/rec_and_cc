@@ -116,3 +116,20 @@ def test_support_probe_reads_the_helpers_usage(tmp_path):
         helper.write_text(f"#!/bin/sh\necho '{usage}'\n", encoding="utf-8")
         helper.chmod(0o755)
         assert system_mac._supports_targets(helper, 0.0) is (name == "new")
+
+
+def test_a_failed_support_probe_is_not_remembered(tmp_path, monkeypatch):
+    helper = tmp_path / "helper"
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        if len(calls) == 1:
+            raise system_mac.subprocess.TimeoutExpired(argv, 5)
+        return type("R", (), {"stdout": "capture [--pid PID ...] [--match TEXT ...]"})()
+
+    monkeypatch.setattr(system_mac.subprocess, "run", run)
+    assert system_mac._supports_targets(helper, 1.0) is False  # busy machine: no answer
+    assert system_mac._supports_targets(helper, 1.0) is True  # asked again, now remembered
+    assert system_mac._supports_targets(helper, 1.0) is True
+    assert len(calls) == 2

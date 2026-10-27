@@ -22,6 +22,8 @@ jobs:
       - run: uv run --locked --only-dev ruff check .
       - run: uv run --locked --only-dev ruff format --check src tests
       # Type checking (#16). Not --only-dev: pyright resolves imports against the project deps.
+      # The pip wrapper fetches the pyright npm package on first run (outside uv.lock hashes);
+      # dev/CI only, never at app runtime.
       - run: uv run --locked pyright
 
   test:

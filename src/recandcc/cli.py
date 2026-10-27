@@ -179,6 +179,23 @@ def cmd_transcribe(args) -> int:
     return 0
 
 
+def cmd_summarize(args) -> int:
+    setup_logging(to_file=False)
+    from .transcribe.summary import SummaryUnavailable, summarize_session
+
+    try:
+        path = summarize_session(Path(args.session_dir).expanduser(), load_config())
+    except SummaryUnavailable as e:
+        print(f"No summary: {e}.", file=sys.stderr)
+        return 1
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as e:
+        # the type only: the message could quote the transcript
+        print(f"Can't summarize the session: {type(e).__name__}", file=sys.stderr)
+        return 1
+    print(path)
+    return 0
+
+
 # ---------------------------------------------------------------------- monitor
 def cmd_monitor(args) -> int:
     setup_logging(to_file=False, level=logging.WARNING)
@@ -295,18 +312,24 @@ def cmd_config(args) -> int:
 def cmd_speakers(args) -> int:
     from .models import SessionInfo
     from .transcribe import voices
+    from .transcribe.intro_hints import transcript_hints
 
     directory = Path(args.session_dir).expanduser()
     try:
         speakers = voices.session_speakers(directory)
         known = voices.read_session_voices(SessionInfo.load(directory).id)
-    except (OSError, ValueError) as e:
+        hints = transcript_hints(directory)  # reads the transcript only; stores nothing
+    except (OSError, ValueError, KeyError, TypeError) as e:
         print(f"Can't read the transcript: {e}", file=sys.stderr)
         return 1
     for label, lines in speakers:
         print(f"{label}{'' if label in known else '  (no voice data)'}")
+        if hint := hints.get(label):
+            print(f"    suggested: {hint.name} (said: {hint.line[:80]})")
         for line in lines:
             print(f"    {line[:100]}")
+    if hints:
+        print("Suggestions are only hints: nothing is renamed until you run `name-speaker`.")
     if not speakers:
         print("No other speakers in this transcript.")
     return 0
@@ -386,6 +409,10 @@ def build_parser() -> argparse.ArgumentParser:
     t = sub.add_parser("transcribe", help="transcribe a recorded session directory")
     t.add_argument("session_dir")
     t.set_defaults(func=cmd_transcribe)
+
+    u = sub.add_parser("summarize", help="write summary.md (local LLM) for a transcribed session")
+    u.add_argument("session_dir")
+    u.set_defaults(func=cmd_summarize)
 
     m = sub.add_parser("monitor", help="print live audio activity + how rules classify it")
     m.add_argument("--interval", type=float, default=1.0)
