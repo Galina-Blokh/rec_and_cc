@@ -29,16 +29,16 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-18 | Runs on Windows | 🟡 untested on Windows hardware (none available; #5 not planned) |
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 no Hebrew test set, ivrit.ai routing not evaluated (#6) |
 | US-20 | Search my transcripts | ✅ search (summaries and export: see US-27, US-25) |
-| US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
-| US-31 | Speaker names from the call app's participant list | 🟡 claimed (#1 A.3): opt-in, macOS, one-to-one only |
+| US-21 | Speaker names remembered across sessions | 🟡 CLI only (#62); self-intro hints (#81) and overlap segmentation (#96) shipped; menu naming not yet (#1) |
+| US-31 | Speaker names from the call app's participant list | 🟡 shipped (#80, #1 A.3): opt-in, macOS, one-to-one only |
 | US-25 | Export a transcript to DOCX and PDF | 🟡 CLI and macOS menu; Windows tray, templates planned (#4) |
 | US-27 | Meeting summaries and action items | 🟡 opt-in, Apple silicon only; no quality evaluation yet (#4) |
 | US-22 | Room listening (opt-in) | 🟡 locked screen, CPU and battery not measured (#2) |
 | US-23 | Sensitivity: room vs system audio | 🟡 presets and keys shipped (#7, #102); live level meters not yet |
 | US-28 | Browse past meetings | 🟡 Windows window untested on Windows hardware (none available) |
 | US-29 | Right-to-left text readable in the Windows captions | 🟡 unit-tested, no hardware check (#6) |
-| US-30 | Change common settings in a window | 🟡 claimed (#3): macOS spike, not on Windows |
-| US-34 | Warn when recordings go to a network volume | 🟡 claimed (#3): detection is fake-tested, no real share or Windows drive checked |
+| US-30 | Change common settings in a window | 🟡 macOS settings window shipped (#86), not on Windows |
+| US-34 | Warn when recordings go to a network volume | 🟡 shipped (#110): detection is fake-tested, no real share or Windows drive checked |
 
 ---
 
@@ -275,8 +275,9 @@ I don't have to work out who `Speaker 2` was every time.*
   never for `Me`; "I'm sure", "Я думаю", "This is Paris." or "אני מדבר" are not names), with
   `speaker_names` on or off, and
   nothing is renamed, stored or logged until I run `name-speaker`.
-- **Not yet:** naming from the menu with a voice sample, names from the call app, overlap
-  handling and an accuracy measurement on real speech (#1, #13).
+- **Not yet:** naming from the menu with a voice sample, and an accuracy measurement on real
+  speech and overlapping speech (#1, #13). Shipped since: overlap-aware segmentation (#96,
+  opt-in until measured on real meetings); names from the call app are under US-31 (#80).
 
 ### US-31 Speaker names from the call app's participant list
 *As the owner, I want `Speaker 2` named after the person shown in Zoom/Teams/Meet, so that I
@@ -300,7 +301,8 @@ don't have to name them myself, without the app ever asking for more permission 
 - **Then** names appear nowhere in logs at INFO or above and nowhere outside the owner-only
   voices store (and a transcript they were used in).
 - **Not yet:** matching several speakers to several names (needs active-speaker highlighting),
-  self-introductions (A.4), tested layouts for each app version (see ARCHITECTURE).
+  tested layouts for each app version (see ARCHITECTURE). Shipped: the participant-list names
+  (#80); the self-introduction hints (A.4, #81) are under US-21.
 
 ### US-25 Export a transcript to DOCX and PDF
 *As the owner, I want a transcript as a Word or PDF file, so that I can share or print it.*
