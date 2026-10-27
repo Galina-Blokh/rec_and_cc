@@ -1156,6 +1156,16 @@ def test_a_call_app_ding_does_not_turn_a_room_session_into_a_call():
     assert h.rec.upgrades == ["Slack"] and h.eng.state.kind == TriggerKind.CALL
 
 
+def test_a_muted_call_still_turns_a_room_session_into_a_call():
+    h = _room_harness()
+    _start_room_session(h)
+    h.mon.procs = [AudioProcess(77, "com.tinyspeck.slackmacgap", "Slack", False, True)]
+    h.run(10)  # joined muted: output only, longer than a ding but not yet confirmed
+    assert h.rec.upgrades == []
+    h.run(8)
+    assert h.rec.upgrades == ["Slack"] and h.eng.state.kind == TriggerKind.CALL
+
+
 def test_discarding_a_room_prompt_discards_the_session_after_a_call_upgrade(tmp_path):
     h = _room_harness(Mode.ASK, app_modes={"us.zoom": Mode.AUTO})
     h.run(1)
