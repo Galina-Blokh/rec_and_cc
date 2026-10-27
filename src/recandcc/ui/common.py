@@ -1626,6 +1626,8 @@ class Controller:
             with self._retention_lock:  # serialises menu purges; the check sees the latest
                 if not _is_days(value) or self.cfg.transcription.audio_retention_days != value:
                     return  # a newer click owns the setting now
+                if self._retention_on_disk() != value:
+                    return  # a later save wrote another value; memory may be an unsaved click
                 if n := len({wav.parent for wav in self.purge_audio_now(value) or ()}):
                     # count only: a mis-click is visible, no session names or text
                     what = f"{n} session" + ("s" if n != 1 else "")

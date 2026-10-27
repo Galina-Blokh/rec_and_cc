@@ -1045,6 +1045,24 @@ def test_menu_purge_uses_the_value_written_not_the_click(tmp_path, monkeypatch):
     assert purged == []  # not by 7: disk holds 30 and C's 7 may never be saved
 
 
+def test_menu_purge_skips_when_disk_no_longer_holds_its_value(tmp_path, monkeypatch):
+    ctrl, path = _ctrl(tmp_path, monkeypatch)
+    purged: list = []
+    monkeypatch.setattr(ctrl, "purge_audio_now", lambda days=None: purged.append(days) or [])
+    real = ctrl._write_settings
+
+    def interleaved(*keys, **kw):  # A=7 writes 7, then B=30 writes 30, then C=7 in memory
+        written = real(*keys, **kw)
+        save_keys(path, {"transcription.audio_retention_days": 30})  # B's save
+        ctrl.cfg.transcription.audio_retention_days = 7  # C, its save still pending
+        return written
+
+    monkeypatch.setattr(ctrl, "_write_settings", interleaved)
+    ctrl.set_retention(7)  # A
+    _join("retention-set")
+    assert purged == []  # disk holds 30: A's 7 is no longer the saved choice
+
+
 def test_a_non_number_retention_never_breaks_the_hourly_loop(tmp_path, monkeypatch):
     ctrl, path = _ctrl(tmp_path, monkeypatch)
     purged: list = []
