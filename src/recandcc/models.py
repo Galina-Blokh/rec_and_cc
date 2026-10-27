@@ -205,7 +205,7 @@ def _replace_json(target: Path, text: str) -> None:
     name is unique per process and thread (the app and the CLI may both save)."""
     tmp = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
-        tmp.write_text(text, encoding="utf-8")
+        tmp.write_text(text, encoding="utf-8", errors="replace")
         for attempt in range(_REPLACE_TRIES):
             try:
                 os.replace(tmp, target)
@@ -214,7 +214,7 @@ def _replace_json(target: Path, text: str) -> None:
                 if attempt + 1 < _REPLACE_TRIES:
                     time.sleep(_REPLACE_WAIT_S)
         log.warning("%s stays in use; writing it in place", target)
-        target.write_text(text, encoding="utf-8")
+        target.write_text(text, encoding="utf-8", errors="replace")
     finally:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
