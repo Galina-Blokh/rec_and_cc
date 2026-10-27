@@ -841,14 +841,9 @@ class Controller:
     def set_room_listening(self, on: bool) -> None:
         """Menu toggle: the engine opens or closes the room mic (and stops a room session) on
         its next tick. Turning it on explains the always-on mic indicator and the consent
-        question. Saves in place, like the other toggles, so quick toggles can't race."""
-        with self._save_lock:  # never interleaves with a reload of config.toml
-            self.cfg.detection.room_listening = bool(on)
-            try:
-                self.cfg.save()
-                self._config_mtime = self._mtime()  # our own write: nothing to reload
-            except Exception:
-                log.exception("saving settings failed")
+        question. Saves only this key, like the other toggles (the last toggle wins)."""
+        self.cfg.detection.room_listening = bool(on)
+        self.save_settings("detection.room_listening")
         if on:
             self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
             if self.permissions.get("microphone") == "denied":
