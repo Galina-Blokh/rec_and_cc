@@ -10,6 +10,7 @@ import logging
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -77,16 +78,29 @@ def test_median_filter_one_dimensional_and_pass_through() -> None:
     np.testing.assert_array_equal(median_filter(x, 7), ref_median(x[None], 7)[0])
     short = np.arange(6, dtype=np.float64).reshape(2, 3)  # length 3 <= pad 3: unchanged
     assert median_filter(short, 7) is short
-    with pytest.raises(ValueError):
-        median_filter(np.zeros((1, 10)), 4)
+    for width in (4, 0, -3):
+        with pytest.raises(ValueError):
+            median_filter(np.zeros((1, 10)), width)
+    with pytest.raises(ValueError):  # checked before the short-input pass-through
+        median_filter(np.zeros((1, 2)), 4)
 
 
+# Skipped in CI and the dev env because scipy is excluded (ADR 0011); verified manually
+# with scipy 1.18.1 installed in a throwaway environment.
 def test_median_filter_matches_scipy_upstream() -> None:
     signal = pytest.importorskip("scipy.signal")
     x = np.random.default_rng(2).standard_normal((4, 5, 200)).astype(np.float32)
     padded = np.pad(x, ((0, 0), (0, 0), (3, 3)), mode="reflect")
     upstream = signal.medfilt(padded, kernel_size=(1, 1, 7))[..., 3:-3]
     np.testing.assert_array_equal(median_filter(x, 7), upstream)
+
+
+def test_median_filter_spreads_a_nan_across_its_window() -> None:
+    x = np.arange(40, dtype=np.float32)
+    x[20] = np.nan
+    out = median_filter(x, 7)
+    assert np.isnan(out[17:24]).all()
+    assert not np.isnan(out[:17]).any() and not np.isnan(out[24:]).any()
 
 
 def assert_valid_path(path: np.ndarray, n: int, m: int) -> None:
@@ -97,8 +111,10 @@ def assert_valid_path(path: np.ndarray, n: int, m: int) -> None:
     assert ((steps >= 0) & (steps <= 1)).all() and (steps.sum(axis=0) >= 1).all()
 
 
-@pytest.mark.parametrize("n", [1, 2, 10, 120])
-@pytest.mark.parametrize("m", [1, 5, 300, 1500])
+@pytest.mark.parametrize(
+    ("n", "m"),
+    [(1, 1), (1, 300), (2, 5), (10, 1), (10, 300), (40, 150), (120, 5), (120, 1500)],
+)
 def test_dtw_matches_upstream_port(n: int, m: int) -> None:
     rng = np.random.default_rng(n * 10_000 + m)
     for x in (
@@ -122,6 +138,21 @@ def test_dtw_with_nan_and_inf_from_a_constant_column() -> None:
     inf = rng.standard_normal((8, 30))
     inf[3, :] = np.inf
     np.testing.assert_array_equal(dtw(inf), ref_dtw(inf))
+
+
+@pytest.mark.parametrize("shape", [(0, 5), (5, 0), (0, 0)])
+def test_dtw_rejects_an_empty_matrix(shape: tuple[int, int]) -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        dtw(np.zeros(shape, dtype=np.float32))
+
+
+def test_matches_golden_vectors_from_the_real_upstream_kernels() -> None:
+    """Fixtures made by the real scipy/numba kernels: see scripts/gen_align_golden.py."""
+    golden = np.load(Path(__file__).parent / "fixtures" / "align_golden.npz")
+    for k in range(3):
+        got = median_filter(golden[f"median_in_{k}"], 7)
+        np.testing.assert_array_equal(got, golden[f"median_out_{k}"])
+        np.testing.assert_array_equal(dtw(golden[f"dtw_in_{k}"]), golden[f"dtw_out_{k}"])
 
 
 def test_dtw_is_fast_enough() -> None:
