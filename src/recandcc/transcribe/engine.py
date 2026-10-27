@@ -31,9 +31,16 @@ from ..metrics import log_session_metrics, rounded
 from ..models import SAMPLE_RATE, Segment, SessionInfo, Track, TriggerKind
 from . import callnames, voices
 from .chunking import Chunk, find_speech, load_track, merge_labelled, slice_chunk
-from .diarize import Diarizer, Turn, label_speakers
+from .diarize import Diarizer, Turn, label_speakers, model_path
 from .gpu import MlxWhisper, hf_cache_folder, use_gpu
-from .merge import ME, OTHERS, language_confidence, merge_tracks, smooth_languages
+from .merge import (
+    ME,
+    OTHERS,
+    language_confidence,
+    merge_tracks,
+    smooth_languages,
+    split_on_speaker_change,
+)
 from .output import write_outputs
 from .revisions import (
     UnpinnedModelError,
@@ -414,7 +421,9 @@ class Transcriber:
             chunks.append(Chunk(track, start, end, lang, sum(d * c for d, c in inside) / w))
         return chunks
 
-    def _transcribe_chunk(self, chunk: Chunk, audio: np.ndarray) -> list[Segment]:
+    def _transcribe_chunk(
+        self, chunk: Chunk, audio: np.ndarray, word_tracks: tuple[Track, ...] = ()
+    ) -> list[Segment]:
         piece = slice_chunk(audio, chunk)
         lang = chunk.language
         if lang is None or chunk.confidence < MIN_LANGUAGE_CONFIDENCE:
@@ -427,8 +436,11 @@ class Transcriber:
                 conf,
                 chunk.language,
             )
+        speaker = SPEAKERS[chunk.track]
+        # decided once per session (see _word_tracks), so every chunk of it agrees
+        words = chunk.track in word_tracks
         return self.transcribe_audio(
-            piece, chunk.start, SPEAKERS[chunk.track], lang, max_end=chunk.end
+            piece, chunk.start, speaker, lang, max_end=chunk.end, words=words
         )
 
     # -- building blocks (also used by LiveTranscriber) --------------------------------------
@@ -468,15 +480,17 @@ class Transcriber:
         beam_size: int = 5,
         max_end: float | None = None,
         wait_for_model: bool = True,
+        words: bool = False,
     ) -> list[Segment]:
         """Transcribe one piece of audio (<= 30 s) in a fixed language. Segment times are
         ``offset`` + position in the piece, clipped to ``max_end``. Blocking; call it from a
         pool worker (see ``submit``) to run pieces in parallel. ``language`` picks the model
         (cfg.language_models); ``wait_for_model=False`` uses the main model while that one is
-        still loading (live)."""
+        still loading (live). ``words``: keep word timings in ``Segment.words`` (faster-whisper
+        only; never requested from MLX, whose word timestamps need numba and scipy)."""
         model = self._model_for(language, wait_for_model)
         if isinstance(model, MlxWhisper):
-            pieces = model.transcribe(audio, language)  # GPU thread; greedy + fallback
+            pieces = [(a, b, t, []) for a, b, t in model.transcribe(audio, language)]
         else:
             segments, _ = model.transcribe(
                 audio,
@@ -484,13 +498,15 @@ class Transcriber:
                 vad_filter=False,
                 beam_size=beam_size,
                 condition_on_previous_text=False,
+                word_timestamps=words,
             )
-            pieces = [(s.start, s.end, s.text) for s in segments]
+            pieces = [(s.start, s.end, s.text, getattr(s, "words", None) or []) for s in segments]
         end_cap = max_end if max_end is not None else offset + len(audio) / SAMPLE_RATE
         out = []
-        for start, end, raw in pieces:
+        for start, end, raw, ws in pieces:
             text = raw.strip()
             if text:
+                kept = [w for w in ws if offset + w.start < end_cap]
                 out.append(
                     Segment(
                         start=round(offset + start, 3),
@@ -498,6 +514,16 @@ class Transcriber:
                         text=text,
                         speaker=speaker,
                         language=language,
+                        words=[
+                            (
+                                round(offset + w.start, 3),
+                                round(min(offset + w.end, end_cap), 3),
+                                w.word,
+                            )
+                            for w in kept
+                        ]
+                        if len(kept) == len(ws)
+                        else [],  # words were cut off: the text is whole, so never split it
                     )
                 )
         return out
@@ -514,6 +540,16 @@ class Transcriber:
         """
         with self._run_lock:
             return self._run(session, progress)
+
+    def _word_tracks(self, session: SessionInfo) -> tuple[Track, ...]:
+        """Tracks whose chunks get word timestamps: the diarized ones, only if the split is
+        on and the speaker model is on disk. One model-present check per session, so a model
+        download finishing mid-run cannot make early and later chunks differ."""
+        if not (self.cfg.diarize and self.cfg.split_on_speaker_change):
+            return ()
+        if model_path(download=False) is None:
+            return ()
+        return diarized_tracks(session)
 
     def _run(self, session: SessionInfo, progress: ProgressCallback | None) -> list[Segment]:
         report = progress or (lambda _f: None)
@@ -550,9 +586,11 @@ class Transcriber:
             total = sum(c.duration for c in chunks) or 1.0
             done, lock = 0.0, threading.Lock()
 
+            word_tracks = self._word_tracks(session)  # once: not per chunk
+
             def work(c: Chunk) -> list[Segment]:
                 nonlocal done
-                res = self._transcribe_chunk(c, audio[c.track])
+                res = self._transcribe_chunk(c, audio[c.track], word_tracks)
                 with lock:
                     done += c.duration
                     report(min(done / total, 0.999))
@@ -754,6 +792,9 @@ class Transcriber:
             # track's cluster instead (and its stored voice can't overwrite the first one).
             folded = {t.casefold() for t in taken}
             names = {k: n for k, n in names.items() if n.casefold() not in folded}
+            if track_turns and self.cfg.split_on_speaker_change:
+                # this track's segments still carry "Me"/"Others": split them at speaker changes
+                out = split_on_speaker_change(out, track_turns, SPEAKERS[track])
             out, labels = label_speakers(
                 out, track_turns or [], SPEAKERS[track], names=names, reserved=taken
             )
