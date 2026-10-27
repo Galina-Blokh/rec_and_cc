@@ -27,8 +27,9 @@ import numpy as np
 from ..config import TranscriptionConfig
 from ..metrics import log_session_metrics, rounded
 from ..models import SAMPLE_RATE, Segment, SessionInfo, Track
+from . import voices
 from .chunking import Chunk, find_speech, load_track, merge_labelled, slice_chunk
-from .diarize import Diarizer, Turn, assign_speakers
+from .diarize import Diarizer, Turn, label_speakers
 from .gpu import MlxWhisper, hf_cache_folder, use_gpu
 from .merge import ME, OTHERS, language_confidence, merge_tracks, smooth_languages
 from .output import write_outputs
@@ -494,16 +495,32 @@ class Transcriber:
             for name in session.tracks.values():
                 (Path(session.directory) / name).unlink(missing_ok=True)
 
-    @staticmethod
     def _labelled(
-        session: SessionInfo, segments: list[Segment], turns: list[Turn] | None
+        self, session: SessionInfo, segments: list[Segment], turns: list[Turn] | None
     ) -> list[Segment]:
+        centroids = getattr(turns, "centroids", {}) if turns and self.cfg.speaker_names else {}
+        names: dict[int, str] = {}
+        if centroids:
+            try:
+                names = voices.match_profiles(centroids, voices.load_profiles())
+            except Exception:  # noqa: BLE001 - names are optional; numbers still work
+                log.exception("session %s: could not match voice profiles", session.id)
+        out, labels = label_speakers(segments, turns or [], names=names)
+        try:  # opt-in only, in the private voices folder: lets `name-speaker` name them later
+            if centroids and labels and Path(session.directory).exists():
+                speakers = {lbl: centroids[k] for k, lbl in labels.items() if k in centroids}
+                voices.write_session_voices(session.id, speakers)
+            else:  # never leave voices of an older transcript of this session behind
+                voices.delete_session_voices(session.id)
+        except OSError:
+            log.exception("session %s: could not update speaker voices", session.id)
         if not turns:
             return segments
-        out = assign_speakers(segments, turns)
-        speakers = sorted({s.speaker for s in out} - {ME, OTHERS})
-        log.info(
-            "session %s: %s", session.id, ", ".join(speakers) if speakers else "one other speaker"
+        log.info(  # counts only: names are personal data
+            "session %s: %d other speaker(s), %d recognized by voice",
+            session.id,
+            len(labels),
+            len(names.keys() & labels.keys()),
         )
         return out
 
