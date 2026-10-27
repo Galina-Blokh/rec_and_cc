@@ -1,5 +1,8 @@
 """Speaker diarization: label assignment, clustering, model download and both final paths
-(batch + live) with fake diarization results. No model needed."""
+(batch + live) with fake diarization results. No model needed.
+
+Stories: US-12, US-14.
+"""
 
 from __future__ import annotations
 

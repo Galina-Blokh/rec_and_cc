@@ -1,3 +1,5 @@
+"""Stories: US-15."""
+
 from datetime import datetime, timedelta
 
 from recandcc.models import SessionInfo, Track, TriggerKind

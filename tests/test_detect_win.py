@@ -1,4 +1,7 @@
-"""Windows activity detection with fake pycaw / comtypes / winreg / psutil (runs anywhere)."""
+"""Windows activity detection with fake pycaw / comtypes / winreg / psutil (runs anywhere).
+
+Stories: US-01, US-17, US-18.
+"""
 
 from __future__ import annotations
 

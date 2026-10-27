@@ -1,4 +1,7 @@
-"""Crash reporting (excepthooks -> log + notice event) and per-session pipeline metrics."""
+"""Crash reporting (excepthooks -> log + notice event) and per-session pipeline metrics.
+
+Stories: US-10, US-17.
+"""
 
 from __future__ import annotations
 

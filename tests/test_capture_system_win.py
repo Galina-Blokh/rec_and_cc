@@ -1,4 +1,7 @@
-"""WASAPI loopback capture with a fake PyAudioWPatch (runs anywhere)."""
+"""WASAPI loopback capture with a fake PyAudioWPatch (runs anywhere).
+
+Stories: US-08, US-18.
+"""
 
 from __future__ import annotations
 

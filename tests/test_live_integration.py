@@ -2,6 +2,8 @@
 
 Run: uv run pytest -m slow tests/test_live_integration.py -v -s
 Model: RECANDCC_TEST_MODEL (default "large-v3-turbo", the app default).
+
+Stories: US-11.
 """
 
 from __future__ import annotations
