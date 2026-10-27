@@ -28,6 +28,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-17 | Always on, visible state | ✅ |
 | US-18 | Runs on Windows | 🟡 untested on hardware (#5) |
 | US-22 | Room listening (opt-in) | 🟡 no pre-roll, locked screen unverified (#2) |
+| US-23 | Sensitivity: room vs system audio | 🟡 presets only, no live meters (#7) |
 
 ---
 
@@ -195,3 +196,24 @@ so that in-person meetings are captured like calls.* (#2)
   the device.
 - **Not yet:** pre-roll of the first sentence, a VAD-based stop, `Speaker N` labels on the
   mic track, locked-screen and battery measurements.
+
+### US-23 Sensitivity: room vs system audio
+*As the owner, I want to tell the app how readily the room (outside, microphone) and the
+laptop's own audio (inside, apps) start a recording, so that it fits a quiet office or a
+noisy café.* (#7)
+
+- **Given** `outside_sensitivity` and `inside_sensitivity` are unset (the default), **then**
+  detection behaves exactly as before: `min_active_s`, `room_speech_s`, no level gate.
+- **Given** a sensitivity 0–100, **then** the threshold is scaled 4× at 0, 1× at 50 and
+  0.25× at 100: inside scales `min_active_s`; outside scales `room_speech_s` (capped at
+  `room_window_s`) and sets a 15–3 dB margin above the room's adaptive noise floor.
+- **Given** outside favoured (high) and inside low, **when** people talk in the room while an
+  app plays briefly, **then** the room starts the recording and the short app audio doesn't
+  yet; **given** inside favoured, **then** the reverse.
+- **Given** steady background noise (a fan, a café), **then** blocks near the noise floor
+  don't count as speech and don't even run the voice detector.
+- **Given** the menu "Sensitivity" (Off / Quiet room / Normal / Noisy place), **then** the
+  preset is saved to `config.toml` and applied on the next engine tick (the room mic reopens
+  with the new thresholds).
+- **Not yet:** a settings window with live level meters, a per-source speech score, caption
+  priority between the tracks.

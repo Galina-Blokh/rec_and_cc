@@ -34,6 +34,8 @@ from ..engine import IDLE, PROMPTING, RECORDING, Engine, EngineState
 from ..models import Mode, SessionInfo, TriggerKind, discard_session
 from ..recorder import make_private_dir
 from ..retention import purge_old_audio
+from ..sensitivity import PRESETS as SENSITIVITY_PRESETS
+from ..sensitivity import apply_preset, current_preset
 
 if TYPE_CHECKING:
     from ..transcribe.live import LiveTranscriber
@@ -538,11 +540,7 @@ class Controller:
             return f"Waiting for answer: record {st.app}?"
         return f"Idle — {str(st.mode).capitalize()} mode"
 
-    def set_room_listening(self, on: bool) -> None:
-        """Menu toggle (any thread): the engine opens or closes the room mic on its next tick.
-        Turning it on explains the always-on mic indicator and the consent question."""
-        self.cfg.detection.room_listening = bool(on)
-
+    def _save_settings(self) -> None:
         def save():
             try:
                 self.cfg.save()
@@ -550,8 +548,23 @@ class Controller:
                 log.exception("saving settings failed")
 
         threading.Thread(target=save, daemon=True, name="settings-save").start()
+
+    def set_room_listening(self, on: bool) -> None:
+        """Menu toggle (any thread): the engine opens or closes the room mic on its next tick.
+        Turning it on explains the always-on mic indicator and the consent question."""
+        self.cfg.detection.room_listening = bool(on)
+        self._save_settings()
         if on:
             self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
+
+    def set_sensitivity(self, preset: str) -> None:
+        """Sensitivity menu (any thread): apply a preset from ``sensitivity.PRESETS``. The
+        engine picks the new thresholds up on its next tick."""
+        apply_preset(self.cfg.detection, preset)
+        self._save_settings()
+
+    def sensitivity_preset(self) -> str | None:
+        return current_preset(self.cfg.detection)
 
     def toggle_recording(self) -> None:
         if self.engine.state.status == RECORDING:
@@ -602,6 +615,7 @@ class _LiveAwareQueue:
 
 
 ROOM_ITEM = "Listen for conversations in the room"
+SENSITIVITY_ITEM = "Sensitivity"
 ROOM_LISTENING_NOTICE = (
     "While idle, the microphone stays on (orange dot) to notice conversations near the "
     "laptop; nothing leaves the device. Recording people may need their consent."
@@ -628,6 +642,8 @@ PROMPT_BUTTONS = (("Discard", "ignore"), ("Always", "always"), ("Keep", "record"
 __all__ = [
     "PROMPT_BUTTONS",
     "ROOM_ITEM",
+    "SENSITIVITY_ITEM",
+    "SENSITIVITY_PRESETS",
     "ROOM_LISTENING_NOTICE",
     "keep_prompt_text",
     "Controller",

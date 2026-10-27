@@ -1,4 +1,4 @@
-"""Stories: US-01, US-02, US-03, US-04, US-05, US-06, US-07, US-16, US-17, US-22."""
+"""Stories: US-01, US-02, US-03, US-04, US-05, US-06, US-07, US-16, US-17, US-22, US-23."""
 
 import shutil
 from pathlib import Path
@@ -878,10 +878,10 @@ class FakeRoom:
         self.opens: list[tuple] = []
         self.closes = 0
 
-    def start(self, speech_s, window_s):
+    def start(self, speech_s, window_s, margin_db=None):
         if self.fail:
             raise OSError("no mic")
-        self.opens.append((speech_s, window_s))
+        self.opens.append((speech_s, window_s) + (() if margin_db is None else (margin_db,)))
         self.running = True
 
     def stop(self):
@@ -1005,3 +1005,45 @@ def test_room_mic_failure_backs_off_and_shutdown_closes_it():
     assert len(h.room.opens) == 1 and h.room.running
     h.eng.shutdown()
     assert not h.room.running
+
+
+# --- sensitivity (outside = room, inside = app audio) -----------------------------------
+def test_sensitivity_unset_keeps_the_plain_thresholds():
+    h = _room_harness()
+    h.mon.procs = [CHROME]
+    h.run(3)
+    assert h.room.opens == [(6.0, 15.0)]  # no noise-floor gate
+    h.run(1)
+    assert h.rec.starts == [(TriggerKind.MEDIA, "Google Chrome")]  # after min_active_s = 3
+
+
+def test_outside_favoured_room_speech_wins_over_short_app_audio():
+    h = _room_harness(outside_sensitivity=100, inside_sensitivity=0)
+    h.run(1)
+    assert h.room.opens == [(1.5, 15.0, 3.0)]  # less speech needed, small noise margin
+    h.mon.procs = [CHROME]
+    h.run(10)  # 10 s of app audio < 4 x min_active_s: not yet
+    assert h.rec.starts == []
+    h.room.active = True
+    h.eng.tick()
+    assert h.rec.starts == [(TriggerKind.ROOM, "Room")]
+
+
+def test_inside_favoured_app_audio_wins_and_room_needs_more():
+    h = _room_harness(outside_sensitivity=0, inside_sensitivity=100)
+    h.run(1)
+    assert h.room.opens == [(15.0, 15.0, 15.0)]  # the whole window must be loud speech
+    h.mon.procs = [CHROME]
+    h.run(2)  # 0.75 s is enough
+    assert h.rec.starts == [(TriggerKind.MEDIA, "Google Chrome")]
+
+
+def test_changing_outside_sensitivity_reopens_the_room_mic():
+    h = _room_harness()
+    h.run(2)
+    h.cfg.detection.outside_sensitivity = 25  # "Noisy place"
+    h.run(1)
+    assert h.room.closes == 1 and h.room.running
+    assert h.room.opens == [(6.0, 15.0), (12.0, 15.0, 12.0)]
+    h.run(5)
+    assert len(h.room.opens) == 2  # unchanged settings: no churn

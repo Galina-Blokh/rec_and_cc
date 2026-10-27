@@ -35,6 +35,8 @@ Changes to `[detection]` are picked up while the app runs. Restart the app after
 | `room_listening` | `false` | Opt-in. While nothing records, keep the mic open and start a `room` session when people talk near the laptop (no app involved). macOS shows the orange mic indicator the whole time. Apps take precedence: a call starting during a room session turns it into a call session. A room session stops after `stop_after_silence_s` of silence. Needs `mode` other than `off` and `record_mic` other than `never` |
 | `room_speech_s` | `6.0` | Room listening triggers once speech totals this many seconds … |
 | `room_window_s` | `15.0` | … within this sliding window. Short remarks (yours or the TV's) stay below it |
+| `outside_sensitivity` | unset | 0–100: how readily the room (mic, room listening) starts a recording. Scales `room_speech_s` by 4× at 0, 1× at 50, 0.25× at 100 (capped at `room_window_s`) and only counts a second as speech if it is 15 dB (at 0) to 3 dB (at 100) louder than the room's adaptive noise floor, so a fan or a café doesn't keep triggering. Unset = plain `room_speech_s`, no level gate. Menu: **Sensitivity** |
+| `inside_sensitivity` | unset | 0–100: how readily app audio (calls, videos) starts a recording. Scales `min_active_s` the same way (12 s at 0, 0.75 s at 100 with the default 3 s). Unset = plain `min_active_s`. Presets: Quiet room = 75/50, Normal = 50/50, Noisy place = 25/50 (outside/inside), Off = both unset |
 | `call_apps` | Zoom, Teams, FaceTime, Slack, Discord, Telegram, WhatsApp, Skype, Webex | Patterns for call apps |
 | `media_apps` | browsers, QuickTime, VLC, Podcasts, TV | Patterns for media apps |
 | `ignore_apps` | Spotify, Music, system sounds, Siri, Voice Memos | Never trigger |

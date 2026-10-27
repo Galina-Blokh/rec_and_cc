@@ -95,6 +95,11 @@ class DetectionConfig:
     room_listening: bool = False
     room_speech_s: float = 6.0
     room_window_s: float = 15.0
+    # Sensitivity 0-100 (higher = less needed to start), unset = the plain thresholds above.
+    # Outside = room/mic (room_speech_s + a noise-floor margin), inside = app audio
+    # (min_active_s). See recandcc.sensitivity and the "Sensitivity" menu presets.
+    outside_sensitivity: float | None = None
+    inside_sensitivity: float | None = None
     call_apps: list[str] = field(default_factory=lambda: list(DEFAULT_CALL_APPS))
     media_apps: list[str] = field(default_factory=lambda: list(DEFAULT_MEDIA_APPS))
     ignore_apps: list[str] = field(default_factory=lambda: list(DEFAULT_IGNORE_APPS))
@@ -145,6 +150,8 @@ class Config:
         path.parent.mkdir(parents=True, exist_ok=True)
         data = asdict(self)
         data["output_dir"] = str(self.output_dir)
+        for section in ("detection", "transcription"):  # TOML has no null: unset = omitted
+            data[section] = {k: v for k, v in data[section].items() if v is not None}
         path.write_bytes(tomli_w.dumps(data).encode())
 
 

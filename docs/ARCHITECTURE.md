@@ -148,6 +148,15 @@ user stopped or discarded stays suppressed until the room has been quiet for
 engine retries after 60 s. The menu toggle goes through `Controller.set_room_listening`.
 Not yet: pre-roll, a VAD-based stop, mic-track diarization.
 
+### Sensitivity: thresholds scaled, not a new trigger
+`sensitivity.py` maps `outside_sensitivity` / `inside_sensitivity` (0–100, unset = off) to the
+existing thresholds with pure functions (#7): inside scales `min_active_s`, which `tick()`
+reads every poll; outside scales `room_speech_s` and adds a noise-floor margin, and
+`_sync_room` reopens the room monitor when that triple changes. The margin gate
+(`room.NoiseFloor`: 10th percentile of the last 60 block levels) runs on the room VAD
+worker, before the VAD, so steady noise also costs no inference. Unset keeps every code path
+as it was. Not yet: live level meters, caption priority by sensitivity.
+
 ### Two tracks → speaker labels for free
 Mic → `Me`, system → `Others`. A mic track that joins mid-session (a media recording upgraded
 to a call) starts with silence up to that moment, so both tracks share one timeline. If you use speakers instead of headphones, the mic also picks

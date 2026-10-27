@@ -19,6 +19,8 @@ Threading model
   stream. The engine thread opens it while idle and closes it before ``recorder.start`` (so
   the mic is never opened twice) and while recording; its ``active`` flag is a pseudo-app
   ``room`` that only triggers when no app session is recording or pending.
+* Sensitivity (``sensitivity.py``): ``tick`` reads the effective ``min_active_s`` (inside)
+  and ``_sync_room`` reopens the room monitor when its effective thresholds (outside) change.
 * Time comes from an injectable ``clock`` so tests can drive the state machine with a fake
   clock by calling ``tick()`` directly without starting the thread.
 """
@@ -35,6 +37,7 @@ from dataclasses import dataclass
 
 from .config import Config, DetectionConfig
 from .models import AudioProcess, Mode, SessionInfo, TriggerKind, discard_session, mark_discarded
+from .sensitivity import effective_min_active_s, room_trigger
 
 log = logging.getLogger(__name__)
 
@@ -219,6 +222,7 @@ class Engine:
         self._apps: dict[str, AppActivity] = {}
         self.room = room_monitor
         self._room_retry_at = float("-inf")
+        self._room_params: tuple | None = None  # what the open room monitor was started with
 
         self._wake = threading.Event()
         self._stop_evt = threading.Event()
@@ -360,6 +364,7 @@ class Engine:
                 log.exception("recorder level query failed")
         apps = group_activity(procs, self.det, self.own_pids)
         now = self.clock()
+        min_active = effective_min_active_s(self.det)  # inside sensitivity
         room = self.room
         room_active = room is not None and room.running and room.active and self._room_wanted()
 
@@ -492,7 +497,7 @@ class Engine:
                         continue
                     if a.key != r.key and (
                         a.key in self._suppressed
-                        or now - self._first_seen[a.key] < det.min_active_s
+                        or now - self._first_seen[a.key] < min_active
                         or effective_mode(det, a.key, a.procs) == Mode.OFF
                     ):
                         continue
@@ -506,7 +511,7 @@ class Engine:
                 cands = [
                     a
                     for k, a in apps.items()
-                    if k not in self._suppressed and now - self._first_seen[k] >= det.min_active_s
+                    if k not in self._suppressed and now - self._first_seen[k] >= min_active
                 ]
                 cands.sort(key=lambda a: (a.kind != TriggerKind.CALL, self._first_seen[a.key]))
                 if room_active and ROOM_KEY not in self._suppressed:  # apps take precedence
@@ -562,9 +567,14 @@ class Engine:
             return
         with self._lock:
             want = self._rec is None and self._room_wanted()
+            params = room_trigger(self.det)  # outside sensitivity
         try:
+            if want and room.running and params != self._room_params:
+                room.stop()  # sensitivity changed: reopen with the new thresholds
             if want and not room.running and now >= self._room_retry_at:
-                room.start(self.det.room_speech_s, self.det.room_window_s)
+                speech_s, window_s, margin_db = params
+                room.start(speech_s, window_s, margin_db=margin_db)
+                self._room_params = params
             elif not want and room.running:
                 room.stop()
         except Exception:

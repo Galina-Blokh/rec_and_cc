@@ -111,6 +111,10 @@ Menu items:
   stays on (macOS shows the orange dot the whole time) and about 6 s of speech within 15 s
   near the laptop starts a recording, as in Auto/Ask mode. Calls take precedence. Tell the
   people in the room: recording them may need their consent.
+- **Sensitivity** (Off by default): presets *Quiet room / Normal / Noisy place* for how
+  readily the room (microphone) and app audio start a recording; a noisy place needs more
+  and louder-than-background speech. Fine-tune with `outside_sensitivity` /
+  `inside_sensitivity` in the settings.
 - **Open live transcript**: opens the current (or last) live session's `transcript.md`.
 - **Recent transcripts**: the last 10, click to open.
 - **Open transcripts folder**

@@ -35,6 +35,8 @@ from .common import (
     PERM_TITLES,
     PROMPT_BUTTONS,
     ROOM_ITEM,
+    SENSITIVITY_ITEM,
+    SENSITIVITY_PRESETS,
     Controller,
     as_str,
     keep_prompt_text,
@@ -110,6 +112,10 @@ class MacApp(rumps.App):
         self.captions_item.state = 1 if self.cfg.live_captions else 0
         self.room_item = rumps.MenuItem(ROOM_ITEM, callback=self._toggle_room)
         self.room_item.state = 1 if self.cfg.detection.room_listening else 0
+        self.sensitivity_menu = rumps.MenuItem(SENSITIVITY_ITEM)
+        for name in SENSITIVITY_PRESETS:
+            self.sensitivity_menu.add(rumps.MenuItem(name, callback=self._set_sensitivity))
+        self._render_sensitivity()
         self.live_open_item = rumps.MenuItem("Open live transcript")
 
         self.menu = [
@@ -119,6 +125,7 @@ class MacApp(rumps.App):
             self.rec_item,
             self.captions_item,
             self.room_item,
+            self.sensitivity_menu,
             self.live_open_item,
             None,
             rumps.MenuItem("Open transcripts folder", callback=self._open_folder),
@@ -331,6 +338,15 @@ class MacApp(rumps.App):
     def _toggle_room(self, sender) -> None:
         self.ctrl.set_room_listening(not self.cfg.detection.room_listening)
         sender.state = 1 if self.cfg.detection.room_listening else 0
+
+    def _render_sensitivity(self) -> None:
+        preset = self.ctrl.sensitivity_preset()
+        for name, item in self.sensitivity_menu.items():
+            item.state = 1 if name == preset else 0
+
+    def _set_sensitivity(self, sender) -> None:
+        self.ctrl.set_sensitivity(sender.title)
+        self._render_sensitivity()
 
     def _open_live(self, _sender) -> None:
         if not self._live_dir:
