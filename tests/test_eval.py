@@ -543,6 +543,33 @@ def test_backend_mlx_without_mlx_is_an_error(tmp_path, monkeypatch):
         ev.main([str(tmp_path), "--backend", "mlx", "--no-diarize", "--json", str(tmp_path / "r")])
 
 
+def test_languages_flag_sets_detection_languages_in_memory(tmp_path, monkeypatch):
+    import recandcc.config as config
+
+    write_set(tmp_path, {"id": "c", "audio": "c.wav", "utterances": [U]})
+    cfg, seen = config.Config(), {}
+    patch_pipeline(monkeypatch, cfg, seen)  # Config.save raises: never written
+    out = tmp_path / "r.json"
+    argv = [str(tmp_path), "--languages", "EN, ru,iw,ru", "--no-diarize", "--json", str(out)]
+    assert ev.main(argv) == 0
+    assert seen["cfg"].languages == ["en", "ru", "he"]  # normalised, aliases, no duplicates
+    assert json.loads(out.read_text(encoding="utf-8"))["languages"] == ["en", "ru", "he"]
+
+
+@pytest.mark.parametrize("value", ["", ",", " ", "en,xx"])
+def test_languages_flag_rejects_empty_or_unknown_codes(tmp_path, monkeypatch, capsys, value):
+    import recandcc.config as config
+
+    write_set(tmp_path, {"id": "c", "audio": "c.wav", "utterances": [U]})
+    seen = {}
+    patch_pipeline(monkeypatch, config.Config(), seen)
+    with pytest.raises(SystemExit):  # [] would silently mean "any language"
+        ev.main(
+            [str(tmp_path), "--languages", value, "--no-diarize", "--json", str(tmp_path / "r")]
+        )
+    assert "cfg" not in seen and "--languages" in capsys.readouterr().err
+
+
 def test_maxrss_units_and_peak_memory():
     assert ev.maxrss_mb(512 * 2**20, "darwin") == 512.0  # bytes on macOS
     assert ev.maxrss_mb(512 * 1024, "linux") == 512.0  # kilobytes on Linux
@@ -651,7 +678,7 @@ def test_main_scores_hypotheses_without_the_pipeline(tmp_path, monkeypatch, caps
     assert "wall n/a s, peak memory n/a MB" in printed
     assert "1 clip(s) without a time, not in RTF" in printed
     assert "да" not in out.read_text(encoding="utf-8") + printed  # no text
-    for flag in (["--backend", "cpu"], ["--model", "small"], ["--live"]):  # no model runs
+    for flag in (["--backend", "cpu"], ["--model", "small"], ["--live"], ["--languages", "he"]):
         with pytest.raises(SystemExit):
             ev.main([str(tmp_path), "--hypotheses", str(hyp), *flag])
 
