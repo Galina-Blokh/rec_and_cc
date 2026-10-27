@@ -15,6 +15,12 @@ All notable changes to RecAndCC are documented here. The format is based on
   minutes (#4).
 - RecAndCC is licensed under the Apache License 2.0 (`LICENSE`, `NOTICE`); completes #17.
 
+### Fixed
+- A hung network-volume probe no longer blocks the warning for other folders (one probe per
+  folder, capped; local results are cached) (#110).
+- Settings errors before the save (temp dir, snapshot file) say "couldn't open settings"
+  instead of blaming the transcripts folder; the never-blocks test has a wider margin (#109).
+
 ### Security
 - CI installs exactly what `uv.lock` pins (`uv sync --locked` / `uv run --locked`), and its
   GitHub Actions are pinned to commit SHAs.
@@ -50,8 +56,17 @@ All notable changes to RecAndCC are documented here. The format is based on
   open transcript / summary, reveal, rename (`title` in `session.json`) and delete to the
   Trash (#4).
 - Opt-in local meeting summaries (`[summary] enabled = true`, Apple silicon): `summary.md`
-  with a short summary and action items after each transcript, from a pinned Qwen2.5 3B
-  model via mlx-lm; `recandcc summarize <session_dir>` (#4).
+  with a short summary and action items after each transcript, from a pinned Qwen2.5 1.5B
+  Instruct model (Apache-2.0) via mlx-lm; `recandcc summarize <session_dir>` (#4). The
+  larger Qwen2.5 3B is also pinned and selectable with `[summary] model`, but its Qwen
+  Research licence allows non-commercial use only: it also needs
+  `accept_qwen_research_licence = true` (a TOML boolean). Because of that licence, any
+  config with the 3B and without that key, whether saved while it was the default or
+  chosen by hand, is migrated to the 1.5B: the app rewrites `summary.model` in
+  `config.toml` and shows a one-time notice. While only the pinned 3B is downloaded, the 3B is
+  kept (offline summaries keep working) and a one-time notice explains how to switch.
+  Afterwards the old ~1.7 GB cache can be deleted. Both models are pinned to a Hugging Face
+  commit (no separate checksum check).
 - Speaker names that carry over between sessions, from opt-in local voice profiles; name a
   speaker once from the CLI (#62), or from the macOS menu ("Name speakers…", "Forget all
   voices…").
@@ -77,6 +92,12 @@ All notable changes to RecAndCC are documented here. The format is based on
   (#36, #54, #55).
 
 ### Fixed
+- A summary stays at the top of DOCX/PDF exports after a speaker rename or call-app names:
+  freshness follows the transcript text (`.summary-source` fingerprint), not its mtime (audit
+  by rec-and-cc-7e). The CLI `recandcc name-speaker` still marks the summary pending so the app
+  redoes it; the menu rename and call-app names keep the existing summary, whose text may still
+  mention the old label. A `null` segments list or an empty/unreadable `.summary-source` falls
+  back to the mtime rule (Fable review).
 - With `keep_audio = false`, audio left behind by a quit during slow diarization or a failed
   delete is removed at the next start (#45).
 - A discarded session is never transcribed later, even if deleting it failed; the delete is

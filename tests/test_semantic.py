@@ -1497,6 +1497,7 @@ def test_hand_edited_semantic_setting_is_applied_to_a_running_app(tmp_path, monk
         _lang_lock=threading.Lock(),
         _dirty_lock=threading.Lock(),
         _dirty={},
+        _unsaved=set(),
         _config_mtime=-1.0,
         _mtime=lambda: 1.0,
         post_notice=lambda *a: None,

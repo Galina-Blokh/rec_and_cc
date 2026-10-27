@@ -8,3 +8,10 @@ Included third-party code:
 - src/recandcc/transcribe/_align_np.py: numpy reimplementation derived from openai/whisper
   (Copyright (c) 2022 OpenAI) and ml-explore/mlx-examples (Copyright (c) 2023 Apple Inc.),
   both under the MIT License. The MIT notice is kept in that file.
+
+- This product includes fpdf2 2.8.9 (https://github.com/py-pdf/fpdf2), used for PDF export.
+  Copyright Olivier PLATHEY, Max, Lucas Cimon, Georg Mischler, Anderson Herzogenrath da Costa.
+  Licensed under the GNU Lesser General Public License v3.0 only (LGPL-3.0-only). It is used
+  unmodified as a dynamically imported library, and is not vendored in this project. The
+  licence text is in LICENSES/LGPL-3.0-fpdf2.txt; the GPL-3.0 text it incorporates is in
+  LICENSES/GPL-3.0.txt.
