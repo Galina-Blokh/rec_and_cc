@@ -31,7 +31,7 @@ from .. import autostart
 from ..config import CONFIG_PATH
 from ..engine import PROMPTING, RECORDING
 from ..models import Mode, TriggerKind
-from .captions import CaptionBuffer, header_text, should_auto_hide
+from .captions import CaptionBuffer, header_text, should_auto_hide, tk_parts
 from .common import (
     ONBOARDING_TEXT,
     PERM_KINDS,
@@ -131,8 +131,8 @@ class TkCaptions:
         text.tag_configure("Others", foreground="#85bdff", font=("Segoe UI", 10, "bold"))
         text.tag_configure("other", foreground="#d9bf80", font=("Segoe UI", 10, "bold"))
         text.tag_configure("line", lmargin2=64, tabs=(64,))
-        # Right-to-left (Hebrew) lines: right-justified, label then text separated by spaces
-        # (tab stops don't mirror in Tk); the OS text renderer orders the Hebrew glyphs.
+        # Right-to-left (Hebrew) lines: right-justified; tk_parts() reorders the text to visual
+        # order and puts the label last, because Tk does not apply the bidi algorithm itself.
         text.tag_configure("rtl", justify="right", rmargin=10)
         text.pack(fill="both", expand=True)
         text.configure(state="disabled")
@@ -147,8 +147,10 @@ class TkCaptions:
             for i, ln in enumerate(buf.lines):
                 tag = ln.label if ln.label in ("Me", "Others") else "other"
                 para = ("rtl",) if ln.rtl else ("line",)
-                text.insert("end", ln.label + ("  " if ln.rtl else "\t"), (tag, *para))
-                text.insert("end", ln.text + ("\n" if i < len(buf) - 1 else ""), para)
+                for piece, is_label in tk_parts(ln):
+                    text.insert("end", piece, (tag, *para) if is_label else para)
+                if i < len(buf) - 1:
+                    text.insert("end", "\n", para)
             text.configure(state="disabled")
             if follow:
                 text.see("end")
