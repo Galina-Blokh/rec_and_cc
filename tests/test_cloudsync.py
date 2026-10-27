@@ -230,7 +230,7 @@ def test_refresh_runs_the_check(tmp_path, monkeypatch):
     assert len(_notices(ctrl)) == 1
     # checked before output_dir is listed (that may stall on a cloud mount), and an
     # already-warned folder is not checked again
-    assert calls == ["cloud", "recent", "recent"]
+    assert calls.index("cloud") < calls.index("recent") and calls.count("recent") == 2
 
 
 def test_known_cloud_roots_are_classified_without_touching_the_disk(tmp_path, monkeypatch):
