@@ -9,6 +9,7 @@ import os
 import shutil
 import threading
 import time
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -17,6 +18,10 @@ from pathlib import Path
 # All captured audio is normalised to this format before it leaves a capture backend:
 # float32, mono, 16 kHz (what Whisper expects).
 SAMPLE_RATE = 16_000
+
+# Whisper languages written right to left (Hebrew, Yiddish, Arabic, Persian, Urdu, Pashto,
+# Sindhi). Captions and transcripts render their segments right-aligned / with bidi marks.
+RTL_LANGUAGES = frozenset({"he", "yi", "ar", "fa", "ur", "ps", "sd"})
 
 log = logging.getLogger(__name__)
 
@@ -71,7 +76,21 @@ class Segment:
     end: float
     text: str
     speaker: str  # "Me", "Others" (later: "Speaker 1", ...)
-    language: str  # ISO 639-1 code, e.g. "en", "ru"
+    language: str  # ISO 639-1 code, e.g. "en", "ru", "he"
+
+
+def is_rtl(language: str, text: str = "") -> bool:
+    """True if a segment reads right to left: by its language, or (no language) by the first
+    strong-direction character of ``text``."""
+    if language:
+        return language in RTL_LANGUAGES
+    for ch in text:
+        kind = unicodedata.bidirectional(ch)
+        if kind in ("R", "AL"):
+            return True
+        if kind == "L":
+            return False
+    return False
 
 
 @dataclass

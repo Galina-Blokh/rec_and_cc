@@ -22,11 +22,12 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-11 | Live captions and live transcript | ✅ |
 | US-12 | Speaker labels for the other side | ✅ |
 | US-13 | Readable transcripts in private folders | 🟡 owner-only not enforced on Windows (#37) |
-| US-14 | Works offline, nothing leaves the device | 🟡 no end-to-end offline test (#40) |
+| US-14 | Works offline, nothing leaves the device | 🟡 no warning for synced folders yet (#41) |
 | US-15 | Delete old audio automatically | 🟡 `keep_audio = false` can miss a crash (#38) |
 | US-16 | Permissions set up from the app | ✅ |
 | US-17 | Always on, visible state | ✅ |
 | US-18 | Runs on Windows | 🟡 untested on hardware (#5) |
+| US-19 | Hebrew transcripts and right-to-left captions | 🟡 stock model, no Hebrew test set (#6) |
 
 ---
 
@@ -142,8 +143,9 @@ while I decide.*
   `allow_unpinned_models = true`.
 - **Then** RecAndCC uploads nothing itself. The default output folder may still be synced
   by iCloud or OneDrive; the README warns, the app doesn't yet (#41).
-- **Not yet:** no automated test runs a whole session with the network blocked
-  (`test_offline.py` and `test_model_pinning.py` cover model loading; #40).
+- **Then** this is enforced end to end: `test_offline_e2e.py` records and transcribes a
+  session (live and batch) with sockets and DNS blocked; only the speaker-model download
+  is attempted, and it fails fast, leaving "Others".
 - **Then** logs contain events, app names and paths, never transcript text or audio.
 
 ### US-15 Delete old audio automatically
@@ -171,3 +173,20 @@ while I decide.*
 - **Then** WASAPI loopback capture, pycaw detection, a tray icon and registry autostart
   implement the same interfaces; CI runs the fast suite on Windows.
 - **Not yet:** a real-hardware test pass, per-app capture, installer (#5).
+
+### US-19 Hebrew transcripts and right-to-left captions
+- **Given** `languages = ["en", "ru", "he"]`, **then** each speech region gets one of the
+  three languages (never Arabic or Yiddish), and Hebrew regions are transcribed in Hebrew.
+- **Given** a Hebrew line, **when** it is shown in the live captions, **then** it is
+  right-aligned and reads right to left, with the speaker label on the right; English words
+  inside it stay readable.
+- **Given** a Hebrew segment, **then** `transcript.md` wraps its text in a right-to-left
+  isolate and `transcript.srt` starts its line with RLM, so editors and players render mixed
+  Hebrew/English correctly; en/ru lines and `transcript.json` are unchanged.
+- **Given** `"iw"` or an unknown code in `languages`, **then** it is mapped to `he` or
+  dropped with a log warning.
+- **Not yet:** a Hebrew-tuned model (ivrit.ai) and per-language model routing, language
+  checkboxes in the menu, a Hebrew evaluation set and WER (#6).
+- **Not yet:** the Windows (Tk) captions only right-justify Hebrew lines; Tk does no bidi
+  reordering, so the label stays left of the Hebrew text and the glyph order is unverified
+  on real hardware (#6).
