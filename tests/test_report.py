@@ -288,16 +288,54 @@ def test_render_with_claude_usage_and_docs_and_fragment():
     assert 'name="claude:viewport-fit-sides"' in frag and 'charset="utf-8"' not in frag
 
 
+def _titles(data):
+    return {f["title"]: f["severity"] for f in render.findings(data)}
+
+
 def test_findings_fire_from_the_evidence():
     data = _report_data()
-    titles = {f["title"]: f["severity"] for f in render.findings(data)}
-    assert titles.get("No review by a person") == "medium"
-    assert titles.get("Open issues have no owner") == "low"
-    assert "Changes merged while CI was red" not in titles
+    t = _titles(data)
+    assert t["No review by a person"] == "medium"
+    assert t["Open issues have no owner"] == "low"
+    assert "Changes merged while CI was red" not in t and "main went red after a merge" not in t
+
     data["summary"]["merged_red"] = 2
-    assert render.findings(data)[0] == {**render.findings(data)[0], "severity": "high"}
-    data["summary"]["reviewed_human"] = 1
-    assert "No review by a person" not in {f["title"] for f in render.findings(data)}
+    findings = render.findings(data)
+    assert (findings[0]["title"], findings[0]["severity"]) == (
+        "Changes merged while CI was red",
+        "high",
+    )
+    assert "2 merged pull requests" in findings[0]["evidence"]
+
+    data["ci"]["main_failed"], data["ci"]["main_runs"] = 1, 4
+    data["claude"].update(cost=10.0, unlinked_share=0.4)
+    data["summary"].update(open=5, closed_unmerged=1, reviewed_human=1)
+    t = _titles(data)
+    assert t["main went red after a merge"] == "medium"
+    assert t["Most Claude spend cannot be tied to a pull request"] == "medium"
+    assert t["Open pull requests pile up"] == "medium"
+    assert t["Work thrown away"] == "low"
+    assert "No review by a person" not in t
+
+
+def test_render_survives_an_empty_record():
+    empty_summary = collect.summarize([], [], collect.ts("2026-10-26T14:00:00Z"))
+    data = {
+        **_report_data(),
+        "window": {"start": None, "end": "2026-10-26T14:00:00+00:00"},
+        "summary": empty_summary,
+        "series": collect.series([], []),
+        "commits": collect.build_commits([]),
+        "ci": collect.build_ci([]),
+        "prs": [],
+        "issues": [],
+    }
+    page = render.render(data)
+    assert 'id="tldr"' in page and "0 merged pull requests" in page
+
+
+def test_day_names_do_not_depend_on_the_locale():
+    assert render.day_name("2026-10-27") == "Tue 27/10"
 
 
 def test_fill_hours_fills_gaps_and_switches_to_days_on_long_spans():

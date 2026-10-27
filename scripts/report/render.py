@@ -198,6 +198,15 @@ def fill_hours(rows: list[dict], keys: list[str]) -> list[dict]:
     return out
 
 
+WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def day_name(key: str) -> str:
+    """'2026-10-27' -> 'Tue 27/10', in English whatever the locale."""
+    d = datetime.strptime(key, "%Y-%m-%d")
+    return f"{WEEKDAYS[d.weekday()]} {d:%d/%m}"
+
+
 def hour_label(key: str) -> str:
     if len(key) == 10:
         return datetime.strptime(key, "%Y-%m-%d").strftime("%d/%m")
@@ -318,7 +327,7 @@ def render(d: dict) -> str:
     people = [p for p in s["by_person"] if not p["bot"]]
     names = ", ".join(p["name"] for p in people) or "nobody"
     start, end = d["window"]["start"], d["window"]["end"]
-    span_h = (ts(end) - ts(start)).total_seconds() / 3600
+    span_h = (ts(end) - ts(start)).total_seconds() / 3600 if start and end else 0.0
     gen = ts(d["generated_at"])
     refresh = d.get("refresh") or {}
     stale_after = refresh.get("minutes")
@@ -468,16 +477,14 @@ def render(d: dict) -> str:
         )
     by_day: dict[str, dict] = {}
     for p in prs:
-        k = ts(p["opened"]).astimezone(UK).strftime("%a %d/%m")
+        k = ts(p["opened"]).astimezone(UK).strftime("%Y-%m-%d")
         by_day.setdefault(k, {"opened": 0, "merged": 0, "lines": 0})["opened"] += 1
     for p in merged:
-        k = ts(p["merged"]).astimezone(UK).strftime("%a %d/%m")
+        k = ts(p["merged"]).astimezone(UK).strftime("%Y-%m-%d")
         row = by_day.setdefault(k, {"opened": 0, "merged": 0, "lines": 0})
         row["merged"] += 1
         row["lines"] += p["additions"]
-    commits_by_day = {
-        datetime.fromisoformat(x["day"]).strftime("%a %d/%m"): x for x in cm["by_day"]
-    }
+    commits_by_day = {x["day"]: x for x in cm["by_day"]}
     delivery = section(
         "delivery",
         "Delivery and throughput",
@@ -551,7 +558,7 @@ def render(d: dict) -> str:
             ["Day", "opened", "merged", "lines added", "commits on main", "Claude-signed"],
             [
                 [
-                    k,
+                    day_name(k),
                     v["opened"],
                     v["merged"],
                     n(v["lines"]),
@@ -561,9 +568,7 @@ def render(d: dict) -> str:
                         commits_by_day.get(k, {}).get("commits", 0),
                     ),
                 ]
-                for k, v in sorted(
-                    by_day.items(), key=lambda kv: datetime.strptime(kv[0][4:], "%d/%m")
-                )
+                for k, v in sorted(by_day.items())
             ],
             {1, 2, 3, 4, 5},
         ),
