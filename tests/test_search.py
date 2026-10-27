@@ -312,6 +312,9 @@ def test_controller_drops_deleted_sessions_at_startup(out):
     from recandcc.config import Config
 
     ctrl.cfg = Config(output_dir=out)
+    import threading
+
+    ctrl._sync_index_lock = threading.Lock()
     ctrl._resubmit_unfinished()
     assert search.default_index().search("forgotten") == []
 

@@ -490,6 +490,7 @@ class Controller:
         self._refreshing = False
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
+        self._sync_index_lock = threading.Lock()  # serialises _sync_index (worker threads only)
         self._save_lock = threading.Lock()  # menu writes to config.toml
         # guards _dirty; also spans the reload's snapshot+apply (only _lang_lock nests)
         self._dirty_lock = threading.Lock()
@@ -1134,9 +1135,10 @@ class Controller:
         try:
             from ..search import default_index
 
-            idx = default_index(self.cfg.search.semantic, self._recording_busy)
-            idx.sync(self.cfg.output_dir)
-            idx.release_idle_cache()  # hourly, off the main thread: free an unused vector cache
+            with self._sync_index_lock:  # read the setting inside: the last runner sees the latest
+                idx = default_index(self.cfg.search.semantic, self._recording_busy)
+                idx.sync(self.cfg.output_dir)
+                idx.release_idle_cache()  # hourly, off the main thread: free an unused cache
         except Exception:  # noqa: BLE001 - search is optional
             log.exception("could not sync the search index")
 
@@ -1262,7 +1264,7 @@ class Controller:
         languages, keep_audio, audio_retention_days, speaker_names, live_captions, [summary],
         [export]).
         Read and apply are one step under ``_save_lock``: a menu write never interleaves."""
-        hotkey_changed = False
+        hotkey_changed = semantic_changed = False
         with self._save_lock:
             m = self._mtime()
             if m == self._config_mtime:
@@ -1279,6 +1281,7 @@ class Controller:
             # "file read" and "memory updated", so it can't write half-applied values. A field
             # a menu click changed meanwhile keeps the click (its queued save writes it).
             was_listening = self.cfg.detection.room_listening
+            was_semantic = self.cfg.search.semantic
             # _dirty_lock spans snapshot and apply. Menu/tray setters (menu_set, menu_apply,
             # set_mode, toggle_language) mark + set under it too, so their click lands either
             # before the snapshot (seen as dirty) or after the apply (kept), never between.
@@ -1308,8 +1311,14 @@ class Controller:
             tr._pending_model = None if on_disk == tr.model else on_disk  # type: ignore[attr-defined]
             if self.cfg.detection.room_listening and not was_listening:  # turned on by hand
                 self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
+            semantic_changed = self.cfg.search.semantic != was_semantic
         if hotkey_changed:  # re-registering the listener may block: outside the lock
             self.apply_hotkey()  # reads cfg.hotkey under the hotkey lock
+        if semantic_changed:
+            # Apply [search] semantic now, not at the next search: switched off, the embed
+            # worker and any model download stop and the vectors are deleted; switched on,
+            # embedding starts (while idle). A sync scans the output folder: own thread.
+            threading.Thread(target=self._sync_index, daemon=True, name="search-reload").start()
         log.info("config reloaded from %s", CONFIG_PATH)
 
     @staticmethod
@@ -1324,7 +1333,7 @@ class Controller:
             out[("detection", f.name)] = getattr(cfg.detection, f.name)
         for f in fields(cfg.summary):
             out[("summary", f.name)] = getattr(cfg.summary, f.name)
-        for f in fields(cfg.search):  # [search] semantic: applies from the next search
+        for f in fields(cfg.search):  # [search] semantic: applied at once (_sync_index)
             out[("search", f.name)] = getattr(cfg.search, f.name)
         out[("export", "template")] = cfg.export.template  # read at each export
         for name in RELOADED_TRANSCRIPTION_KEYS:

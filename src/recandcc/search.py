@@ -73,6 +73,8 @@ SEMANTIC_MIN_SIM = 0.45  # cosine below this is not a semantic match (0.3 matche
 RRF_K = 60  # reciprocal rank fusion constant
 POOL = 4  # each ranking contributes up to POOL * limit candidates to the fusion
 SCAN_CHUNK = 2048  # vectors scored (or cached) per fetch
+EMBED_BLOCKED_RETRIES = 5  # passes retried after another process blocked a write
+EMBED_BLOCKED_BACKOFF_S = 0.2  # times the pass number
 # Vector cache cap. Per row: 1,536 B of 384-d float32 plus ~300-500 B of Python metadata (the
 # 7-tuple, a float, the list slot and the segment text; folder/speaker strings are pooled), so
 # ~190 MB at the cap for an always-resident menu-bar app. Above it queries stream (as before).
@@ -217,6 +219,7 @@ class TranscriptIndex:
         self.busy_poll_s = BUSY_POLL_S
         self._embed_guard = threading.Lock()  # guards the two fields below (never held long)
         self._embed_thread: threading.Thread | None = None  # the one background embedding worker
+        self._embed_blocked_passes = 0
         self._embed_dirty = False  # work arrived while the worker was running
         self.path = Path(path) if path is not None else INDEX_PATH
         self.fts = has_fts5() if fts is None else fts
@@ -609,6 +612,7 @@ class TranscriptIndex:
                     embedder.embed([])
             if not todo:
                 return
+            blocked = False
             for folder, stamp in todo:
                 if not self._wait_idle(embedder):
                     return
@@ -623,26 +627,55 @@ class TranscriptIndex:
                         return  # model unavailable now: retry at the next sync
                     parts.append(part)
                 vecs = np.concatenate(parts) if parts else NO_VECTORS
-                with self._lock, contextlib.closing(self._connect()) as db:
-                    if self.embedder is not embedder:
-                        return  # switched off or swapped: don't store
-                    cur = db.execute("SELECT stamp FROM sessions WHERE folder = ?", (folder,))
-                    if (row := cur.fetchone()) is None or row[0] != stamp:
-                        continue
-                    db.execute("DELETE FROM seg_vec WHERE folder = ?", (folder,))
-                    rows = [
-                        (folder, start, speaker, lang, text, vecs[i].astype(np.float32).tobytes())
-                        for i, (text, start, speaker, lang) in enumerate(segs)
-                    ]
-                    db.executemany("INSERT INTO seg_vec VALUES (?, ?, ?, ?, ?, ?)", rows)
-                    db.execute(
-                        "INSERT OR REPLACE INTO sem_sessions VALUES (?, ?, ?)",
-                        (folder, stamp, model),
-                    )
-                    self._bump(db)
-                    self._commit(db)
+                try:
+                    with self._lock, contextlib.closing(self._connect()) as db:
+                        if self.embedder is not embedder:
+                            return  # switched off or swapped: don't store
+                        # Check and write in one transaction: another process (the app or a CLI
+                        # search) can't drop the session in between and leave its text here.
+                        db.execute("BEGIN IMMEDIATE")
+                        cur = db.execute("SELECT stamp FROM sessions WHERE folder = ?", (folder,))
+                        if (row := cur.fetchone()) is None or row[0] != stamp:
+                            continue
+                        db.execute("DELETE FROM seg_vec WHERE folder = ?", (folder,))
+                        rows = [
+                            (
+                                folder,
+                                start,
+                                speaker,
+                                lang,
+                                text,
+                                vecs[i].astype(np.float32).tobytes(),
+                            )
+                            for i, (text, start, speaker, lang) in enumerate(segs)
+                        ]
+                        db.executemany("INSERT INTO seg_vec VALUES (?, ?, ?, ?, ?, ?)", rows)
+                        db.execute(
+                            "INSERT OR REPLACE INTO sem_sessions VALUES (?, ?, ?)",
+                            (folder, stamp, model),
+                        )
+                        self._bump(db)
+                        self._commit(db)
+                except sqlite3.OperationalError:  # another process holds the write lock
+                    blocked = True  # skip this session; the others still get embedded
+                    log.warning("search index busy: embedding a session is retried shortly")
+            if blocked:
+                self._retry_embed_later()
+            else:
+                self._embed_blocked_passes = 0
         except Exception as e:  # noqa: BLE001 - semantic search is optional
             log.error("semantic indexing failed: %s", type(e).__name__)
+
+    def _retry_embed_later(self) -> None:
+        """A write was blocked by another process: back off (no lock held), then ask the
+        worker for another pass; gives up after a few so a stuck lock can't spin forever."""
+        self._embed_blocked_passes += 1
+        if self._embed_blocked_passes > EMBED_BLOCKED_RETRIES:
+            self._embed_blocked_passes = 0
+            return  # the next sync or search kicks again
+        time.sleep(EMBED_BLOCKED_BACKOFF_S * self._embed_blocked_passes)
+        with self._embed_guard:
+            self._embed_dirty = True
 
     def _semantic(self, query: str, limit: int) -> list[Hit]:
         """Segments closest in meaning to ``query`` (cosine), best first, from the vectors

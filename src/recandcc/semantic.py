@@ -176,12 +176,16 @@ class _Abandoned(Exception):
 
 
 def model_path(
-    model: ModelFile, download: bool = True, wait: Callable[[], bool] | None = None
+    model: ModelFile,
+    download: bool = True,
+    wait: Callable[[], bool] | None = None,
+    lock_wait_s: float | None = None,
 ) -> Path | None:
     """Local path of `model`, downloading (and verifying) it once if needed. None if it is not
     on disk and can't be downloaded now. A model on disk is used without any network access.
     ``wait`` is called before every block of a download: it blocks while the app is busy
-    (a recording) and returns False to abandon the download (the ``.part`` file is deleted)."""
+    (a recording) and returns False to abandon the download (the ``.part`` file is deleted).
+    ``lock_wait_s`` bounds the wait for another process's download (``DOWNLOAD_LOCK_WAIT_S``)."""
     global _last_failure
     path = MODELS_DIR / model.name
     if _is_valid(path, model):
@@ -195,7 +199,8 @@ def model_path(
             return None
         lock = _FileLock(MODELS_DIR / ".download.lock")
         try:
-            deadline = time.monotonic() + DOWNLOAD_LOCK_WAIT_S
+            wait_s = DOWNLOAD_LOCK_WAIT_S if lock_wait_s is None else lock_wait_s
+            deadline = time.monotonic() + wait_s
             while not lock.try_acquire():
                 # another process is downloading: use its result when it is done
                 if _is_valid(path, model):
@@ -270,9 +275,10 @@ def _download(model: ModelFile, path: Path, wait: Callable[[], bool] | None = No
                         raise ValueError(f"download larger than the expected {model.size} bytes")
                     digest.update(block)
                     f.write(block)
-                    if paused:
+                    if paused and written < model.size:
                         # The connection sat idle and the server may have dropped it: resume
                         # on a fresh one from the bytes on disk (the final sha256 still decides).
+                        # Not when every byte is here: ``Range: bytes=<size>-`` is a 416.
                         r.close()
                         r = _open(model.url, written)
                         if not _resumes_at(r, written):  # no range support: start clean
@@ -322,6 +328,8 @@ class OnnxEmbedder:
         self._retry_at = 0.0  # soft load failure (locked file ...): no new attempt before this
 
     model_id = MODEL.name
+    downloads = True  # False: use model files on disk only (a CLI search while the app runs)
+    lock_wait_s: float | None = None  # wait for another process's download (None: default)
 
     def ready(self) -> bool:
         """True once the model is loaded: ``embed`` then doesn't wait for anything."""
@@ -357,7 +365,12 @@ class OnnxEmbedder:
             for m in (MODEL, TOKENIZER):
                 if self._cancelled(gen) or (wait is not None and not wait()):
                     return False
-                p = model_path(m, wait=lambda: self._cancelled(gen) is False and _ok(wait))
+                p = model_path(
+                    m,
+                    download=self.downloads,
+                    wait=lambda: self._cancelled(gen) is False and _ok(wait),
+                    lock_wait_s=self.lock_wait_s,
+                )
                 if p is None:
                     return False
                 paths.append(p)

@@ -99,6 +99,12 @@ All notable changes to RecAndCC are documented here. The format is based on
   (#36, #54, #55).
 
 ### Fixed
+- Semantic search (#4): a hand edit of `[search] semantic = false` stops the embedding worker
+  and model download at once (not at the next search); a non-boolean value such as `"false"`
+  is treated as off with a warning; a download paused right before its last block no longer
+  ends in an HTTP 416 and a re-download; a meeting deleted while it was being embedded can't
+  leave its text in the index; `recandcc search` leaves the download to a running app and
+  waits at most 15 s for another process's download.
 - A recording cut off by a crash, force-quit or power loss is transcribed at the next start:
   its end time comes from the audio on disk, and `session.json` marks it `recovered`. A full
   disk at stop no longer keeps a session's end time off disk (#150).

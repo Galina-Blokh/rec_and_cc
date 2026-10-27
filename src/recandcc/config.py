@@ -699,6 +699,9 @@ def load_config(path: Path | None = None, *, migrate: bool = False) -> Config:
     )
     _migrate_summary_model(summary, path, persist=migrate)
     search = _build(SearchConfig, data.pop("search", {}))
+    if not isinstance(search.semantic, bool):  # "false" is a truthy string: never download on it
+        log.warning("config: [search] semantic must be true or false; using false")
+        search.semantic = False
     export = _build(ExportConfig, data.pop("export", {}))
     if not isinstance(export.template, str):
         log.warning("export.template must be a path string; ignoring it")
