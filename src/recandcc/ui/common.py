@@ -297,6 +297,8 @@ class Controller:
             transcriber = transcriber or Transcriber(cfg.transcription)
             tq = TranscriptionQueue(transcriber, on_done=self._on_transcribed)
         self.transcriber = transcriber
+        if transcriber is not None:  # toasts e.g. a language_models entry that failed to load
+            transcriber.on_notice = self.post_notice
         self.tq = tq
         self._live = None  # LiveTranscriber of the session being recorded (engine thread)
         self._live_done: dict[str, LiveTranscriber] = {}  # session id -> flushed LiveTranscriber

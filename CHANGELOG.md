@@ -27,6 +27,10 @@ All notable changes to RecAndCC are documented here. The format is based on
 - "Open transcripts folder" creates the folder owner-only, like session folders (#32).
 
 ### Added
+- Per-language model routing, opt-in: `transcription.language_models`, e.g.
+  `{ he = "ivrit-ai/whisper-large-v3-turbo-ct2" }`, transcribes Hebrew regions (live and
+  final) with the Hebrew-tuned ivrit.ai Whisper, pinned for faster-whisper and MLX, loaded on
+  first use; other languages keep the default model (#6).
 - `SECURITY.md`: how to report a vulnerability and a threat-model summary.
 - README "Privacy & consent": consent laws, where data lives, retention, deleting everything.
 - This changelog.
@@ -44,7 +48,8 @@ All notable changes to RecAndCC are documented here. The format is based on
 - Record only the app that triggered a session with `detection.system_audio_scope = "app"`
   (macOS per-app audio tap) (#63, #65).
 - `scripts/eval.py`: WER per language, language-ID accuracy, DER and RTF on a local,
-  consented speech set; see `docs/EVALUATION.md` (#34).
+  consented speech set; see `docs/EVALUATION.md` (#34). `--live` adds live caption latency
+  (p50 / p90 / max) by replaying each clip through the live transcriber (#13).
 - Requirements docs: intent, user stories with acceptance criteria, and a traceability table
   from stories to modules and tests, checked by a test (#33, #35).
 - ADR 0011: stack and packaging after v0.1 (Proposed) (#57).
