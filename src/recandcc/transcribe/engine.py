@@ -10,6 +10,7 @@ Pipeline per session:
   5. Merge tracks, drop mic echo, write transcript.{md,json,srt}.
   6. Speaker diarization of the "Others" track (diarize.py) runs on its own CPU threads from
      the start, alongside steps 1-4; "Others" segments become "Speaker 1", "Speaker 2", ...
+     (the "Me" track in a room session, both tracks in a room session a call upgraded).
 """
 
 from __future__ import annotations
@@ -52,11 +53,38 @@ ROUTE_RETRY_S = 300.0
 LANGUAGE_NAMES = {"he": "Hebrew", "en": "English", "ru": "Russian"}  # for notices
 
 
-def diarized_track(session: SessionInfo) -> Track:
-    """The track whose speakers get numbered: "Others", except in a room session (also one
-    a call upgraded later), where everyone in the room is on the mic ("Me")."""
-    room = session.trigger_kind == TriggerKind.ROOM or session.started_as_room
-    return Track.ME if room else Track.OTHERS
+def diarized_tracks(session: SessionInfo) -> tuple[Track, ...]:
+    """The tracks whose speakers get numbered: "Others" (the remote side of a call), "Me" in
+    a room session (everyone in the room is on the mic), both in a room session a call
+    upgraded later (the room on "Me", the call on "Others")."""
+    if session.trigger_kind == TriggerKind.ROOM:
+        return (Track.ME,)
+    return (Track.ME, Track.OTHERS) if session.started_as_room else (Track.OTHERS,)
+
+
+def _gather(futures: dict[Track, Future]) -> Future:
+    """One future for several ``Diarizer.submit`` futures: track -> turns (None if that one
+    failed or was cancelled), with their timings summed into ``timing`` before it is set."""
+    out: Future = Future()
+    timing: dict = {}
+    out.timing = timing  # pyright: ignore[reportAttributeAccessIssue]
+    left, lock = [len(futures)], threading.Lock()
+
+    def done(_f: Future) -> None:
+        with lock:
+            left[0] -= 1
+            if left[0]:
+                return
+        result: dict[Track, Any] = {}
+        for track, f in futures.items():
+            for key, value in getattr(f, "timing", {}).items():
+                timing[key] = round(timing.get(key, 0.0) + value, 2)
+            result[track] = None if f.cancelled() or f.exception() else f.result()
+        out.set_result(result)
+
+    for f in futures.values():
+        f.add_done_callback(done)
+    return out
 
 
 LANGUAGE_ID_MODEL = "base"  # small multilingual model used only for per-region language ID
@@ -64,6 +92,14 @@ MIN_LANGUAGE_CONFIDENCE = 0.75  # below this a chunk's language is re-checked wi
 # How long writing the final transcript waits for speaker diarization. If it takes longer, the
 # transcript is written with "Others" right away and rewritten with speaker labels when ready.
 DIARIZE_WAIT_S = 5.0
+# A summary waiting this long for a diarization that never ends is dropped from memory; its
+# .summary-pending marker gets it summarised (with "Others") by the app's idle re-scan.
+LABEL_WAIT_MAX_S = 3600.0
+
+
+def _dir_key(directory) -> str:
+    """A session folder as a dict key, the same for every spelling (no disk access)."""
+    return os.path.normcase(os.path.abspath(directory))
 
 
 def auto_parallelism(workers: int = 0, cores: int | None = None) -> tuple[int, int]:
@@ -118,6 +154,9 @@ class Transcriber:
         # model -> load seconds, not yet reported in a session's metrics (the session that
         # waited for the load gets them)
         self._load_times: dict[str, float] = {}
+        # session folder -> (since, callbacks waiting for a slow diarization's relabelled
+        # transcript), see after_labels; under _init_lock
+        self._label_waiters: dict[str, tuple[float, list[Callable[[], None]]]] = {}
 
     # -- models ------------------------------------------------------------------------------
 
@@ -557,13 +596,18 @@ class Transcriber:
     # -- final transcript + speaker diarization ----------------------------------------------
 
     def start_diarization(self, session: SessionInfo) -> Future | None:
-        """Start diarizing the session's ``diarized_track`` in the background (CPU threads).
-        None if disabled (cfg.diarize) or that track is not on disk."""
+        """Start diarizing the session's ``diarized_tracks`` in the background (CPU threads).
+        The future's result is the turns of the one track, or track -> turns when there are
+        two. None if disabled (cfg.diarize) or none of those tracks is on disk."""
         if not self.cfg.diarize:
             return None
-        name = session.tracks.get(diarized_track(session))
-        path = Path(session.directory) / name if name else None
-        if path is None or not path.exists():
+        paths = {
+            track: Path(session.directory) / session.tracks[track]
+            for track in diarized_tracks(session)
+            if track in session.tracks
+        }
+        paths = {track: path for track, path in paths.items() if path.exists()}
+        if not paths:
             return None
         with self._init_lock:
             if self._diarizer is None:
@@ -573,12 +617,16 @@ class Transcriber:
                     segmentation=self.cfg.diarize_overlap,
                 )
             diarizer = self._diarizer
-        timing: dict = {}
-        future = diarizer.submit(path, timing)
-        # Ad-hoc attribute, read back with getattr. Filled in before the result is set
-        # (see Diarizer._safe).
-        future.timing = timing  # pyright: ignore[reportAttributeAccessIssue]
-        return future
+        futures: dict[Track, Future] = {}
+        for track, path in paths.items():
+            timing: dict = {}
+            futures[track] = diarizer.submit(path, timing)
+            # Ad-hoc attribute, read back with getattr. Filled in before the result is set
+            # (see Diarizer._safe).
+            futures[track].timing = timing  # pyright: ignore[reportAttributeAccessIssue]
+        if len(diarized_tracks(session)) > 1:  # keyed by track, even if one file is missing
+            return _gather(futures)
+        return next(iter(futures.values()))
 
     def write_final(
         self,
@@ -607,6 +655,8 @@ class Transcriber:
             except TimeoutError:
                 log.info("session %s: speaker labels follow when diarization ends", session.id)
                 self._write(session, segments, duration)
+                with self._init_lock:  # before the callback, which may run right away
+                    self._label_waiters[_dir_key(session.directory)] = (self.clock(), [])
                 diarization.add_done_callback(
                     lambda f: self._relabel_later(session, segments, duration, f)
                 )
@@ -618,6 +668,36 @@ class Transcriber:
         self._write(session, segments, duration)
         self._drop_audio(session)
         return segments
+
+    def after_labels(self, directory: Path, fn: Callable[[], None]) -> None:
+        """Run ``fn`` once the session's transcript has its final speaker labels: now, or
+        (on the diarizer thread) after a slow diarization has rewritten it."""
+        with self._init_lock:
+            if self._waiting_for_labels(directory):
+                self._label_waiters[_dir_key(directory)][1].append(fn)
+                return
+        fn()
+
+    def labels_pending(self, directory: Path) -> bool:
+        """True while a slow diarization will still rewrite this session's transcript."""
+        with self._init_lock:
+            return self._waiting_for_labels(directory)
+
+    def _waiting_for_labels(self, directory: Path) -> bool:  # under _init_lock
+        now = self.clock()
+        for key, (since, _fns) in list(self._label_waiters.items()):
+            if now - since > LABEL_WAIT_MAX_S:  # never finished (hung): stop waiting
+                del self._label_waiters[key]
+        return _dir_key(directory) in self._label_waiters
+
+    def _labels_final(self, session: SessionInfo) -> None:
+        with self._init_lock:
+            waiters = self._label_waiters.pop(_dir_key(session.directory), (0.0, []))[1]
+        for fn in waiters:
+            try:
+                fn()
+            except Exception:  # noqa: BLE001 - runs on the diarizer thread
+                log.exception("session %s: a speaker-label callback failed", session.id)
 
     def _write(self, session: SessionInfo, segments: list[Segment], duration: float) -> None:
         write_outputs(session, segments, duration, self.cfg.model)
@@ -636,22 +716,39 @@ class Transcriber:
                 (Path(session.directory) / name).unlink(missing_ok=True)
 
     def _labelled(
-        self, session: SessionInfo, segments: list[Segment], turns: list[Turn] | None
+        self,
+        session: SessionInfo,
+        segments: list[Segment],
+        turns: list[Turn] | dict[Track, list[Turn] | None] | None,
     ) -> list[Segment]:
-        centroids = getattr(turns, "centroids", {}) if turns and self.cfg.speaker_names else {}
-        names: dict[int, str] = {}
-        if centroids:
-            try:
-                names = voices.match_profiles(centroids, voices.load_profiles())
-            except Exception:  # noqa: BLE001 - names are optional; numbers still work
-                log.exception("session %s: could not match voice profiles", session.id)
-        speaker = SPEAKERS[diarized_track(session)]  # "Me" in a room session
-        out, labels = label_speakers(segments, turns or [], speaker, names=names)
-        try:  # opt-in only, in the private voices folder: lets `name-speaker` name them later
+        """Number (or name) the speakers of each diarized track independently; a later
+        track's numbers continue after the earlier ones' ("Speaker 3" after 1 and 2)."""
+        by_track = turns if isinstance(turns, dict) else {diarized_tracks(session)[0]: turns}
+        out, n_labels, n_named = list(segments), 0, 0
+        speakers: dict[str, np.ndarray] = {}
+        for track, track_turns in by_track.items():
+            centroids = getattr(track_turns, "centroids", {}) if self.cfg.speaker_names else {}
+            names: dict[int, str] = {}
+            if track_turns and centroids:
+                try:
+                    names = voices.match_profiles(centroids, voices.load_profiles())
+                except Exception:  # noqa: BLE001 - names are optional; numbers still work
+                    log.exception("session %s: could not match voice profiles", session.id)
+            taken = {s.speaker for s in out} - {ME, OTHERS}
+            # One person, one name: a profile already given on an earlier track numbers this
+            # track's cluster instead (and its stored voice can't overwrite the first one).
+            folded = {t.casefold() for t in taken}
+            names = {k: n for k, n in names.items() if n.casefold() not in folded}
+            out, labels = label_speakers(
+                out, track_turns or [], SPEAKERS[track], names=names, reserved=taken
+            )
             # A lone speaker in a room session keeps "Me", which is never renamed: no voice.
-            speakers = {
+            speakers |= {
                 lbl: centroids[k] for k, lbl in labels.items() if k in centroids and lbl != ME
             }
+            n_labels += len(labels)
+            n_named += len(names.keys() & labels.keys())
+        try:  # opt-in only, in the private voices folder: lets `name-speaker` name them later
             if speakers and Path(session.directory).exists():
                 voices.write_session_voices(session, speakers)
             else:  # never leave voices of an older transcript of this session behind
@@ -659,13 +756,13 @@ class Transcriber:
             voices.prune_session_voices()  # of sessions whose folder was deleted
         except OSError:
             log.exception("session %s: could not update speaker voices", session.id)
-        if not turns:
+        if not any(by_track.values()):
             return segments
         log.info(  # counts only: names are personal data
-            "session %s: %d other speaker(s), %d recognized by voice",
+            "session %s: %d speaker(s), %d recognized by voice",
             session.id,
-            len(labels),
-            len(names.keys() & labels.keys()),
+            n_labels,
+            n_named,
         )
         return out
 
@@ -688,6 +785,7 @@ class Transcriber:
         finally:
             if Path(session.directory).exists():
                 self._drop_audio(session)
+            self._labels_final(session)
 
 
 def transcribe_directory(path: Path, cfg: TranscriptionConfig) -> list[Segment]:

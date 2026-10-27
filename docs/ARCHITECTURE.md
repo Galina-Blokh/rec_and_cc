@@ -76,7 +76,7 @@ The app is built around one rule: **real-time audio threads never block**. Every
 | UI main thread | rumps/AppKit; drains an event queue every 0.5 s | event queue |
 | UI workers | Permission checks, recent-transcript scan, `osascript` dialogs, transcript search (syncs the index, posts a `search` event), meeting notes scan / rename / delete (post a `notes` event; a delete also drops the session from the index) | event queue |
 | search indexer (per finished transcript) | `TranscriptIndex.index_session` after `on_done`; errors logged | own SQLite connection |
-| summary (1, only with `summary.enabled`) | Loads the summary LLM, writes `summary.md`, frees the model (and MLX's buffer cache); one session at a time. It never competes with a recording: while the engine is not idle (recording or asking) it waits before a session and pauses between model calls (chunk notes, summary, action items). Each call holds `gpu.MLX_LOCK`, which every MLX Whisper call also holds, for its prompt prefill (≤ 8,000 characters, ~1–2 s, in 512-token steps) and then per generated token, so the GPU is never driven from two threads at once and a post-session Whisper pass waits at most one prefill | `SummaryQueue` |
+| summary (1, only with `summary.enabled`) | Loads the summary LLM, writes `summary.md`, frees the model (and MLX's buffer cache); one session at a time, queued only once the transcript has its final speaker labels (`Transcriber.after_labels`: after a slow diarization's rewrite). A `.summary-pending` marker in the session folder lives from queueing until the summary is written or skipped; startup and idle UI refreshes queue marked sessions (not in flight, not waiting for labels; a session already queued is not queued twice). It never competes with a recording: while the engine is not idle (recording or asking) it waits before a session and pauses between model calls (chunk notes, summary, action items). Each call holds `gpu.MLX_LOCK`, which every MLX Whisper call also holds, for its prompt prefill (≤ 8,000 characters, ~1–2 s, in 512-token steps) and then per generated token, so the GPU is never driven from two threads at once and a post-session Whisper pass waits at most one prefill | `SummaryQueue` |
 
 - The engine holds one lock and never makes a blocking call while holding it. UI actions
   (`start_manual`, `stop`, `respond`) are queued as commands, so only the engine thread
@@ -164,9 +164,11 @@ engine closes the monitor's mic (the recorder opens its own) and reopens it when
 diarization and UI differ: there is no app, so a room session stops after
 `room_stop_after_silence_s` without speech (VAD on the session's own mic stream) or by the
 level rule (`stop_after_silence_s`), and the `calls` mic policy includes it. Everyone in the
-room is on the mic, so diarization numbers the speakers of the `Me` track in room sessions,
-also after a call upgraded one (`SessionInfo.started_as_room`; `transcribe/engine.py:
-diarized_track`). The replayed pre-roll is not counted as writer backlog.
+room is on the mic, so diarization numbers the speakers of the `Me` track in room sessions.
+After a call upgraded one (`SessionInfo.started_as_room`) both tracks are diarized, each on
+its own: the room on `Me`, then the call on `Others`, whose numbers continue after the
+room's (`transcribe/engine.py: diarized_tracks`). The replayed pre-roll is not counted as
+writer backlog.
 
 **Precedence.** In `tick()` sustained room speech is a candidate `@room`, appended *after*
 the app candidates and only when nothing records or asks and **no other process is doing
@@ -231,7 +233,8 @@ and has similar text (`difflib` ratio ≥ 0.6).
 ### Speaker diarization: `Others` → `Speaker 1`, `Speaker 2`, …
 The system-audio track mixes everyone else on the call. Only the **final** transcript splits
 it; live captions keep `Others`, and `Me` is never touched (`diarize.py`), except in a
-room session, where the `Me` track is the one split:
+room session, where the `Me` track is the one split (both tracks, numbered one after the
+other, when a call upgraded the room session):
 
 1. Silero VAD (the one used for chunking) finds speech in `others.wav`. With the opt-in
    `diarize_overlap` ([ADR 0014](adr/0014-overlap-aware-segmentation.md)), pyannote

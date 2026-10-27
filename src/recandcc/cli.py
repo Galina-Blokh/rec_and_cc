@@ -181,10 +181,11 @@ def cmd_transcribe(args) -> int:
 
 def cmd_summarize(args) -> int:
     setup_logging(to_file=False)
-    from .transcribe.summary import SummaryUnavailable, summarize_session
+    from .transcribe.summary import SummaryUnavailable, clear_pending, summarize_session
 
+    directory = Path(args.session_dir).expanduser()
     try:
-        path = summarize_session(Path(args.session_dir).expanduser(), load_config())
+        path = summarize_session(directory, load_config())
     except SummaryUnavailable as e:
         print(f"No summary: {e}.", file=sys.stderr)
         return 1
@@ -192,6 +193,7 @@ def cmd_summarize(args) -> int:
         # the type only: the message could quote the transcript
         print(f"Can't summarize the session: {type(e).__name__}", file=sys.stderr)
         return 1
+    clear_pending(directory)
     print(path)
     return 0
 
@@ -335,7 +337,8 @@ def cmd_speakers(args) -> int:
 
 
 def cmd_name_speaker(args) -> int:
-    if not load_config().transcription.speaker_names:
+    cfg = load_config()
+    if not cfg.transcription.speaker_names:
         print("Voice profiles are off: set transcription.speaker_names = true.", file=sys.stderr)
         return 1
     from .transcribe import voices
@@ -346,7 +349,20 @@ def cmd_name_speaker(args) -> int:
         print(f"Can't name {args.label!r}: {e}", file=sys.stderr)
         return 1
     print(f"{args.label} is now {p.name} (voice profile from {p.count} session(s)).")
+    _refresh_summary(Path(args.session_dir).expanduser(), cfg)
     return 0
+
+
+def _refresh_summary(directory: Path, cfg) -> None:
+    """After a speaker rename: mark an existing summary.md stale. The app redoes it while
+    idle (never here: that could run the model on the GPU during a recording)."""
+    from .transcribe.summary import SUMMARY_NAME, mark_pending
+
+    if not (directory / SUMMARY_NAME).exists():
+        return
+    mark_pending(directory)
+    by_app = "the summary is redone by the app (or run" if cfg.summary.enabled else "(run"
+    print(f"{SUMMARY_NAME} still uses the old name: {by_app} `recandcc summarize {directory}`).")
 
 
 def cmd_voices(args) -> int:
