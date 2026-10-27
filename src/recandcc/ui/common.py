@@ -218,6 +218,9 @@ def grant_permission(kind: str) -> str | None:
         return None
 
 
+DIALOG_TIMEOUT_S = 300  # an abandoned chooser must not keep a flow "open" for ever
+
+
 def osascript(script: str, timeout: float | None = None) -> str:
     """Run AppleScript, return stdout ('' on error/cancel). The script goes in on stdin, not
     argv, so text in it (search results) isn't visible in the process list."""

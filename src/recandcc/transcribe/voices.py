@@ -106,39 +106,64 @@ def forget_generation(voices_dir: Path | None = None) -> int:
         return 0
 
 
-_held = threading.local()  # file-lock depth of this thread: re-entrant
+_held = threading.local()  # per thread: voices folder -> lock depth (re-entrant)
+LOCK_WAIT_S = 60.0  # Windows: how long to wait for another process before giving up
+
+
+def _depth(d: Path) -> int:
+    return getattr(_held, "depths", {}).get(str(d), 0)
+
+
+def _set_depth(d: Path, n: int) -> None:
+    if not hasattr(_held, "depths"):
+        _held.depths = {}
+    _held.depths[str(d)] = n
+
+
+def _lock_windows(f) -> None:
+    """msvcrt.LK_LOCK gives up after ~10 s: poll LK_NBLCK with a backoff up to LOCK_WAIT_S."""
+    import msvcrt
+
+    deadline, pause = time.monotonic() + LOCK_WAIT_S, 0.02
+    while True:
+        try:
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)  # pyright: ignore[reportAttributeAccessIssue] - Windows only
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise OSError("the voice data is in use by another process; try again") from None
+            time.sleep(pause)
+            pause = min(pause * 2, 0.5)
 
 
 @contextlib.contextmanager
 def _file_lock(voices_dir: Path | None = None):
     """Exclusive lock on the voices folder across processes (and threads, with LOCK), taken
-    by every change of the voice store. Re-entrant per thread: a second handle on the same
-    file would block this very thread."""
+    by every change of the voice store. Re-entrant per thread and folder: a second handle on
+    the same file would block this very thread."""
+    d = _dir(voices_dir)
     with LOCK:
-        if getattr(_held, "depth", 0):
-            _held.depth += 1
+        if _depth(d):
+            _set_depth(d, _depth(d) + 1)
             try:
                 yield
             finally:
-                _held.depth -= 1
+                _set_depth(d, _depth(d) - 1)
             return
-        d = _dir(voices_dir)
         d.mkdir(parents=True, exist_ok=True, mode=0o700)
         with open(d / LOCK_FILE, "a+b") as f:
             if os.name == "nt":
-                import msvcrt
-
-                f.seek(0)
-                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                _lock_windows(f)
             else:
                 import fcntl
 
                 fcntl.flock(f, fcntl.LOCK_EX)
-            _held.depth = 1
+            _set_depth(d, 1)
             try:
                 yield
             finally:
-                _held.depth = 0
+                _set_depth(d, 0)
                 if os.name == "nt":
                     import msvcrt
 

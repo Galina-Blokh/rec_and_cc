@@ -29,6 +29,7 @@ from ..models import Mode, TriggerKind
 from ..retention import RETENTION_CHOICES
 from . import notes as notes_ui
 from .common import (
+    DIALOG_TIMEOUT_S,
     PERM_KINDS,
     PERM_TITLES,
     ROOM_ITEM,
@@ -498,7 +499,7 @@ class MacApp(rumps.App):
         def run():
             handed_over = False
             try:
-                number = osascript(script).partition(".")[0]
+                number = osascript(script, DIALOG_TIMEOUT_S).partition(".")[0]
                 if number.isdigit() and 0 < int(number) <= len(recent):
                     self.ctrl.speakers_async(recent[int(number) - 1].parent)
                     handed_over = True  # the "speakers" event continues the flow
@@ -519,12 +520,12 @@ class MacApp(rumps.App):
         def run():
             dispatched = False
             try:
-                number = osascript(pick).partition(".")[0]
+                number = osascript(pick, DIALOG_TIMEOUT_S).partition(".")[0]
                 if not (number.isdigit() and 0 < int(number) <= len(speakers)):
                     return
                 label = speakers[int(number) - 1][0]
                 if (
-                    name := osascript(name_dialog_script(label))
+                    name := osascript(name_dialog_script(label), DIALOG_TIMEOUT_S)
                     .partition("text returned:")[2]
                     .strip()
                 ):

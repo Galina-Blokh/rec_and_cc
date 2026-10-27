@@ -384,7 +384,9 @@ def test_relabel_never_overwrites_names_even_after_a_forget(tmp_path, monkeypatc
 
 def test_prune_does_not_hold_the_file_lock_while_checking_folders(tmp_path, monkeypatch):
     held = []
-    monkeypatch.setattr(voices, "_deleted", lambda d: held.append(voices._held.depth) or True)
+    monkeypatch.setattr(
+        voices, "_deleted", lambda d: held.append(voices._depth(voices.VOICES_DIR)) or True
+    )
     voices.write_session_voices(make_session(tmp_path), {"Speaker 1": ANNA})
     assert voices.prune_session_voices() == 1
     assert held == [0]
@@ -414,3 +416,52 @@ def test_stale_run_neither_names_nor_deletes_after_a_forget(tmp_path, monkeypatc
     voices.write_session_voices(session, {"Speaker 1": ANNA})  # stored after the forget
     t._labelled(session, list(SEGS), None, stale)  # an old run with no voices to store
     assert voices.read_session_voices(session.id)  # ...must not delete the newer ones
+
+
+def test_file_lock_depth_is_kept_per_folder(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    with voices._file_lock(a):
+        assert voices._depth(a) == 1 and voices._depth(b) == 0
+        with voices._file_lock(b):  # another folder: a real lock of its own
+            assert voices._depth(b) == 1
+        with voices._file_lock(a):
+            assert voices._depth(a) == 2
+    assert voices._depth(a) == 0 and voices._depth(b) == 0
+
+
+def test_windows_lock_polls_and_gives_up_cleanly(monkeypatch):
+    import sys
+    import types
+
+    calls = []
+    fake = types.SimpleNamespace(LK_NBLCK=2, LK_UNLCK=0)
+
+    def locking(fd, mode, n):
+        calls.append(mode)
+        raise OSError("busy")
+
+    fake.locking = locking
+    monkeypatch.setitem(sys.modules, "msvcrt", fake)
+    monkeypatch.setattr(voices, "LOCK_WAIT_S", 0.1)
+
+    class F:
+        def seek(self, n): ...
+        def fileno(self):
+            return 0
+
+    with pytest.raises(OSError, match="in use by another process"):
+        voices._lock_windows(F())
+    assert len(calls) > 1  # it polled instead of failing on the first try
+
+
+def test_osascript_timeout_returns_empty(monkeypatch):
+    import subprocess
+
+    from recandcc.ui import common
+
+    def slow(*a, **k):
+        assert k["timeout"] == common.DIALOG_TIMEOUT_S
+        raise subprocess.TimeoutExpired("osascript", k["timeout"])
+
+    monkeypatch.setattr(common.subprocess, "run", slow)
+    assert common.osascript("x", common.DIALOG_TIMEOUT_S) == ""
