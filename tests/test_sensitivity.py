@@ -231,6 +231,72 @@ def test_quick_clicks_and_a_hand_edit_all_survive_saves_in_any_order(tmp_path, m
     assert ctrl._pending == {}  # everything saved
 
 
+def test_a_preset_click_keeps_hand_edits_outside_detection(tmp_path, monkeypatch):
+    ctrl, cfg, path = _controller(tmp_path, monkeypatch)
+    cfg.save(path)
+    ctrl._maybe_reload_config()
+    pending = _deferred_saves(ctrl, monkeypatch)
+    text = path.read_text().replace("live_captions = true", "live_captions = false")
+    path.write_text(text.replace("audio_retention_days = 0", "audio_retention_days = 7"))
+    ctrl.set_sensitivity("Normal")
+    pending.pop()()
+    saved = load_config(path)
+    assert saved.live_captions is False and saved.transcription.audio_retention_days == 7
+    assert cfg.live_captions is False and cfg.transcription.audio_retention_days == 7
+    assert current_preset(saved.detection) == "Normal" == current_preset(cfg.detection)
+
+
+def test_a_changed_hotkey_is_applied_outside_the_config_lock(tmp_path, monkeypatch):
+    from recandcc.config import CONFIG_LOCK
+
+    ctrl, cfg, path = _controller(tmp_path, monkeypatch)
+    cfg.save(path)
+    ctrl._maybe_reload_config()
+    free: list[bool] = []
+
+    def apply_hotkey(spec):
+        def probe():
+            got = CONFIG_LOCK.acquire(timeout=1)
+            free.append(got)
+            if got:
+                CONFIG_LOCK.release()
+
+        t = threading.Thread(target=probe)
+        t.start()
+        t.join()
+
+    monkeypatch.setattr(ctrl, "apply_hotkey", apply_hotkey)
+    pending = _deferred_saves(ctrl, monkeypatch)
+    path.write_text(
+        path.read_text().replace('hotkey = "<ctrl>+<alt>+r"', 'hotkey = "<ctrl>+<alt>+t"')
+    )
+    ctrl.set_sensitivity("Normal")
+    pending.pop()()  # the save worker reloads the edit first
+    path.write_text(
+        path.read_text().replace('hotkey = "<ctrl>+<alt>+t"', 'hotkey = "<ctrl>+<alt>+y"')
+    )
+    ctrl._maybe_reload_config()  # the periodic reload
+    assert free == [True, True] and cfg.hotkey == "<ctrl>+<alt>+y"
+
+
+def test_speech_longer_than_the_window_is_clamped_only_where_it_is_used(tmp_path, caplog):
+    path = tmp_path / "c.toml"
+    path.write_text("[detection]\nroom_speech_s = 20.0\nroom_window_s = 15.0\n")
+    det = load_config(path).detection
+    assert det.room_speech_s == 20.0 and "longer than room_window_s" in caplog.text
+    assert room_trigger(det) == (15.0, 15.0, None)  # unset sensitivity: clamped at use
+    caplog.clear()
+    path.write_text(
+        "[detection]\nroom_speech_s = 20.0\nroom_window_s = 15.0\noutside_sensitivity = 50\n"
+    )
+    det = load_config(path).detection
+    assert "longer than" not in caplog.text  # the window widens instead
+    assert room_trigger(det)[:2] == pytest.approx((20.0, 40.0))
+    cfg = Config(detection=det)
+    cfg.save(path)
+    assert load_config(path).detection.room_speech_s == 20.0  # the user's value is kept
+
+
 def test_a_preset_click_never_overwrites_a_broken_hand_edit(tmp_path, monkeypatch):
     ctrl, cfg, path = _controller(tmp_path, monkeypatch)
     cfg.save(path)

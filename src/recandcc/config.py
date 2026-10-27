@@ -353,19 +353,20 @@ def load_config(path: Path | None = None) -> Config:
     det = _build(DetectionConfig, data.pop("detection", {}))
     det.mode = Mode(det.mode)
     det.app_modes = {k: Mode(v) for k, v in det.app_modes.items()}
-    if det.room_speech_s > det.room_window_s:  # could never trigger: say so, and clamp
+    for key in ("outside_sensitivity", "inside_sensitivity"):
+        v = getattr(det, key)
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int | float)):
+            log.warning("config: [detection] %s must be a number 0-100; ignoring it", key)
+            setattr(det, key, None)
+    # Could never trigger: say so. Clamped where it is used (the file keeps the value); with
+    # an outside sensitivity the window widens instead.
+    if det.outside_sensitivity is None and det.room_speech_s > det.room_window_s:
         log.warning(
             "room_speech_s (%s) is longer than room_window_s (%s); using %s",
             det.room_speech_s,
             det.room_window_s,
             det.room_window_s,
         )
-        det.room_speech_s = det.room_window_s
-    for key in ("outside_sensitivity", "inside_sensitivity"):
-        v = getattr(det, key)
-        if v is not None and (isinstance(v, bool) or not isinstance(v, int | float)):
-            log.warning("config: [detection] %s must be a number 0-100; ignoring it", key)
-            setattr(det, key, None)
     tr = _build(TranscriptionConfig, data.pop("transcription", {}))
     raw = tr.languages
     tr.languages = normalize_languages(raw)

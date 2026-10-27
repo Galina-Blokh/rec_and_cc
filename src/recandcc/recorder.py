@@ -629,7 +629,6 @@ class Recorder:
                     writers.append(w)
                     if room_mic:  # replayed synchronously by start(): the others start padded
                         preroll = w._padding
-                    replay = max(replay, w.replay_s) if mic_source else 0.0  # longer pre-roll
 
             if not writers:
                 shutil.rmtree(directory, ignore_errors=True)

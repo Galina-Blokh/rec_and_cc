@@ -71,7 +71,9 @@ Thresholds = Callable[[DetectionConfig], tuple[float, float, float | None]]
 
 
 def plain_thresholds(det: DetectionConfig) -> tuple[float, float, float | None]:
-    return float(det.room_speech_s), float(det.room_window_s), None
+    """room_speech_s within room_window_s; speech longer than the window is clamped to it."""
+    window = float(det.room_window_s)
+    return min(float(det.room_speech_s), window), window, None
 
 
 def window_levels(audio: np.ndarray) -> np.ndarray:

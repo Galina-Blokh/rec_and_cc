@@ -47,8 +47,9 @@ def room_trigger(det: DetectionConfig) -> tuple[float, float, float | None]:
     The window widens so speech_s is at most MAX_COVERAGE of it; margin_db is how far above
     the room's noise floor a step must be to count (None = no level gate)."""
     s = valid(det.outside_sensitivity)
-    if s is None:
-        return float(det.room_speech_s), float(det.room_window_s), None
+    if s is None:  # as configured; speech longer than the window is clamped to it
+        window = float(det.room_window_s)
+        return min(float(det.room_speech_s), window), window, None
     speech = det.room_speech_s * scale(s)
     window = max(float(det.room_window_s), speech / MAX_COVERAGE)
     margin = MAX_MARGIN_DB - (MAX_MARGIN_DB - MIN_MARGIN_DB) * s / 100.0
