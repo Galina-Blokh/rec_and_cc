@@ -345,8 +345,8 @@ def test_replace_that_never_succeeds_is_an_export_error(session, monkeypatch):
     assert not list(session.glob(".*.tmp"))
 
 
-def test_latest_finished_skips_live_sessions_and_ignores_mtime(tmp_path):
-    from recandcc.ui.common import latest_finished
+def test_latest_finished_session_skips_live_ones_and_ignores_mtime(tmp_path):
+    from recandcc.ui.common import latest_finished_session
 
     def sess(day, name, done):
         d = tmp_path / day / name
@@ -356,12 +356,14 @@ def test_latest_finished_skips_live_sessions_and_ignores_mtime(tmp_path):
             (d / "transcript.json").write_text("{}")
         return d / "transcript.md"
 
-    live = sess("2026-10-27", "090000_zoom", False)
+    assert latest_finished_session(tmp_path) is None
+    for i in range(12):  # many newer live sessions
+        sess("2026-10-27", f"{i:02d}0000_zoom", False)
     new = sess("2026-10-26", "140312_zoom", True)
     old = sess("2026-10-25", "100000_meet", True)
     os.utime(old, (9e9, 9e9))  # re-transcribed just now: newest mtime, oldest session
-    assert latest_finished([old, live, new]) == new
-    assert latest_finished([live]) is None and latest_finished([]) is None
+    assert latest_finished_session(tmp_path) == new
+    assert latest_finished_session(tmp_path / "missing") is None
 
 
 def test_controller_export_of_nothing_finished_posts_a_notice(tmp_path):
@@ -380,25 +382,6 @@ def test_a_held_open_file_gets_a_clear_notice(session, monkeypatch):
         export.export_docx(session)
 
 
-def test_latest_export_finds_a_finished_session_beyond_the_recent_ten(tmp_path, monkeypatch):
-    for i in range(12):  # twelve newer, unfinished (live) sessions
-        d = tmp_path / "2026-10-27" / f"{i:02d}0000_zoom"
-        d.mkdir(parents=True)
-        (d / "transcript.md").write_text("x")
-    done = tmp_path / "2026-10-20" / "140312_zoom"
-    done.mkdir(parents=True)
-    (done / "transcript.md").write_text("x")
-    (done / "transcript.json").write_text("{}")
-    calls = []
-    monkeypatch.setattr(
-        export, "export_session", lambda f, fmt, sk: calls.append(f) or [f / "transcript.docx"]
-    )
-    ctrl = _controller(tmp_path)
-    ctrl.export_async()
-    assert ctrl.events.get(timeout=10)[2].startswith("Saved transcript.docx")
-    assert calls == [done]
-
-
 def test_export_refuses_a_session_linked_from_outside_the_folder(tmp_path):
     if sys.platform == "win32":
         pytest.skip("symlinks need privileges")
@@ -412,11 +395,15 @@ def test_export_refuses_a_session_linked_from_outside_the_folder(tmp_path):
     assert not list(elsewhere.iterdir())
 
 
-def test_stale_temp_files_of_a_crashed_export_are_swept(session):
-    stale = session / ".transcript.docx.99999.1.tmp"
-    stale.write_text("old")
+def test_only_old_export_temps_are_swept(session):
+    old = session / ".transcript.docx.99999.1.tmp"
+    fresh = session / ".transcript.pdf.99999.1.tmp"  # another process, in flight
+    others = [session / f".transcript.{e}.tmp" for e in ("md", "json", "srt")]
+    for f in (old, fresh, *others):
+        f.write_text("x")
+    os.utime(old, (1, 1))
     export.export_session(session, "docx")
-    assert not stale.exists()
+    assert not old.exists() and fresh.exists() and all(f.exists() for f in others)
 
 
 def test_a_write_error_is_not_reported_as_a_file_in_use(session, monkeypatch):

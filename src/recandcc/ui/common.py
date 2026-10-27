@@ -51,7 +51,6 @@ log = logging.getLogger(__name__)
 
 RECENT_COUNT = 10
 SEARCH_LIMIT = 20
-MAX_SCAN = 10_000  # sessions looked at to find the newest finished one
 HOTKEY_DEBOUNCE_S = 0.5
 REFRESH_EVERY_S = 10.0
 PERM_KINDS = ("microphone", "system_audio")
@@ -129,12 +128,28 @@ def recent_transcripts(output_dir: Path, n: int = RECENT_COUNT) -> list[Path]:
         return []
 
 
-def latest_finished(recent: list[Path]) -> Path | None:
-    """The session that started last among ``recent`` and has a transcript.json (a live or
-    still-transcribing one has only transcript.md). Ordered by the <day>/<time>_<app> folder
-    name, not mtime, so a re-transcribed old session doesn't count as the latest."""
-    done = [p for p in recent if (p.parent / "transcript.json").is_file()]
-    return max(done, key=lambda p: (p.parent.parent.name, p.parent.name), default=None)
+def latest_finished_session(output_dir: Path) -> Path | None:
+    """The transcript.md of the session that started last and has a transcript.json (a live
+    or still-transcribing one has only transcript.md). Walks <day>/<time>_<app> folders newest
+    first by name, not mtime (a re-transcribed old session isn't "latest"), and stops at the
+    first hit, so a big or synced library isn't scanned. Unreadable entries are skipped."""
+
+    def names(directory: Path) -> list[Path]:
+        try:
+            return sorted((d for d in directory.iterdir() if d.is_dir()), reverse=True)
+        except OSError:
+            return []
+
+    for day in names(Path(output_dir)):
+        for session in names(day):
+            try:
+                if (session / "transcript.json").is_file() and not (
+                    session / SessionInfo.DISCARD_MARKER
+                ).exists():
+                    return session / "transcript.md"
+            except OSError:
+                continue
+    return None
 
 
 def transcript_label(path: Path) -> str:
@@ -552,7 +567,7 @@ class Controller:
 
                     target = transcript
                     if target is None:
-                        target = latest_finished(recent_transcripts(self.cfg.output_dir, MAX_SCAN))
+                        target = latest_finished_session(self.cfg.output_dir)
                     if target is None:
                         raise ExportError("No finished transcripts yet")
                     if not inside(target.parent, self.cfg.output_dir):

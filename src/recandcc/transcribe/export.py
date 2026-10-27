@@ -126,11 +126,19 @@ def _write(path: Path, data: bytes) -> Path:
             tmp.unlink(missing_ok=True)
 
 
+STALE_TEMP_AGE_S = 3600.0
+
+
 def _sweep_stale_temps(folder: Path) -> None:
-    """Remove temp files a crashed export left behind (their names carry an old pid)."""
-    for stale in Path(folder).glob(".transcript.*.tmp"):
-        with contextlib.suppress(OSError):
-            stale.unlink()
+    """Remove export temp files (never the transcript's own ``.transcript.md.tmp`` etc.) that
+    a crashed export left behind: ``.transcript.docx.<pid>.<tid>.tmp`` / ``.pdf``, untouched
+    for an hour (so another process's export in flight is left alone)."""
+    now = time.time()
+    for name in (DOCX_NAME, PDF_NAME):
+        for stale in Path(folder).glob(f".{name}.*.tmp"):
+            with contextlib.suppress(OSError):
+                if now - stale.stat().st_mtime > STALE_TEMP_AGE_S:
+                    stale.unlink()
 
 
 def _type_only(fn):
