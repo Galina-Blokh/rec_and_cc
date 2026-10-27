@@ -9,6 +9,7 @@ import types
 
 import pytest
 
+from recandcc import cli
 from recandcc.cli import _SingleInstance
 
 
@@ -29,10 +30,17 @@ class _FakeMsvcrt(types.ModuleType):
         key = (os.fstat(fd).st_ino, offset)
         if mode == self.LK_UNLCK:
             self.held.pop(key, None)
-        elif key in self.held and self.held[key] != fd:
+        elif key in self.held and self.held[key] != fd and self._open(*key):
             raise PermissionError(13, "Permission denied")
         else:
             self.held[key] = fd
+
+    def _open(self, ino, offset):
+        """Windows drops a lock when its handle closes: a closed holder holds nothing."""
+        try:
+            return os.fstat(self.held[(ino, offset)]).st_ino == ino
+        except OSError:
+            return False
 
 
 @pytest.fixture
@@ -81,6 +89,46 @@ def test_windows_stale_lock_of_other_length_still_locks_byte_zero(win, tmp_path,
     assert _new(path, opened).acquire()
     assert win.offsets == [0]
     assert path.read_text() == str(os.getpid())
+
+
+def test_windows_lock_is_free_again_after_the_holder_closes(win, tmp_path, opened):
+    path = tmp_path / "run.lock"
+    first = _new(path, opened)
+    assert first.acquire()
+    assert first._f is not None
+    first._f.close()
+    first._f = None
+    assert _new(path, opened).acquire()
+
+
+class _FullDisk:
+    """A file whose writes fail, as on a full disk; everything else is real."""
+
+    def __init__(self, f):
+        self._f = f
+
+    def __getattr__(self, name):
+        return getattr(self._f, name)
+
+    def write(self, _data):
+        raise OSError(28, "No space left on device")
+
+
+def test_write_failure_after_lock_is_raised_and_closes_the_handle(
+    win, tmp_path, opened, monkeypatch
+):
+    files: list[_FullDisk] = []
+
+    def fake_open(*args, **kwargs):
+        files.append(_FullDisk(open(*args, **kwargs)))  # noqa: SIM115
+        return files[-1]
+
+    monkeypatch.setattr(cli, "open", fake_open, raising=False)
+    lock = _new(tmp_path / "run.lock", opened)
+    with pytest.raises(OSError, match="No space"):
+        lock.acquire()  # not misreported as "already running"
+    assert lock._f is None
+    assert files[0].closed
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only")

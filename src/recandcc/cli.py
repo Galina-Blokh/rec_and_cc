@@ -45,14 +45,20 @@ class _SingleInstance:
                 import fcntl
 
                 fcntl.flock(self._f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:  # another instance holds the lock
+            self._f.close()
+            self._f = None
+            return False
+        try:
             self._f.seek(0)
             self._f.truncate()
             self._f.write(str(os.getpid()))
             self._f.flush()
-        except OSError:
+        except OSError:  # lock won but the PID write failed (e.g. disk full)
+            log.warning("could not write the PID to %s", self.path, exc_info=True)
             self._f.close()
             self._f = None
-            return False
+            raise
         return True
 
 
