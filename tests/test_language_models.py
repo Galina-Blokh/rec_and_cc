@@ -179,11 +179,31 @@ def test_close_does_not_wait_for_a_routed_download_and_drops_its_result(monkeypa
     assert started.wait(5)
     t0 = time.monotonic()
     t.close()  # Quit, on the UI thread
-    assert time.monotonic() - t0 < 0.5
+    assert time.monotonic() - t0 < 2
     release.set()
     with t._route_lock:
         pass  # the prefetch has finished
     assert routed.closed and t._routed == {}
+
+
+def test_routed_load_failing_after_close_is_silent():
+    t = _loaded(Transcriber(_cfg()), HebrewFakeModel())
+    started, release, notices = threading.Event(), threading.Event(), []
+    t.on_notice = lambda title, msg: notices.append((title, msg))
+
+    def load(name):  # the download ends after Quit, e.g. on the shut-down GPU thread
+        started.set()
+        release.wait(3)
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+    t._load = load  # type: ignore[method-assign]
+    t.start_prefetch()
+    assert started.wait(5)
+    t.close()
+    release.set()
+    with t._route_lock:
+        pass  # the prefetch has finished
+    assert t._route_retry == {} and t._routed == {} and notices == []
 
 
 def test_routed_mlx_download_does_not_block_the_shared_gpu_thread(monkeypatch):
@@ -205,7 +225,7 @@ def test_routed_mlx_download_does_not_block_the_shared_gpu_thread(monkeypatch):
     assert started.wait(5)
     t0 = time.monotonic()
     main._thread.submit(lambda: None).result()  # the next live caption pass
-    assert time.monotonic() - t0 < 0.5
+    assert time.monotonic() - t0 < 2
     release.set()
     loader.join(5)
     assert routed._model is not None

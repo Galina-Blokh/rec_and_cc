@@ -251,6 +251,8 @@ class Transcriber:
                 self._routed_model(name, language, main, wait=False)
 
     def _load_routed(self, name: str, language: str, main):
+        if self._model is not main:  # closed meanwhile: don't start a download now
+            return None
         try:
             if isinstance(main, MlxWhisper):
                 t0 = time.monotonic()
@@ -306,6 +308,8 @@ class Transcriber:
                 if isinstance(model, MlxWhisper):
                     model.close()  # before the main model, whose GPU thread it shares
             if isinstance(main, MlxWhisper):
+                # Waits only for GPU jobs already queued, e.g. a routed weight load (seconds);
+                # a routed download runs on its own thread (MlxWhisper.load) and never here.
                 main.close()
             self._pool, self._lid_model = None, None
             diarizer, self._diarizer = self._diarizer, None
