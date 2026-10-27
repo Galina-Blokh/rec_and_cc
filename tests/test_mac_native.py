@@ -222,7 +222,8 @@ def _playing(path):
     monitor = MacActivityMonitor(interval=0.2)
     player = None
     try:
-        _wait_ready(monitor)  # start afplay only once the helper is live
+        # start afplay only once the helper is live; a silent helper is a failure, not a skip
+        assert _wait_ready(monitor, timeout=20.0), "rcc-audiotap monitor printed nothing in 20 s"
         player = _play(path)
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
