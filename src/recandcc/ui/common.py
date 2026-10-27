@@ -413,6 +413,66 @@ class Controller:
 
         threading.Thread(target=run, daemon=True, name="search").start()
 
+    # --- speaker names (opt-in; worker threads; results arrive as events)
+    @property
+    def speaker_names_enabled(self) -> bool:
+        return self.cfg.transcription.speaker_names
+
+    def speakers_async(self, directory: Path) -> None:
+        """List the session's speakers that have voice data, with their first lines; posts
+        ``("speakers", directory, [(label, lines)])`` (the exception if it failed)."""
+
+        def run() -> None:
+            try:
+                from ..models import SessionInfo
+                from ..transcribe import voices
+
+                known = voices.read_session_voices(SessionInfo.load(directory).id)
+                result = [
+                    (lbl, ln) for lbl, ln in voices.session_speakers(directory) if lbl in known
+                ]
+            except Exception as e:  # noqa: BLE001
+                log.error("could not list the speakers: %s", type(e).__name__)
+                result = e
+            self.events.put(("speakers", directory, result))
+
+        threading.Thread(target=run, daemon=True, name="speakers").start()
+
+    def name_speaker_async(self, directory: Path, label: str, name: str) -> None:
+        """Name a speaker through the same function as ``recandcc name-speaker``; posts
+        ``("named", label, name, error | None)``. Names are never logged."""
+
+        def run() -> None:
+            error = None
+            try:
+                if not self.speaker_names_enabled:
+                    raise ValueError("voice profiles are off (transcription.speaker_names)")
+                from ..transcribe import voices
+
+                voices.name_speaker(Path(directory), label, name)
+            except (OSError, ValueError, KeyError) as e:
+                log.error("could not name a speaker: %s", type(e).__name__)
+                error = str(e) or type(e).__name__
+            self.events.put(("named", label, name, error))
+
+        threading.Thread(target=run, daemon=True, name="name-speaker").start()
+
+    def forget_voices_async(self) -> None:
+        """Delete every voice profile and all stored session voices; posts
+        ``("forgot", count | exception)``."""
+
+        def run() -> None:
+            try:
+                from ..transcribe import voices
+
+                result = voices.delete_all_profiles()
+            except Exception as e:  # noqa: BLE001
+                log.error("could not delete the voices: %s", type(e).__name__)
+                result = e
+            self.events.put(("forgot", result))
+
+        threading.Thread(target=run, daemon=True, name="forget-voices").start()
+
     # --- live transcription (engine thread)
     def _on_session_start(self, session: SessionInfo) -> None:
         if not self.cfg.transcription.live or self.transcriber is None:

@@ -30,6 +30,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-19 | Hebrew transcripts and right-to-left captions | 🟡 stock model, no Hebrew test set (#6) |
 | US-20 | Search my transcripts | 🟡 search only; summaries, export planned (#4) |
 | US-21 | Speaker names remembered across sessions | 🟡 CLI only; UI naming, call-app names, overlaps planned (#1) |
+| US-26 | Name speakers and forget voices from the menu | 🟡 macOS menu, first lines instead of an audio sample; Windows tray not yet (#1) |
 
 ---
 
@@ -243,3 +244,20 @@ I don't have to work out who `Speaker 2` was every time.*
   delete the profiles (`--all` also deletes every session's voices).
 - **Not yet:** naming from the menu with a voice sample, names from the call app, overlap
   handling and an accuracy measurement on real speech (#1, #13).
+
+### US-26 Name speakers and forget voices from the menu
+*As the owner, I want to name a speaker and delete all voice data from the menu, so that I
+don't need the command line for it.*
+
+- **Given** `speaker_names = true`, **when** I choose "Recent transcripts → Name speakers…",
+  pick a session and a `Speaker N` (shown with their first lines), and type a name, **then**
+  the result is exactly that of `recandcc name-speaker` (same function): transcript files and
+  the voice profile are updated.
+- **Given** `speaker_names = false` (default), **then** "Name speakers…" is greyed out and
+  naming through the controller is refused.
+- **When** I choose "Forget all voices…" and confirm, **then** every voice profile and every
+  session's saved voices are deleted (like `voices delete --all`); cancelling deletes nothing.
+- **Then** dialogs run off the menu thread, disk work on worker threads, and neither names
+  nor transcript text are logged at INFO or above.
+- **Not yet:** a short audio sample (the first lines are shown instead), the Windows tray
+  items (#1).

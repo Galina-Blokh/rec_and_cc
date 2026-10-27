@@ -196,3 +196,33 @@ def search_open_target(hit) -> Path:
         return hit.transcript if hit.transcript.exists() else hit.folder
     except OSError:
         return hit.folder
+
+
+def speakers_notice(speakers) -> tuple[str, str] | None:
+    """(title, message) when there is nobody to name in a session, else None."""
+    if isinstance(speakers, Exception):
+        return ("Can't read the speakers", "This transcript could not be read.")
+    if not speakers:
+        return (
+            "No speakers to name",
+            "This session has no speakers with saved voice data.",
+        )
+    return None
+
+
+def speaker_choice_label(index: int, label: str, lines: list[str]) -> str:
+    """'1. Speaker 2: “hi there” / “ok”' (first lines as a hint: no audio sample)."""
+    hint = " / ".join(f"“{ln[:40]}”" for ln in lines[:2])
+    return f"{index}. {label}: {hint}"[:200]
+
+
+def named_notice(label: str, name: str, error: str | None) -> tuple[str, str]:
+    if error:
+        return ("Can't name the speaker", error)
+    return ("Speaker named", f"{label} is now {name}.")
+
+
+def forgot_notice(result) -> tuple[str, str]:
+    if isinstance(result, Exception):
+        return ("Can't delete voices", "Some voice data could not be deleted.")
+    return ("Voices deleted", f"Deleted {result} voice profile(s) and all saved session voices.")

@@ -33,7 +33,8 @@ All notable changes to RecAndCC are documented here. The format is based on
 - Search across all transcripts with a local SQLite FTS5 index: `recandcc search` and a
   menu item (#59).
 - Speaker names that carry over between sessions, from opt-in local voice profiles; name a
-  speaker once from the CLI (#62).
+  speaker once from the CLI (#62), or from the macOS menu ("Name speakers…", "Forget all
+  voices…").
 - Hebrew in `transcription.languages`, with right-to-left captions and transcripts (#60).
 - Record only the app that triggered a session with `detection.system_audio_scope = "app"`
   (macOS per-app audio tap) (#63, #65).
