@@ -174,6 +174,13 @@ capture your room. If a call starts while a video is already being recorded, the
 becomes a call: the microphone joins in, lined up in time, and the recording follows the call
 instead of stopping when the video ends. You can change this with `record_mic` in the settings.
 
+System audio (`Others`) is everything the Mac plays, so a notification sound or a video in
+another tab ends up in the recording too. On macOS, `system_audio_scope = "app"` records only
+the app that started the session (Zoom, the browser tab's browser…) and its helper
+processes; if a call starts during a video, both apps are recorded. Manual recordings always
+take everything. It is off by default because FaceTime plays calls through a system process,
+which a per-app recording would miss.
+
 ## Settings
 
 `~/Library/Application Support/RecAndCC/config.toml` (Windows:

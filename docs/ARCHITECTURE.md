@@ -94,6 +94,15 @@ A process tap delivers **no IO cycles while nothing is playing**. To keep the "o
 aligned with the mic track and continuous on disk, the helper fills those gaps with zeros,
 paced by the wall clock.
 
+With `detection.system_audio_scope = "app"` the engine passes the trigger app as an
+`AppTarget` (pattern + pids) through `Recorder.start` to `create_system_source(target)`, and
+the helper taps only those processes (`CATapDescription(stereoMixdownOfProcesses:)`). Each
+second it re-matches the pattern and updates the running tap's description, so browser or
+Electron helpers that start later are included; `pid` / `match` lines on its stdin add a
+second app when a call upgrades a media session. No process object yet, or a failing
+per-app tap, falls back to the global tap
+([ADR 0011](adr/0011-per-app-system-audio-tap.md)).
+
 ### Permissions belong to RecAndCC, not Terminal/python
 macOS (TCC) attributes permission requests to the *responsible process*. `RecAndCC.app`'s
 executable is a tiny Swift launcher that `posix_spawn`s Python as a child, so the app stays

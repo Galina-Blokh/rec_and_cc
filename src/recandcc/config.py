@@ -90,6 +90,10 @@ class DetectionConfig:
     # nothing is lost while you decide. Unanswered prompt: "record" keeps it, "ignore" discards.
     ask_timeout_action: str = "record"
     record_mic: str = "calls"  # "always" | "calls" | "never"
+    # "all": the Others track records everything the Mac plays. "app": only the app that
+    # triggered the session (macOS; falls back to "all" for manual sessions, when the app has
+    # no audio process yet, and on Windows).
+    system_audio_scope: str = "all"
     call_apps: list[str] = field(default_factory=lambda: list(DEFAULT_CALL_APPS))
     media_apps: list[str] = field(default_factory=lambda: list(DEFAULT_MEDIA_APPS))
     ignore_apps: list[str] = field(default_factory=lambda: list(DEFAULT_IGNORE_APPS))

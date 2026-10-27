@@ -19,6 +19,7 @@ the numbers in them come from the commits and docs they link to (measured on an 
 | [0008](0008-in-app-toast-notifications.md) | In-app toast instead of `osascript` notifications | Accepted |
 | [0009](0009-sherpa-onnx-campp-diarization.md) | sherpa-onnx CAM++ diarization instead of pyannote | Accepted |
 | [0010](0010-offline-first-model-loading.md) | Offline-first model loading | Accepted |
+| [0011](0011-per-app-system-audio-tap.md) | Optional per-app system-audio tap that follows the trigger app | Accepted |
 
 ## Adding an ADR
 
