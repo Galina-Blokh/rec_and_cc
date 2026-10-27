@@ -321,11 +321,13 @@ def test_a_short_path_or_case_variant_of_our_exe_is_still_ours(fakes, venv):
     assert WinActivityMonitor().snapshot() == []
 
 
-def test_another_script_on_our_base_interpreter_is_reported(fakes, venv):
+def test_another_script_on_our_base_interpreter_does_not_hide_our_own_mic_use(fakes, venv):
+    # An IDE language server or pytest on the same interpreter shares the one consent-store
+    # entry: counting it as someone else on the mic would keep closing our room mic.
     ns = types.SimpleNamespace
     fakes.procs = [*venv, ns(pid=4242, info={"name": "python.exe", "exe": BASE})]
     fakes.winreg.tree = mic_tree({}, {BASE.replace("\\", "#"): IN_USE})
-    assert [p.pid for p in WinActivityMonitor().snapshot()] == [4242]
+    assert WinActivityMonitor().snapshot() == []
 
 
 def test_a_parent_that_is_not_our_launcher_is_not_us(fakes, venv):

@@ -135,12 +135,14 @@ class WinActivityMonitor(ActivityMonitor):
     def _mic_owner(self, exe_lower: str, full: str) -> int | None:
         """PID to report for a consent-store mic entry; None when it is our own mic use.
 
-        Ours only if the running process(es) the entry can belong to are us: our own pid, or
-        our parent when that is the venv launcher (its exe is sys.executable; the base
-        interpreter it starts is us). Processes whose exe path matches the entry are the
-        candidates; if none does (8.3 short path, path unreadable), every process with that
-        exe name is. Any other candidate makes it someone else's (pid 0 if none runs): a
-        false "busy" beats hiding a real app on the mic."""
+        Processes whose exe path matches the entry are the candidates. The entry is ours when
+        one of them is us: our own pid, or our parent when that is the venv launcher
+        (its exe is sys.executable; the base interpreter it starts is us). The consent store
+        has one entry per exe path, so it can't tell us from another script on the same
+        interpreter (an IDE's language server always is): counting that as someone else on
+        the mic would keep closing our own room mic. A packaged app has its own exe. If no
+        path matches (8.3 short path, path unreadable), every process with that exe name is
+        a candidate and any other one makes it someone else's (pid 0 if none runs)."""
         try:
             import psutil  # pycaw dependency  # pyright: ignore[reportMissingModuleSource]
 
@@ -164,11 +166,16 @@ class WinActivityMonitor(ActivityMonitor):
             return pid == os.getpid() or (pid == ppid and norm(exe) == launcher)
 
         entry = norm(full)
-        cands = [c for c in procs if norm(c[1]) == entry] or procs
-        foreign = [pid for pid, exe in cands if not ours(pid, exe)]
+        matched = [c for c in procs if norm(c[1]) == entry]
+        if matched:
+            if any(ours(pid, exe) for pid, exe in matched):
+                return None
+            return matched[0][0]
+        # Only the exe name to go on: ours only if nothing else by that name runs.
+        foreign = [pid for pid, exe in procs if not ours(pid, exe)]
         if foreign:
             return foreign[0]
-        return None if cands else 0
+        return None if procs else 0
 
     def snapshot(self) -> list[AudioProcess]:
         self._ensure_com()
