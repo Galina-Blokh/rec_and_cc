@@ -801,6 +801,12 @@ class Engine:
                     self._suppressed.add(self._rec.key)  # don't retry every second
                 self._rec = None
             return
+        if self._stop_evt.is_set():
+            # shutdown() may have stopped waiting for us while start() ran: nobody else will
+            # stop this session, so finish it now as shutdown would (kept and submitted).
+            log.info("shutting down: stopping the recording that just started")
+            self._do_stop()
+            return
         with self._lock:
             if self._rec is not None:
                 self._rec.session = session

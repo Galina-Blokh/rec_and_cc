@@ -131,6 +131,10 @@ class SessionInfo:
     FILENAME = "session.json"
     # Present in a folder the user discarded: never transcribe or list it (discard_session).
     DISCARD_MARKER = ".discarded"
+    # Present while a slow diarization still reads the WAVs to relabel the transcript:
+    # retention keeps the audio. One older than LABELS_PENDING_MAX_S is stale (a crash).
+    LABELS_PENDING_MARKER = ".labels-pending"
+    LABELS_PENDING_MAX_S = 3600.0
 
     def update_metrics(self, stage: str, values: dict) -> None:
         """Merge `values` into ``metrics[stage]`` (thread-safe; not saved until ``save``)."""

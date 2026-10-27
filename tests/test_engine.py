@@ -469,6 +469,41 @@ def test_thread_and_shutdown():
     assert h.mon.closed
 
 
+def test_recording_that_starts_after_shutdown_gave_up_is_stopped():
+    """shutdown() stops waiting for an engine thread stuck in recorder.start(): once that
+    start returns, the engine stops the recorder itself, so the mic doesn't stay on."""
+    h = Harness(Mode.AUTO)
+    h.cfg.detection.poll_interval_s = 0.01
+    h.eng.clock = time.monotonic
+    entered, release = threading.Event(), threading.Event()
+    real_start, ops = h.rec.start, []
+
+    def slow_start(*a, **k):
+        entered.set()
+        release.wait(5)
+        ops.append("start")
+        return real_start(*a, **k)
+
+    real_stop = h.rec.stop
+
+    def stop():
+        ops.append("stop")
+        return real_stop()
+
+    h.rec.start, h.rec.stop = slow_start, stop
+    h.eng.start()
+    thread = h.eng._thread
+    assert thread is not None
+    h.eng.start_manual()
+    assert entered.wait(2)
+    h.eng.shutdown(timeout=0.05)  # gives up: the thread is still inside start()
+    release.set()
+    thread.join(2)
+    assert not thread.is_alive()
+    assert ops[-1] == "stop" and not h.rec.is_recording
+    assert h.status == IDLE
+
+
 def test_monitor_closed_on_the_engine_thread():
     """Per-thread monitor resources (Windows COM) are released by the thread that polled."""
     h = Harness(Mode.AUTO)  # fake clock: no recording starts, only polling

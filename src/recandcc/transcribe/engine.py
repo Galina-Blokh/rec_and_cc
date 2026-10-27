@@ -101,7 +101,7 @@ MIN_LANGUAGE_CONFIDENCE = 0.75  # below this a chunk's language is re-checked wi
 DIARIZE_WAIT_S = 5.0
 # A summary waiting this long for a diarization that never ends is dropped from memory; its
 # .summary-pending marker gets it summarised (with "Others") by the app's idle re-scan.
-LABEL_WAIT_MAX_S = 3600.0
+LABEL_WAIT_MAX_S = SessionInfo.LABELS_PENDING_MAX_S
 
 
 def _dir_key(directory) -> str:
@@ -749,6 +749,7 @@ class Transcriber:
                 turns = diarization.result(timeout=self.diarize_wait_s)
             except TimeoutError:
                 log.info("session %s: speaker labels follow when diarization ends", session.id)
+                _set_labels_pending(session.directory, True)  # before transcribed is saved
                 with voices.NAMING_LOCK:
                     self._write(session, segments, duration)
                 with self._init_lock:  # before the callback, which may run right away
@@ -955,7 +956,21 @@ class Transcriber:
         finally:
             if Path(session.directory).exists():
                 self._drop_audio(session)
+            _set_labels_pending(session.directory, False)
             self._labels_final(session)
+
+
+def _set_labels_pending(directory: Path, pending: bool) -> None:
+    """Create or remove the marker that keeps retention off a session's audio. Best effort:
+    without it retention may delete the audio early, which only costs the speaker labels."""
+    marker = Path(directory) / SessionInfo.LABELS_PENDING_MARKER
+    try:
+        if pending:
+            marker.touch()
+        else:
+            marker.unlink(missing_ok=True)
+    except OSError as e:
+        log.warning("could not update %s: %s", marker.name, e)
 
 
 def transcribe_directory(path: Path, cfg: TranscriptionConfig) -> list[Segment]:
