@@ -685,26 +685,3 @@ def test_cli_autostart_reverts_the_config_when_the_login_item_fails(tmp_path, mo
     assert cli.cmd_autostart(types.SimpleNamespace(action="on")) == 1
     assert tomllib.loads(path.read_text())["autostart"] is False  # still matches the OS
     assert "Can't change launch at login" in capsys.readouterr().err
-
-
-def test_reload_between_retention_click_and_save_keeps_the_click(tmp_path, monkeypatch):
-    ctrl, path = _ctrl(tmp_path, monkeypatch)
-    purged = []
-    monkeypatch.setattr(ctrl, "purge_audio_now", lambda: purged.append(1))
-    gate = threading.Event()
-    real = ctrl._write_settings
-
-    def slow(*a, **k):
-        gate.wait(5)  # the worker is late: a reload lands first
-        return real(*a, **k)
-
-    monkeypatch.setattr(ctrl, "_write_settings", slow)
-    path.write_text(path.read_text() + "[transcription]\naudio_retention_days = 3\n")
-    ctrl.set_retention_days(30)
-    assert ctrl._dirty  # marked synchronously, before the worker runs
-    ctrl._maybe_reload_config()  # the reload sees the on-disk 3
-    assert ctrl.cfg.transcription.audio_retention_days == 30
-    gate.set()
-    _join("retention-set")
-    assert tomllib.loads(path.read_text())["transcription"]["audio_retention_days"] == 30
-    assert not ctrl._dirty and purged == [1]

@@ -1129,28 +1129,6 @@ class Controller:
             return
         self.save_settings("transcription.languages", title="Languages")
 
-    def set_retention_days(self, days: int) -> None:
-        """Menu "Delete audio after": apply ``days`` at once, save it and purge expired audio
-        on a worker. The key is marked pending *before* the value changes, so a config reload
-        landing between the click and the save keeps the click; the mark is released once."""
-        key = "transcription.audio_retention_days"
-        self._mark_dirty((key,), 1)
-        try:
-            self.cfg.transcription.audio_retention_days = days
-            t = threading.Thread(target=self._save_and_purge, args=(key,), name="retention-set")
-            t.daemon = True
-            t.start()
-        except BaseException:
-            self._mark_dirty((key,), -1)
-            raise
-
-    def _save_and_purge(self, key: str) -> None:
-        try:
-            self.write_settings(key)
-        finally:
-            self._mark_dirty((key,), -1)
-        self.purge_audio_now()
-
     def toggle_call_app_names(self) -> None:
         """Menu "Use names from the call app" (macOS), from the main thread; never blocks.
         Off is immediate. On needs `speaker_names` and Accessibility trust, checked silently on
