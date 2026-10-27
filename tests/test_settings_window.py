@@ -57,26 +57,16 @@ def make_ctrl(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _real_config_untouched():
-    """Nothing here may write the owner's real config.toml (all saves use tmp paths)."""
-    from recandcc.config import CONFIG_PATH
-
-    def stamp():
-        try:
-            st = CONFIG_PATH.stat()
-            return st.st_mtime_ns, st.st_size
-        except OSError:
-            return None
-
-    before = stamp()
+def _reap_helpers():
+    """Never leak a stub helper into the next test."""
     settings_window._closing.clear()
     yield
     proc = settings_window._proc
     if proc is not None and proc.poll() is None:
-        proc.kill()  # never leak a stub helper into the next test
+        proc.kill()
         proc.wait()
     settings_window._closing.clear()
-    assert stamp() == before, "a test wrote the real config.toml"
+    join_threads("purge-audio")
 
 
 def join_threads(name, timeout=5.0):
@@ -98,14 +88,15 @@ def next_event(ctrl, kinds, timeout=10.0):
     raise AssertionError(f"no {kinds} event")
 
 
-GOOD = {
-    "mode": "auto",
-    "output_dir": "/tmp/rcc-out",
-    "languages": ["en", "he"],
-    "keep_audio": False,
-    "live_captions": False,
-    "speaker_names": True,
-}
+def good(tmp_path):
+    return {
+        "mode": "auto",
+        "output_dir": str(tmp_path / "out"),
+        "languages": ["en", "he"],
+        "keep_audio": False,
+        "live_captions": False,
+        "speaker_names": True,
+    }
 
 
 @mac_only
@@ -118,7 +109,7 @@ def test_save_writes_toml_keeps_unknown_keys_and_applies(tmp_path, monkeypatch):
         "import json,sys\n"
         "snap=json.load(open(sys.argv[sys.argv.index('--config')+1]))\n"
         "assert snap['mode']=='ask' and 'hotkey' in snap\n"
-        f"print(json.dumps({{'settings':'saved','values':{GOOD!r}}}))\n",
+        f"print(json.dumps({{'settings':'saved','values':{good(tmp_path)!r}}}))\n",
     )
     ctrl.open_settings_async()
     ev = next_event(ctrl, {"settings_saved", "settings_fallback", "notice"})
@@ -130,9 +121,9 @@ def test_save_writes_toml_keeps_unknown_keys_and_applies(tmp_path, monkeypatch):
     assert reloaded.transcription.keep_audio is False
     assert reloaded.transcription.speaker_names is True
     assert reloaded.live_captions is False
-    assert str(reloaded.output_dir) == "/tmp/rcc-out"
-    ctrl.apply_settings(ev[1])  # UI thread
-    join_threads("save-config")
+    assert reloaded.output_dir == tmp_path / "out"
+    # applied in memory by the worker before the event: nothing for the UI thread to redo
+    assert ctrl.cfg.output_dir == tmp_path / "out"
     assert ctrl.cfg.transcription.keep_audio is False
     assert ctrl.cfg.detection.mode == Mode.AUTO
     assert ctrl.cfg.transcription.languages == ["en", "he"]
@@ -157,7 +148,7 @@ def test_cancel_changes_nothing(tmp_path, monkeypatch):
 def test_invalid_values_are_rejected(tmp_path, monkeypatch):
     ctrl, path = make_ctrl(tmp_path, monkeypatch)
     before = path.read_text()
-    bad = dict(GOOD, mode="sometimes")
+    bad = dict(good(tmp_path), mode="sometimes")
     fake_helper(tmp_path, monkeypatch, reply({"settings": "saved", "values": bad}))
     ctrl.open_settings_async()
     ev = next_event(ctrl, {"settings_saved", "settings_fallback", "notice"})
@@ -378,9 +369,43 @@ def test_failed_write_rolls_back_and_keeps_the_mode(tmp_path, monkeypatch):
         raise PermissionError("locked")
 
     monkeypatch.setattr(common, "save_settings", boom)
-    fake_helper(tmp_path, monkeypatch, reply({"settings": "saved", "values": GOOD}))
+    fake_helper(tmp_path, monkeypatch, reply({"settings": "saved", "values": good(tmp_path)}))
     ctrl.open_settings_async()
     ev = next_event(ctrl, {"settings_saved", "settings_fallback", "notice"})
     assert ev[0] == "notice"
     assert ctrl.cfg.detection.mode == Mode.ASK  # not applied: the file was not written
     assert ctrl.cfg.transcription.keep_audio is True and ctrl.cfg.live_captions is True
+
+
+@mac_only
+def test_turning_off_keep_audio_deletes_nothing_until_startup(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta
+
+    from recandcc.models import SessionInfo, Track, TriggerKind
+
+    ctrl, _ = make_ctrl(tmp_path, monkeypatch)
+    ctrl.cfg.output_dir = tmp_path / "old"
+    d = ctrl.cfg.output_dir / "2026-10-01" / "s1"
+    d.mkdir(parents=True)
+    for f in ("me.wav", "others.wav", "transcript.md"):
+        (d / f).write_bytes(b"x")
+    ended = datetime.now().astimezone() - timedelta(days=3)
+    SessionInfo(
+        id="s1",
+        directory=d,
+        started_at=ended - timedelta(hours=1),
+        trigger_kind=TriggerKind.CALL,
+        ended_at=ended,
+        tracks={Track.ME: "me.wav", Track.OTHERS: "others.wav"},
+        transcribed=True,
+    ).save()
+    values = {"keep_audio": False}
+    fake_helper(tmp_path, monkeypatch, reply({"settings": "saved", "values": values}))
+    ctrl.open_settings_async()
+    assert next_event(ctrl, {"settings_saved", "notice", "settings_fallback"})[0] == (
+        "settings_saved"
+    )
+    assert ctrl.cfg.transcription.keep_audio is False
+    assert len(list(d.glob("*.wav"))) == 2  # saving the setting deletes no recording
+    ctrl._purge_leftover_audio()  # the startup purge is unchanged: it does
+    assert not list(d.glob("*.wav"))

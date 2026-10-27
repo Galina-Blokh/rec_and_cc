@@ -158,6 +158,42 @@ already cached and the network blocked.
    and warm start, and idle memory for PyInstaller and for standalone Python + `uv sync --frozen`.
    Pick the one that passes all checks with the fewer special cases, and on a tie the smaller
    one. Record the result in a new ADR that supersedes 0007.
+
+   **Measurement, PyInstaller only (unsigned; 2026-10-27, M5 Max, Python 3.12).** Not done
+   here: signing, notarization, `/Applications` run, TCC survival, idle memory, the
+   standalone-Python option, the superseding ADR. One-folder build with `--collect-all` for
+   mlx, mlx_whisper, faster_whisper, ctranslate2, onnxruntime, rumps and numpy; no model
+   weights inside (every file over 20 MB is the launcher, a shared library or `mlx.metallib`;
+   models load from the user cache as today).
+
+   | Measure | PyInstaller | `uv run` (.venv) |
+   |---|---|---|
+   | Bundle size, excluding models | 634 MiB | n/a |
+   | `recandcc --help`, warm median of 7 | 0.07 s | 0.04 s |
+   | `recandcc --help`, first run | 0.85 s | 0.05 s |
+   | Import numpy, mlx, mlx_whisper, faster_whisper, onnxruntime, rumps, warm median | 0.34 s (n=7) | 0.29 s (n=7, includes `uv run` start) |
+   | Same imports, first run after build | 16.5 s | n/a |
+
+   Top directories: `mlx` 232 MiB, `onnxruntime` 74, `av` 43, `transformers` 41, `sherpa_onnx`
+   32, `numpy` 20, `tokenizers` 9, `hf_xet` 7, `ctranslate2` 5. `--help` does not load the
+   heavy stack (lazy imports), so the import row is the better start-up proxy. The 16.5 s
+   first run is one sample of a fresh, unsigned bundle (page cache and macOS first-run
+   checks; an earlier sample took 29.7 s); a real cold launch needs `sudo purge` and a signed
+   bundle, so it is still open. The two "first run" figures are not comparable: `uv run` hit
+   a warm venv and `--help` skips the heavy stack, while the PyInstaller numbers come from a
+   freshly built bundle. The 634 MiB is inside the 0.6-1.3 GB estimate. `transformers`/`av`
+   ship although the MLX path should not need them (follow-up 4 territory). Only imports
+   were exercised, not a transcription, so a missed dynamic library could still show later.
+
+   The import probe fails the run (non-zero exit, failed modules on stderr) on any missing
+   import. A first version swallowed errors and reported 0.38 s / 29.7 s while
+   `import mlx_whisper` was failing on the trimmed `numba`; the probe now uses the app's own
+   `transcribe.gpu.import_mlx_whisper`, and the numbers above are from the strict version.
+
+   Reproduce (macOS only): `uv run python scripts/pyinstaller_spike.py` (builds into the
+   gitignored `build/pyinstaller-spike/`; `--skip-build --runs 7` re-measures). The third
+   timing line is the probe. The `uv run` import baseline is `uv run python -c` with the
+   same imports, `mlx_whisper` taken from `recandcc.transcribe.gpu.import_mlx_whisper`.
 4. **Trim runtime dependencies pulled by mlx-whisper**. AC, tier 1: `torch` and its own
    dependencies are excluded from the shipped environment; the slow en/ru tests and
    `tests/test_offline.py` pass; the size change is recorded. **Tier 1 done:**

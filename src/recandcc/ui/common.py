@@ -50,7 +50,6 @@ from ..settings_window import (
     close_settings,
     raise_settings,
     run_settings,
-    snapshot,
 )
 
 if TYPE_CHECKING:
@@ -648,15 +647,13 @@ class Controller:
         except Exception:
             log.exception("audio retention failed")
 
-    def _purge_leftover_audio(self, startup: bool = True) -> None:
+    def _purge_leftover_audio(self) -> None:
         """keep_audio = false: delete WAVs left behind by transcribed sessions (e.g. the app
         quit before a slow diarization finished and dropped them, or the delete failed)."""
         if self.cfg.transcription.keep_audio:
             return
         try:
-            purge_transcribed_audio(
-                self.cfg.output_dir, ended_before=self._started_at if startup else None
-            )
+            purge_transcribed_audio(self.cfg.output_dir, ended_before=self._started_at)
         except Exception:
             log.exception("deleting leftover audio failed")
 
@@ -855,7 +852,16 @@ class Controller:
                     # Fields go live before the write (a menu save in between can't write the
                     # old values back) and are rolled back if the write fails. The mode,
                     # which can stop a recording, only changes once the file is written.
-                    old = validate_settings({k: snapshot(self.cfg)[k] for k in fields})
+                    tr = self.cfg.transcription
+                    old = {
+                        "output_dir": self.cfg.output_dir,
+                        "live_captions": self.cfg.live_captions,
+                        "keep_audio": tr.keep_audio,
+                        "speaker_names": tr.speaker_names,
+                        "languages": list(tr.languages),
+                    }
+                    old = {k: v for k, v in old.items() if k in fields}
+                    old_raw = getattr(tr, "_raw_languages", None)
                     self.apply_settings(fields)
                     edited = self._mtime() != self._config_mtime  # hand edit not reloaded yet
                     try:
@@ -866,6 +872,8 @@ class Controller:
                             mtime = save_settings(updates, CONFIG_PATH)
                     except Exception:
                         self.apply_settings(old)
+                        with self._lang_lock:
+                            tr._raw_languages = old_raw  # type: ignore[attr-defined]
                         raise
                     if not edited:
                         self._config_mtime = mtime  # our own write: nothing to reload
@@ -873,25 +881,18 @@ class Controller:
                         self.apply_settings({"mode": updates["mode"]})
                 if "output_dir" in updates:
                     self.refresh_async(force=True)  # cloud-sync warning for the new folder
-                if updates.get("keep_audio") is False:
-                    threading.Thread(
-                        target=self._purge_leftover_audio,
-                        kwargs={"startup": False},
-                        daemon=True,
-                        name="purge-audio",
-                    ).start()  # opted out: delete audio already kept, off this thread
                 self.events.put(("settings_saved", updates))
             except SettingsUnavailable as e:
                 log.info("native settings unavailable: %s", e)
                 self.events.put(("settings_fallback",))
             except ValueError as e:
-                log.warning("settings not saved: %s", e)
+                log.warning("settings not saved: %s", type(e).__name__)  # no values in logs
                 self.post_notice("Settings not saved", str(e))
             except OSError as e:
-                log.warning("settings not saved: %s", e)
+                log.warning("settings not saved: %s (errno %s)", type(e).__name__, e.errno)
                 self.post_notice("Settings not saved", "the transcripts folder can't be created")
-            except Exception:
-                log.exception("settings window failed")
+            except Exception as e:
+                log.error("settings window failed: %s", type(e).__name__)  # no paths in logs
                 self.post_notice("Settings not saved", "config.toml could not be written")
             finally:
                 self._settings_lock.release()
