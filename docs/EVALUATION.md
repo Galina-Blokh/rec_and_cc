@@ -14,6 +14,7 @@ pipeline on a small set of real, consented speech, so that model, VAD and diariz
 | **DER** | missed + false-alarm + wrong-speaker time / reference speech time; 10 ms frames, no collar, best one-to-one speaker mapping (exact up to 12 speakers on the smaller side, greedy above) |
 | **RTF** | total transcription time / total audio duration (batch pipeline) |
 | **Diarization time** | seconds per clip |
+| **Wall time, peak memory** | seconds for the whole run (model loading included) and the process's peak resident memory (`getrusage` on macOS/Linux, `psutil` on Windows; n/a if neither works). On the MLX path, MLX's own peak GPU allocation is reported too, since Metal buffers may not show in the RSS |
 | **Live latency** (`--live`) | per live caption: seconds from the nominal capture time of the 100 ms block holding the segment's end (the moment that audio ended) to the moment the caption was emitted; p50, p90 (linear interpolation) and max per clip and over all captions |
 
 ## The eval set
@@ -70,7 +71,17 @@ uv run python scripts/eval.py ~/RecAndCC-eval                       # config's m
 uv run python scripts/eval.py ~/RecAndCC-eval --model small --json small.json
 uv run python scripts/eval.py ~/RecAndCC-eval --no-diarize          # skip DER
 uv run python scripts/eval.py ~/RecAndCC-eval --live                # + live caption latency
+uv run python scripts/eval.py ~/RecAndCC-eval --backend mlx         # force MLX on the GPU
+uv run python scripts/eval.py ~/RecAndCC-eval --backend cpu         # force faster-whisper, CPU
+uv run python scripts/eval.py ~/RecAndCC-eval --hypotheses ~/RecAndCC-eval/whisper-cpp
 ```
+
+`--backend` changes the transcription settings in memory for that run only; the config on
+disk is never written. `mlx` fails at once if MLX is not available (not Apple silicon, or
+mlx-whisper not installed). `auto` (the default) uses the config's `backend` and `device`.
+The chosen backend is printed and stored in `eval-results.json` as `backend`, with
+`wall_s`, `peak_memory_mb` and, on MLX, `gpu_peak_memory_mb`. Run one backend per process,
+so that the peak memory belongs to that backend alone.
 
 With `--live`, each clip is also replayed through the live transcriber (`LiveTranscriber`,
 the same one that drives captions in the app) after the batch run, on the same models. The
@@ -89,6 +100,49 @@ a new owner-only `rcc-eval-*` folder in the system temp directory, created for t
 deleted when it ends. A run killed with SIGKILL can leave that folder behind; delete it by hand. The script prints scores only, never transcript text. It writes the full
 results, including the counts for each clip, to `eval-results.json`. Like the app, it runs
 offline once the models are downloaded.
+
+## Scoring other engines (`--hypotheses`)
+
+To compare engines that don't run inside RecAndCC (whisper.cpp, WhisperKit, …), run them by
+hand on the same clips (same model size, beam 5, language restricted to en/ru) and put one
+file per clip in a folder, named after the clip's `id`. That folder holds transcript text,
+so keep it inside the eval set's folder (or another git-ignored eval path), never in the repo.
+`eval.py --hypotheses DIR` then scores those files with the same code as a pipeline run;
+it loads no models and can't be combined with `--model`, `--backend` or `--live`.
+
+`<clip-id>.json`, segments in seconds from the start of the clip:
+
+```json
+{
+  "elapsed_s": 41.2,
+  "segments": [
+    {"start": 0.4, "end": 3.1, "text": "...", "language": "en", "speaker": "0"},
+    {"start": 3.5, "end": 6.0, "text": "...", "language": "ru", "speaker": "1"}
+  ]
+}
+```
+
+- A bare list of segments works too. `start`, `end` and `text` are required.
+- `language` (optional): language-ID accuracy is scored only if every segment has one; it
+  is the engine's own language ID, not RecAndCC's (`language_id` in the results says so).
+- `speaker` (optional): DER is scored only on `others` clips where every segment has one.
+- `elapsed_s` (optional): the engine's wall time for the clip, used for RTF. Measure peak
+  memory outside, e.g. with `/usr/bin/time -l`.
+
+`<clip-id>.txt`: plain text, no times. Scored for WER only, over the whole clip: listed
+under the clip's language, or `mixed` for a code-switched clip. Language ID and DER are n/a.
+
+## Backend comparison
+
+One machine, same set, models cached, network blocked, on AC power (ADR 0011, follow-up 1;
+the switching gate is in [ADR 0011](adr/0011-stack-and-packaging-after-v0-1.md)). Scores only.
+
+| Engine | How | WER en | WER ru | LID | RTF | Live p90 | Wall s | Peak MB |
+|---|---|---|---|---|---|---|---|---|
+| MLX (GPU) | `--backend mlx` | | | | | | | |
+| faster-whisper (CPU) | `--backend cpu` | | | | | | | |
+| whisper.cpp (Metal) | `--hypotheses` | | | | | n/a | | |
+| WhisperKit | `--hypotheses` | | | | | n/a | | |
 
 ## Baseline
 
