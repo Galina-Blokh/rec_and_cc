@@ -88,3 +88,12 @@ def test_crash_handler_none_disables_faults_file(tmp_path, monkeypatch):
     logging_setup.install_crash_handlers(None)
     assert logging_setup._faults_file is None
     assert not logging_setup.FAULTS_FILE.exists()
+
+
+def test_bare_save_keys_writes_only_the_private_path(tmp_path):
+    config.Config().save()
+    config.save_keys(None, {"autostart": True, "transcription.languages": ["ru"]})
+    assert tmp_path in config.CONFIG_PATH.parents
+    loaded = config.load_config()
+    assert loaded.autostart is True
+    assert loaded.transcription.languages == ["ru"]
