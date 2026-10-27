@@ -38,20 +38,36 @@ across platforms.
 | `capture/` | `AudioSource`: produces float32 mono 16 kHz frames. `mic.py` (sounddevice), `system_mac.py` (process tap via helper), `system_win.py` (WASAPI loopback) |
 | `recorder.py` | One session: sources → queues → WAV writer threads, live levels, silence tracking, frame tap for live transcription |
 | `engine.py` | Detection state machine: classify apps, debounce, ask/auto/off, stop conditions |
+| `sensitivity.py` | Pure functions: the outside/inside sensitivity settings and their presets → effective trigger thresholds |
 | `transcribe/` | VAD chunking, language ID, parallel Whisper, merge + echo removal, md/srt/json output, background queue, live transcription (`live.py`) |
+| `transcribe/chunking.py` | VAD speech regions and chunking of a track for parallel Whisper |
+| `transcribe/merge.py` | Merges the `Me`/`Others` segments in time order and drops speaker-phone echo |
+| `transcribe/output.py` | Writes `transcript.md` / `.srt` / `.json` (right-to-left marks for Hebrew) |
+| `transcribe/queue.py` | Background transcription queue: one session at a time, in order |
 | `transcribe/_align_np.py` | Pure-numpy word-alignment kernels (DTW, median filter) for the MLX path, replacing mlx-whisper's numba/scipy ones (wired in a follow-up) |
 | `transcribe/diarize.py` | Offline speaker diarization of the `Others` track (speaker embeddings + clustering) and `Others` → `Speaker N` relabelling of the final transcript; one-time, checksum-verified model download |
 | `hotkey.py` | Global start/stop shortcut: parses `hotkey`, runs `rcc-audiotap hotkey` (macOS) or `RegisterHotKey` (Windows) |
+| `participants.py` | Opt-in sampler of the call app's participant list via `rcc-audiotap participants` (macOS Accessibility) |
 | `cloudsync.py` | Is `output_dir` synced to iCloud / OneDrive / File Provider? Local path checks only; the controller warns once per folder |
 | `permissions.py` | Query, request and open settings for mic and system-audio permissions |
+| `native.py` | Locates the native helper binary (`rcc-audiotap`) |
+| `settings_window.py` | Native settings window: runs `rcc-audiotap settings` with a JSON snapshot and saves the values it returns through `config` validation |
+| `retention.py` | Audio retention: deletes the WAV files of fully transcribed sessions (`audio_retention_days`); transcripts are kept |
 | `ui/` | `common.Controller` (platform-independent glue) + `present.py` (pure presenter logic: menu titles and check marks, notice texts, the ask dialog script and its answers, toast placement) + `mac.py` (rumps) / `tray.py` (pystray) / `toast_mac.py`, thin shells that only apply it |
 | `ui/notes.py` | Meeting notes (pure logic, no UI imports): scan session folders newest first, row texts, `summary.md` excerpt, rename (`title` in `session.json`), delete to the Trash (Foundation / `SHFileOperationW`) or via `discard_session`, the macOS dialog scripts; the Windows window is `TkNotes` in `tray.py` |
 | `ui/captions*.py` | Live captions window: `captions.py` (pure logic: ordering, trimming, header, panel frame, speaker colours) + `captions_mac.py` (floating non-activating NSPanel); Windows uses a Tk window in `tray.py` |
+| `ui/bidi.py` | Pure visual reordering of right-to-left (Hebrew) text for Tk widgets on Windows |
 | `autostart.py` | LaunchAgent (macOS) / HKCU Run key (Windows) |
 | `logging_setup.py`, `metrics.py` | Log file + crash reporting (`sys`/`threading.excepthook` → log with traceback, thread crash → `notice` toast at most once per thread name per minute; `faulthandler` → `<log dir>/faults.log`); per-session pipeline metrics in `session.json` `metrics` + one INFO summary line |
+| `transcribe/voices.py` | Opt-in voice profiles (`speaker_names`): speaker names remembered across sessions, kept in the owner-only voices store |
+| `transcribe/callnames.py` | Assigns participant names from the call app to `Speaker N` labels, only when nothing is left to guess |
+| `transcribe/intro_hints.py` | Self-introduction hints ("I'm Anna") for `recandcc speakers`; never renames or stores anything |
+| `transcribe/export.py` | Export a finished session to `transcript.docx` / `transcript.pdf` (Hebrew right to left) |
+| `transcribe/revisions.py` | Pinned Hugging Face commit revisions for every offered Whisper model (MLX and faster-whisper) |
 | `transcribe/summary.py` | Opt-in `summary.md` (summary + action items) with a local LLM via mlx-lm: prompts in the meeting's main language, map-reduce over chunks, pinned offline-first model load (`gpu.local_model_path`) |
 | `search.py` | Transcript search: incremental SQLite FTS5 index of `transcript.json` segments in the app-data dir (owner-only, never in `output_dir`); `LIKE` fallback without FTS5 |
 | `cli.py` | `recandcc` command line |
+| `__main__.py` | `python -m recandcc` entry point |
 | `native/macos/AudioTap` | SwiftPM package: `rcc-audiotap` helper + `RecAndCC` app launcher |
 
 ## Concurrency model
