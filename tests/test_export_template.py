@@ -173,7 +173,7 @@ def test_a_missing_template_warns_once_and_falls_back(session, tmp_path, caplog)
 
 def test_template_paths_use_pathlib_and_the_config_folder(session, tmp_path, monkeypatch):
     write_tpl(tmp_path, 'title = "Rel {date}"\n')
-    monkeypatch.setattr(export_template, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("recandcc.config.CONFIG_DIR", tmp_path)  # read_setting_file's folder
     assert texts(session, "tpl.toml")[0] == "Rel 2026-10-26"  # relative: from the config folder
     assert texts(session, tmp_path / "tpl.toml")[0] == "Rel 2026-10-26"
     monkeypatch.setenv("HOME", str(tmp_path))

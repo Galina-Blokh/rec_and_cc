@@ -5,8 +5,9 @@ Opt-in (``summary.enabled``). A small instruct model runs through mlx-lm on Appl
 pinned in revisions.py and loaded offline-first like Whisper (gpu.local_model_path); with
 ``summary.language_models`` the transcript's main spoken language picks it. Long
 transcripts are summarised map-reduce: notes per chunk, then the summary and the action list
-from the notes. Everything runs on one background ``summary`` thread; logs never contain
-transcript or summary text.
+from the notes. ``summary.template`` (summary_template.py) replaces that layout with the sections
+of a template, one model call each. Everything runs on one background ``summary`` thread; logs
+never contain transcript or summary text.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import json
 import logging
 import platform
 import queue
+import re
 import sys
 import threading
 import time
@@ -34,6 +36,7 @@ from ..config import (
 )
 from ..models import Segment, SessionInfo, is_rtl
 from .output import JSON_NAME, PDI, RLI, atomic_write, paragraphs
+from .summary_template import load_template
 
 log = logging.getLogger("recandcc.transcribe")
 
@@ -178,18 +181,22 @@ def chunk_lines(lines: list[str], max_chars: int = 0) -> list[str]:
     return chunks
 
 
+def _system(language: str, room: bool) -> str:
+    """The system prompt of every summary call: the answer's language, and who 'Me' is."""
+    lang = LANGUAGE_NAMES.get(language, f"the language with code '{language}'")
+    owner = "the owner is one of the numbered speakers in the room" if room else "'Me' is the owner"
+    return (
+        f"You summarise meeting transcripts. Lines are 'Speaker: text'; {owner}. "
+        f"Always answer in {lang}, even if parts of the input are in another language. "
+        "Use only facts from the input; do not invent names, dates or tasks."
+    )
+
+
 def build_messages(
     task: str, text: str, language: str, part: str = "", room: bool = False
 ) -> Messages:
     """Chat messages for ``task`` ("notes", "summary" or "actions") in ``language``.
     ``room``: a room session whose mic speakers are numbered, so no line is 'Me'."""
-    lang = LANGUAGE_NAMES.get(language, f"the language with code '{language}'")
-    owner = "the owner is one of the numbered speakers in the room" if room else "'Me' is the owner"
-    system = (
-        f"You summarise meeting transcripts. Lines are 'Speaker: text'; {owner}. "
-        f"Always answer in {lang}, even if parts of the input are in another language. "
-        "Use only facts from the input; do not invent names, dates or tasks."
-    )
     what = "meeting transcript" + (f" (part {part})" if part else "")
     if task == "notes":
         ask = (
@@ -206,7 +213,7 @@ def build_messages(
             f"Write {NONE_MARK} only if there is no task at all."
         )
     return [
-        {"role": "system", "content": system},
+        {"role": "system", "content": _system(language, room)},
         {"role": "user", "content": f"{ask}\n\n---\n{text}\n---"},
     ]
 
@@ -281,6 +288,74 @@ def format_summary(language: str, summary: str, items: list[str], model: str) ->
     return "\n".join(out) + "\n"
 
 
+def section_messages(
+    heading: str, instruction: str, text: str, language: str, room: bool = False
+) -> Messages:
+    """Chat messages for one section of a summary template: that section's content only."""
+    ask = (
+        f"Write only the '{heading}' part of a summary of this meeting transcript, without a "
+        f"heading. {instruction or 'Summarise what the meeting says about it.'} "
+        f"Write {NONE_MARK} if the transcript has nothing for it."
+    )
+    return [
+        {"role": "system", "content": _system(language, room)},
+        {"role": "user", "content": f"{ask}\n\n---\n{text}\n---"},
+    ]
+
+
+def summarize_sections(
+    segments: list[Segment],
+    generate: Generator,
+    sections: tuple[tuple[str, str], ...],
+    max_tokens: int = 400,
+    room: bool = False,
+) -> tuple[str, list[tuple[str, str]]]:
+    """(language, [(heading, answer)]) for a summary template: the notes pass of ``summarize``,
+    then one call per section on the reduced text. An empty transcript needs no call."""
+    language = main_language(segments)
+    room = room and not any(s.speaker == "Me" for s in segments)
+    text = _reduce(transcript_lines(segments), generate, language, max_tokens, room)
+    answers = []
+    for heading, instruction in sections:
+        answer = ""
+        if text:
+            messages = section_messages(heading, instruction, text, language, room)
+            answer = generate(messages, max_tokens)
+        answers.append((heading, answer))
+    return language, answers
+
+
+_LIST_MARK = re.compile(r"(?:[-*+]|\d{1,3}[.)])\s+")
+
+
+def _section_lines(language: str, answer: str, none: str) -> list[str]:
+    """The lines of one answer: the model's own headings dropped, NONE (or nothing) as the
+    language's "none", and a right-to-left line isolated as in transcript.md with its list mark
+    kept outside the isolate, so Markdown still sees a list."""
+    lines = [s for s in (raw.strip() for raw in answer.splitlines()) if s and not s.startswith("#")]
+    if not lines or _says_none(" ".join(lines)):
+        lines = [none]
+    out = []
+    for line in lines:
+        mark = _LIST_MARK.match(line)
+        head, text = (line[: mark.end()], line[mark.end() :]) if mark else ("", line)
+        out.append(head + (f"{RLI}{text}{PDI}" if is_rtl(language, text) else text))
+    return out
+
+
+def format_sections(
+    language: str, sections: list[tuple[str, str]], model: str, title: str = ""
+) -> str:
+    """summary.md for a template: its title, then each section as ``##`` with the model's answer
+    under it, then the same note as the default layout."""
+    default_title, _, none = HEADINGS.get(language, HEADINGS["en"])
+    out = [f"# {title or default_title}", ""]
+    for heading, answer in sections:
+        out += [f"## {heading}", "", *_section_lines(language, answer, none), ""]
+    out.append(f"_Generated on this computer by {Path(model).name}; it can be wrong._")
+    return "\n".join(out) + "\n"
+
+
 def summarize_session(
     directory: Path,
     cfg: Config,
@@ -298,6 +373,7 @@ def summarize_session(
     data = json.loads((directory / JSON_NAME).read_text(encoding="utf-8"))
     segments = [Segment(**s) for s in data.get("segments", [])]
     model = summary_model(cfg, segments)
+    template = load_template(cfg.summary.template)  # None: the default layout
     try:
         room = SessionInfo.load(directory).started_as_room
     except Exception as e:  # noqa: BLE001 - only a hint for the prompt
@@ -305,43 +381,53 @@ def summarize_session(
         room = False
     t0 = time.monotonic()
 
-    def run(gen: Generator) -> tuple[str, str, list[str]]:
+    def run(gen: Generator, name: str) -> tuple[str, str, str]:
+        """(language, summary.md text, what the log says was written), made by model ``name``."""
+
         def call(messages: Messages, max_tokens: int) -> str:
             if before_call is not None:
                 before_call()
             return gen(messages, max_tokens)
 
-        return summarize(segments, call, cfg.summary.max_tokens, room)
+        if template is None:
+            language, summary, items = summarize(segments, call, cfg.summary.max_tokens, room)
+            text = format_summary(language, summary, items, name)
+            return language, text, f"{len(items)} action item(s)"
+        language, answers = summarize_sections(
+            segments, call, template.sections, cfg.summary.max_tokens, room
+        )
+        text = format_sections(language, answers, name, template.title)
+        return language, text, f"{len(answers)} section(s)"
 
-    def run_model(name: str) -> tuple[str, str, list[str]]:
+    def run_model(name: str) -> tuple[str, str, str]:
         notice = on_download
         hook = None if notice is None else lambda: notice(name)
         owned = create_generator(name, cfg.transcription.allow_unpinned_models, hook, before_call)
         try:  # the real model, freed again after this session
-            return run(owned)
+            return run(owned, name)
         finally:
             owned.close()
 
     if generate is not None:
-        language, summary, items = run(generate)
+        language, text, written = run(generate, model)
     else:
         try:
-            language, summary, items = run_model(model)
+            language, text, written = run_model(model)
         except ModelUnavailable:
             if model == cfg.summary.model:
                 raise
             log.info("summary model %s unavailable; using %s", model, cfg.summary.model)
             model = cfg.summary.model
-            language, summary, items = run_model(model)
+            language, text, written = run_model(model)
     with contextlib.suppress(OSError):  # an old fingerprint must not sit next to a new summary
         (directory / SOURCE_NAME).unlink(missing_ok=True)
-    path = atomic_write(directory / SUMMARY_NAME, format_summary(language, summary, items, model))
+    path = atomic_write(directory / SUMMARY_NAME, text)
     with contextlib.suppress(OSError):  # no fingerprint: export falls back to the mtime rule
         atomic_write(directory / SOURCE_NAME, transcript_fingerprint(data.get("segments", [])))
     log.info(
-        "summary of %s written: %d action item(s), %s, in %.1fs",
+        "summary of %s written: %s, %s, in %.1fs",
         directory.name,
-        len(items),
+        written,
         language,
         time.monotonic() - t0,
     )
