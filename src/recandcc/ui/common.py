@@ -561,8 +561,9 @@ class Controller:
         )
         self._started_at = datetime.now().astimezone()  # older sessions: not diarized now
         if start_threads:
-            if cfg.detection.room_listening:  # the mic opens right away: say so at every start
-                self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
+            # Standby: nothing records (room mic included) until the user picks a mode, so
+            # no start-up "mic is on" notice: _room_notice_if_standby_ended shows it then.
+            self.engine.enter_standby()
             self.engine.start()
             threading.Thread(target=self._resubmit_unfinished, daemon=True, name="resubmit").start()
             threading.Thread(target=self._retention_loop, daemon=True, name="retention").start()
@@ -1311,6 +1312,8 @@ class Controller:
                 now = self._reloadable(self.cfg)
                 # changed in the menu, save not written yet (or failed: _unsaved)
                 dirty = set(self._dirty) | self._unsaved
+                if self.engine.standby:  # standby is never saved: the file's mode can't end it
+                    dirty.add("detection.mode")
                 for key, value in self._reloadable(new).items():
                     if now[key] != before[key] or self._dotted(key) in dirty:
                         continue
@@ -1486,11 +1489,24 @@ class Controller:
         """Menu/tray "Mode": mark ``detection.mode`` and switch the engine in one step (see
         ``menu_apply``), so a config reload can't revert the click between set and mark. Lock
         order is ``_dirty_lock`` then the engine's lock, as in the reload."""
+        was_standby = self.engine.standby
         self.menu_apply(
             ("detection.mode",),
             lambda: self.engine.set_mode(mode, save=False),
             title="Mode",
         )
+        self._room_notice_if_standby_ended(was_standby)
+
+    def _room_notice_if_standby_ended(self, was_standby: bool) -> None:
+        """Standby keeps the room mic closed and skips its start-up notice, so the notice comes
+        when a mode ends standby with room listening on: the mic opens then."""
+        if (
+            was_standby
+            and not self.engine.standby
+            and self.cfg.detection.room_listening
+            and Mode(self.cfg.detection.mode) != Mode.OFF
+        ):
+            self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
 
     def menu_apply(
         self,
@@ -1782,7 +1798,9 @@ class Controller:
                 tr._raw_languages = None  # type: ignore[attr-defined]
                 tr.languages = list(updates["languages"])
         if "mode" in updates and updates["mode"] != cfg.detection.mode:
+            was_standby = self.engine.standby
             self.engine.set_mode(updates["mode"], save=False)
+            self._room_notice_if_standby_ended(was_standby)
 
     @property
     def permissions(self) -> dict[str, str]:

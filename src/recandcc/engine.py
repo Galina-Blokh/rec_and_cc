@@ -242,6 +242,7 @@ class Engine:
         self._first_seen: dict[str, float] = {}
         self._last_seen: dict[str, float] = {}
         self._suppressed: set[str] = set()
+        self.standby = False  # set by enter_standby(), cleared by set_mode()
         self._commands: list[tuple] = []
         self._prompt: _Prompt | None = None
         self._rec: _Rec | None = None
@@ -339,9 +340,16 @@ class Engine:
             choice = "ignore"
         self._command(("respond", choice, prompt_id))
 
-    def set_mode(self, mode: Mode | str, *, save: bool = True) -> None:
+    def enter_standby(self) -> None:
+        """Launch in standby: detection is Off for this run only, so nothing records on its
+        own (not even audio already playing at login). Manual recordings still start. The
+        first set_mode() ends standby; the saved mode is left alone."""
+        self.set_mode(Mode.OFF, save=False, standby=True)
+
+    def set_mode(self, mode: Mode | str, *, save: bool = True, standby: bool = False) -> None:
         mode = Mode(mode)
         with self._lock:
+            self.standby = standby  # only enter_standby() sets it: any user choice ends it
             self.det.mode = mode
             if mode == Mode.OFF:
                 if self._prompt is not None:

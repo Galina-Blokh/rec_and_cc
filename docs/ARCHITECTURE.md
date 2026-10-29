@@ -270,8 +270,9 @@ once; if the new one stalls too, it retries after 60 s. A reopened mic counts as
 again only once frames arrive 10 s after the open, so a dead device that sends one block
 while it opens still backs off. The menu
 toggle goes through `Controller.set_room_listening`, which explains the always-on mic
-indicator, battery and consent each time it is turned on; the same notice appears at every
-start with room listening on and when a hand edit of `config.toml` turns it on.
+indicator, battery and consent each time it is turned on; the same notice appears when a hand edit of
+`config.toml` turns it on, and when a mode ends standby with room listening on (standby keeps
+the mic closed until then).
 
 ### Sensitivity: thresholds scaled, not a new trigger
 `sensitivity.py` maps `outside_sensitivity` / `inside_sensitivity` (0–100, unset = off) to the
