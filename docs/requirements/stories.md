@@ -203,9 +203,7 @@ while I decide.*
 ### US-17 Always on, visible state
 - **Then** the menu-bar icon shows Off / Ask / Auto / recording time / queued transcriptions /
   missing permission.
-- **Given** RecAndCC starts (at login or by hand), **then** it is in standby: nothing records,
-  not even audio that is already playing, until I choose Ask or Auto. The shortcut still records.
-- **Given** "Launch at login" is on, **then** RecAndCC starts at every login, in standby.
+- **Given** "Launch at login" is on, **then** RecAndCC starts at every login.
 - **Given** a worker thread crashes, **then** it is logged and I get one notice per minute
   at most, and the app keeps running.
 
