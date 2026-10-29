@@ -505,6 +505,34 @@ def test_manual_stop_keeps_the_room_held_until_the_talk_has_been_quiet():
     assert h.rec.starts[-1][0] == TriggerKind.ROOM
 
 
+def _silence(h, seconds):
+    """Quiet time grows one second per tick, as the room monitor's seconds_since_speech does."""
+    for _ in range(seconds):
+        h.room.quiet += 1.0
+        h.eng.tick()
+        h.clock.t += 1.0
+
+
+def test_a_stopped_manual_recording_holds_the_room_for_stop_after_inactive_s_of_quiet():
+    h = _room_harness(mode=Mode.AUTO)
+    h.eng.start_manual()
+    h.run(2)
+    h.eng.stop()
+    h.room.speech, h.room.ready, h.room.quiet = True, False, 0.0
+    h.run(5)  # people talk; the reopened mic has not triggered yet
+    h.room.speech = False
+    _silence(h, 15)  # still held: 15 s of quiet is less than stop_after_inactive_s (20 s)
+    h.room.speech, h.room.ready, h.room.quiet = True, True, 0.0
+    h.run(2)
+    assert [k for k, *_ in h.rec.starts] == [TriggerKind.MANUAL]
+    h.room.speech = h.room.ready = False
+    _silence(h, 25)  # quiet for longer than stop_after_inactive_s: released
+    h.room.speech = h.room.ready = True
+    h.room.quiet = 0.0
+    h.run(2)
+    assert h.rec.starts[-1][0] == TriggerKind.ROOM
+
+
 def test_start_failure_returns_to_idle_without_retry_loop():
     h = Harness(Mode.AUTO)
     h.rec.fail = True

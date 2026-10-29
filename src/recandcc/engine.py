@@ -487,14 +487,11 @@ class Engine:
             for key in apps:
                 self._first_seen.setdefault(key, now)
                 self._last_seen[key] = now
-            # Speech keeps the room held: a room session, a trigger, or the room hearing speech
-            # (it also reads quiet for a while after opening). Once none of these has held for
-            # stop_after_inactive_s, a suppressed room may start again.
-            if (
-                room_active
-                or (self._rec is not None and self._rec.kind == TriggerKind.ROOM)
-                or (room is not None and room.running and room_quiet < det.stop_after_inactive_s)
-            ):
+            # A suppressed room is held while it hears speech now (within two polls) and while
+            # a room session records. The hold then ends stop_after_inactive_s after the last
+            # speech; a longer window would stretch it to twice that.
+            hearing = room is not None and room.running and room_quiet < 2 * det.poll_interval_s
+            if hearing or (self._rec is not None and self._rec.kind == TriggerKind.ROOM):
                 self._last_seen[ROOM_KEY] = now
             for key in list(self._first_seen):
                 if key not in apps:
