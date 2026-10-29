@@ -58,7 +58,13 @@ ROOM_KEY, ROOM_NAME = "@room", "Room"
 OWN_AUDIO = ("recandcc", "rcc-audiotap")  # our own mic use (the room monitor) never blocks it
 # System chimes and alerts playing (not capturing): no one excluded them, and one must not cut
 # a room session mid-conversation.
-SYSTEM_SOUNDS = ("com.apple.systemsound", "com.apple.notificationcenter", "coreaudiod")
+# systemsoundserverd plays the keep-recording dialog's own alert sound.
+SYSTEM_SOUNDS = (
+    "com.apple.systemsound",
+    "systemsoundserverd",
+    "com.apple.notificationcenter",
+    "coreaudiod",
+)
 ROOM_RETRY_S = 60.0  # wait this long before reopening a room-listening mic that failed
 # An idle room mic that delivers no frames this long has stalled (the device went away, e.g.
 # AirPods disconnected): close it and reopen. A reopened mic that stalls again backs off.
@@ -461,7 +467,10 @@ class Engine:
         self._room_apps_busy = bool(busy) or was_busy  # one more reset after they stop
         names = sorted({p.name or p.bundle_id for p in busy})
         if names != self._room_blockers and self.room is not None and self.det.room_listening:
-            log.info("room listening holds off for: %s", ", ".join(names) or "nothing")
+            if names:
+                log.info("room listening holds off for: %s", ", ".join(names))
+            else:
+                log.info("room listening resumes: no other app is doing audio")
         self._room_blockers = names
         room_active, room_quiet = False, 0.0
         if room is not None and room.running:
@@ -522,6 +531,7 @@ class Engine:
                             self._suppressed.update(apps, (ROOM_KEY,))
                             self._last_seen[ROOM_KEY] = now  # the room hold runs from this stop
                         self._prompt = None  # explicit stop: keep what was recorded
+                        self._rec.provisional = False  # not an unanswered prompt: no timeout policy
                         stop_req = True
                     elif self._prompt is not None:
                         self._suppressed.add(self._prompt.key)

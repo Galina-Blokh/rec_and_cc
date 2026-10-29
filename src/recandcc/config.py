@@ -108,6 +108,7 @@ DEFAULT_IGNORE_APPS = [
     "com.apple.music",
     "music.ui",
     "com.apple.systemsound",
+    "systemsoundserverd",  # alert sounds, e.g. the keep-recording dialog's
     "coreaudiod",
     "com.apple.notificationcenter",
     "com.apple.siri",

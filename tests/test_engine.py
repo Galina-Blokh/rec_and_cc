@@ -380,6 +380,17 @@ def test_manual_stop_while_prompt_pending_keeps_recording():
     assert h.status == IDLE and len(h.q.submitted) == 1
 
 
+def test_manual_stop_keeps_an_unanswered_recording_even_when_timeouts_discard():
+    # "ignore" discards an unanswered prompt's recording when its audio ends; an explicit stop
+    # is an answer of sorts and keeps what was recorded.
+    h = Harness(Mode.ASK, ask_timeout_action="ignore")
+    h.mon.procs = [ZOOM]
+    h.run(4)
+    h.eng.stop()
+    h.eng.tick()
+    assert h.status == IDLE and len(h.q.submitted) == 1
+
+
 def test_stale_prompt_id_ignored(tmp_path):
     h = Harness(Mode.ASK)
     h.rec = h.eng.recorder = DiscardingRecorder(tmp_path)
@@ -1350,8 +1361,15 @@ def test_room_session_stops_when_an_excluded_app_starts_or_listening_is_off():
     assert h.rec.stops == 0 and h.rec.upgrades == ["zoom.us"]
 
 
-def test_a_notification_chime_neither_stops_nor_blocks_room_listening():
-    chime = AudioProcess(30, "com.apple.notificationcenter", "NotificationCenter", False, True)
+@pytest.mark.parametrize(
+    "bundle, name",
+    [
+        ("com.apple.notificationcenter", "NotificationCenter"),
+        ("", "systemsoundserverd"),  # the keep-recording dialog's alert sound
+    ],
+)
+def test_a_notification_chime_neither_stops_nor_blocks_room_listening(bundle, name):
+    chime = AudioProcess(30, bundle, name, False, True)
     h = _room_harness()
     _start_room_session(h)
     h.mon.procs = [chime]
