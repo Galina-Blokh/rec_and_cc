@@ -469,6 +469,36 @@ def test_standby_still_starts_a_manual_recording_and_stays_in_standby():
     assert [kind for kind, *_ in h.rec.starts] == [TriggerKind.MANUAL]  # no auto start after it
 
 
+def test_manual_stop_does_not_restart_an_app_that_is_still_playing():
+    h = Harness(Mode.AUTO)
+    h.mon.procs = [CHROME]
+    h.eng.start_manual()
+    h.run(2)
+    h.eng.stop()
+    h.run(10)  # Chrome still plays: the stop holds
+    assert h.status == IDLE and [k for k, *_ in h.rec.starts] == [TriggerKind.MANUAL]
+    h.mon.procs = []
+    h.run(25)  # Chrome has been quiet for stop_after_inactive_s: a new start is allowed again
+    h.mon.procs = [CHROME]
+    h.run(5)
+    assert h.rec.starts[-1][0] == TriggerKind.MEDIA
+
+
+def test_manual_stop_does_not_restart_the_room_while_people_still_talk():
+    h = _room_harness(mode=Mode.AUTO)
+    h.eng.start_manual()
+    h.run(2)
+    h.eng.stop()
+    h.room.speech = True  # the conversation goes on
+    h.run(10)
+    assert [k for k, *_ in h.rec.starts] == [TriggerKind.MANUAL]  # no room session after it
+    h.room.speech = False
+    h.run(25)  # quiet for stop_after_inactive_s: the room may start again
+    h.room.speech = True
+    h.run(2)
+    assert h.rec.starts[-1][0] == TriggerKind.ROOM
+
+
 def test_start_failure_returns_to_idle_without_retry_loop():
     h = Harness(Mode.AUTO)
     h.rec.fail = True

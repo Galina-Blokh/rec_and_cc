@@ -514,6 +514,8 @@ class Engine:
                     if self._rec is not None and start_req is None:
                         if self._rec.key:
                             self._suppressed.add(self._rec.key)
+                        else:  # manual: what is playing or talking now must not restart it
+                            self._suppressed.update(apps, (ROOM_KEY,))
                         self._prompt = None  # explicit stop: keep what was recorded
                         stop_req = True
                     elif self._prompt is not None:
