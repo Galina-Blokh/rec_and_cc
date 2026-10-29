@@ -39,7 +39,7 @@ audio only once it is saved.
 
 | Key | Default | Description |
 |---|---|---|
-| `mode` | `"ask"` | `off` never records · `ask` records and asks whether to keep it · `auto` records automatically |
+| `mode` | `"ask"` | `off` never records · `ask` records and asks whether to keep it · `auto` records automatically. Every launch starts in standby: that run's mode is `off` (not saved) until you choose one in the menu or Settings. The shortcut still records manually |
 | `poll_interval_s` | `1.0` | How often audio activity is checked |
 | `min_active_s` | `3.0` | An app must be doing audio this long before a recording starts or a prompt appears |
 | `stop_after_inactive_s` | `20.0` | Calls: stop when the trigger app has stopped doing audio for this long |

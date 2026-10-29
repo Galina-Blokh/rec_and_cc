@@ -561,8 +561,9 @@ class Controller:
         )
         self._started_at = datetime.now().astimezone()  # older sessions: not diarized now
         if start_threads:
-            if cfg.detection.room_listening:  # the mic opens right away: say so at every start
-                self.post_notice("Room listening on", ROOM_LISTENING_NOTICE)
+            # Standby: nothing records (room mic included) until the user picks a mode, so
+            # there is no start-up "mic is on" notice; the toggle's notice still shows.
+            self.engine.enter_standby()
             self.engine.start()
             threading.Thread(target=self._resubmit_unfinished, daemon=True, name="resubmit").start()
             threading.Thread(target=self._retention_loop, daemon=True, name="retention").start()
@@ -1311,6 +1312,8 @@ class Controller:
                 now = self._reloadable(self.cfg)
                 # changed in the menu, save not written yet (or failed: _unsaved)
                 dirty = set(self._dirty) | self._unsaved
+                if self.engine.standby:  # standby is never saved: the file's mode can't end it
+                    dirty.add("detection.mode")
                 for key, value in self._reloadable(new).items():
                     if now[key] != before[key] or self._dotted(key) in dirty:
                         continue

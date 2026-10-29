@@ -162,7 +162,7 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   changed. On macOS it is a pair of dialogs; on Windows a small window with buttons.
 - **Open transcripts folder**
 - **Permissions**: status and "Grant…" actions.
-- **Launch at login**: starts RecAndCC every time you log in. Turn it on once.
+- **Launch at login**: starts RecAndCC every time you log in, in standby: nothing records until you choose Ask or Auto in the menu (the shortcut still records). Turn it on once.
 - **Languages**: English / Russian / Hebrew checkboxes, plus **Any language**: which
   languages speech is detected among (`languages` in the settings). Applies at once, also to
   the rest of a recording in progress; at least one stays ticked unless Any is chosen. Codes
