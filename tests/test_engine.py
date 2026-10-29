@@ -1361,8 +1361,15 @@ def test_room_session_stops_when_an_excluded_app_starts_or_listening_is_off():
     assert h.rec.stops == 0 and h.rec.upgrades == ["zoom.us"]
 
 
-def test_a_notification_chime_neither_stops_nor_blocks_room_listening():
-    chime = AudioProcess(30, "com.apple.notificationcenter", "NotificationCenter", False, True)
+@pytest.mark.parametrize(
+    "bundle, name",
+    [
+        ("com.apple.notificationcenter", "NotificationCenter"),
+        ("", "systemsoundserverd"),  # the keep-recording dialog's alert sound
+    ],
+)
+def test_a_notification_chime_neither_stops_nor_blocks_room_listening(bundle, name):
+    chime = AudioProcess(30, bundle, name, False, True)
     h = _room_harness()
     _start_room_session(h)
     h.mon.procs = [chime]
