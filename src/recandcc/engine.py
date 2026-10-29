@@ -487,8 +487,12 @@ class Engine:
             for key in apps:
                 self._first_seen.setdefault(key, now)
                 self._last_seen[key] = now
-            if room_active or (self._rec is not None and self._rec.kind == TriggerKind.ROOM):
-                self._last_seen[ROOM_KEY] = now  # keeps a stopped room session suppressed
+            # A suppressed room is held while it hears speech now (within two polls) and while
+            # a room session records. The hold then ends stop_after_inactive_s after the last
+            # speech; a longer window would stretch it to twice that.
+            hearing = room is not None and room.running and room_quiet < 2 * det.poll_interval_s
+            if hearing or (self._rec is not None and self._rec.kind == TriggerKind.ROOM):
+                self._last_seen[ROOM_KEY] = now
             for key in list(self._first_seen):
                 if key not in apps:
                     del self._first_seen[key]
@@ -514,6 +518,9 @@ class Engine:
                     if self._rec is not None and start_req is None:
                         if self._rec.key:
                             self._suppressed.add(self._rec.key)
+                        else:  # manual: what is playing or talking now must not restart it
+                            self._suppressed.update(apps, (ROOM_KEY,))
+                            self._last_seen[ROOM_KEY] = now  # the room hold runs from this stop
                         self._prompt = None  # explicit stop: keep what was recorded
                         stop_req = True
                     elif self._prompt is not None:

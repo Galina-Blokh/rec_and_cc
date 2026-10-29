@@ -92,6 +92,9 @@ while I decide.*
 - **When** I press ⌃⌥R (Ctrl+Alt+R on Windows) or use the menu, **then** a manual session
   starts, or the current session stops; a toast confirms it.
 - **Given** a manual session, **then** it is never stopped automatically.
+- **Given** I stop a manual session, **then** nothing that is still playing or talking starts a
+  new recording until it has been quiet for a while (an app until its audio stops, the room for
+  `stop_after_inactive_s`).
 - **Given** the shortcut is taken by another app or invalid, **then** I am told once and can
   change it with `hotkey`.
 

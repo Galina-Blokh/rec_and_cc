@@ -469,6 +469,70 @@ def test_standby_still_starts_a_manual_recording_and_stays_in_standby():
     assert [kind for kind, *_ in h.rec.starts] == [TriggerKind.MANUAL]  # no auto start after it
 
 
+def test_manual_stop_does_not_restart_an_app_that_is_still_playing():
+    h = Harness(Mode.AUTO)
+    h.mon.procs = [CHROME]
+    h.eng.start_manual()
+    h.run(2)
+    h.eng.stop()
+    h.run(10)  # Chrome still plays: the stop holds
+    assert h.status == IDLE and [k for k, *_ in h.rec.starts] == [TriggerKind.MANUAL]
+    h.mon.procs = []
+    h.run(25)  # Chrome has been quiet for stop_after_inactive_s: a new start is allowed again
+    h.mon.procs = [CHROME]
+    h.run(5)
+    assert h.rec.starts[-1][0] == TriggerKind.MEDIA
+
+
+def test_manual_stop_keeps_the_room_held_until_the_talk_has_been_quiet():
+    h = _room_harness(mode=Mode.AUTO)
+    h.eng.start_manual()
+    h.run(2)
+    h.eng.stop()
+    # The reopened mic hears speech but needs seconds before it triggers.
+    h.room.ready = False
+    h.room.speech, h.room.quiet = True, 0.0
+    h.run(10)
+    h.room.ready = True
+    h.run(2)
+    assert [k for k, *_ in h.rec.starts] == [TriggerKind.MANUAL]  # held: no room session
+    h.room.speech = h.room.ready = False  # the talk ends
+    h.room.quiet = 100.0
+    h.run(25)  # quiet for stop_after_inactive_s: the hold clears
+    h.room.speech = h.room.ready = True
+    h.room.quiet = 0.0
+    h.run(2)
+    assert h.rec.starts[-1][0] == TriggerKind.ROOM
+
+
+def _silence(h, seconds):
+    """Quiet time grows one second per tick, as the room monitor's seconds_since_speech does."""
+    for _ in range(seconds):
+        h.room.quiet += 1.0
+        h.eng.tick()
+        h.clock.t += 1.0
+
+
+def test_a_stopped_manual_recording_holds_the_room_for_stop_after_inactive_s_of_quiet():
+    h = _room_harness(mode=Mode.AUTO)
+    h.eng.start_manual()
+    h.run(2)
+    h.eng.stop()
+    h.room.speech, h.room.ready, h.room.quiet = True, False, 0.0
+    h.run(5)  # people talk; the reopened mic has not triggered yet
+    h.room.speech = False
+    _silence(h, 15)  # still held: 15 s of quiet is less than stop_after_inactive_s (20 s)
+    h.room.speech, h.room.ready, h.room.quiet = True, True, 0.0
+    h.run(2)
+    assert [k for k, *_ in h.rec.starts] == [TriggerKind.MANUAL]
+    h.room.speech = h.room.ready = False
+    _silence(h, 25)  # quiet for longer than stop_after_inactive_s: released
+    h.room.speech = h.room.ready = True
+    h.room.quiet = 0.0
+    h.run(2)
+    assert h.rec.starts[-1][0] == TriggerKind.ROOM
+
+
 def test_start_failure_returns_to_idle_without_retry_loop():
     h = Harness(Mode.AUTO)
     h.rec.fail = True
@@ -1126,6 +1190,7 @@ ROOMS_APP = AudioProcess(
 class FakeRoom:
     def __init__(self):
         self.running = self.speech = self.fail = False
+        self.ready = True  # enough speech heard to trigger (a test clears it to model the delay)
         self.quiet = 0.0  # seconds_since_speech()
         self.stall = 0.0  # seconds_since_frame()
         self.opens = self.closes = self.resets = 0
@@ -1148,7 +1213,7 @@ class FakeRoom:
         self.resets += 1
 
     def triggered(self):
-        return self.running and self.speech
+        return self.running and self.speech and self.ready
 
     def seconds_since_speech(self):
         return self.quiet
@@ -1294,9 +1359,10 @@ def test_a_notification_chime_neither_stops_nor_blocks_room_listening():
     assert h.status == RECORDING and h.rec.stops == 0
     h.eng.stop()
     h.mon.procs, h.room.speech = [], False
+    h.room.quiet = 100.0  # no speech after the stop
     h.run(25)
     h.mon.procs = [chime]  # idle: a chime doesn't reset what the room said
-    h.room.speech = True
+    h.room.speech, h.room.quiet = True, 0.0
     h.eng.tick()
     assert len(h.rec.starts) == 2 and h.room.resets == 0
 
@@ -1353,8 +1419,9 @@ def test_stopped_room_session_stays_stopped_while_the_talk_goes_on():
         h.run(1)
     assert len(h.rec.starts) == 1
     h.room.speech = False
+    h.room.quiet = 100.0  # no speech for a while
     h.run(25)  # the room was quiet for stop_after_inactive_s
-    h.room.speech = True
+    h.room.speech, h.room.quiet = True, 0.0
     h.eng.tick()
     assert len(h.rec.starts) == 2
 
