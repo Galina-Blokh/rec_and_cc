@@ -162,7 +162,7 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   changed. On macOS it is a pair of dialogs; on Windows a small window with buttons.
 - **Open transcripts folder**
 - **Permissions**: status and "Grant…" actions.
-- **Launch at login**: starts RecAndCC every time you log in, in standby: nothing records until you choose Ask or Auto in the menu (the shortcut still records). Turn it on once.
+- **Launch at login**: starts RecAndCC every time you log in. Turn it on once.
 - **Languages**: English / Russian / Hebrew checkboxes, plus **Any language**: which
   languages speech is detected among (`languages` in the settings). Applies at once, also to
   the rest of a recording in progress; at least one stays ticked unless Any is chosen. Codes
@@ -181,8 +181,7 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   from the next session, and a model change after the app restarts (a model not on disk yet
   is downloaded once then). Without it, the app opens `config.toml` instead.
 - **Edit config.toml** (**Edit settings** in the Windows tray): opens `config.toml` (changes
-  to detection settings, `hotkey` and `languages` apply live; in standby a changed `mode` waits
-  until you choose one in the menu or Settings).
+  to detection settings, `hotkey` and `languages` apply live).
 - **Reveal logs**: shows the log folder in Finder / Explorer.
 - **Quit RecAndCC** (**Quit** in the Windows tray)
 

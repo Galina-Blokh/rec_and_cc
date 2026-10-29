@@ -454,32 +454,6 @@ def test_set_mode_off_stops_auto_recording():
     assert h.states[-1].mode == Mode.OFF
 
 
-def test_standby_records_nothing_until_a_mode_is_chosen():
-    h = Harness(Mode.AUTO)
-    h.eng.enter_standby()
-    h.mon.procs = [ZOOM]
-    h.run(30)
-    assert h.status == IDLE and h.rec.starts == [] and h.prompts == []
-    assert h.cfg.detection.mode == Mode.OFF and h.saves == 0  # the saved mode is not touched
-    h.eng.set_mode(Mode.AUTO)
-    h.run(5)
-    assert h.rec.starts == [(TriggerKind.CALL, "zoom.us")]
-    assert h.eng.standby is False
-
-
-def test_standby_still_starts_a_manual_recording_and_stays_in_standby():
-    h = Harness(Mode.AUTO)
-    h.eng.enter_standby()
-    h.mon.procs = [ZOOM]
-    h.eng.start_manual()
-    h.run(2)
-    assert h.status == RECORDING and h.eng.state.manual
-    h.eng.stop()
-    h.run(30)
-    assert h.status == IDLE
-    assert [kind for kind, *_ in h.rec.starts] == [TriggerKind.MANUAL]  # no auto start after it
-
-
 def test_manual_stop_does_not_restart_an_app_that_is_still_playing():
     h = Harness(Mode.AUTO)
     h.mon.procs = [CHROME]

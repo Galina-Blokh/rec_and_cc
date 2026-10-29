@@ -1493,7 +1493,6 @@ def test_hand_edited_semantic_setting_is_applied_to_a_running_app(tmp_path, monk
 
     ctrl = SimpleNamespace(
         cfg=Config(output_dir=tmp_path),
-        engine=SimpleNamespace(standby=False),
         _save_lock=threading.Lock(),
         _sync_index_lock=threading.Lock(),
         _lang_lock=threading.Lock(),
@@ -1658,7 +1657,6 @@ def _reload_ctrl(cfg, new, sync_index=None):
 
     ctrl = SimpleNamespace(
         cfg=cfg,
-        engine=SimpleNamespace(standby=False),
         _save_lock=threading.Lock(),
         _sync_index_lock=threading.Lock(),
         _lang_lock=threading.Lock(),
