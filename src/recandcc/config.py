@@ -31,6 +31,25 @@ DEFAULT_OUTPUT_DIR = Path(platformdirs.user_documents_dir()) / "Transcribes"
 
 log = logging.getLogger("recandcc.config")
 
+
+def read_setting_file(setting: str | Path, max_bytes: int) -> tuple[Path, str]:
+    """The resolved path and the UTF-8 text of the local file a setting names. ``~``, ``..`` and
+    absolute paths are fine; a relative one is taken from the config folder. ValueError ("not a
+    file", "too large") for anything but a regular file of at most ``max_bytes``. The caller
+    handles OSError, RuntimeError (an unknown ``~user``) and UnicodeDecodeError."""
+    path = Path(str(setting).strip()).expanduser()
+    if not path.is_absolute():
+        path = CONFIG_DIR / path
+    path = path.resolve()
+    if not path.is_file():  # a directory or a FIFO must not be opened (it could block)
+        raise ValueError("not a file")
+    with path.open("rb") as f:
+        blob = f.read(max_bytes + 1)
+    if len(blob) > max_bytes:
+        raise ValueError("too large")
+    return path, blob.decode("utf-8-sig")
+
+
 # Language codes Whisper knows (faster_whisper.tokenizer._LANGUAGE_CODES), for validating
 # `transcription.languages` without importing a model library here.
 _WHISPER_CODES = (
@@ -295,6 +314,9 @@ class SummaryConfig:
     # whose main language (most speech time) is listed is summarised by that model, all others
     # by `model`. {} = `model` for every language.
     language_models: dict[str, str] = field(default_factory=dict)
+    # Local Markdown file that sets summary.md's sections (see transcribe/summary_template.py).
+    # "" = the default layout.
+    template: str = ""
     # Set by load_config(migrate=True) for a one-time notice about the summary model (shown
     # by ui.common.Controller). Runtime only: not read from or saved to config.toml.
     notice: str | None = field(default=None, init=False, repr=False, compare=False)
@@ -724,6 +746,9 @@ def load_config(path: Path | None = None, *, migrate: bool = False) -> Config:
     summary.language_models = normalize_language_models(
         summary.language_models, "summary.language_models"
     )
+    if not isinstance(summary.template, str):
+        log.warning("summary.template must be a path string; ignoring it")
+        summary.template = ""
     _migrate_summary_model(summary, path, persist=migrate)
     search = _build(SearchConfig, data.pop("search", {}))
     if not isinstance(search.semantic, bool):  # "false" is a truthy string: never download on it

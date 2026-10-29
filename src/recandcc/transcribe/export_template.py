@@ -25,7 +25,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..config import CONFIG_DIR
+from ..config import read_setting_file
 
 log = logging.getLogger(__name__)
 
@@ -81,19 +81,9 @@ def load_template(setting: str | Path | None) -> Template | None:
     path is taken from the config folder. Any problem logs one warning and returns None."""
     if not setting or not str(setting).strip():
         return None
-    path = Path(str(setting).strip())
     try:
-        path = path.expanduser()  # RuntimeError for an unknown "~user"
-        if not path.is_absolute():
-            path = CONFIG_DIR / path
-        path = path.resolve()  # a path you choose: ~, .. and absolute paths are all fine
-        if not path.is_file():  # a directory or a FIFO must not be opened (it could block)
-            raise ValueError("not a file")
-        with path.open("rb") as f:
-            blob = f.read(_MAX_BYTES + 1)
-        if len(blob) > _MAX_BYTES:
-            raise ValueError("too large")
-        tpl = parse(tomllib.loads(blob.decode("utf-8-sig")))
+        _, text = read_setting_file(setting, _MAX_BYTES)
+        tpl = parse(tomllib.loads(text))
         if "transcript" not in tpl.sections:
             log.info("export template omits the transcript")
         return tpl
@@ -105,6 +95,8 @@ def load_template(setting: str | Path | None) -> Template | None:
     ) as e:  # TOMLDecodeError is a ValueError
         # the exception type only: a TOML error message can quote the file's text
         log.warning(
-            "export template %s not used (%s); using the default layout", path, type(e).__name__
+            "export template %s not used (%s); using the default layout",
+            setting,
+            type(e).__name__,
         )
         return None
