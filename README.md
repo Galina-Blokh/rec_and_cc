@@ -181,7 +181,8 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   from the next session, and a model change after the app restarts (a model not on disk yet
   is downloaded once then). Without it, the app opens `config.toml` instead.
 - **Edit config.toml** (**Edit settings** in the Windows tray): opens `config.toml` (changes
-  to detection settings, `hotkey` and `languages` apply live).
+  to detection settings, `hotkey` and `languages` apply live; in standby a changed `mode` waits
+  until you choose one in the menu or Settings).
 - **Reveal logs**: shows the log folder in Finder / Explorer.
 - **Quit RecAndCC** (**Quit** in the Windows tray)
 

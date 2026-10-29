@@ -344,13 +344,12 @@ class Engine:
         """Launch in standby: detection is Off for this run only, so nothing records on its
         own (not even audio already playing at login). Manual recordings still start. The
         first set_mode() ends standby; the saved mode is left alone."""
-        self.set_mode(Mode.OFF, save=False)
-        self.standby = True
+        self.set_mode(Mode.OFF, save=False, standby=True)
 
-    def set_mode(self, mode: Mode | str, *, save: bool = True) -> None:
+    def set_mode(self, mode: Mode | str, *, save: bool = True, standby: bool = False) -> None:
         mode = Mode(mode)
         with self._lock:
-            self.standby = False
+            self.standby = standby  # only enter_standby() sets it: any user choice ends it
             self.det.mode = mode
             if mode == Mode.OFF:
                 if self._prompt is not None:
