@@ -380,6 +380,17 @@ def test_manual_stop_while_prompt_pending_keeps_recording():
     assert h.status == IDLE and len(h.q.submitted) == 1
 
 
+def test_manual_stop_keeps_an_unanswered_recording_even_when_timeouts_discard():
+    # "ignore" discards an unanswered prompt's recording when its audio ends; an explicit stop
+    # is an answer of sorts and keeps what was recorded.
+    h = Harness(Mode.ASK, ask_timeout_action="ignore")
+    h.mon.procs = [ZOOM]
+    h.run(4)
+    h.eng.stop()
+    h.eng.tick()
+    assert h.status == IDLE and len(h.q.submitted) == 1
+
+
 def test_stale_prompt_id_ignored(tmp_path):
     h = Harness(Mode.ASK)
     h.rec = h.eng.recorder = DiscardingRecorder(tmp_path)

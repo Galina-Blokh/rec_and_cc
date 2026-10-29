@@ -522,6 +522,7 @@ class Engine:
                             self._suppressed.update(apps, (ROOM_KEY,))
                             self._last_seen[ROOM_KEY] = now  # the room hold runs from this stop
                         self._prompt = None  # explicit stop: keep what was recorded
+                        self._rec.provisional = False  # not an unanswered prompt: no timeout policy
                         stop_req = True
                     elif self._prompt is not None:
                         self._suppressed.add(self._prompt.key)
