@@ -10,6 +10,7 @@ dependencies = [
     "comtypes>=1.4.17 ; sys_platform == 'win32'",
     "faster-whisper>=1.2.1",
     "fpdf2>=2.8.9",
+    "keyring>=25.7.0",
     "mlx-lm>=0.28 ; platform_machine == 'arm64' and sys_platform == 'darwin'",
     "mlx-whisper>=0.4.3 ; platform_machine == 'arm64' and sys_platform == 'darwin'",
     "numpy>=2.5.4",
@@ -56,6 +57,9 @@ dev = [
 # replaces that module with transcribe/mlx_timing.py (a numpy port, mlx-whisper 0.4.3) or a
 # stub before importing mlx_whisper. See ADR 0011, follow-up 4.
 exclude-dependencies = ["torch", "numba", "scipy"]
+# PyObjC stays at the locked 12.2.2: uv 0.13 re-resolves it to 13.0 on any new dependency (keyring
+# does not need it). Drop this pin once the captions panel and rumps are tested on 13.x.
+constraint-dependencies = ["pyobjc-core==12.2.2", "pyobjc-framework-cocoa==12.2.2"]
 
 [tool.ruff]
 line-length = 100

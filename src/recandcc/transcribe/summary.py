@@ -6,8 +6,9 @@ pinned in revisions.py and loaded offline-first like Whisper (gpu.local_model_pa
 ``summary.language_models`` the transcript's main spoken language picks it. Long
 transcripts are summarised map-reduce: notes per chunk, then the summary and the action list
 from the notes. ``summary.template`` (summary_template.py) replaces that layout with the sections
-of a template, one model call each. Everything runs on one background ``summary`` thread; logs
-never contain transcript or summary text.
+of a template, one model call each. ``summary.provider`` = "openai" or "anthropic" makes one
+call on the timestamped transcript instead (cloud_answer, summary_cloud.py). Everything runs on one
+background ``summary`` thread; logs never contain transcript or summary text.
 """
 
 from __future__ import annotations
@@ -33,10 +34,11 @@ from ..config import (
     PREVIOUS_DEFAULT_SUMMARY_MODEL,
     QWEN_RESEARCH_SUMMARY_MODEL,
     Config,
+    resolve_cloud_model,
 )
 from ..models import Segment, SessionInfo, is_rtl
-from .output import JSON_NAME, PDI, RLI, atomic_write, paragraphs
-from .summary_template import load_template
+from .output import JSON_NAME, PDI, RLI, atomic_write, fmt_hms, paragraphs
+from .summary_template import SummaryTemplate, load_template
 
 log = logging.getLogger("recandcc.transcribe")
 
@@ -72,6 +74,13 @@ HEADINGS = {
 NONE_MARK = "NONE"
 # A bullet made only of one of these (any case, no punctuation) says there is no task.
 NONE_WORDS = frozenset({NONE_MARK.casefold(), "nothing", "нет", "ничего", "אין"})
+# Cloud summaries: one call on the timestamped transcript; past CLOUD_SINGLE_CALL_CHARS (about
+# 100k tokens) it goes in parts of CLOUD_PART_CHARS first.
+CLOUD_LABELS = {"openai": "OpenAI", "anthropic": "Anthropic"}  # as summary.md's note names them
+CLOUD_ANSWER_TOKENS = 4_000  # a cloud answer, or a part's notes (the provider adds room to think)
+CLOUD_SINGLE_CALL_CHARS = 400_000
+CLOUD_PART_CHARS = 200_000
+_MARK_HEADING_OR_LIST = re.compile(r"(?:#{1,6}\s+|(?:[-*+]|\d{1,3}[.)])\s+)")
 
 Messages = list[dict[str, str]]
 
@@ -356,6 +365,88 @@ def format_sections(
     return "\n".join(out) + "\n"
 
 
+def timed_transcript_lines(segments: list[Segment]) -> list[str]:
+    """``transcript_lines`` with each paragraph's start time first ("[00:01:23] Me: ..."), in the
+    format of transcript.md, so an answer can say when a decision was made."""
+    return [f"[{fmt_hms(p.start)}] {p.speaker}: {p.text}" for p in paragraphs(segments) if p.text]
+
+
+def cloud_messages(
+    prompt: str,
+    text: str,
+    language: str,
+    room: bool = False,
+    sections: tuple[tuple[str, str], ...] = (),
+    part: str = "",
+) -> Messages:
+    """Messages of one cloud call: the system text (the answer's language, Markdown headings),
+    then the prompt, the template's sections if any, and the text between --- lines."""
+    ask = prompt
+    if sections:
+        listed = "\n".join(f"- {h}: {i or 'what the meeting says about it'}" for h, i in sections)
+        ask += f"\n\nUse exactly these sections, in this order, each as a '## ' heading:\n{listed}"
+    if part:
+        ask += f"\n\n(This is {part} of the transcript.)"
+    system = f"{_system(language, room)} Answer in Markdown with ## headings."
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"{ask}\n\n---\n{text}\n---"},
+    ]
+
+
+def cloud_answer(
+    segments: list[Segment],
+    call: Generator,
+    prompt: str,
+    budget: int,
+    template: SummaryTemplate | None,
+    room: bool = False,
+) -> tuple[str, str]:
+    """(language, Markdown answer) of a cloud summary: one call on the timestamped transcript, or
+    past CLOUD_SINGLE_CALL_CHARS one call per part (with the same prompt) and one on the parts'
+    answers. An empty transcript sends nothing: the answer is ""."""
+    language = main_language(segments)
+    room = room and not any(s.speaker == "Me" for s in segments)
+    sections = template.sections if template else ()
+    lines = timed_transcript_lines(segments)
+    if not lines:
+        return language, ""
+
+    def ask(text: str, part: str = "") -> str:
+        messages = cloud_messages(prompt, text, language, room, sections, part)
+        return strip_thinking(call(messages, budget))
+
+    text = "\n".join(lines)
+    if len(text) <= CLOUD_SINGLE_CALL_CHARS:
+        answer = ask(text)
+    else:
+        parts = chunk_lines(lines, CLOUD_PART_CHARS)
+        notes = [ask(p, f"part {i} of {len(parts)}") for i, p in enumerate(parts, 1)]
+        answer = ask(
+            "The answers for consecutive parts of the transcript, in order:\n\n"
+            + "\n\n".join(notes)
+        )
+    if not answer:
+        raise SummaryUnavailable("the cloud model returned no answer")
+    return language, answer
+
+
+def format_cloud(language: str, answer: str, model: str, label: str, title: str = "") -> str:
+    """summary.md of a cloud answer: the title, the model's Markdown as it came (its ## headings
+    kept; a right-to-left line isolated, its heading or list mark outside, as in the sections),
+    and a note that it was written in the cloud. Nothing said gives "None.", as elsewhere."""
+    default_title, _, none = HEADINGS.get(language, HEADINGS["en"])
+    out = [f"# {title or default_title}", ""]
+    for raw in (answer or none).splitlines():
+        line = raw.rstrip()
+        mark = _MARK_HEADING_OR_LIST.match(line)
+        head, text = (line[: mark.end()], line[mark.end() :]) if mark else ("", line)
+        rtl = bool(text.strip()) and is_rtl(language, text)
+        out.append(head + (f"{RLI}{text}{PDI}" if rtl else text))
+    out += ["", f"_Generated in the cloud by {model} ({label}); it can be wrong._"]
+    return "\n".join(out) + "\n"
+
+
 def summarize_session(
     directory: Path,
     cfg: Config,
@@ -368,11 +459,16 @@ def summarize_session(
     ``generate``, the routed model (summary_model) is loaded on first use and freed when done,
     so only one summary model is ever in memory; ``on_download(model)`` runs before its
     one-time download. A routed model that can't be downloaded or loaded falls back once to
-    ``summary.model``. ``before_call`` runs before each model call."""
+    ``summary.model``. ``before_call`` runs before each model call. With a cloud provider the
+    answer comes from summary_cloud (one request per summary, no local fallback)."""
     directory = Path(directory)
     data = json.loads((directory / JSON_NAME).read_text(encoding="utf-8"))
     segments = [Segment(**s) for s in data.get("segments", [])]
-    model = summary_model(cfg, segments)
+    cloud = cfg.summary.provider != "local"
+    if cloud:
+        model = resolve_cloud_model(cfg.summary.provider, cfg.summary.cloud_model)
+    else:
+        model = summary_model(cfg, segments)
     template = load_template(cfg.summary.template)  # None: the default layout
     try:
         room = SessionInfo.load(directory).started_as_room
@@ -389,6 +485,17 @@ def summarize_session(
                 before_call()
             return gen(messages, max_tokens)
 
+        if cloud:
+            label = CLOUD_LABELS[cfg.summary.provider]
+            log.info(
+                "summary of %s: sending its transcript to %s (%s)", directory.name, label, name
+            )
+            budget = max(cfg.summary.max_tokens, CLOUD_ANSWER_TOKENS)
+            language, answer = cloud_answer(
+                segments, call, cfg.summary.prompt, budget, template, room
+            )
+            title = template.title if template else ""
+            return language, format_cloud(language, answer, name, label, title), "a cloud answer"
         if template is None:
             language, summary, items = summarize(segments, call, cfg.summary.max_tokens, room)
             text = format_summary(language, summary, items, name)
@@ -408,8 +515,21 @@ def summarize_session(
         finally:
             owned.close()
 
+    def run_cloud() -> tuple[str, str, str]:
+        from . import summary_cloud  # only a cloud provider imports the network code
+
+        gen = summary_cloud.CloudGenerator(
+            cfg.summary.provider, cfg.summary.cloud_model, cfg.summary.reasoning_effort
+        )
+        try:  # no local fallback: a failure raises SummaryUnavailable (the queue shows it)
+            return run(gen, gen.model_name)
+        finally:
+            gen.close()
+
     if generate is not None:
         language, text, written = run(generate, model)
+    elif cloud:
+        language, text, written = run_cloud()
     else:
         try:
             language, text, written = run_model(model)

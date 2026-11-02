@@ -300,6 +300,25 @@ def _snapshot_complete(snap: Path) -> bool:
     return (snap / "model.safetensors").exists() and (snap / "config.json").exists()
 
 
+# Cloud summaries (opt-in, transcribe/summary_cloud.py): the default model of each provider, the
+# reasoning effort levels (OpenAI takes none..xhigh, Claude low..max) and the default prompt.
+SUMMARY_PROVIDERS = ("local", "openai", "anthropic")
+DEFAULT_CLOUD_MODELS = {"openai": "gpt-6.1", "anthropic": "claude-opus-5-5"}
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+DEFAULT_REASONING_EFFORT = "xhigh"
+DEFAULT_SUMMARY_PROMPT = (
+    "Summarize this meeting using only the transcript. Include updates by person, explicit "
+    "decisions, action items with owners and deadlines, and unresolved questions. Attach "
+    "timestamps to decisions and actions. Preserve uncertainty. Never invent names, "
+    "assignments, commitments, or explanations. Flag unclear transcription."
+)
+
+
+def resolve_cloud_model(provider: str, model: str = "") -> str:
+    """The model a cloud summary uses: ``model``, or the provider's default when it is empty."""
+    return model.strip() or DEFAULT_CLOUD_MODELS[provider]
+
+
 @dataclass
 class SummaryConfig:
     # Write summary.md (short summary + action items) after each final transcript, with a
@@ -318,6 +337,13 @@ class SummaryConfig:
     # Local Markdown file that sets summary.md's sections (see transcribe/summary_template.py).
     # "" = the default layout.
     template: str = ""
+    # Who writes the summary: "local" (the model above, on this computer) or a cloud provider,
+    # "openai" (ChatGPT's API) or "anthropic" (Claude's API). A cloud summary sends the transcript
+    # of its session to that provider; it never falls back to the local model.
+    provider: str = "local"
+    cloud_model: str = ""  # "" = DEFAULT_CLOUD_MODELS[provider]
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT  # cloud only, one of REASONING_EFFORTS
+    prompt: str = DEFAULT_SUMMARY_PROMPT  # cloud only: what the summary asks for
     # Set by load_config(migrate=True) for a one-time notice about the summary model (shown
     # by ui.common.Controller). Runtime only: not read from or saved to config.toml.
     notice: str | None = field(default=None, init=False, repr=False, compare=False)
@@ -750,6 +776,22 @@ def load_config(path: Path | None = None, *, migrate: bool = False) -> Config:
     if not isinstance(summary.template, str):
         log.warning("summary.template must be a path string; ignoring it")
         summary.template = ""
+    if summary.provider not in SUMMARY_PROVIDERS:
+        log.warning("summary.provider must be local, openai or anthropic; using local")
+        summary.provider = "local"
+    if summary.reasoning_effort not in REASONING_EFFORTS:
+        log.warning(
+            "summary.reasoning_effort must be one of %s; using %s",
+            ", ".join(REASONING_EFFORTS),
+            DEFAULT_REASONING_EFFORT,
+        )
+        summary.reasoning_effort = DEFAULT_REASONING_EFFORT
+    if not isinstance(summary.cloud_model, str):
+        log.warning("summary.cloud_model must be a model name; using the default")
+        summary.cloud_model = ""
+    if not isinstance(summary.prompt, str) or not summary.prompt.strip():
+        log.warning("summary.prompt must be non-empty text; using the default")
+        summary.prompt = DEFAULT_SUMMARY_PROMPT
     _migrate_summary_model(summary, path, persist=migrate)
     search = _build(SearchConfig, data.pop("search", {}))
     if not isinstance(search.semantic, bool):  # "false" is a truthy string: never download on it
