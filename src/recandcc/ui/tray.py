@@ -71,6 +71,9 @@ from .common import (
 from .present import (
     FORGET_VOICES_TEXT,
     SEARCHING,
+    SIGN_IN_TEXT,
+    SIGN_IN_TITLES,
+    SIGN_OUT_TITLE,
     forgot_notice,
     language_menu,
     live_transcript_target,
@@ -83,6 +86,7 @@ from .present import (
     search_status,
     speaker_choice_label,
     speakers_notice,
+    summary_provider_rows,
 )
 
 log = logging.getLogger(__name__)
@@ -684,6 +688,21 @@ class TrayApp:
             rows = retention_menu(self.cfg.transcription.audio_retention_days)
             return [retention_item(*row) for row in rows]
 
+        def summary_item(provider: str, title: str, on: bool):
+            action = lambda: self._choose_summary(provider)  # noqa: E731
+            return Item(title, action, checked=lambda _i: on, radio=True)
+
+        def sign_in_item(provider: str):
+            return Item(SIGN_IN_TITLES[provider], lambda: self._sign_in(provider))
+
+        def summaries():  # rebuilt on each update_menu(): the check follows the setting
+            rows = summary_provider_rows(self.cfg.summary.provider)
+            items = [summary_item(*row) for row in rows]
+            items.append(pystray.Menu.SEPARATOR)
+            items += [sign_in_item(p) for p in ("openai", "anthropic")]
+            items.append(Item(SIGN_OUT_TITLE, lambda: self._sign_out()))
+            return items
+
         def perms():
             perm = self.ctrl.permissions
             items = [
@@ -759,6 +778,7 @@ class TrayApp:
             Item("Permissions", pystray.Menu(perms)),
             Item("Languages", pystray.Menu(languages)),
             Item("Delete audio after", pystray.Menu(retention)),
+            Item("Summaries with", pystray.Menu(summaries)),
             Item("Launch at login", self._toggle_login, checked=lambda _i: autostart.is_enabled()),
             Item("Edit settings", lambda: open_path(CONFIG_PATH, True)),
             Item("Reveal logs", lambda: reveal_logs()),
@@ -773,6 +793,29 @@ class TrayApp:
     def _set_retention(self, days: int) -> None:
         self.ctrl.set_retention(days)
         self.icon.update_menu()  # Win32 caches the native menu: move the radio check now
+
+    def _choose_summary(self, provider: str) -> None:
+        self.ctrl.set_summary_provider(provider, self._ask_key)
+
+    def _sign_in(self, provider: str) -> None:
+        self.ctrl.sign_in_async(provider, self._ask_key)
+
+    def _sign_out(self) -> None:
+        self.ctrl.sign_out_async()
+
+    def _ask_key(self, provider: str) -> str:
+        """The sign-in prompt: a Tk entry that shows the key as asterisks. It runs on the worker
+        that asked, with its own Tk root (as the notes window has its own thread)."""
+        import tkinter as tk
+        from tkinter import simpledialog
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            key = simpledialog.askstring("RecAndCC", SIGN_IN_TEXT[provider], show="*", parent=root)
+            return key or ""
+        finally:
+            root.destroy()
 
     def _toggle_captions(self) -> None:
         self.ctrl.menu_set("live_captions", not self.cfg.live_captions)
@@ -956,8 +999,10 @@ class TrayApp:
                 self.search.post("results", ev[1], ev[2])  # failures and no matches too
             elif ev[0] == "notes":
                 self.notes.post("notes", ev[1])
-            elif ev[0] == "retention_changed":  # e.g. reverted after a failed save
+            elif ev[0] in ("retention_changed", "summaries_changed"):  # e.g. a reverted save
                 self.icon.update_menu()
+            elif ev[0] == "summary_needs_key":
+                self.ctrl.on_summary_needs_key(ev[1], ev[2], self._ask_key)
             elif ev[0] == "transcribed":
                 _, s, res = ev
                 self._notify(

@@ -114,6 +114,14 @@ class SummaryUnavailable(RuntimeError):
     fixed reason without any transcript text."""
 
 
+class NeedsKey(SummaryUnavailable):
+    """A cloud provider has no API key stored: the summary waits for one (``provider``)."""
+
+    def __init__(self, provider: str, message: str) -> None:
+        super().__init__(message)
+        self.provider = provider
+
+
 class ModelUnavailable(SummaryUnavailable):
     """This summary model can't be downloaded or loaded (another one may still work)."""
 
@@ -471,7 +479,7 @@ def summarize_session(
         model = resolve_cloud_model(settings.provider, settings.cloud_model)
     else:
         model = summary_model(cfg, segments)
-    template = load_template(cfg.summary.template)  # None: the default layout
+    template = load_template(settings.template)  # None: the default layout
     try:
         room = SessionInfo.load(directory).started_as_room
     except Exception as e:  # noqa: BLE001 - only a hint for the prompt
@@ -732,8 +740,10 @@ class SummaryQueue:
         busy: Callable[[], bool] | None = None,
         generate: Generator | None = None,
         poll_s: float = 1.0,
+        needs_key: Callable[[str, Path], None] | None = None,
     ) -> None:
         self.cfg = cfg
+        self.needs_key = needs_key or (lambda provider, directory: None)
         self.notify = notify or (lambda title, message: None)
         self.busy = busy or (lambda: False)
         self.generate = generate
@@ -782,6 +792,9 @@ class SummaryQueue:
                     continue  # discarded: purge_discarded_sessions deletes it
                 self._job(directory)
                 clear_pending(directory)
+            except NeedsKey as e:  # no key yet: the summary stays owed until one is saved
+                log.info("summary of %s waits for a %s key", directory.name, e.provider)
+                self.needs_key(e.provider, directory)
             except SummaryUnavailable as e:
                 clear_pending(directory)  # no model here: retrying at every start won't help
                 log.info("summary of %s skipped: %s", directory.name, e)

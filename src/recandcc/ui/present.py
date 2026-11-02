@@ -68,6 +68,54 @@ def retention_menu(current: int) -> list[tuple[int | None, str, bool]]:
     return rows
 
 
+SUMMARY_PROVIDER_TITLES = {
+    "local": "This Mac (local)",
+    "openai": "ChatGPT (OpenAI)",
+    "anthropic": "Claude (Anthropic)",
+}
+SIGN_IN_TITLES = {"openai": "Sign in to ChatGPT…", "anthropic": "Sign in to Claude…"}
+SIGN_OUT_TITLE = "Sign out"
+KEY_PAGES = {
+    "openai": "https://platform.openai.com/api-keys",
+    "anthropic": "https://console.anthropic.com/settings/keys",
+}
+SIGN_IN_TEXT = {
+    "openai": (
+        "Paste your OpenAI API key (create one on the page that just opened). The key is billed "
+        "per use as API credit, separate from a ChatGPT subscription: set a spending limit on "
+        "that site. It is kept in this computer's keychain; summaries with ChatGPT send that "
+        "meeting's transcript to OpenAI."
+    ),
+    "anthropic": (
+        "Paste your Anthropic API key (create one on the page that just opened). The key is "
+        "billed per use as API credit, separate from a Claude subscription: set a spending limit "
+        "on that site. It is kept in this computer's keychain; summaries with Claude send that "
+        "meeting's transcript to Anthropic."
+    ),
+}
+
+
+def summary_provider_rows(current: str) -> list[tuple[str, str, bool]]:
+    """Rows of the "Summaries with" submenu as (provider, title, checked)."""
+    return [(p, title, p == current) for p, title in SUMMARY_PROVIDER_TITLES.items()]
+
+
+def signin_script(provider: str) -> str:
+    """The sign-in prompt (AppleScript): the key is typed hidden and comes back as the answer."""
+    return (
+        "display dialog "
+        + as_str(SIGN_IN_TEXT[provider])
+        + ' default answer "" with hidden answer '
+        'with title "RecAndCC" buttons {"Cancel", "Save"} default button "Save"'
+    )
+
+
+def signin_answer(output: str) -> str:
+    """The typed key of a ``signin_script`` result; "" when cancelled or nothing was typed."""
+    button, _, text = output.partition(", text returned:")
+    return text.strip() if button.strip() == "button returned:Save" else ""
+
+
 def language_menu(languages: list[str]) -> list[tuple[str | None, str, bool]]:
     """Rows of the "Languages" submenu as (code, title, checked). Codes added in config.toml
     beyond en/ru/he get one disabled row (code None) so they are not invisible; "Any language"

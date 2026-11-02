@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import logging
+import threading
 import tomllib
 import urllib.error
 import urllib.request
@@ -25,6 +26,7 @@ from recandcc.transcribe import summary, summary_cloud
 from recandcc.transcribe.output import PDI, RLI, write_outputs
 
 KEY = "sk-test-do-not-leak"
+REAL_OPENER = summary_cloud._OPENER  # the no_network guard replaces it per test
 OPENAI_URL = "https://api.openai.com/v1/responses"
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 SPOKEN = "we ship the beta on Friday"
@@ -133,12 +135,16 @@ def test_keys_come_from_the_keychain_and_the_environment_is_the_fallback(
         summary_cloud.set_key("openai", "two words")
 
 
-def test_a_key_that_is_not_printable_ascii_is_refused_without_being_shown(fake_keychain):
+def test_a_key_that_is_not_printable_ascii_is_refused_without_being_shown(
+    fake_keychain, monkeypatch
+):
     with pytest.raises(ValueError) as err:
         summary_cloud.set_key("openai", "sk-“test")
     assert "sk-" not in str(err.value)
     fake_keychain[("RecAndCC", "openai")] = "sk-“test"
     assert summary_cloud.get_key("openai") is None
+    monkeypatch.setenv("RECANDCC_OPENAI_API_KEY", "sk-env")
+    assert summary_cloud.get_key("openai") == "sk-env"  # the next source is still tried
 
 
 def test_openai_request_carries_prompt_timed_transcript_and_template(
@@ -252,9 +258,47 @@ def test_retry_after_is_honoured_up_to_a_minute(monkeypatch, fake_keychain):
     assert waits == [7.0, 60.0]
 
 
-def test_redirects_are_refused_so_the_key_is_never_sent_on():
+def test_redirects_are_refused_before_the_location_is_parsed():
     handler = summary_cloud._NoRedirect()
-    assert handler.redirect_request(None, None, 302, "Found", {}, "https://elsewhere") is None
+    for code in (301, 302, 303, 307, 308):  # a malformed Location must not raise either
+        method = getattr(handler, f"http_error_{code}")
+        assert method(None, None, code, "Moved", {"location": "http://[::1"}) is None
+
+
+def test_a_redirect_from_the_real_opener_is_an_error_and_the_target_gets_nothing(
+    monkeypatch, fake_keychain
+):
+    import http.server
+
+    hits: list[str] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802 - http.server's name
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if self.path == "/target":
+                hits.append(self.headers.get("Authorization", ""))
+                self.send_response(200)
+                self.end_headers()
+                return
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{server.server_address[1]}/target")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        fake_keychain[("RecAndCC", "openai")] = KEY
+        port = server.server_address[1]
+        monkeypatch.setattr(summary_cloud, "_OPENER", REAL_OPENER)
+        monkeypatch.setitem(summary_cloud.URLS, "openai", f"http://127.0.0.1:{port}/start")
+        with pytest.raises(summary.SummaryUnavailable, match="HTTP 302"):
+            summary_cloud.CloudGenerator("openai")(MSGS, 400)
+        assert hits == []  # the key was not sent on to /target
+    finally:
+        server.shutdown()
 
 
 @pytest.mark.parametrize(
@@ -377,3 +421,27 @@ def test_bad_cloud_settings_fall_back_with_a_warning(tmp_path, caplog):
     assert (cfg.provider, cfg.reasoning_effort, cfg.cloud_model) == ("local", "xhigh", "")
     assert cfg.prompt == DEFAULT_SUMMARY_PROMPT
     assert "provider must be" in caplog.text and "reasoning_effort must be" in caplog.text
+
+
+def test_a_negative_retry_after_falls_back_to_the_backoff(monkeypatch, fake_keychain):
+    fake_keychain[("RecAndCC", "openai")] = KEY
+    waits = []
+    monkeypatch.setattr(summary_cloud, "_sleep", waits.append)
+    serve(monkeypatch, (429, {"Retry-After": "-5"}), {"output_text": "ok"})
+    assert summary_cloud.CloudGenerator("openai")(MSGS, 400) == "ok"
+    assert waits == [2.0]
+
+
+def test_the_request_body_stays_ascii_for_russian_text(tmp_path, monkeypatch, fake_keychain):
+    fake_keychain[("RecAndCC", "openai")] = KEY
+    seen = serve(monkeypatch, {"output_text": "ok"})
+    d = make_session(tmp_path, [Segment(5, 9, "обсуждаем бюджет", "Me", "ru")])
+    summary.summarize_session(d, cloud_cfg("openai"))
+    assert seen[0].data.isascii() and b"\\u" in seen[0].data  # escaped, still valid JSON
+
+
+def test_a_reply_that_is_not_an_object_is_unavailable(monkeypatch, fake_keychain):
+    fake_keychain[("RecAndCC", "openai")] = KEY
+    serve(monkeypatch, [1, 2])
+    with pytest.raises(summary.SummaryUnavailable, match="unexpected reply"):
+        summary_cloud.CloudGenerator("openai")(MSGS, 400)

@@ -70,6 +70,7 @@ from ..settings_window import (
     raise_settings,
     run_settings,
 )
+from ..transcribe import summary_cloud
 
 if TYPE_CHECKING:
     from ..transcribe.live import LiveTranscriber
@@ -487,6 +488,9 @@ class Controller:
         self._recent: list[Path] = []
         self._export_lock = threading.Lock()
         self._retention_lock = threading.Lock()  # one menu purge at a time
+        self._waiting_summaries: dict[str, list[Path]] = {}  # summaries waiting for a key
+        self._signin_started: set[str] = set()  # providers whose sign-in flow ran this run
+        self._signin_lock = threading.Lock()
         self._refreshing = False
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
@@ -747,6 +751,7 @@ class Controller:
                     self.cfg,
                     notify=self.post_notice,
                     busy=lambda: self.engine.state.status != IDLE,  # never during a recording
+                    needs_key=self._summary_needs_key,
                 )
         summaries.submit(directory)
 
@@ -1911,6 +1916,127 @@ class Controller:
         except BaseException:
             self._mark_dirty((RETENTION_KEY,), -1)  # apply() will never unmark
             raise
+
+    def set_summary_provider(self, provider: str, ask: Callable[[str], str]) -> None:
+        """ "Summaries with" menu (both shells), on a worker: a cloud provider without a stored key
+        asks for one first (``ask`` shows the sign-in prompt and returns the typed key, "" if
+        cancelled). Then ``summary.provider`` is applied in memory and saved on its own, as
+        ``set_retention`` does; the menus re-render on ``summaries_changed``."""
+        threading.Thread(
+            target=self._set_summary_provider,
+            args=(provider, ask),
+            daemon=True,
+            name="summary-provider",
+        ).start()
+
+    def _set_summary_provider(self, provider: str, ask: Callable[[str], str]) -> None:
+        needs_key = provider != "local" and summary_cloud.get_key(provider) is None
+        if needs_key and not self.sign_in(provider, ask):
+            self.events.put(("summaries_changed",))  # cancelled: the check stays put
+            return
+        key = "summary.provider"
+        self._mark_and_apply((key,), lambda: setattr(self.cfg.summary, "provider", provider))
+        try:
+            self._write_settings(key, title="Summaries with")
+        finally:
+            self._mark_dirty((key,), -1)
+        self.events.put(("summaries_changed",))
+
+    def sign_in(self, provider: str, ask: Callable[[str], str]) -> bool:
+        """Keep the API key ``ask`` returns for ``provider`` in the keychain ("" = cancelled).
+        True when it was saved. The key is never logged or shown."""
+        from .present import KEY_PAGES
+
+        open_path(KEY_PAGES[provider])  # the key page first, then the prompt
+        key = ask(provider)
+        if not key:
+            return False
+        try:
+            summary_cloud.set_key(provider, key)
+        except ValueError:
+            self.post_notice("Summaries", "That is not an API key (no spaces); nothing was saved")
+            return False
+        except Exception as e:  # noqa: BLE001 - keychain unavailable: the type only
+            log.warning("could not save the %s key (%s)", provider, type(e).__name__)
+            self.post_notice("Summaries", "The API key could not be saved to the keychain")
+            return False
+        return True
+
+    def sign_in_async(self, provider: str, ask: Callable[[str], str]) -> None:
+        """Menu "Sign in to ChatGPT…" / "Sign in to Claude…": keep a key; the provider stays."""
+        from .present import SUMMARY_PROVIDER_TITLES
+
+        def run() -> None:
+            if self.sign_in(provider, ask):
+                self.post_notice("Summaries", f"{SUMMARY_PROVIDER_TITLES[provider]}: key saved")
+                self.requeue_waiting_summaries(provider)
+
+        threading.Thread(target=run, daemon=True, name="summary-sign-in").start()
+
+    def sign_out_async(self) -> None:
+        """Menu "Sign out": remove the stored keys of both cloud providers (on a worker)."""
+
+        def run() -> None:
+            failed = False
+            for provider in ("openai", "anthropic"):
+                try:
+                    summary_cloud.delete_key(provider)
+                except Exception as e:  # noqa: BLE001 - keychain unavailable: the type only
+                    failed = True
+                    log.warning("could not remove the %s key (%s)", provider, type(e).__name__)
+            if failed:
+                self.post_notice(
+                    "Summaries", "Some API keys could not be removed from the keychain"
+                )
+                return
+            note = ""
+            if self.cfg.summary.provider != "local":
+                note = " Summaries with it are skipped until you sign in again."
+            self.post_notice("Summaries", "Signed out: the stored API keys are removed." + note)
+
+        threading.Thread(target=run, daemon=True, name="summary-sign-out").start()
+
+    def _summary_needs_key(self, provider: str, directory: Path) -> None:
+        """Worker thread (summary queue): hand the waiting summary to the UI thread."""
+        self.events.put(("summary_needs_key", provider, directory))
+
+    def on_summary_needs_key(
+        self, provider: str, directory: Path, ask: Callable[[str], str]
+    ) -> None:
+        """UI thread: a cloud summary waits for ``provider``'s key and joins the waiting list. The
+        first one for a provider posts a notice and starts the sign-in (key page, then prompt, on
+        a worker), once per run; a key saved then queues the waiting summaries again."""
+        with self._signin_lock:
+            waiting = self._waiting_summaries.setdefault(provider, [])
+            if directory not in waiting:
+                waiting.append(directory)
+            if provider in self._signin_started:
+                return
+            self._signin_started.add(provider)
+        from .present import SUMMARY_PROVIDER_TITLES
+
+        self.post_notice(
+            "Summaries",
+            f"{SUMMARY_PROVIDER_TITLES[provider]} needs an API key for this summary. The sign-in "
+            "page is opening; the summary is written once a key is saved.",
+        )
+        threading.Thread(
+            target=self._sign_in_for_summaries,
+            args=(provider, ask),
+            daemon=True,
+            name="summary-sign-in",
+        ).start()
+
+    def _sign_in_for_summaries(self, provider: str, ask: Callable[[str], str]) -> None:
+        if self.sign_in(provider, ask):
+            self.requeue_waiting_summaries(provider)
+
+    def requeue_waiting_summaries(self, provider: str) -> None:
+        """Queue again the summaries that waited for ``provider``'s key."""
+        with self._signin_lock:
+            waiting = self._waiting_summaries.pop(provider, [])
+        for directory in waiting:
+            self._summarize(directory)
 
     def sensitivity_preset(self) -> str | None:
         return current_preset(self.cfg.detection)

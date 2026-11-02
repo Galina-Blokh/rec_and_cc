@@ -43,7 +43,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-33 | Live captions name the speakers | 🟡 no accuracy measurement on real speech (#1) |
 | US-30 | Change common settings in a window | 🟡 macOS settings window shipped (#86), not on Windows |
 | US-34 | Warn when recordings go to a network volume | 🟡 shipped (#110): detection is fake-tested, no real share or Windows drive checked |
-| US-36 | Cloud summaries (opt-in): ChatGPT or Claude writes the summary | 🟡 backend (#177): keys, requests and prompts fake-tested; menu sign-in pending |
+| US-36 | Cloud summaries (opt-in): ChatGPT or Claude writes the summary | 🟡 backend and menus (#177): macOS menu and Windows tray (tray untested on hardware); keys, requests and prompts fake-tested |
 
 ---
 
@@ -634,4 +634,6 @@ leaves this computer.* (#177)
   twice first (after the server's `Retry-After`, at most 60 s, else 2 s and then 4 s).
 - **Then** the key is never logged or shown, logs never contain transcript or summary text, and
   requests use HTTPS with certificate checks.
-- **Not yet:** the sign-in and provider choice in the macOS menu and the Windows tray (PR 2).
+- **Given** a cloud summary has no key, **then** the provider's key page opens once, the key prompt
+  follows, and the summary is written after a key is saved (no failure notice is the only outcome).
+- **Not yet:** the Windows tray on real hardware; a quality evaluation on real meetings (#4).

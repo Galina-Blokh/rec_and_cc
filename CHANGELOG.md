@@ -7,6 +7,9 @@ All notable changes to RecAndCC are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Cloud summaries in the menus (macOS and Windows tray): **Summaries with** picks this Mac, ChatGPT
+  or Claude; **Sign in** opens the provider's key page and keeps the key in the keychain; a summary
+  without a key opens the same sign-in once and is written after the key is saved (US-36, #177).
 - Opt-in cloud summaries: `[summary] provider = "openai"` (ChatGPT) or `"anthropic"` (Claude)
   writes `summary.md` from the transcript of that meeting, with timestamps, a prompt and the
   template's sections. Off by default; the API key is kept in the OS keychain (US-36, #177).
