@@ -162,6 +162,11 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   `session.json`) or delete it. Delete moves the folder to the Trash / Recycle Bin and drops
   it from the search index; a session still recording or waiting to be transcribed can't be
   changed. On macOS it is a pair of dialogs; on Windows a small window with buttons.
+- **Summarize a meeting…**: lists the meetings that have a transcript, newest first; the one
+  you pick gets its `summary.md` written, as **Summarize** in Meeting notes does. A summary you
+  asked for from this menu or from Meeting notes opens when it is written, with a "Summary
+  ready" notice naming the meeting; automatic summaries never open anything. On Windows the
+  list is a small dialog.
 - **Open transcripts folder**
 - **Permissions**: status and "Grant…" actions.
 - **Launch at login**: starts RecAndCC every time you log in. Turn it on once.
