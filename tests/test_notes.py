@@ -84,6 +84,7 @@ def test_summary_md_adds_an_excerpt_and_an_open_action(tmp_path):
     assert len(note.excerpt) <= notes.EXCERPT_CHARS and note.excerpt.endswith("…")
     assert notes.note_columns(note)[-1] == "transcribed, summary"
     assert "Open summary" in notes.note_actions(note)
+    assert notes.SUMMARIZE in notes.note_actions(note)  # redo it on demand
     assert notes.action_target(note, "Open summary") == s.directory / "summary.md"
     assert notes.action_target(note, "Reveal folder") == s.directory
     assert "Budget agreed" in notes.actions_script(note)
@@ -334,8 +335,13 @@ def test_mac_dialog_flow(tmp_path):
     run("1. x", "Rename…", "")  # cancelled
     run("1. x", "Delete…", "")
     run("1. x", "Delete…", "button returned:Delete")
+    run("1. x", "Summarize")
     assert opened == [s.directory / "transcript.md"]
-    assert acted == [(s.directory, "rename", "A, text returned: B"), (s.directory, "delete")]
+    assert acted == [
+        (s.directory, "rename", "A, text returned: B"),
+        (s.directory, "delete"),
+        (s.directory, "summarize"),
+    ]
 
 
 def test_listing_survives_a_broken_transcript_and_caps_titles(tmp_path):
@@ -349,3 +355,19 @@ def test_listing_survives_a_broken_transcript_and_caps_titles(tmp_path):
     notes.rename_session(s.directory, "second", tmp_path)
     s.save()
     assert SessionInfo.load(s.directory).title == "second" and s.title is None
+
+
+def test_summarize_queues_a_summary_for_a_chosen_meeting(tmp_path, monkeypatch):
+    s = make_session(tmp_path, "140312_zoom-us", T0, transcribed=True)
+    write_transcript(s.directory)
+    queued: list[Path] = []
+    monkeypatch.setattr(Controller, "_summarize", lambda self, d: queued.append(d))
+    c = _ctrl(tmp_path)
+    assert not c.cfg.summary.enabled  # works with automatic summaries off
+    c.note_action_async(s.directory, "summarize")
+    assert _wait_for(c, "notice")[1] == "Writing the summary"
+    assert queued == [s.directory]
+    (s.directory / "transcript.json").unlink()
+    c.note_action_async(s.directory, "summarize")
+    assert _wait_for(c, "notice")[1] == "No transcript to summarize"
+    assert queued == [s.directory]

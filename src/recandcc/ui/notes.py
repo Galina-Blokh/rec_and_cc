@@ -29,7 +29,8 @@ NOTES_LIMIT = 100  # newest sessions listed (each one's transcript.json is read)
 EXCERPT_CHARS = 120
 TITLE_CHARS = 200
 TRANSCRIPT_MD, TRANSCRIPT_JSON, SUMMARY_MD = "transcript.md", "transcript.json", "summary.md"
-ACTIONS = ("Open transcript", "Open summary", "Reveal folder", "Rename…", "Delete…")
+SUMMARIZE = "Summarize"  # (re)write summary.md now, also when automatic summaries are off
+ACTIONS = ("Open transcript", "Open summary", SUMMARIZE, "Reveal folder", "Rename…", "Delete…")
 
 
 @dataclass
@@ -169,7 +170,7 @@ def note_label(note: Note) -> str:
 
 def note_actions(note: Note) -> list[str]:
     """What can be done with a session (``ACTIONS``, minus opening files it doesn't have)."""
-    skip = {"Open transcript"} if not note.has_transcript else set()
+    skip = {"Open transcript", SUMMARIZE} if not note.has_transcript else set()
     if not note.has_summary:
         skip.add("Open summary")
     return [a for a in ACTIONS if a not in skip]
@@ -329,8 +330,9 @@ def delete_script(note: Note) -> str:
 
 def run_dialogs(notes: list[Note], ask, act, open_) -> None:
     """The macOS flow (worker thread): pick a meeting, then an action. ``ask(script)`` runs
-    AppleScript and returns its output, ``act(directory, action, title="")`` renames or
-    deletes (``Controller.note_action_async``), ``open_(path)`` opens a file or folder."""
+    AppleScript and returns its output, ``act(directory, action, title="")`` renames,
+    deletes or summarizes (``Controller.note_action_async``), ``open_(path)`` opens a file
+    or folder."""
     i = chosen_index(ask(list_script(notes)), len(notes))
     if i is None:
         return
@@ -343,6 +345,8 @@ def run_dialogs(notes: list[Note], ask, act, open_) -> None:
     elif action == "Delete…":
         if ask(delete_script(note)).startswith("button returned:Delete"):
             act(note.directory, "delete")
+    elif action == SUMMARIZE and action in note_actions(note):
+        act(note.directory, "summarize")
     elif action in note_actions(note):
         open_(action_target(note, action))
 

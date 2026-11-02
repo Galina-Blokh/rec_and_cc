@@ -799,13 +799,14 @@ class Controller:
         return None
 
     def note_action_async(self, directory: Path, action: str, title: str = "") -> None:
-        """Rename (``action="rename"``) or delete a session off the UI thread, then post a
-        notice and a fresh ``notes`` list."""
+        """Rename (``action="rename"``), delete or summarize a session off the UI thread, then
+        post a notice and a fresh ``notes`` list. "summarize" queues summary.md (local LLM),
+        also when ``summary.enabled`` is off: the summary appears when the queue gets to it."""
 
         def run() -> None:
             from .notes import delete_notice, delete_session, rename_session, scan_notes
 
-            if action not in ("rename", "delete"):
+            if action not in ("rename", "delete", "summarize"):
                 log.error("unknown meeting action %r", action)
                 return
             if why := self.note_busy(directory):
@@ -814,6 +815,14 @@ class Controller:
             try:
                 if action == "rename":
                     rename_session(directory, title, self.cfg.output_dir)
+                elif action == "summarize":
+                    if not (directory / "transcript.json").exists():
+                        self.events.put(("notice", "No transcript to summarize", directory.name))
+                        return
+                    self._summarize(directory)
+                    self.events.put(
+                        ("notice", "Writing the summary", "Open summary shows it when it's done.")
+                    )
                 elif action == "delete":
                     result = delete_session(directory, self.cfg.output_dir)
                     self._index_session(directory)  # gone: drops it from the search index

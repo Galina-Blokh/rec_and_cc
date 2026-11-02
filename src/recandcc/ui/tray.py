@@ -442,6 +442,9 @@ class TkNotes:
         elif action == "Delete…":
             if ask and ask("delete", note):
                 self.ctrl.note_action_async(note.directory, "delete")
+        elif action == notes_ui.SUMMARIZE:
+            if action in notes_ui.note_actions(note):
+                self.ctrl.note_action_async(note.directory, "summarize")
         elif action in notes_ui.note_actions(note):
             target = notes_ui.action_target(note, action)
             threading.Thread(target=open_path, args=(target,), daemon=True).start()
