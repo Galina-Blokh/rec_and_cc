@@ -2,10 +2,10 @@
 API (Anthropic), picked by ``summary.provider``. "local" never reaches this module.
 
 summary.py builds the prompt and the timestamped transcript; this module sends them and reads the
-answer back, with no SDK (``urllib.request``, default certificate checks). The key is in the OS
-keychain (``keyring``: macOS Keychain, Windows Credential Manager; service "RecAndCC", account =
-provider), or else in ``RECANDCC_OPENAI_API_KEY`` / ``RECANDCC_ANTHROPIC_API_KEY``. Errors raise
-SummaryUnavailable with a fixed reason: never the key, the request or the reply.
+answer back, with no SDK (``urllib.request``, default certificate checks, no redirects). The key is
+in the OS keychain (``keyring``: macOS Keychain, Windows Credential Manager; service "RecAndCC",
+account = provider), or else in ``RECANDCC_OPENAI_API_KEY`` / ``RECANDCC_ANTHROPIC_API_KEY``.
+Errors raise SummaryUnavailable with a fixed reason: never the key, the request or the reply.
 """
 
 from __future__ import annotations
@@ -15,9 +15,9 @@ import json
 import logging
 import os
 import re
-import time
 import urllib.error
 import urllib.request
+from time import sleep as _sleep  # a module name, so a test can replace it
 from typing import Any
 
 from ..config import resolve_cloud_model
@@ -33,11 +33,24 @@ URLS = {
 }
 # The current Messages API version (claude-api skill); nothing this request sends has changed.
 ANTHROPIC_VERSION = "2026-10-21"
-TIMEOUT_S = 300.0
-RETRIES = 2  # extra attempts after a 429 or a 5xx, 2 s and then 4 s apart
+# An idle timeout: an answer that is not streamed sends nothing until it is complete.
+TIMEOUT_S = 600.0
+RETRIES = 2  # extra attempts after a 429 or a 5xx: Retry-After (at most 60 s), else 2 s, 4 s
+MAX_RETRY_WAIT_S = 60.0
 MAX_OUTPUT_TOKENS = 128_000  # the output limit of the current models
 TRUNCATED = "the cloud model did not finish its answer"
 _OLD_CLAUDE = re.compile(r"claude-(?:opus|sonnet)-4-6")  # effort up to max, no xhigh
+_KEY = re.compile(r"[!-~]+")  # an API key: printable ASCII, no spaces
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect would send the key on to wherever it points: a 3xx is an error instead."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 def _keyring():
@@ -47,21 +60,26 @@ def _keyring():
 
 
 def get_key(provider: str) -> str | None:
-    """The API key of ``provider``: the keychain entry, else its environment variable."""
+    """The API key of ``provider``: the keychain entry, else its environment variable. A key that
+    is not printable ASCII is ignored (it could not be sent); the warning does not show it."""
     key = ""
     try:
         key = (_keyring().get_password(SERVICE, provider) or "").strip()
     except Exception as e:  # noqa: BLE001 - a locked or unavailable keychain: the type only
         log.warning("could not read the %s key from the keychain (%s)", provider, type(e).__name__)
-    return key or os.environ.get(ENV_VARS[provider], "").strip() or None
+    key = key or os.environ.get(ENV_VARS[provider], "").strip()
+    if key and not _KEY.fullmatch(key):
+        log.warning("the %s API key is not printable ASCII; ignoring it", provider)
+        return None
+    return key or None
 
 
 def set_key(provider: str, key: str) -> None:
-    """Store ``key`` for ``provider`` in the keychain. Raises ValueError (the key is not in the
-    message) if it is empty or has spaces."""
+    """Store ``key`` for ``provider`` in the keychain. Raises ValueError unless the key is
+    printable ASCII without spaces (the message never shows it)."""
     key = key.strip()
-    if not key or any(c.isspace() for c in key):
-        raise ValueError("the API key is empty or has spaces in it")
+    if not _KEY.fullmatch(key):
+        raise ValueError("the API key must be printable ASCII without spaces")
     _keyring().set_password(SERVICE, provider, key)
 
 
@@ -88,24 +106,43 @@ def _claude_effort(effort: str, model: str) -> str:
     return effort
 
 
+def _openai_effort(effort: str) -> str:
+    """OpenAI's ``reasoning.effort`` has no max level: max means xhigh there."""
+    return "xhigh" if effort == "max" else effort
+
+
+def _items(value: Any) -> list[Any]:
+    """``value`` if it is a list, else nothing (a reply in an unexpected shape)."""
+    return value if isinstance(value, list) else []
+
+
 def _openai_text(reply: dict[str, Any]) -> str:
     if isinstance(reply.get("output_text"), str):
         return reply["output_text"]
-    texts = []
-    for item in reply.get("output") or []:
-        if isinstance(item, dict):
-            for part in item.get("content") or []:
-                if isinstance(part, dict) and part.get("type") == "output_text":
-                    texts.append(str(part.get("text", "")))
-    return "".join(texts)
+    return "".join(
+        str(part.get("text", ""))
+        for item in _items(reply.get("output"))
+        if isinstance(item, dict)
+        for part in _items(item.get("content"))
+        if isinstance(part, dict) and part.get("type") == "output_text"
+    )
 
 
 def _claude_text(reply: dict[str, Any]) -> str:
     return "".join(
         str(block.get("text", ""))
-        for block in reply.get("content") or []
+        for block in _items(reply.get("content"))
         if isinstance(block, dict) and block.get("type") == "text"
     )
+
+
+def _retry_wait(headers: Any, retries: int) -> float:
+    """Seconds before a retry: the server's Retry-After (at most MAX_RETRY_WAIT_S), else 2 s and
+    then 4 s."""
+    try:
+        return max(0.0, min(float(headers.get("Retry-After")), MAX_RETRY_WAIT_S))
+    except (AttributeError, TypeError, ValueError):
+        return 2.0 * 2**retries
 
 
 def _http_reason(label: str, status: int) -> str:
@@ -148,8 +185,9 @@ class CloudGenerator:
                 "model": self.model_name,
                 "instructions": system,
                 "input": turns,
-                "reasoning": {"effort": self.effort},
+                "reasoning": {"effort": _openai_effort(self.effort)},
                 "max_output_tokens": budget,
+                "store": False,  # not kept on the provider's side for later retrieval
             }
         else:
             body = {
@@ -182,23 +220,24 @@ class CloudGenerator:
         else:
             headers = {"x-api-key": self._key, "anthropic-version": ANTHROPIC_VERSION}
         headers["Content-Type"] = "application/json"
-        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        data = json.dumps(body).encode("ascii")  # ensure_ascii: escapes are valid JSON too
         retries = 0
         while True:
-            # https only: the URL is one of the constants above
+            # https only: the URL is a constant above, and _OPENER refuses redirects
             req = urllib.request.Request(  # noqa: S310
                 URLS[self.provider], data=data, headers=headers, method="POST"
             )
             try:
-                with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:  # noqa: S310
+                with _OPENER.open(req, timeout=TIMEOUT_S) as resp:  # noqa: S310
                     raw = resp.read()
             except urllib.error.HTTPError as e:
                 status = e.code
+                wait = _retry_wait(e.headers, retries)
                 e.close()
                 if (status == 429 or status >= 500) and retries < RETRIES:
                     retries += 1
                     log.info("%s answered HTTP %d; trying again", label, status)
-                    time.sleep(2.0 * 2 ** (retries - 1))
+                    _sleep(wait)
                     continue
                 raise SummaryUnavailable(_http_reason(label, status)) from None
             except (OSError, http.client.HTTPException):

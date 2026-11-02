@@ -21,8 +21,9 @@ RecAndCC records calls and transcribes them. What it protects, and how:
 
 ### Local-only data
 - Audio, transcripts, settings and logs stay on the computer
-  (paths: README → [Privacy & consent](README.md#privacy--consent)). Nothing is uploaded; there
-  is no telemetry and no account.
+  (paths: README → [Privacy & consent](README.md#privacy--consent)). Nothing is uploaded, except
+  a cloud summary you turn on (`summary.provider`: that session's text goes to the provider you
+  chose); there is no telemetry and no account.
 - Recording and transcript folders created by the app are owner-only (`0700`). Other local
   users and processes running as **you** are out of scope: anything running under your
   account can read your files, and macOS permissions (Microphone, System audio) are what gate
@@ -30,7 +31,10 @@ RecAndCC records calls and transcribes them. What it protects, and how:
 - Retention is up to the user (`keep_audio`, `audio_retention_days`); transcripts are never
   deleted automatically. Disk encryption (FileVault / BitLocker) is recommended.
 
-### Model downloads (the only network access)
+### Model downloads and cloud summaries (the only network access)
+- Cloud summaries are off by default. When on, one HTTPS request per summary carries that
+  session's transcript to the chosen provider; the API key is kept in the OS keychain, and
+  redirects are refused so the key is never sent elsewhere.
 - Whisper models come from Hugging Face at **pinned commits**
   ([`src/recandcc/transcribe/revisions.py`](src/recandcc/transcribe/revisions.py)), so a
   changed upstream repo can't swap the weights. Once downloaded they load with

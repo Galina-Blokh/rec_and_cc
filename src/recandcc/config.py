@@ -397,6 +397,8 @@ class Config:
         for section in ("detection", "transcription"):
             data[section] = {k: v for k, v in data[section].items() if v is not None}
         data["summary"].pop("notice", None)  # runtime only
+        if data["summary"].get("prompt") == DEFAULT_SUMMARY_PROMPT:  # the default is not written
+            data["summary"].pop("prompt")
         with _file_lock(path.with_name(f".{path.name}.lock")):  # shared with save_keys / CLI
             _write_atomic(path, tomli_w.dumps(data).encode())
 

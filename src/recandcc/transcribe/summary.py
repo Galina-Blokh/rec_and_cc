@@ -14,6 +14,7 @@ background ``summary`` thread; logs never contain transcript or summary text.
 from __future__ import annotations
 
 import contextlib
+import copy
 import gc
 import hashlib
 import importlib.util
@@ -80,7 +81,7 @@ CLOUD_LABELS = {"openai": "OpenAI", "anthropic": "Anthropic"}  # as summary.md's
 CLOUD_ANSWER_TOKENS = 4_000  # a cloud answer, or a part's notes (the provider adds room to think)
 CLOUD_SINGLE_CALL_CHARS = 400_000
 CLOUD_PART_CHARS = 200_000
-_MARK_HEADING_OR_LIST = re.compile(r"(?:#{1,6}\s+|(?:[-*+]|\d{1,3}[.)])\s+)")
+_MARK_HEADING_OR_LIST = re.compile(r"\s*(?:#{1,6}\s+|(?:[-*+]|\d{1,3}[.)])\s+)")
 
 Messages = list[dict[str, str]]
 
@@ -464,9 +465,10 @@ def summarize_session(
     directory = Path(directory)
     data = json.loads((directory / JSON_NAME).read_text(encoding="utf-8"))
     segments = [Segment(**s) for s in data.get("segments", [])]
-    cloud = cfg.summary.provider != "local"
+    settings = copy.copy(cfg.summary)  # one snapshot: the UI may reload the config meanwhile
+    cloud = settings.provider in CLOUD_LABELS
     if cloud:
-        model = resolve_cloud_model(cfg.summary.provider, cfg.summary.cloud_model)
+        model = resolve_cloud_model(settings.provider, settings.cloud_model)
     else:
         model = summary_model(cfg, segments)
     template = load_template(cfg.summary.template)  # None: the default layout
@@ -486,14 +488,12 @@ def summarize_session(
             return gen(messages, max_tokens)
 
         if cloud:
-            label = CLOUD_LABELS[cfg.summary.provider]
+            label = CLOUD_LABELS[settings.provider]
             log.info(
                 "summary of %s: sending its transcript to %s (%s)", directory.name, label, name
             )
-            budget = max(cfg.summary.max_tokens, CLOUD_ANSWER_TOKENS)
-            language, answer = cloud_answer(
-                segments, call, cfg.summary.prompt, budget, template, room
-            )
+            budget = max(settings.max_tokens, CLOUD_ANSWER_TOKENS)
+            language, answer = cloud_answer(segments, call, settings.prompt, budget, template, room)
             title = template.title if template else ""
             return language, format_cloud(language, answer, name, label, title), "a cloud answer"
         if template is None:
@@ -519,7 +519,7 @@ def summarize_session(
         from . import summary_cloud  # only a cloud provider imports the network code
 
         gen = summary_cloud.CloudGenerator(
-            cfg.summary.provider, cfg.summary.cloud_model, cfg.summary.reasoning_effort
+            settings.provider, settings.cloud_model, settings.reasoning_effort
         )
         try:  # no local fallback: a failure raises SummaryUnavailable (the queue shows it)
             return run(gen, gen.model_name)

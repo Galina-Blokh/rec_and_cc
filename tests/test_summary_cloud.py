@@ -10,17 +10,19 @@ import contextlib
 import io
 import json
 import logging
+import tomllib
 import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from recandcc.config import DEFAULT_SUMMARY_PROMPT, Config, load_config
 from recandcc.models import Segment, SessionInfo, TriggerKind
 from recandcc.transcribe import summary, summary_cloud
-from recandcc.transcribe.output import write_outputs
+from recandcc.transcribe.output import PDI, RLI, write_outputs
 
 KEY = "sk-test-do-not-leak"
 OPENAI_URL = "https://api.openai.com/v1/responses"
@@ -37,24 +39,28 @@ def no_network(monkeypatch):
     def refuse(req, timeout=None):
         pytest.fail(f"unexpected request to {req.full_url}")
 
-    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    monkeypatch.setattr(summary_cloud, "_OPENER", SimpleNamespace(open=refuse))
 
 
 def serve(monkeypatch, *replies) -> list:
-    """Answer requests in turn: a dict is a 200 JSON body, an int an HTTP error status, an
-    exception is raised. Returns the requests seen."""
+    """Answer requests in turn: a dict is a 200 JSON body, an int an HTTP error status, a
+    (status, headers) pair an HTTP error with headers, an exception is raised. Returns the
+    requests seen."""
     seen, queue = [], list(replies)
 
-    def urlopen(req, timeout=None):
+    def fake_open(req, timeout=None):
         seen.append(req)
         reply = queue.pop(0)
+        if isinstance(reply, tuple):
+            status, headers = reply
+            raise urllib.error.HTTPError(req.full_url, status, "error", headers, io.BytesIO(b"{}"))
         if isinstance(reply, int):
             raise urllib.error.HTTPError(req.full_url, reply, "error", {}, io.BytesIO(b"{}"))
         if isinstance(reply, Exception):
             raise reply
         return contextlib.nullcontext(io.BytesIO(json.dumps(reply).encode()))
 
-    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(summary_cloud, "_OPENER", SimpleNamespace(open=fake_open))
     return seen
 
 
@@ -127,6 +133,14 @@ def test_keys_come_from_the_keychain_and_the_environment_is_the_fallback(
         summary_cloud.set_key("openai", "two words")
 
 
+def test_a_key_that_is_not_printable_ascii_is_refused_without_being_shown(fake_keychain):
+    with pytest.raises(ValueError) as err:
+        summary_cloud.set_key("openai", "sk-“test")
+    assert "sk-" not in str(err.value)
+    fake_keychain[("RecAndCC", "openai")] = "sk-“test"
+    assert summary_cloud.get_key("openai") is None
+
+
 def test_openai_request_carries_prompt_timed_transcript_and_template(
     tmp_path, monkeypatch, fake_keychain
 ):
@@ -144,6 +158,7 @@ def test_openai_request_carries_prompt_timed_transcript_and_template(
     assert KEY not in req.data.decode() and KEY not in text
     assert body["model"] == "gpt-6.1" and body["reasoning"] == {"effort": "xhigh"}
     assert body["max_output_tokens"] == 32_000  # 8 x the 4000-token answer budget
+    assert body["store"] is False
     assert body["instructions"].endswith("Answer in Markdown with ## headings.")
     user = body["input"][-1]["content"]
     assert user.startswith(DEFAULT_SUMMARY_PROMPT)
@@ -155,7 +170,7 @@ def test_openai_request_carries_prompt_timed_transcript_and_template(
 
 
 def test_anthropic_request_has_its_headers_effort_and_timed_transcript(
-    tmp_path, monkeypatch, fake_keychain
+    tmp_path, monkeypatch, fake_keychain, caplog
 ):
     fake_keychain[("RecAndCC", "anthropic")] = KEY
     reply = {
@@ -167,7 +182,8 @@ def test_anthropic_request_has_its_headers_effort_and_timed_transcript(
     }
     seen = serve(monkeypatch, reply)
     d = make_session(tmp_path, [Segment(3700, 3704, SPOKEN, "Others", "en")])
-    text = summary.summarize_session(d, cloud_cfg("anthropic")).read_text("utf-8")
+    with caplog.at_level(logging.DEBUG, logger="recandcc"):
+        text = summary.summarize_session(d, cloud_cfg("anthropic")).read_text("utf-8")
     req = seen[0]
     body = json.loads(req.data)
     assert req.full_url == ANTHROPIC_URL and req.get_header("X-api-key") == KEY
@@ -179,6 +195,7 @@ def test_anthropic_request_has_its_headers_effort_and_timed_transcript(
     assert "[01:01:40] Others: we ship the beta on Friday" in body["messages"][0]["content"]
     assert "## Summary\nShip on Friday." in text
     assert "_Generated in the cloud by claude-opus-5-5 (Anthropic)" in text
+    assert SPOKEN not in caplog.text and KEY not in caplog.text  # logs hold no text or key
 
 
 @pytest.mark.parametrize(
@@ -188,6 +205,11 @@ def test_anthropic_request_has_its_headers_effort_and_timed_transcript(
 def test_reasoning_effort_is_mapped_to_claude_levels(model, effort, sent):
     assert summary_cloud._claude_effort(effort, model) == sent
     assert summary_cloud._claude_effort("minimal", model) == "low"
+
+
+def test_openai_has_no_max_level_so_max_is_xhigh():
+    assert summary_cloud._openai_effort("max") == "xhigh"
+    assert summary_cloud._openai_effort("low") == "low"
 
 
 @pytest.mark.parametrize(
@@ -206,7 +228,7 @@ def test_openai_answer_is_read_from_either_reply_shape(monkeypatch, fake_keychai
 def test_rate_limits_and_server_errors_are_retried_twice(monkeypatch, fake_keychain):
     fake_keychain[("RecAndCC", "openai")] = KEY
     waits = []
-    monkeypatch.setattr(summary_cloud.time, "sleep", waits.append)
+    monkeypatch.setattr(summary_cloud, "_sleep", waits.append)
     seen = serve(monkeypatch, 503, 429, {"output_text": "ok"})
     assert summary_cloud.CloudGenerator("openai")(MSGS, 400) == "ok"
     assert len(seen) == 3 and waits == [2.0, 4.0]
@@ -214,6 +236,25 @@ def test_rate_limits_and_server_errors_are_retried_twice(monkeypatch, fake_keych
     with pytest.raises(summary.SummaryUnavailable, match="HTTP 502"):
         summary_cloud.CloudGenerator("openai")(MSGS, 400)
     assert len(seen) == 3
+
+
+def test_retry_after_is_honoured_up_to_a_minute(monkeypatch, fake_keychain):
+    fake_keychain[("RecAndCC", "openai")] = KEY
+    waits = []
+    monkeypatch.setattr(summary_cloud, "_sleep", waits.append)
+    serve(
+        monkeypatch,
+        (429, {"Retry-After": "7"}),
+        (429, {"Retry-After": "900"}),
+        {"output_text": "ok"},
+    )
+    assert summary_cloud.CloudGenerator("openai")(MSGS, 400) == "ok"
+    assert waits == [7.0, 60.0]
+
+
+def test_redirects_are_refused_so_the_key_is_never_sent_on():
+    handler = summary_cloud._NoRedirect()
+    assert handler.redirect_request(None, None, 302, "Found", {}, "https://elsewhere") is None
 
 
 @pytest.mark.parametrize(
@@ -239,6 +280,7 @@ def test_failures_are_reported_and_the_key_never_appears(
         ("openai", {"status": "incomplete", "output_text": "part"}, "did not finish"),
         ("anthropic", {"stop_reason": "max_tokens", "content": []}, "did not finish"),
         ("openai", {"status": "completed", "output_text": "  "}, "returned no answer"),
+        ("anthropic", {"content": 5}, "returned no answer"),  # an unexpected shape, no crash
     ],
 )
 def test_a_cut_off_or_empty_answer_is_never_written(
@@ -248,6 +290,23 @@ def test_a_cut_off_or_empty_answer_is_never_written(
     serve(monkeypatch, reply)
     with pytest.raises(summary.SummaryUnavailable, match=match):
         summary_cloud.CloudGenerator(provider)(MSGS, 400)
+
+
+def test_a_failed_cloud_summary_writes_nothing_and_never_falls_back_to_local(
+    tmp_path, monkeypatch, fake_keychain
+):
+    fake_keychain[("RecAndCC", "openai")] = KEY
+    serve(monkeypatch, 401)
+    built = []
+    monkeypatch.setattr(summary, "MlxGenerator", lambda *args, **kwargs: built.append(args))
+    notices = []
+    d = make_session(tmp_path, [Segment(5, 9, SPOKEN, "Me", "en")])
+    queue = summary.SummaryQueue(cloud_cfg("openai"), notify=lambda t, m: notices.append((t, m)))
+    queue.submit(d)
+    queue.join()
+    assert built == []  # no local model was even made
+    assert not (d / "summary.md").exists() and not (d / summary.PENDING_MARKER).exists()
+    assert notices == [("Summary skipped", "OpenAI rejected the API key (HTTP 401)")]
 
 
 def test_a_transcript_past_the_single_call_limit_goes_in_parts_then_once_more(
@@ -289,6 +348,21 @@ def test_timed_lines_keep_paragraphs_and_the_transcript_time_format():
         "[00:00:05] Me: hi there",
         "[01:01:40] Others: bye",
     ]
+
+
+def test_nested_bullets_in_a_hebrew_summary_stay_list_items():
+    out = summary.format_cloud("he", "- ראשון\n  - שני", "m", "OpenAI")
+    assert f"\n  - {RLI}שני{PDI}" in out
+
+
+def test_the_default_prompt_is_not_written_to_config_but_a_changed_one_is(tmp_path):
+    path = tmp_path / "config.toml"
+    Config().save(path)
+    assert "prompt" not in tomllib.loads(path.read_text("utf-8"))["summary"]
+    cfg = Config()
+    cfg.summary.prompt = "Two lines only."
+    cfg.save(path)
+    assert load_config(path).summary.prompt == "Two lines only."
 
 
 def test_bad_cloud_settings_fall_back_with_a_warning(tmp_path, caplog):

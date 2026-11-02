@@ -629,8 +629,9 @@ leaves this computer.* (#177)
   sections (a transcript over 400,000 characters goes in parts first); `summary.md` keeps the
   usual title and says it was written in the cloud, and by which model.
 - **Given** no key (keychain or `RECANDCC_*_API_KEY`), a rejected key, a network failure or a
-  provider error, **then** the summary is skipped with a notice, and the local model is not used.
-  Rate limits and server errors are retried twice first (2 s, then 4 s).
+  provider error, **then** the summary is skipped with a notice (once for each reason, as for
+  local summaries), and the local model is not used. Rate limits and server errors are retried
+  twice first (after the server's `Retry-After`, at most 60 s, else 2 s and then 4 s).
 - **Then** the key is never logged or shown, logs never contain transcript or summary text, and
   requests use HTTPS with certificate checks.
 - **Not yet:** the sign-in and provider choice in the macOS menu and the Windows tray (PR 2).
