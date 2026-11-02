@@ -520,3 +520,30 @@ def test_unmounted_mount_point_keeps_the_index(tmp_path, out, monkeypatch, stub)
         out.mkdir()
     assert idx.sync(out) == 0
     assert [h.folder for h in idx.search("budget")] == [a]
+
+
+def test_a_volume_id_past_sqlite_range_still_indexes(tmp_path, out, monkeypatch):
+    """A Windows volume id can use all 64 bits (the CI runner image reports one), but SQLite
+    stores INTEGERs as signed 64-bit: the roots table must take the id anyway."""
+    make_session(out, 1, [seg(0, "the quarterly budget")])
+    real_stat = os.stat
+
+    class WideDev:
+        """The real stat result, with a volume id past SQLite's signed 64-bit range."""
+
+        st_dev = 2**64 - 3
+
+        def __init__(self, st):
+            self._st = st
+
+        def __getattr__(self, name):
+            return getattr(self._st, name)
+
+    def stat_of(p, *args, **kwargs):
+        st = real_stat(p, *args, **kwargs)
+        return WideDev(st) if Path(p) == out else st
+
+    monkeypatch.setattr(os, "stat", stat_of)
+    idx = index(tmp_path, True)
+    assert idx.sync(out) == 1
+    assert [h.folder for h in idx.search("budget")]
