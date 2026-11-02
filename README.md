@@ -156,7 +156,9 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
 - **Meeting notes…**: your past sessions, newest first, with title (the app that triggered
   it, or one you gave it), date and time, duration, speakers, languages and whether it is
   transcribed. Pick one to open its transcript or `summary.md` (if there is one; its first
-  lines show as an excerpt), reveal its folder, rename it (the title is kept in
+  lines show as an excerpt), **Summarize** it (writes or redoes `summary.md` with the local
+  model, also when automatic summaries are off; it follows `summary.template` if set),
+  reveal its folder, rename it (the title is kept in
   `session.json`) or delete it. Delete moves the folder to the Trash / Recycle Bin and drops
   it from the search index; a session still recording or waiting to be transcribed can't be
   changed. On macOS it is a pair of dialogs; on Windows a small window with buttons.
