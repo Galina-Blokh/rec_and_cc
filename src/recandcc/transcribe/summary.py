@@ -603,6 +603,10 @@ class SummaryQueue:
     It never competes with a recording for the GPU: while ``busy()`` is true (the engine is
     recording or asking) it waits before a session and between model calls. ``notify(title,
     message)`` gets a one-time notice per skip reason and before the model's first download.
+    ``on_done(directory, written, announce)`` runs on the summary thread after every job.
+    ``written``: its summary.md was written. ``announce``: it was submitted with
+    ``announce=True``, a summary the user asked for. That flag is read when the job ends, under
+    the queue's lock, so a request made while the job is queued or running is never lost.
     """
 
     def __init__(
@@ -612,23 +616,28 @@ class SummaryQueue:
         busy: Callable[[], bool] | None = None,
         generate: Generator | None = None,
         poll_s: float = 1.0,
+        on_done: Callable[[Path, bool, bool], None] | None = None,
     ) -> None:
         self.cfg = cfg
         self.notify = notify or (lambda title, message: None)
         self.busy = busy or (lambda: False)
         self.generate = generate
         self.poll_s = poll_s
+        self.on_done = on_done or (lambda directory, written, announce: None)
         self._q: queue.Queue[Path] = queue.Queue()
         self._skipped: set[str] = set()
         self._queued: set[Path] = set()  # queued or running (resolved): never twice at once
+        self._announce: set[Path] = set()  # queued or running and asked for: under _queued_lock
         self._queued_lock = threading.Lock()
         threading.Thread(target=self._loop, name="summary", daemon=True).start()
 
-    def submit(self, directory: Path) -> None:
+    def submit(self, directory: Path, announce: bool = False) -> None:
         directory = Path(directory)
         mark_pending(directory)  # removed when done; startup re-queues it if we quit first
         key = directory.resolve()
         with self._queued_lock:
+            if announce:  # read when the job ends (see _loop): a late request still counts
+                self._announce.add(key)
             if key in self._queued:
                 return
             self._queued.add(key)
@@ -653,6 +662,7 @@ class SummaryQueue:
     def _loop(self) -> None:
         while True:
             directory = self._q.get()
+            written = False
             try:
                 self._wait_idle()
                 if not directory.exists():
@@ -662,6 +672,7 @@ class SummaryQueue:
                     continue  # discarded: purge_discarded_sessions deletes it
                 self._job(directory)
                 clear_pending(directory)
+                written = True
             except SummaryUnavailable as e:
                 clear_pending(directory)  # no model here: retrying at every start won't help
                 log.info("summary of %s skipped: %s", directory.name, e)
@@ -673,6 +684,13 @@ class SummaryQueue:
                 log.error("summary of %s failed: %s", directory.name, type(e).__name__)
                 clear_pending(directory)  # e.g. a broken transcript: don't retry every start
             finally:
+                key = directory.resolve()
                 with self._queued_lock:
-                    self._queued.discard(directory.resolve())
+                    self._queued.discard(key)
+                    announce = key in self._announce
+                    self._announce.discard(key)
+                try:  # before task_done: join() also waits for the callback
+                    self.on_done(directory, written, announce)
+                except Exception as e:  # noqa: BLE001 - a callback must never kill the thread
+                    log.error("summary callback failed: %s", type(e).__name__)
                 self._q.task_done()
