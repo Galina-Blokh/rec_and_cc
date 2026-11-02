@@ -23,6 +23,7 @@ from recandcc.config import DEFAULT_SUMMARY_PROMPT, Config, load_config
 from recandcc.models import Segment, SessionInfo, TriggerKind
 from recandcc.transcribe import summary, summary_cloud
 from recandcc.transcribe.output import PDI, RLI, write_outputs
+from recandcc.transcribe.summary_template import builtin
 
 KEY = "sk-test-do-not-leak"
 OPENAI_URL = "https://api.openai.com/v1/responses"
@@ -97,7 +98,7 @@ class Local:
         pass
 
 
-def test_local_summaries_build_no_cloud_generator_and_keep_their_prompts(tmp_path, monkeypatch):
+def test_local_summaries_build_no_cloud_generator_and_share_the_prompt(tmp_path, monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("a local summary built a cloud generator")
 
@@ -108,8 +109,24 @@ def test_local_summaries_build_no_cloud_generator_and_keep_their_prompts(tmp_pat
     text = summary.summarize_session(d, Config()).read_text("utf-8")
     sent = json.dumps(Local.calls)
     assert "Generated on this computer" in text
-    assert DEFAULT_SUMMARY_PROMPT not in sent and "Answer in Markdown" not in sent
-    assert "[00:00:05]" not in sent  # the local prompts keep their own transcript lines
+    assert len(Local.calls) == 6  # one call per section of the built-in template
+    assert DEFAULT_SUMMARY_PROMPT in sent  # the prompt applies to local summaries too
+    assert "Answer in Markdown" not in sent  # the cloud's own instruction stays cloud-only
+    assert "[00:00:05] Me: we ship the beta on Friday" in sent  # timed, as in the cloud
+
+
+def test_cloud_summary_without_a_template_asks_for_the_builtin_sections(
+    tmp_path, monkeypatch, fake_keychain
+):
+    fake_keychain[("RecAndCC", "openai")] = KEY
+    seen = serve(monkeypatch, {"output_text": "## Decisions\n- Ship on Friday."})
+    d = make_session(tmp_path, [Segment(5, 9, SPOKEN, "Me", "en")])
+    text = summary.summarize_session(d, cloud_cfg("openai")).read_text("utf-8")
+    user = json.loads(seen[0].data)["input"][-1]["content"]
+    assert user.startswith(DEFAULT_SUMMARY_PROMPT)
+    for heading, _ in builtin().sections:
+        assert f"- {heading}:" in user
+    assert text.startswith("# Meeting summary\n")
 
 
 def test_cloud_summary_without_a_key_fails_before_anything_is_sent(tmp_path):

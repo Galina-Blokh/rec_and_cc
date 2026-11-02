@@ -1,5 +1,6 @@
-"""Summary templates (``summary.template``): parsing, the fallback to the default layout, one
-model call per section, the layout of summary.md, and how the export reads the result.
+"""Summary templates (``summary.template``): parsing, the built-in six sections and their match with
+the prompt, one model call per section (each with the prompt and the timed transcript), the layout
+of summary.md, and how the export reads the result.
 
 Stories: US-27.
 """
@@ -14,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from recandcc import config as config_mod
-from recandcc.config import Config, load_config
+from recandcc.config import DEFAULT_SUMMARY_PROMPT, Config, load_config
 from recandcc.models import Segment, SessionInfo, TriggerKind
 from recandcc.transcribe import summary
 from recandcc.transcribe.export import _split_summary
@@ -26,9 +27,19 @@ from recandcc.transcribe.summary_template import (
     TOO_MANY,
     UNNAMED,
     SummaryTemplate,
+    builtin,
     load_template,
     parse,
 )
+
+DRAFT_HEADINGS = [
+    "Updates by person",
+    "Decisions",
+    "Action items",
+    "Unresolved questions",
+    "Unclear transcription",
+    "Personal data",
+]
 
 TEMPLATE = (
     "# Meeting summary\n"
@@ -107,12 +118,24 @@ def test_the_example_template_in_the_docs_parses():
         "utf-8"
     )
     tpl = parse(text)
-    assert tpl.title == "Meeting summary" and len(tpl.sections) == 5
+    assert tpl.title == "Meeting summary" and tpl.sections == builtin().sections
 
 
-def test_no_setting_is_the_default_layout(caplog):
+def test_the_built_in_template_is_the_six_sections_of_the_agreed_draft():
+    tpl = builtin()
+    assert tpl.title == "Meeting summary"
+    assert [heading for heading, _ in tpl.sections] == DRAFT_HEADINGS
+
+
+def test_the_default_prompt_names_each_builtin_section_in_order():
+    prompt = DEFAULT_SUMMARY_PROMPT.casefold()
+    at = [prompt.find(heading.casefold()) for heading, _ in builtin().sections]
+    assert min(at) >= 0 and at == sorted(at), at  # each topic is named, in the same order
+
+
+def test_no_setting_is_the_builtin_template(caplog):
     with caplog.at_level(logging.WARNING, logger="recandcc"):
-        assert load_template("") is None and load_template("   ") is None
+        assert load_template("") == builtin() and load_template("   ") == builtin()
     assert not caplog.records
 
 
@@ -122,9 +145,9 @@ def test_a_relative_path_is_read_from_the_config_folder(tmp_path, monkeypatch):
     assert load_template("meeting.md") == parse(TEMPLATE)
 
 
-def test_a_missing_file_warns_once_and_is_the_default(tmp_path, caplog):
+def test_a_missing_file_warns_once_and_is_the_builtin(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="recandcc"):
-        assert load_template(str(tmp_path / "nope.md")) is None
+        assert load_template(str(tmp_path / "nope.md")) == builtin()
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1 and "not used (not a file)" in warnings[0]
 
@@ -133,7 +156,7 @@ def test_a_bad_template_warns_without_quoting_it(tmp_path, caplog):
     path = tmp_path / "bad.md"
     path.write_text("secret words, no section\n", "utf-8")
     with caplog.at_level(logging.WARNING, logger="recandcc"):
-        assert load_template(str(path)) is None
+        assert load_template(str(path)) == builtin()
     assert NO_SECTION in caplog.text and "secret words" not in caplog.text
 
 
@@ -141,7 +164,7 @@ def test_an_oversized_template_is_refused(tmp_path, caplog):
     path = tmp_path / "big.md"
     path.write_text("## a\n" + "x" * MAX_BYTES, "utf-8")
     with caplog.at_level(logging.WARNING, logger="recandcc"):
-        assert load_template(str(path)) is None
+        assert load_template(str(path)) == builtin()
     assert "too large" in caplog.text
 
 
@@ -149,7 +172,7 @@ def test_a_template_that_is_not_utf8_warns_by_type_only(tmp_path, caplog):
     path = tmp_path / "latin.md"
     path.write_bytes(b"## Caf\xe9\n")
     with caplog.at_level(logging.WARNING, logger="recandcc"):
-        assert load_template(str(path)) is None
+        assert load_template(str(path)) == builtin()
     assert "UnicodeDecodeError" in caplog.text
 
 
@@ -221,47 +244,87 @@ def test_summary_md_follows_the_template(tmp_path, caplog):
     assert "written: 2 section(s)" in caplog.text
 
 
-def test_an_invalid_template_gives_the_default_summary(tmp_path, caplog):
+def test_an_invalid_template_gives_the_builtin_sections(tmp_path, caplog):
     d = make_session(tmp_path, [seg("We agreed on the plan.")])
     bad = tmp_path / "bad.md"
     bad.write_text("no sections here\n", "utf-8")
     cfg = Config()
     cfg.summary.template = str(bad)
-
-    def default_model(messages, max_tokens):
-        user = messages[-1]["content"]
-        if "List every task" in user:
-            return "- Anna: send the deck"
-        return "We agreed on the plan."
-
+    gen = FakeSections({"Decisions": "- Ship on Friday"})
     with caplog.at_level(logging.WARNING, logger="recandcc"):
-        path = summary.summarize_session(d, cfg, default_model)
+        path = summary.summarize_session(d, cfg, gen)
     text = path.read_text("utf-8")
-    assert text.startswith("# Summary\n\nWe agreed on the plan.\n\n## Action items\n\n- Anna")
+    assert text.startswith(
+        "# Meeting summary\n\n## Updates by person\n\nNone.\n\n## Decisions\n\n- Ship on Friday\n"
+    )
+    assert gen.asked == DRAFT_HEADINGS
     assert NO_SECTION in caplog.text
 
 
-def test_export_takes_only_a_trailing_action_items_section_off_a_template():
+def test_a_local_summary_without_a_template_setting_has_the_builtin_sections(tmp_path):
+    d = make_session(tmp_path, [seg("We ship on Friday; Anna sends the deck.", t=65)])
+    gen = FakeSections({"Decisions": "- Ship on Friday [00:01:05]"})
+    text = summary.summarize_session(d, Config(), gen).read_text("utf-8")
+    assert text.startswith("# Meeting summary\n")
+    assert re.findall(r"^## (.+)$", text, re.M) == DRAFT_HEADINGS
+    assert "- Ship on Friday [00:01:05]" in text
+
+
+def test_each_section_call_gets_the_prompt_and_the_timed_transcript():
+    asked = []
+
+    def gen(messages, max_tokens):
+        asked.append(messages)
+        return "NONE"
+
+    summary.summarize_sections([seg("We ship on Friday.", t=83)], gen, parse(TEMPLATE).sections)
+    assert len(asked) == 2
+    for system, user in asked:
+        assert DEFAULT_SUMMARY_PROMPT in system["content"]  # the rules, local too
+        assert "[00:01:23] Me: We ship on Friday." in user["content"]
+
+
+def test_a_long_timed_transcript_is_reduced_with_its_times_kept(monkeypatch):
+    monkeypatch.setattr(summary, "CHUNK_CHARS", 200)
+    segs = [seg(f"point number {i} " * 4, speaker=f"Speaker {i % 2}", t=i * 5) for i in range(30)]
+    chunks = summary.chunk_lines(summary.timed_transcript_lines(segs))
+    assert len(chunks) > 1 and all(len(c) <= 200 for c in chunks)
+    notes = []
+
+    def gen(messages, max_tokens):
+        if ASKED.search(messages[-1]["content"]) is None:  # a chunk's notes
+            notes.append(messages[-1]["content"])
+            return "- Anna: send the deck [00:00:05]"
+        return "NONE"
+
+    summary.summarize_sections(segs, gen, parse(TEMPLATE).sections)
+    assert len(notes) >= len(chunks) and all("[00:0" in n for n in notes)
+
+
+def test_export_takes_the_action_items_section_out_wherever_the_template_puts_it():
     blocks = [
         ("h1", "Meeting summary"),
         ("h2", "Decisions"),
         ("bullet", "Ship"),
         ("h2", "Action items"),
         ("bullet", "Anna: deck"),
-    ]
-    parts = _split_summary(blocks)
-    assert parts["summary"] == blocks[:3] and parts["action_items"] == blocks[3:]
-
-
-def test_export_keeps_template_sections_after_an_action_items_one_in_the_summary():
-    blocks = [
-        ("h1", "Meeting summary"),
-        ("h2", "Action items"),
-        ("bullet", "Anna: deck"),
         ("h2", "Topics"),
         ("p", "Budget?"),
     ]
-    assert _split_summary(blocks) == {"summary": blocks, "action_items": [], "note": []}
+    assert _split_summary(blocks) == {
+        "summary": [*blocks[:3], *blocks[5:]],
+        "action_items": blocks[3:5],
+        "note": [],
+    }
+
+
+def test_the_builtin_layout_exports_its_action_items_as_their_own_part():
+    blocks = [("h1", "Meeting summary")]
+    for heading in DRAFT_HEADINGS:
+        blocks += [("h2", heading), ("bullet", "x")]
+    parts = _split_summary(blocks)
+    assert parts["action_items"] == [("h2", "Action items"), ("bullet", "x")]
+    assert parts["summary"] == blocks[:5] + blocks[7:]
 
 
 def test_the_default_layout_still_splits_at_its_action_items():

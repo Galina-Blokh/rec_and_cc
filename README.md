@@ -157,7 +157,7 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
   it, or one you gave it), date and time, duration, speakers, languages and whether it is
   transcribed. Pick one to open its transcript or `summary.md` (if there is one; its first
   lines show as an excerpt), **Summarize** it (writes or redoes `summary.md` with the local
-  model, also when automatic summaries are off; it follows `summary.template` if set),
+  model, also when automatic summaries are off; its sections are the summary template's (the built-in six unless `summary.template` is set),
   reveal its folder, rename it (the title is kept in
   `session.json`) or delete it. Delete moves the folder to the Trash / Recycle Bin and drops
   it from the search index; a session still recording or waiting to be transcribed can't be
@@ -286,8 +286,10 @@ enabled = false              # true = summary.md with action items after each me
 ### Meeting summaries (opt-in)
 
 With `[summary] enabled = true`, each finished transcript also gets a
-`summary.md` in its folder: a few sentences about the meeting and an **Action items** list
-(who does what, by when), written in the meeting's main language. The default model is
+`summary.md` in its folder: one section per section of the summary template (by default six: updates by person,
+decisions, action items with owners and deadlines, unresolved questions, unclear
+transcription, and the kinds of personal data mentioned), written in the meeting's main
+language. The default model is
 Qwen3.5 4B (4-bit, Apache-2.0), a hybrid thinking model run with thinking off: ~3.0 GB
 download, ~2.9-3.4 GB of RAM while it runs (2.9 GB measured on one machine). Summaries take
 about 2.5x as long as with the 1.5B (measured on the synthetic one-hour meeting). The model
@@ -348,7 +350,7 @@ repo):
 | `recandcc run` | Start the menu-bar app (what RecAndCC.app runs) |
 | `recandcc record --seconds 60 [--no-mic] [--no-transcribe] [-v]` | Record now without the UI; prints the text live as it is spoken, then the transcript path. `--no-transcribe` only records; `-v` shows INFO logs |
 | `recandcc transcribe <session_dir>` | (Re-)transcribe a recorded session |
-| `recandcc summarize <session_dir>` | Write the session's `summary.md` (summary + action items) with the local model |
+| `recandcc summarize <session_dir>` | Write the session's `summary.md` (the summary template's sections, by default the built-in six) with the local model |
 | `recandcc monitor [--interval 1.0]` | Live view of which apps do audio and how the rules classify them. Use it to tune the app lists |
 | `recandcc export <session-folder> [--format docx\|pdf\|both]` | Write `transcript.docx` and/or `transcript.pdf` next to the session's transcript (speakers, timestamps, Hebrew right to left; the summary and action items first if there is a `summary.md`); the PDF needs a system font with Latin, Cyrillic and Hebrew (Arial or DejaVu Sans) |
 | `recandcc search "<words>" [--limit N]` | Search all transcripts; prints each match's date, time in the recording, speaker, the text and the transcript path |

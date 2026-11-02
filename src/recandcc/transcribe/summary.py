@@ -1,14 +1,15 @@
-"""Local meeting summaries: ``summary.md`` (short summary + action items) next to a transcript.
+"""Local meeting summaries: ``summary.md`` next to a transcript, one section per template section.
 
 Opt-in (``summary.enabled``). A small instruct model runs through mlx-lm on Apple silicon
 (elsewhere on the CPU through ONNX Runtime, see summary_cpu.py and create_generator),
 pinned in revisions.py and loaded offline-first like Whisper (gpu.local_model_path); with
-``summary.language_models`` the transcript's main spoken language picks it. Long
-transcripts are summarised map-reduce: notes per chunk, then the summary and the action list
-from the notes. ``summary.template`` (summary_template.py) replaces that layout with the sections
-of a template, one model call each. ``summary.provider`` = "openai" or "anthropic" makes one
-call on the timestamped transcript instead (cloud_answer, summary_cloud.py). Everything runs on one
-background ``summary`` thread; logs never contain transcript or summary text.
+``summary.language_models`` the transcript's main spoken language picks it. Long transcripts
+are reduced map-reduce first: notes per chunk, keeping the timestamps. Then each section of the
+summary template (summary_template.py; by default the built-in six sections) gets one model call
+on those notes, with ``summary.prompt`` in its system message. ``summary.provider`` = "openai" or
+"anthropic" makes one call on the timestamped transcript instead (cloud_answer, summary_cloud.py).
+Everything runs on one background ``summary`` thread; logs never contain transcript or summary
+text.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from typing import Any, Protocol
 
 from ..config import (
     DEFAULT_SUMMARY_MODEL,
+    DEFAULT_SUMMARY_PROMPT,
     PREVIOUS_DEFAULT_SUMMARY_MODEL,
     QWEN_RESEARCH_SUMMARY_MODEL,
     Config,
@@ -196,7 +198,7 @@ def _system(language: str, room: bool) -> str:
     lang = LANGUAGE_NAMES.get(language, f"the language with code '{language}'")
     owner = "the owner is one of the numbered speakers in the room" if room else "'Me' is the owner"
     return (
-        f"You summarise meeting transcripts. Lines are 'Speaker: text'; {owner}. "
+        f"You summarise meeting transcripts. Lines are '[HH:MM:SS] Speaker: text'; {owner}. "
         f"Always answer in {lang}, even if parts of the input are in another language. "
         "Use only facts from the input; do not invent names, dates or tasks."
     )
@@ -211,7 +213,8 @@ def build_messages(
     if task == "notes":
         ask = (
             f"Write concise bullet-point notes of this {what}: key points, decisions, and every "
-            "task with who will do it and when, if said."
+            "task with who will do it and when, if said. Keep the [HH:MM:SS] time of each "
+            "decision and task."
         )
     elif task == "summary":
         ask = f"Summarise this {what} in 3-6 sentences: topic, key points and decisions."
@@ -270,7 +273,7 @@ def summarize(
     room session; if its mic speakers were numbered (no 'Me' line), the prompts say so."""
     language = main_language(segments)
     room = room and not any(s.speaker == "Me" for s in segments)
-    text = _reduce(transcript_lines(segments), generate, language, max_tokens, room)
+    text = _reduce(timed_transcript_lines(segments), generate, language, max_tokens, room)
     if not text:
         return language, "", []
     summary = generate(build_messages("summary", text, language, room=room), max_tokens).strip()
@@ -299,16 +302,23 @@ def format_summary(language: str, summary: str, items: list[str], model: str) ->
 
 
 def section_messages(
-    heading: str, instruction: str, text: str, language: str, room: bool = False
+    heading: str,
+    instruction: str,
+    text: str,
+    language: str,
+    room: bool = False,
+    prompt: str = DEFAULT_SUMMARY_PROMPT,
 ) -> Messages:
-    """Chat messages for one section of a summary template: that section's content only."""
+    """Chat messages for one section of a summary template: that section's content only, under
+    the rules of ``prompt`` (summary.prompt, the same for every summary)."""
     ask = (
         f"Write only the '{heading}' part of a summary of this meeting transcript, without a "
         f"heading. {instruction or 'Summarise what the meeting says about it.'} "
         f"Write {NONE_MARK} if the transcript has nothing for it."
     )
+    system = " ".join(part for part in (_system(language, room), prompt.strip()) if part)
     return [
-        {"role": "system", "content": _system(language, room)},
+        {"role": "system", "content": system},
         {"role": "user", "content": f"{ask}\n\n---\n{text}\n---"},
     ]
 
@@ -319,17 +329,19 @@ def summarize_sections(
     sections: tuple[tuple[str, str], ...],
     max_tokens: int = 400,
     room: bool = False,
+    prompt: str = DEFAULT_SUMMARY_PROMPT,
 ) -> tuple[str, list[tuple[str, str]]]:
-    """(language, [(heading, answer)]) for a summary template: the notes pass of ``summarize``,
-    then one call per section on the reduced text. An empty transcript needs no call."""
+    """(language, [(heading, answer)]) for a summary template: the notes pass of ``summarize`` on
+    the timestamped lines, then one call per section on the reduced text, with ``prompt`` in each
+    call's system message. An empty transcript needs no call."""
     language = main_language(segments)
     room = room and not any(s.speaker == "Me" for s in segments)
-    text = _reduce(transcript_lines(segments), generate, language, max_tokens, room)
+    text = _reduce(timed_transcript_lines(segments), generate, language, max_tokens, room)
     answers = []
     for heading, instruction in sections:
         answer = ""
         if text:
-            messages = section_messages(heading, instruction, text, language, room)
+            messages = section_messages(heading, instruction, text, language, room, prompt)
             answer = generate(messages, max_tokens)
         answers.append((heading, answer))
     return language, answers
@@ -357,7 +369,7 @@ def format_sections(
     language: str, sections: list[tuple[str, str]], model: str, title: str = ""
 ) -> str:
     """summary.md for a template: its title, then each section as ``##`` with the model's answer
-    under it, then the same note as the default layout."""
+    under it, then the note that it was made on this computer."""
     default_title, _, none = HEADINGS.get(language, HEADINGS["en"])
     out = [f"# {title or default_title}", ""]
     for heading, answer in sections:
@@ -400,7 +412,7 @@ def cloud_answer(
     call: Generator,
     prompt: str,
     budget: int,
-    template: SummaryTemplate | None,
+    template: SummaryTemplate,
     room: bool = False,
 ) -> tuple[str, str]:
     """(language, Markdown answer) of a cloud summary: one call on the timestamped transcript, or
@@ -408,7 +420,7 @@ def cloud_answer(
     answers. An empty transcript sends nothing: the answer is ""."""
     language = main_language(segments)
     room = room and not any(s.speaker == "Me" for s in segments)
-    sections = template.sections if template else ()
+    sections = template.sections
     lines = timed_transcript_lines(segments)
     if not lines:
         return language, ""
@@ -471,7 +483,7 @@ def summarize_session(
         model = resolve_cloud_model(settings.provider, settings.cloud_model)
     else:
         model = summary_model(cfg, segments)
-    template = load_template(cfg.summary.template)  # None: the default layout
+    template = load_template(cfg.summary.template)  # "" or an unusable file: the built-in sections
     try:
         room = SessionInfo.load(directory).started_as_room
     except Exception as e:  # noqa: BLE001 - only a hint for the prompt
@@ -494,14 +506,10 @@ def summarize_session(
             )
             budget = max(settings.max_tokens, CLOUD_ANSWER_TOKENS)
             language, answer = cloud_answer(segments, call, settings.prompt, budget, template, room)
-            title = template.title if template else ""
+            title = template.title
             return language, format_cloud(language, answer, name, label, title), "a cloud answer"
-        if template is None:
-            language, summary, items = summarize(segments, call, cfg.summary.max_tokens, room)
-            text = format_summary(language, summary, items, name)
-            return language, text, f"{len(items)} action item(s)"
         language, answers = summarize_sections(
-            segments, call, template.sections, cfg.summary.max_tokens, room
+            segments, call, template.sections, cfg.summary.max_tokens, room, settings.prompt
         )
         text = format_sections(language, answers, name, template.title)
         return language, text, f"{len(answers)} section(s)"

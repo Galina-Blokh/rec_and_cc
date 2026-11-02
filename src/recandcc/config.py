@@ -300,15 +300,19 @@ def _snapshot_complete(snap: Path) -> bool:
     return (snap / "model.safetensors").exists() and (snap / "config.json").exists()
 
 
-# Cloud summaries (opt-in, transcribe/summary_cloud.py): the default model of each provider, the
-# reasoning effort levels (OpenAI takes none..xhigh, Claude low..max) and the default prompt.
+# Summaries (transcribe/summary.py): the prompt every summary asks for, local and cloud alike. It
+# names the six sections of the built-in template (transcribe/default_summary_template.md) in the
+# same order; tests/test_summary_template.py keeps the two in step. Cloud summaries (opt-in,
+# transcribe/summary_cloud.py) also need each provider's default model and the reasoning effort
+# levels (OpenAI takes none..xhigh, Claude low..max).
 SUMMARY_PROVIDERS = ("local", "openai", "anthropic")
 DEFAULT_CLOUD_MODELS = {"openai": "gpt-6.1", "anthropic": "claude-opus-5-5"}
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 DEFAULT_REASONING_EFFORT = "xhigh"
 DEFAULT_SUMMARY_PROMPT = (
     "Summarize this meeting using only the transcript. Include updates by person, explicit "
-    "decisions, action items with owners and deadlines, and unresolved questions. Attach "
+    "decisions, action items with owners and deadlines, unresolved questions, unclear "
+    "transcription, and the kinds of personal data mentioned (never the details). Attach "
     "timestamps to decisions and actions. Preserve uncertainty. Never invent names, "
     "assignments, commitments, or explanations. Flag unclear transcription."
 )
@@ -321,21 +325,22 @@ def resolve_cloud_model(provider: str, model: str = "") -> str:
 
 @dataclass
 class SummaryConfig:
-    # Write summary.md (short summary + action items) after each final transcript, with a
-    # local LLM (mlx-lm, Apple silicon only). Off by default: it costs ~2.9-3.4 GB of peak RAM
-    # (2.9 GB measured on one machine) and a one-time ~3.0 GB model download.
+    # Write summary.md (the template's sections: by default six, action items among them) after
+    # each final transcript, with a local LLM (mlx-lm on Apple silicon, ONNX on the CPU elsewhere).
+    # Off by default: it costs ~2.9-3.4 GB of peak RAM (2.9 GB measured on one machine) and a
+    # one-time ~3.0 GB model download.
     enabled: bool = False
     model: str = DEFAULT_SUMMARY_MODEL  # pinned in transcribe/revisions.py, or a local path
     # Keep `model = QWEN_RESEARCH_SUMMARY_MODEL` (non-commercial licence). Without it, that
     # model is read as the old default that save() wrote to every config.toml, and replaced.
     accept_qwen_research_licence: bool = False
-    max_tokens: int = 400  # longest generated answer (summary, action list, chunk notes)
+    max_tokens: int = 400  # longest generated answer (one section, one chunk's notes)
     # Per-language summary model, e.g. {he = "mlx-community/Qwen3.5-4B-MLX-4bit"}: a transcript
     # whose main language (most speech time) is listed is summarised by that model, all others
     # by `model`. {} = `model` for every language.
     language_models: dict[str, str] = field(default_factory=dict)
     # Local Markdown file that sets summary.md's sections (see transcribe/summary_template.py).
-    # "" = the default layout.
+    # "" = the built-in six sections (transcribe/default_summary_template.md), for local and cloud.
     template: str = ""
     # Who writes the summary: "local" (the model above, on this computer) or a cloud provider,
     # "openai" (ChatGPT's API) or "anthropic" (Claude's API). A cloud summary sends the transcript
@@ -343,7 +348,7 @@ class SummaryConfig:
     provider: str = "local"
     cloud_model: str = ""  # "" = DEFAULT_CLOUD_MODELS[provider]
     reasoning_effort: str = DEFAULT_REASONING_EFFORT  # cloud only, one of REASONING_EFFORTS
-    prompt: str = DEFAULT_SUMMARY_PROMPT  # cloud only: what the summary asks for
+    prompt: str = DEFAULT_SUMMARY_PROMPT  # what every summary asks for, local and cloud
     # Set by load_config(migrate=True) for a one-time notice about the summary model (shown
     # by ui.common.Controller). Runtime only: not read from or saved to config.toml.
     notice: str | None = field(default=None, init=False, repr=False, compare=False)
