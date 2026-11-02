@@ -1,8 +1,29 @@
+import sys
+import types
+
 import pytest
 
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "slow: long-running tests that load real models")
+
+
+@pytest.fixture(autouse=True)
+def fake_keychain():
+    """No test reads or writes the user's keychain or cloud API keys: an in-memory keyring stands
+    in for ``keyring`` (summary_cloud imports it lazily). Yields the store, keyed by (service,
+    account)."""
+    store: dict[tuple[str, str], str] = {}
+    fake = types.SimpleNamespace(
+        get_password=lambda service, account: store.get((service, account)),
+        set_password=lambda service, account, secret: store.__setitem__((service, account), secret),
+        delete_password=lambda service, account: store.pop((service, account), None),
+    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setitem(sys.modules, "keyring", fake)
+        mp.delenv("RECANDCC_OPENAI_API_KEY", raising=False)
+        mp.delenv("RECANDCC_ANTHROPIC_API_KEY", raising=False)
+        yield store
 
 
 @pytest.fixture(autouse=True)
