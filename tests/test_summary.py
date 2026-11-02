@@ -896,6 +896,68 @@ def test_discarded_session_is_skipped_and_its_marker_cleared(tmp_path):
     assert not (d / "summary.md").exists() and not (d / summary.PENDING_MARKER).exists()
 
 
+class Flaky(FakeGen):
+    """Fails on any transcript that says "boom", as a model error would."""
+
+    def __call__(self, messages, max_tokens):
+        if any("boom" in m["content"] for m in messages):
+            raise RuntimeError("the model fell over")
+        return super().__call__(messages, max_tokens)
+
+
+def test_on_done_reports_each_job_with_whether_it_wrote_and_was_asked_for(tmp_path):
+    written = make_session(tmp_path / "a", [seg("hello")])
+    discarded = make_session(tmp_path / "b", [seg("hi")])
+    (discarded / SessionInfo.DISCARD_MARKER).touch()
+    failed = make_session(tmp_path / "c", [seg("boom")])
+    reports = []
+
+    def on_done(directory, ok, asked):
+        reports.append((directory, ok, asked))
+
+    q = summary.SummaryQueue(Config(), generate=Flaky(), on_done=on_done)
+    q.submit(written, announce=True)
+    q.submit(discarded)
+    q.submit(failed, announce=True)
+    q.join()  # join() also waits for the callbacks
+    assert reports == [(written, True, True), (discarded, False, False), (failed, False, True)]
+
+
+def test_a_request_made_while_its_job_is_queued_is_announced_by_that_job(tmp_path):
+    d = make_session(tmp_path, [seg("hello")])
+    gate = threading.Event()  # the job waits while the queue is busy
+    reports = []
+
+    def on_done(directory, ok, asked):
+        reports.append((ok, asked))
+
+    q = summary.SummaryQueue(
+        Config(), generate=FakeGen(), busy=lambda: not gate.is_set(), poll_s=0.001, on_done=on_done
+    )
+    q.submit(d)  # automatic
+    q.submit(d, announce=True)  # asked for before the job starts: one job, announced
+    gate.set()
+    q.join()
+    assert reports == [(True, True)]
+
+
+def test_a_raising_on_done_never_stops_the_queue(tmp_path):
+    first = make_session(tmp_path / "a", [seg("hello")])
+    second = make_session(tmp_path / "b", [seg("hi")])
+    seen = []
+
+    def on_done(directory, ok, asked):
+        seen.append(directory)
+        if directory == first:
+            raise RuntimeError("callback")
+
+    q = summary.SummaryQueue(Config(), generate=FakeGen(), on_done=on_done)
+    q.submit(first)
+    q.submit(second)
+    q.join()
+    assert seen == [first, second] and (second / "summary.md").exists()
+
+
 def test_missing_model_offline_is_skipped_with_one_notice(tmp_path, monkeypatch, caplog):
     def offline(repo, allow_unpinned=False):
         raise ConnectionError("no network")
