@@ -405,8 +405,10 @@ its transcript, so that I know what was decided and who does what without reread
 - **Given** `summary.enabled = true` on Apple silicon, **when** a session's final transcript
   is written, **then** a background job (never on the audio or UI threads, and never while
   a recording is in progress: it waits, and pauses between chunks) writes
-  `summary.md` next to `transcript.md`: a short summary and an **Action items** list, in the
-  meeting's main language (English, Russian or Hebrew headings; Hebrew right to left).
+  `summary.md` next to `transcript.md`: one section per section of the summary template (by
+  default six: updates by person, decisions, action items, unresolved questions, unclear
+  transcription, personal data), in the meeting's main language (English headings by default;
+  Hebrew right to left).
 - **Given** a transcript longer than the model's context, **then** it is summarised in
   chunks and the chunk notes are merged (map-reduce).
 - **Then** the model runs locally (mlx-lm), pinned to an exact Hugging Face commit, loaded

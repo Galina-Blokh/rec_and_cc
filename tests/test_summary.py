@@ -37,8 +37,12 @@ from recandcc.transcribe.output import PDI, RLI, write_outputs
 SPOKEN = "the merger price is 42 million"
 
 
+SECTION = re.compile(r"Write only the '(.+?)' part")
+
+
 class FakeGen:
-    """Records prompts; answers by task, so the output shows which step produced what."""
+    """Records prompts; answers by task, so the output shows which step produced what. A section
+    of summary.md gets ``actions`` under "Action items" and one summary line under any other."""
 
     def __init__(self, actions: str = "- Anna sends the deck by Friday\n- Me books the room"):
         self.calls: list[str] = []
@@ -46,6 +50,10 @@ class FakeGen:
 
     def __call__(self, messages, max_tokens):
         user = messages[-1]["content"]
+        section = SECTION.search(user)
+        if section:
+            self.calls.append("section")
+            return self.actions if section.group(1) == "Action items" else "We agreed on the plan."
         task = "notes" if "notes" in user else "summary" if "Summarise" in user else "actions"
         self.calls.append(task)
         return {"notes": "- a note", "summary": "We agreed on the plan.", "actions": self.actions}[
@@ -134,7 +142,7 @@ def test_mixed_meeting_uses_one_language_for_model_prompt_and_headings(tmp_path,
     segs = [Segment(0, 30, "כן", "Me", "he"), seg("a much longer English sentence", t=40)]
     text = summary.summarize_session(make_session(tmp_path, segs), cfg).read_text("utf-8")
     assert seen[0] == PREVIOUS_DEFAULT_SUMMARY_MODEL and "Always answer in Hebrew" in seen[1]
-    assert text.startswith("# סיכום")
+    assert text.startswith("# Meeting summary")
 
 
 def test_routed_model_unavailable_falls_back_to_the_default(tmp_path, monkeypatch, caplog):
@@ -453,14 +461,17 @@ def test_summary_md_next_to_the_transcript(tmp_path):
     path = summary.summarize_session(d, Config(), FakeGen(actions="NONE"))
     assert path == d / "summary.md"
     text = path.read_text("utf-8")
-    assert text.startswith("# Краткое содержание\n\nWe agreed on the plan.\n\n## Задачи\n\nНет.")
+    assert text.startswith(
+        "# Meeting summary\n\n## Updates by person\n\nWe agreed on the plan.\n\n"
+    )
+    assert "## Action items\n\nНет.\n" in text  # the headings stay English, the answers Russian
     assert "by Qwen3.5-4B-MLX-4bit;" in text  # the footer names the model that wrote it
 
 
 def test_hebrew_summary_is_right_to_left(tmp_path):
     d = make_session(tmp_path, [seg("שלום, נדבר על התקציב", "he")])
     text = summary.summarize_session(d, Config(), FakeGen()).read_text("utf-8")
-    assert "# סיכום" in text and "## משימות" in text
+    assert "# Meeting summary" in text and "## Action items" in text
     assert f"- {RLI}Anna sends the deck by Friday{PDI}" in text
 
 
@@ -881,10 +892,10 @@ def test_a_queued_session_is_not_summarised_twice(tmp_path):
     q.submit(Path(str(d) + "/."))  # e.g. startup's re-queue of the same session
     gate.set()
     q.join()
-    assert gen.calls == ["summary", "actions"]  # one summary
+    assert gen.calls == ["section"] * 6  # one summary: one call per section of the built-in one
     q.submit(d)  # done: a later stale marker runs again
     q.join()
-    assert len(gen.calls) == 4
+    assert len(gen.calls) == 12
 
 
 def test_discarded_session_is_skipped_and_its_marker_cleared(tmp_path):
@@ -926,7 +937,7 @@ def test_other_platforms_skip_the_summary(tmp_path, monkeypatch):
 def test_logs_never_contain_transcript_or_summary_text(tmp_path, caplog):
     class Leaky(FakeGen):
         def __call__(self, messages, max_tokens):
-            if "Summarise" in messages[-1]["content"]:
+            if "Write only the" in messages[-1]["content"]:
                 raise RuntimeError(messages[-1]["content"])  # an error quoting the prompt
             return SPOKEN
 
@@ -936,7 +947,7 @@ def test_logs_never_contain_transcript_or_summary_text(tmp_path, caplog):
         q = summary.SummaryQueue(Config(), generate=Leaky())
         q.submit(d)
         q.join()
-    assert "written: 1 action item(s)" in caplog.text
+    assert "written: 6 section(s)" in caplog.text
     assert "failed: RuntimeError" in caplog.text
     assert SPOKEN not in caplog.text
 
@@ -1046,8 +1057,7 @@ def test_real_model_summarises_en_and_ru(tmp_path):
             tmp_path / lang, [seg(t, lang, f"Speaker {i}") for i, t in enumerate(lines)]
         )
         text = summary.summarize_session(d, Config()).read_text("utf-8")
-        heading = summary.HEADINGS[lang][1]
-        assert f"## {heading}" in text and len(text) > 80
+        assert "## Action items" in text and "## Updates by person" in text and len(text) > 80
 
 
 def test_a_numbered_room_session_says_the_owner_is_one_of_the_room_speakers():
