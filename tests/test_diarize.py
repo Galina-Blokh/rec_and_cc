@@ -336,9 +336,8 @@ def test_windows_follow_segmentation_and_overlap_takes_the_dominant_speaker(monk
     turns = d.diarize(_voices_track())
     a, b = turns[0].speaker, next(t.speaker for t in turns if t.start >= 5.3)
     assert a != b
-    assert [(t.start, t.end) for t in turns if t.speaker == b] == pytest.approx(
-        [(5.3, 7.533), (7.533, 9.767), (9.767, 12.0)], abs=1e-3
-    )
+    ends = [x for t in turns if t.speaker == b for x in (t.start, t.end)]
+    assert ends == pytest.approx([5.3, 7.533, 7.533, 9.767, 9.767, 12.0], abs=1e-3)
     assert [(t.start, t.end, t.speaker) for t in turns if t.overlap] == [(12.0, 13.0, a)]
     assert np.allclose(turns.centroids[a], [1, 0, 0])  # the mixed window is left out
 
