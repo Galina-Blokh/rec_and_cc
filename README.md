@@ -156,10 +156,17 @@ Menu items (macOS menu bar; the Windows tray has the same items unless marked *m
 - **Meeting notes…**: your past sessions, newest first, with title (the app that triggered
   it, or one you gave it), date and time, duration, speakers, languages and whether it is
   transcribed. Pick one to open its transcript or `summary.md` (if there is one; its first
-  lines show as an excerpt), reveal its folder, rename it (the title is kept in
+  lines show as an excerpt), **Summarize** it (writes or redoes `summary.md` with the local
+  model, also when automatic summaries are off; it follows `summary.template` if set),
+  reveal its folder, rename it (the title is kept in
   `session.json`) or delete it. Delete moves the folder to the Trash / Recycle Bin and drops
   it from the search index; a session still recording or waiting to be transcribed can't be
   changed. On macOS it is a pair of dialogs; on Windows a small window with buttons.
+- **Summarize a meeting…**: lists the meetings that have a transcript, newest first; the one
+  you pick gets its `summary.md` written, as **Summarize** in Meeting notes does. A summary you
+  asked for from this menu or from Meeting notes opens when it is written, with a "Summary
+  ready" notice naming the meeting; automatic summaries never open anything. On Windows the
+  list is a small dialog.
 - **Open transcripts folder**
 - **Permissions**: status and "Grant…" actions.
 - **Launch at login**: starts RecAndCC every time you log in. Turn it on once.
@@ -399,7 +406,10 @@ recognized voice or `Me` is never overridden.
 
 ### Where your data lives
 
-Audio and transcripts never leave your computer. The only network access is the one-time
+Audio and transcripts never leave your computer, with one opt-in exception: a cloud summary
+(`[summary] provider = "openai"` or `"anthropic"`, off by default) sends the transcript of that
+one meeting, with its times and speaker labels, to the chosen provider over HTTPS, and nothing
+else. The only other network access is the one-time
 model download: Whisper (and, with summaries on, the summary model) from Hugging Face, pinned to exact repo commits
 ([`revisions.py`](src/recandcc/transcribe/revisions.py), and the Windows and Linux CPU summary model
 in [`summary_cpu.py`](src/recandcc/transcribe/summary_cpu.py); unpinned custom repos are refused

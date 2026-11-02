@@ -64,6 +64,7 @@ def _app(tray):
     app = tray.TrayApp.__new__(tray.TrayApp)  # only the search wiring: no icon or runtime
     app.ctrl = types.SimpleNamespace(events=queue.Queue())
     app._live_id, app.notices, app.search = None, [], FakeWindow()
+    app._summary_open, app._naming_lock = False, threading.Lock()
     app._notify = lambda title, msg: app.notices.append((title, msg))
     return app
 
@@ -156,6 +157,48 @@ def test_notes_window_actions(tray, tmp_path, monkeypatch):
     assert asked == ["rename", "delete", "delete"]
     assert acted == [(tmp_path, "rename", "Budget"), (tmp_path, "delete")]
     assert opened == [tmp_path]
+
+
+def test_summarize_menu_item_scans_for_the_picker(tray):
+    app = _app(tray)
+    scans: list[str] = []
+    app.ctrl.notes_async = lambda purpose="notes": scans.append(purpose)
+    actions = {i[0]: i[1] for i in app._menu() if i and isinstance(i[0], str)}
+    actions["Summarize a meeting…"]()
+    assert scans == ["summarize"]
+
+
+def test_summarize_picker_lists_only_meetings_with_a_transcript(tray, tmp_path):
+    from recandcc.ui.notes import Note, note_label
+
+    done, shown, acted = threading.Event(), [], []
+    app = _app(tray)
+    app._dialog = lambda title, text, choices, ok: (shown.append((title, choices)), 0)[1]
+    app.ctrl.note_action_async = lambda d, action, reopen=True: (
+        acted.append((d, action, reopen)),
+        done.set(),
+    )
+    with_text = Note(tmp_path / "a", "zoom.us", datetime(2026, 10, 26), 60.0, True,
+                     has_transcript=True)  # fmt: skip
+    no_text = Note(tmp_path / "b", "Manual recording", datetime(2026, 10, 27), None, False)
+    app.ctrl.events.put(("summary_notes", [no_text, with_text]))
+    app._drain()
+    assert done.wait(5)
+    assert shown == [("Summarize a meeting", [note_label(with_text)])]
+    assert acted == [(tmp_path / "a", "summarize", False)]
+    app.ctrl.events.put(("summary_notes", [no_text]))
+    app._drain()
+    assert app.notices == [("No transcripts to summarize yet", "Transcribe a meeting first.")]
+
+
+def test_summary_ready_notifies_and_opens_the_file(tray, tmp_path, monkeypatch):
+    done, opened = threading.Event(), []
+    monkeypatch.setattr(tray, "open_path", lambda p: (opened.append(p), done.set()))
+    app = _app(tray)
+    app.ctrl.events.put(("summary_ready", tmp_path / "summary.md", "zoom.us"))
+    app._drain()
+    assert done.wait(5) and opened == [tmp_path / "summary.md"]
+    assert app.notices == [("Summary ready", "zoom.us")]
 
 
 def test_export_item_runs_the_controller_export(tray):

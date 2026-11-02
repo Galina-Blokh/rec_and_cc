@@ -693,18 +693,21 @@ class Controller:
             if self.cfg.summary.enabled:
                 self._summarize_when_labelled(Path(session.directory))
 
-    def _summarize_when_labelled(self, directory: Path) -> None:
+    def _summarize_when_labelled(self, directory: Path, announce: bool = False) -> None:
         """Summarise once the transcript has its final speaker labels (a slow diarization
-        rewrites it later), so action items aren't credited to "Others"."""
+        rewrites it later), so action items aren't credited to "Others". ``announce``: the user
+        asked for it from the menu, so the summary made then is announced (_summary_finished).
+        A request made while labels are pending waits for them as well: it becomes the same
+        summary as the automatic one, not an earlier unlabelled duplicate of it."""
         from ..transcribe.summary import mark_pending
 
         mark_pending(directory)  # owed from now on, even if we quit before diarization ends
         transcriber = getattr(self, "transcriber", None)
         after_labels = getattr(transcriber, "after_labels", None)  # None: test fakes
         if after_labels is None:
-            self._summarize(directory)
+            self._summarize(directory, announce=announce)
         else:
-            after_labels(directory, lambda: self._summarize(directory))
+            after_labels(directory, lambda: self._summarize(directory, announce=announce))
 
     def _resubmit_summaries(self) -> None:
         """summary.enabled: queue summaries still owed (cut short by quitting, or stale after
@@ -736,8 +739,9 @@ class Controller:
             or bool(getattr(self, "_resubmitting", 0))
         )
 
-    def _summarize(self, directory: Path) -> None:
-        """Queue summary.md for a final transcript (local LLM, own background thread)."""
+    def _summarize(self, directory: Path, announce: bool = False) -> None:
+        """Queue summary.md for a final transcript (local LLM, own background thread).
+        ``announce``: the user asked for it from the menu (see _summary_finished)."""
         with self._summaries_lock:  # called from the transcription and diarizer threads
             summaries = getattr(self, "_summaries", None)
             if summaries is None:
@@ -747,8 +751,27 @@ class Controller:
                     self.cfg,
                     notify=self.post_notice,
                     busy=lambda: self.engine.state.status != IDLE,  # never during a recording
+                    on_done=self._summary_finished,
                 )
-        summaries.submit(directory)
+        summaries.submit(directory, announce=announce)
+
+    def _summary_finished(self, directory: Path, written: bool, announce: bool) -> None:
+        """SummaryQueue's callback (summary thread) after each job. A summary the user asked for
+        from the menu is announced when written (its summary.md opens on the UI thread) and
+        reported when it wasn't; automatic summaries never announce or open anything."""
+        if not announce:
+            return
+        from ..transcribe.summary import SUMMARY_NAME
+        from .notes import session_title
+
+        try:  # session.json only: the summary thread shouldn't wait on a transcript read
+            meeting = session_title(SessionInfo.load(Path(directory)))
+        except Exception:  # noqa: BLE001 - the title is only for the notice's wording
+            meeting = Path(directory).name
+        if written:
+            self.events.put(("summary_ready", Path(directory) / SUMMARY_NAME, meeting))
+        else:
+            self.events.put(("notice", "Summary not written", meeting))
 
     # --- transcript search (worker threads; results arrive as a "search" event)
     def _index_session(self, directory: Path) -> None:
@@ -760,16 +783,19 @@ class Controller:
             log.exception("could not update the search index")
 
     # --- meeting notes (worker threads; the list arrives as a ("notes", notes) event)
-    def notes_async(self) -> None:
-        """Scan for Meeting notes off the UI thread; a click while a scan runs is dropped."""
+    def notes_async(self, purpose: str = "notes") -> None:
+        """Scan for Meeting notes off the UI thread; a click while a scan runs is dropped. The
+        list arrives as a ``notes`` event, or as ``summary_notes`` for the "Summarize a
+        meeting…" picker (``purpose="summarize"``)."""
         if not self._notes_scanning.acquire(blocking=False):
             return
+        kind = "summary_notes" if purpose == "summarize" else "notes"
 
         def run() -> None:
             try:
                 from .notes import scan_notes
 
-                self.events.put(("notes", scan_notes(self.cfg.output_dir)))
+                self.events.put((kind, scan_notes(self.cfg.output_dir)))
             finally:
                 self._notes_scanning.release()
 
@@ -798,14 +824,18 @@ class Controller:
             return "It may still be transcribing; try again when the queue is done."
         return None
 
-    def note_action_async(self, directory: Path, action: str, title: str = "") -> None:
-        """Rename (``action="rename"``) or delete a session off the UI thread, then post a
-        notice and a fresh ``notes`` list."""
+    def note_action_async(
+        self, directory: Path, action: str, title: str = "", reopen: bool = True
+    ) -> None:
+        """Rename (``action="rename"``), delete or summarize a session off the UI thread, then
+        post a notice and a fresh ``notes`` list (not with ``reopen=False``, which the "Summarize
+        a meeting…" picker passes). "summarize" queues summary.md (local LLM), also when
+        ``summary.enabled`` is off: the summary appears when the queue gets to it."""
 
         def run() -> None:
             from .notes import delete_notice, delete_session, rename_session, scan_notes
 
-            if action not in ("rename", "delete"):
+            if action not in ("rename", "delete", "summarize"):
                 log.error("unknown meeting action %r", action)
                 return
             if why := self.note_busy(directory):
@@ -814,6 +844,15 @@ class Controller:
             try:
                 if action == "rename":
                     rename_session(directory, title, self.cfg.output_dir)
+                elif action == "summarize":
+                    if not (directory / "transcript.json").exists():
+                        self.events.put(("notice", "No transcript to summarize", directory.name))
+                        return
+                    log.info("summary of %s asked for from the menu", directory.name)
+                    self._summarize_when_labelled(directory, announce=True)
+                    self.events.put(
+                        ("notice", "Writing the summary", "Open summary shows it when it's done.")
+                    )
                 elif action == "delete":
                     result = delete_session(directory, self.cfg.output_dir)
                     self._index_session(directory)  # gone: drops it from the search index
@@ -824,8 +863,9 @@ class Controller:
             except Exception as e:  # noqa: BLE001
                 log.error("meeting %s failed for %s: %s", action, directory.name, type(e).__name__)
                 self.events.put(("notice", f"Could not {action} the meeting", directory.name))
-            with self._notes_scanning:  # one scan at a time, after a running one (fresh list)
-                self.events.put(("notes", scan_notes(self.cfg.output_dir)))
+            if reopen:
+                with self._notes_scanning:  # one scan at a time, after a running one (fresh list)
+                    self.events.put(("notes", scan_notes(self.cfg.output_dir)))
 
         threading.Thread(target=run, daemon=True, name="notes-action").start()
 

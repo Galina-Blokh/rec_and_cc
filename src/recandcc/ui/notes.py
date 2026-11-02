@@ -29,7 +29,8 @@ NOTES_LIMIT = 100  # newest sessions listed (each one's transcript.json is read)
 EXCERPT_CHARS = 120
 TITLE_CHARS = 200
 TRANSCRIPT_MD, TRANSCRIPT_JSON, SUMMARY_MD = "transcript.md", "transcript.json", "summary.md"
-ACTIONS = ("Open transcript", "Open summary", "Reveal folder", "Rename…", "Delete…")
+SUMMARIZE = "Summarize"  # (re)write summary.md now, also when automatic summaries are off
+ACTIONS = ("Open transcript", "Open summary", SUMMARIZE, "Reveal folder", "Rename…", "Delete…")
 
 
 @dataclass
@@ -169,7 +170,7 @@ def note_label(note: Note) -> str:
 
 def note_actions(note: Note) -> list[str]:
     """What can be done with a session (``ACTIONS``, minus opening files it doesn't have)."""
-    skip = {"Open transcript"} if not note.has_transcript else set()
+    skip = {"Open transcript", SUMMARIZE} if not note.has_transcript else set()
     if not note.has_summary:
         skip.add("Open summary")
     return [a for a in ACTIONS if a not in skip]
@@ -179,6 +180,11 @@ def action_target(note: Note, action: str) -> Path:
     """The file or folder an "Open…" / "Reveal folder" action opens."""
     names = {"Open transcript": TRANSCRIPT_MD, "Open summary": SUMMARY_MD}
     return note.directory / names[action] if action in names else note.directory
+
+
+def summary_choices(notes: list[Note]) -> list[Note]:
+    """The meetings a summary can be written for: the ones with a transcript, newest first."""
+    return [n for n in notes if n.has_transcript]
 
 
 def rename_session(directory: Path, title: str, output_dir: Path) -> None:
@@ -295,12 +301,25 @@ def delete_prompt(note: Note) -> str:
     return f"Delete “{note.title}” ({when})? Its audio, transcript and summary {where}."
 
 
+# The "Summarize a meeting…" list (the macOS dialog; the Windows dialog takes the same texts)
+SUMMARY_PICK = {
+    "title": "Summarize a meeting",
+    "prompt": "Newest first. Choose a meeting to summarize:",
+    "ok": "Summarize",
+}
+
+
 # --- macOS: AppleScript dialogs (run with common.osascript on a worker thread)
-def list_script(notes: list[Note]) -> str:
+def list_script(
+    notes: list[Note],
+    title: str = "Meeting notes",
+    prompt: str = "Newest first. Choose a meeting:",
+    ok: str = "Choose",
+) -> str:
     items = ", ".join(as_str(f"{i}. {note_label(n)}"[:200]) for i, n in enumerate(notes, 1))
     return (
-        f'choose from list {{{items}}} with title "Meeting notes" '
-        f'with prompt "Newest first. Choose a meeting:" OK button name "Choose"'
+        f"choose from list {{{items}}} with title {as_str(title)} "
+        f"with prompt {as_str(prompt)} OK button name {as_str(ok)}"
     )
 
 
@@ -329,8 +348,9 @@ def delete_script(note: Note) -> str:
 
 def run_dialogs(notes: list[Note], ask, act, open_) -> None:
     """The macOS flow (worker thread): pick a meeting, then an action. ``ask(script)`` runs
-    AppleScript and returns its output, ``act(directory, action, title="")`` renames or
-    deletes (``Controller.note_action_async``), ``open_(path)`` opens a file or folder."""
+    AppleScript and returns its output, ``act(directory, action, title="")`` renames,
+    deletes or summarizes (``Controller.note_action_async``), ``open_(path)`` opens a file
+    or folder."""
     i = chosen_index(ask(list_script(notes)), len(notes))
     if i is None:
         return
@@ -343,8 +363,20 @@ def run_dialogs(notes: list[Note], ask, act, open_) -> None:
     elif action == "Delete…":
         if ask(delete_script(note)).startswith("button returned:Delete"):
             act(note.directory, "delete")
+    elif action == SUMMARIZE and action in note_actions(note):
+        act(note.directory, "summarize", reopen=False)  # the summary announces itself: no list
     elif action in note_actions(note):
         open_(action_target(note, action))
+
+
+def run_summary_pick(notes: list[Note], ask, act) -> None:
+    """The "Summarize a meeting…" flow (worker thread): one list of the meetings with a
+    transcript, then ``act(directory, "summarize", reopen=False)`` for the chosen one (cancel:
+    nothing). ``reopen=False`` keeps the Meeting notes list from opening after it."""
+    choices = summary_choices(notes)
+    i = chosen_index(ask(list_script(choices, **SUMMARY_PICK)), len(choices))
+    if i is not None:
+        act(choices[i].directory, "summarize", reopen=False)
 
 
 def chosen_index(output: str, count: int) -> int | None:
