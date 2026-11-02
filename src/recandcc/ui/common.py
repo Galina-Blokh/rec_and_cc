@@ -693,18 +693,21 @@ class Controller:
             if self.cfg.summary.enabled:
                 self._summarize_when_labelled(Path(session.directory))
 
-    def _summarize_when_labelled(self, directory: Path) -> None:
+    def _summarize_when_labelled(self, directory: Path, announce: bool = False) -> None:
         """Summarise once the transcript has its final speaker labels (a slow diarization
-        rewrites it later), so action items aren't credited to "Others"."""
+        rewrites it later), so action items aren't credited to "Others". ``announce``: the user
+        asked for it from the menu, so the summary made then is announced (_summary_finished).
+        A request made while labels are pending waits for them as well: it becomes the same
+        summary as the automatic one, not an earlier unlabelled duplicate of it."""
         from ..transcribe.summary import mark_pending
 
         mark_pending(directory)  # owed from now on, even if we quit before diarization ends
         transcriber = getattr(self, "transcriber", None)
         after_labels = getattr(transcriber, "after_labels", None)  # None: test fakes
         if after_labels is None:
-            self._summarize(directory)
+            self._summarize(directory, announce=announce)
         else:
-            after_labels(directory, lambda: self._summarize(directory))
+            after_labels(directory, lambda: self._summarize(directory, announce=announce))
 
     def _resubmit_summaries(self) -> None:
         """summary.enabled: queue summaries still owed (cut short by quitting, or stale after
@@ -845,7 +848,8 @@ class Controller:
                     if not (directory / "transcript.json").exists():
                         self.events.put(("notice", "No transcript to summarize", directory.name))
                         return
-                    self._summarize(directory, announce=True)
+                    log.info("summary of %s asked for from the menu", directory.name)
+                    self._summarize_when_labelled(directory, announce=True)
                     self.events.put(
                         ("notice", "Writing the summary", "Open summary shows it when it's done.")
                     )

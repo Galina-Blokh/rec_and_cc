@@ -441,6 +441,45 @@ def test_only_summaries_asked_for_from_the_menu_are_announced(tmp_path, monkeypa
     assert announced() == [("summary_ready", s.directory / "summary.md", "zoom.us")]
 
 
+def test_a_request_made_while_labels_are_pending_is_one_summary_after_them(tmp_path, monkeypatch):
+    from recandcc.engine import IDLE
+    from recandcc.transcribe import summary
+
+    s = make_session(tmp_path, "140312_zoom-us", T0, transcribed=True)
+    write_transcript(s.directory)
+    writes, gate = [], threading.Event()
+
+    def writer(directory, *args, **kwargs):  # stands in for the local model
+        writes.append(directory)
+        gate.wait(5)  # runs until the test has queued the rest, as a slow model would
+        (directory / "summary.md").write_text("# Summary\n", encoding="utf-8")
+        return directory / "summary.md"
+
+    class LabelsPending:  # a transcriber whose speaker labels are still to come
+        def __init__(self):
+            self.waiting = []
+
+        def after_labels(self, directory, fn):
+            self.waiting.append(fn)
+
+    monkeypatch.setattr(summary, "summarize_session", writer)
+    monkeypatch.setattr(notes, "scan_notes", lambda d: [])
+    c = _ctrl(tmp_path)
+    c.engine.state.status = IDLE
+    c.transcriber = LabelsPending()
+    c._summarize_when_labelled(s.directory)  # the automatic one, queued at transcription
+    c.note_action_async(s.directory, "summarize")  # the menu's, before the labels are final
+    assert _wait_for(c, "notice")[1] == "Writing the summary"
+    assert writes == []  # nothing is written from the unlabelled transcript
+    for fn in c.transcriber.waiting:  # the labels are final: both waiters run, in order
+        fn()
+    gate.set()
+    c._summaries.join()
+    assert writes == [s.directory]  # one summary, and it is the one announced
+    announced = [e for e in list(c.events.queue) if e[0] == "summary_ready"]
+    assert announced == [("summary_ready", s.directory / "summary.md", "zoom.us")]
+
+
 def test_a_summary_picked_from_the_picker_does_not_reopen_meeting_notes(tmp_path, monkeypatch):
     s = make_session(tmp_path, "140312_zoom-us", T0, transcribed=True)
     write_transcript(s.directory)
