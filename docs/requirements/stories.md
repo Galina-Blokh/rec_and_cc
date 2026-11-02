@@ -43,6 +43,7 @@ issues (#1–#7) get their acceptance criteria copied in here when they are pick
 | US-33 | Live captions name the speakers | 🟡 no accuracy measurement on real speech (#1) |
 | US-30 | Change common settings in a window | 🟡 macOS settings window shipped (#86), not on Windows |
 | US-34 | Warn when recordings go to a network volume | 🟡 shipped (#110): detection is fake-tested, no real share or Windows drive checked |
+| US-36 | Cloud summaries (opt-in): ChatGPT or Claude writes the summary | 🟡 backend (#177): keys, requests and prompts fake-tested; menu sign-in pending |
 
 ---
 
@@ -615,3 +616,22 @@ know recordings and transcripts leave this computer.*
   is probed on a side thread with a short wait, so the menu never hangs) and
   logs contain the kind of share but never the path.
 - **Not yet:** shares that a sync or FUSE tool presents as a local disk are not detected.
+
+### US-36 Cloud summaries (opt-in)
+*As the owner, I want a meeting's summary written by ChatGPT or Claude when I choose it, so that it
+is more thorough than the small local model, knowing that the transcript of that meeting then
+leaves this computer.* (#177)
+
+- **Given** `summary.provider = "local"` (default), **then** nothing is sent and no key is read.
+- **Given** `summary.provider` is `"openai"` or `"anthropic"` and summaries are on, **when** a
+  session's final transcript is written, **then** one request for that session goes to that
+  provider with the prompt, the transcript with the time of each paragraph and the template's
+  sections (a transcript over 400,000 characters goes in parts first); `summary.md` keeps the
+  usual title and says it was written in the cloud, and by which model.
+- **Given** no key (keychain or `RECANDCC_*_API_KEY`), a rejected key, a network failure or a
+  provider error, **then** the summary is skipped with a notice (once for each reason, as for
+  local summaries), and the local model is not used. Rate limits and server errors are retried
+  twice first (after the server's `Retry-After`, at most 60 s, else 2 s and then 4 s).
+- **Then** the key is never logged or shown, logs never contain transcript or summary text, and
+  requests use HTTPS with certificate checks.
+- **Not yet:** the sign-in and provider choice in the macOS menu and the Windows tray (PR 2).

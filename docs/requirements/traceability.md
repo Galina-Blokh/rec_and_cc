@@ -43,3 +43,4 @@ Paths are relative to `src/recandcc/`.
 | US-33 | `transcribe/live_speakers.py`, `transcribe/live.py`, `transcribe/diarize.py`, `config.py` | `test_live_speakers.py::*`, `test_diarize_integration.py::test_live_speaker_labels_distinguish_voices` |
 | US-30 | `settings_window.py`, `config.py`, `ui/common.py`, `ui/mac.py`, `transcribe/revisions.py`, `native/macos/AudioTap/Sources/rcc-audiotap/Settings.swift` | `test_settings_window.py::*` |
 | US-34 | `cloudsync.py`, `ui/common.py`, `cli.py` | `test_network_volume.py::*` |
+| US-36 | `transcribe/summary_cloud.py`, `transcribe/summary.py`, `config.py` | `test_summary_cloud.py::*` |

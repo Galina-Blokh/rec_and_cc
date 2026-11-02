@@ -965,7 +965,8 @@ def rrf(rankings: Sequence[Sequence[Hit]]) -> list[Hit]:
 
 
 def _dev(path: Path) -> int:
-    return os.stat(path).st_dev
+    # A Windows volume serial can use all 64 bits, but SQLite INTEGERs are signed: keep 63.
+    return os.stat(path).st_dev & 0x7FFF_FFFF_FFFF_FFFF
 
 
 def _reachable(output_dir: Path, known_dev: int | None) -> tuple[bool, int | None]:

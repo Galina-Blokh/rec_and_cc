@@ -406,7 +406,10 @@ recognized voice or `Me` is never overridden.
 
 ### Where your data lives
 
-Audio and transcripts never leave your computer. The only network access is the one-time
+Audio and transcripts never leave your computer, with one opt-in exception: a cloud summary
+(`[summary] provider = "openai"` or `"anthropic"`, off by default) sends the transcript of that
+one meeting, with its times and speaker labels, to the chosen provider over HTTPS, and nothing
+else. The only other network access is the one-time
 model download: Whisper (and, with summaries on, the summary model) from Hugging Face, pinned to exact repo commits
 ([`revisions.py`](src/recandcc/transcribe/revisions.py), and the Windows and Linux CPU summary model
 in [`summary_cpu.py`](src/recandcc/transcribe/summary_cpu.py); unpinned custom repos are refused

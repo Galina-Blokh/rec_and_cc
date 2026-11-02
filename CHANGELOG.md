@@ -7,6 +7,9 @@ All notable changes to RecAndCC are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Opt-in cloud summaries: `[summary] provider = "openai"` (ChatGPT) or `"anthropic"` (Claude)
+  writes `summary.md` from the transcript of that meeting, with timestamps, a prompt and the
+  template's sections. Off by default; the API key is kept in the OS keychain (US-36, #177).
 - Live captions label other speakers `Speaker 1`, `Speaker 2`, … within a session instead of
   `Others` (`diarize.live_speaker_labels`, on by default; display only, uses the downloaded
   speaker model) (#1).
