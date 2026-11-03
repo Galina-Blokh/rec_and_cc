@@ -81,7 +81,7 @@ def seg(text: str, lang: str = "en", speaker: str = "Me", t: float = 0) -> Segme
     "lang, name",
     [("en", "English"), ("ru", "Russian"), ("he", "Hebrew"), ("de", "the language with code 'de'")],
 )
-def test_prompts_ask_for_the_meetings_language(lang, name):
+def test_message_builder_honors_its_output_language(lang, name):
     for task, phrase in [("notes", "notes"), ("summary", "Summarise"), ("actions", "NONE")]:
         system, user = summary.build_messages(task, "Me: hi", lang, "2 of 3")
         assert f"Always answer in {name}" in system["content"]
@@ -122,9 +122,8 @@ def test_unpinned_language_model_is_ignored_unless_allowed(tmp_path, caplog):
     assert summary.summary_model(cfg, segs) == "someone/unpinned-llm"
 
 
-def test_mixed_meeting_uses_one_language_for_model_prompt_and_headings(tmp_path, monkeypatch):
-    """Long Hebrew speech with few characters, plus a wordy English line: Hebrew wins for
-    the model and for the summary's language."""
+def test_mixed_meeting_routes_by_spoken_language_but_summarizes_in_english(tmp_path, monkeypatch):
+    """Hebrew still picks its routed model; the summary is always in English."""
     seen = []
 
     class Gen(FakeGen):
@@ -141,8 +140,34 @@ def test_mixed_meeting_uses_one_language_for_model_prompt_and_headings(tmp_path,
     cfg.summary.language_models = {"he": PREVIOUS_DEFAULT_SUMMARY_MODEL}  # not the default
     segs = [Segment(0, 30, "כן", "Me", "he"), seg("a much longer English sentence", t=40)]
     text = summary.summarize_session(make_session(tmp_path, segs), cfg).read_text("utf-8")
-    assert seen[0] == PREVIOUS_DEFAULT_SUMMARY_MODEL and "Always answer in Hebrew" in seen[1]
+    assert seen[0] == PREVIOUS_DEFAULT_SUMMARY_MODEL
+    assert all("Always answer in English" in system for system in seen[1:])
     assert text.startswith("# Meeting summary")
+
+
+@pytest.mark.parametrize("lang", ["ru", "he", "ja", ""])
+@pytest.mark.parametrize("chunk_chars", [80, 8_000])
+@pytest.mark.parametrize("templated", [False, True])
+def test_local_summaries_and_chunk_notes_are_english(lang, chunk_chars, templated, monkeypatch):
+    monkeypatch.setattr(summary, "CHUNK_CHARS", chunk_chars)
+    segments = [
+        seg("Обсудим бюджет. נדבר על התקציב.", lang, f"Speaker {i}", i * 5) for i in range(4)
+    ]
+    calls = []
+
+    def generate(messages, max_tokens):
+        calls.append(messages)
+        return "- Budget approved."
+
+    if templated:
+        language, _ = summary.summarize_sections(segments, generate, (("Decisions", "Decisions."),))
+    else:
+        language, _, _ = summary.summarize(segments, generate)
+    assert language == "en"
+    assert calls and all("Always answer in English" in m[0]["content"] for m in calls)
+    assert any("Обсудим бюджет" in m[-1]["content"] for m in calls)
+    if chunk_chars == 80:
+        assert any("(part " in m[-1]["content"] for m in calls)
 
 
 def test_routed_model_unavailable_falls_back_to_the_default(tmp_path, monkeypatch, caplog):
@@ -464,15 +489,85 @@ def test_summary_md_next_to_the_transcript(tmp_path):
     assert text.startswith(
         "# Meeting summary\n\n## Updates by person\n\nWe agreed on the plan.\n\n"
     )
-    assert "## Action items\n\nНет.\n" in text  # the headings stay English, the answers Russian
+    assert "## Action items\n\nNone.\n" in text
     assert "by Qwen3.5-4B-MLX-4bit;" in text  # the footer names the model that wrote it
 
 
-def test_hebrew_summary_is_right_to_left(tmp_path):
+def test_hebrew_meeting_summary_is_english_without_rtl_isolates(tmp_path):
     d = make_session(tmp_path, [seg("שלום, נדבר על התקציב", "he")])
     text = summary.summarize_session(d, Config(), FakeGen()).read_text("utf-8")
     assert "# Meeting summary" in text and "## Action items" in text
-    assert f"- {RLI}Anna sends the deck by Friday{PDI}" in text
+    assert "- Anna sends the deck by Friday" in text
+    assert RLI not in text and PDI not in text
+
+
+def test_copied_foreign_quotes_get_one_local_translation_and_pause_hook(tmp_path):
+    translated = []
+    pauses = []
+
+    class Gen(FakeGen):
+        def __call__(self, messages, max_tokens):
+            if messages[0]["content"].startswith("You translate text into English"):
+                translated.append(messages)
+                return '- [00:00:00] "Release the update on Friday."'
+            if "Write only the 'Unclear transcription' part" in messages[-1]["content"]:
+                return '- [00:00:00] "Выпустить обновление в пятницу."'
+            return super().__call__(messages, max_tokens)
+
+    d = make_session(tmp_path, [seg("Выпустить обновление в пятницу.", "ru")])
+    before = (d / "transcript.json").read_bytes()
+    text = summary.summarize_session(
+        d, Config(), Gen(), before_call=lambda: pauses.append(True)
+    ).read_text("utf-8")
+    assert len(translated) == 1 and len(pauses) == 7
+    assert "Выпустить" in translated[0][-1]["content"]
+    assert '"Release the update on Friday."' in text and "Выпустить" not in text
+    assert (d / "transcript.json").read_bytes() == before
+
+
+def test_non_latin_speaker_names_and_none_do_not_need_translation():
+    assert not summary._needs_translation("- Гали: Send the report.", {"Гали"})
+    assert not summary._needs_translation("אין.", set())
+    assert not summary._needs_translation("- René: Send the report.", set())
+    assert summary._needs_translation("- Выпустить обновление.", {"Me"})
+
+
+@pytest.mark.parametrize("translation", ["", "  \n", "NONE"])
+def test_failed_translation_preserves_the_previous_summary_and_source(tmp_path, translation):
+    def generate(messages, max_tokens):
+        if messages[0]["content"].startswith("You translate text into English"):
+            return translation
+        return "- Выпустить обновление."
+
+    d = make_session(tmp_path, [seg("Выпустить обновление.", "ru")])
+    previous = "# Summary\n\nKeep this existing summary.\n"
+    (d / summary.SUMMARY_NAME).write_text(previous, "utf-8")
+    (d / summary.SOURCE_NAME).write_text("previous fingerprint", "utf-8")
+    with pytest.raises(summary.SummaryUnavailable, match="no English translation"):
+        summary.summarize_session(d, Config(), generate)
+    assert (d / summary.SUMMARY_NAME).read_text("utf-8") == previous
+    assert (d / summary.SOURCE_NAME).read_text("utf-8") == "previous fingerprint"
+
+
+def test_foreign_chunk_notes_are_translated_before_sections(tmp_path, monkeypatch):
+    monkeypatch.setattr(summary, "CHUNK_CHARS", 80)
+    notes, translations = [], []
+
+    def generate(messages, max_tokens):
+        if messages[0]["content"].startswith("You translate text into English"):
+            translations.append(messages)
+            return "- Friday release."
+        if "Write concise bullet-point notes" in messages[-1]["content"]:
+            notes.append(messages)
+            return "- Выпустить обновление."
+        assert "Выпустить" not in messages[-1]["content"]
+        return "NONE"
+
+    segments = [
+        seg("Выпустить обновление в пятницу.", "ru", f"Speaker {i}", i * 5) for i in range(4)
+    ]
+    summary.summarize_session(make_session(tmp_path, segments), Config(), generate)
+    assert len(notes) > 1 and len(translations) == len(notes)
 
 
 def test_empty_transcript_needs_no_model(tmp_path):

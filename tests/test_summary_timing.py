@@ -106,6 +106,37 @@ def _model_cached(repo: str) -> bool:
 
 
 @pytest.mark.slow
+@pytest.mark.skipif(not summary.mlx_lm_available(), reason="needs Apple silicon with mlx-lm")
+@pytest.mark.parametrize(
+    "language, speech",
+    [
+        ("ru", "Мы решили выпустить обновление в пятницу. Я отправлю отчет завтра."),
+        ("he", "החלטנו לשחרר את העדכון ביום שישי. אשלח את הדוח מחר."),
+    ],
+)
+def test_non_english_meeting_produces_english_summary_offline(
+    tmp_path, monkeypatch, language, speech
+):
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    import huggingface_hub.constants as hub_constants
+
+    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", True)
+    cfg = Config()
+    if not _model_cached(cfg.summary.model):
+        pytest.skip("pinned summary model is not cached (tests never download)")
+    session = SessionInfo(
+        "english-summary", tmp_path, datetime(2026, 11, 3, 10), TriggerKind.MANUAL
+    )
+    session.save()
+    write_outputs(session, [Segment(0, 10, speech, "Me", language)], 10.0, "fake")
+
+    text = summary.summarize_session(tmp_path, cfg).read_text("utf-8")
+    assert re.findall(r"^## (.+)$", text, re.M) == [h for h, _ in builtin().sections]
+    assert not re.search(r"[\u0400-\u04ff\u0590-\u05ff]", text), "summary was not translated"
+    assert "friday" in text.casefold(), "the release decision was lost"
+
+
+@pytest.mark.slow
 @pytest.mark.skipif(
     not summary.mlx_lm_available(), reason="summaries need Apple silicon with mlx-lm"
 )

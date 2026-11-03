@@ -3,11 +3,14 @@
 Opt-in (``summary.enabled``). A small instruct model runs through mlx-lm on Apple silicon
 (elsewhere on the CPU through ONNX Runtime, see summary_cpu.py and create_generator),
 pinned in revisions.py and loaded offline-first like Whisper (gpu.local_model_path); with
-``summary.language_models`` the transcript's main spoken language picks it. Long transcripts
+``summary.language_models`` the transcript's main spoken language picks it. Summaries are always
+written in English, regardless of the spoken language. Long transcripts
 are reduced map-reduce first: notes per chunk, keeping the timestamps. Then each section of the
 summary template (summary_template.py; by default the built-in six sections) gets one model call
 on those notes, with ``summary.prompt`` in its system message. ``summary.provider`` = "openai" or
 "anthropic" makes one call on the timestamped transcript instead (cloud_answer, summary_cloud.py).
+A local answer that copies non-Latin passages gets one extra translation call; known speaker
+names and empty-section markers are exempt. Cloud answers rely on the English instruction.
 Everything runs on one background ``summary`` thread; logs never contain transcript or summary
 text.
 """
@@ -27,6 +30,7 @@ import re
 import sys
 import threading
 import time
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
@@ -67,6 +71,7 @@ MODEL_SIZES = {
 THOUGHT_MARKERS = (("<think>", "</think>"), ("<|channel>thought", "<channel|>"))
 CUT_OFF = "the summary model ran out of tokens while thinking"
 MAX_ROUNDS = 3  # reduce rounds before the notes are cut to fit
+OUTPUT_LANGUAGE = "en"  # independent of the spoken language used to route the model
 LANGUAGE_NAMES = {"en": "English", "ru": "Russian", "he": "Hebrew"}
 # (summary heading, action items heading, "none") per language; English otherwise.
 HEADINGS = {
@@ -121,8 +126,8 @@ class ModelUnavailable(SummaryUnavailable):
 
 
 def main_language(segments: list[Segment]) -> str:
-    """The language with the most speech time ("en" if none is known). It picks both the
-    summary's language (prompt, headings) and its model (summary_model). Overlapping
+    """The language with the most speech time ("en" if none is known). It picks the
+    model (summary_model); summaries are always English. Overlapping
     segments (Me and Others at once) count their shared time once."""
     spans: dict[str, list[tuple[float, float]]] = {}
     for s in segments:
@@ -193,13 +198,50 @@ def chunk_lines(lines: list[str], max_chars: int = 0) -> list[str]:
     return chunks
 
 
+def _language_rule(language: str) -> str:
+    lang = LANGUAGE_NAMES.get(language, f"the language with code '{language}'")
+    return (
+        f"Always answer in {lang}, even when the entire transcript is in another language. "
+        f"Translate all content, including quotations, into {lang}; do not repeat passages in "
+        "their original language. Preserve names, speaker labels and timestamps. "
+        f"For unclear transcription, describe the issue in {lang} without quoting the source."
+    )
+
+
+def _needs_translation(answer: str, speakers: set[str]) -> bool:
+    """Catch copied non-Latin passages in local answers; known speaker names may stay as-is.
+    Latin-script languages rely on the English instruction, as do cloud answers."""
+    for speaker in sorted(speakers, key=len, reverse=True):
+        if speaker:
+            answer = answer.replace(speaker, "")
+    return not _says_none(answer) and any(
+        char.isalpha() and "LATIN" not in unicodedata.name(char, "") for char in answer
+    )
+
+
+def translation_messages(answer: str) -> Messages:
+    """Translate a local model's copied foreign passages without re-summarizing the answer."""
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You translate text into English. Return only the English translation. "
+                "Translate all non-English passages, including text inside quotation marks. "
+                "Keep existing English, Markdown structure, names, speaker labels, numbers and "
+                "timestamps. Do not summarize, add facts, explain or comment."
+            ),
+        },
+        {"role": "user", "content": f"Translate the following text into English:\n\n{answer}"},
+    ]
+
+
 def _system(language: str, room: bool) -> str:
     """The system prompt of every summary call: the answer's language, and who 'Me' is."""
-    lang = LANGUAGE_NAMES.get(language, f"the language with code '{language}'")
     owner = "the owner is one of the numbered speakers in the room" if room else "'Me' is the owner"
     return (
         f"You summarise meeting transcripts. Lines are '[HH:MM:SS] Speaker: text'; {owner}. "
-        f"Always answer in {lang}, even if parts of the input are in another language. "
+        f"{_language_rule(language)} "
+        "A different language alone does not make the transcription unclear. "
         "Use only facts from the input; do not invent names, dates or tasks."
     )
 
@@ -227,7 +269,7 @@ def build_messages(
         )
     return [
         {"role": "system", "content": _system(language, room)},
-        {"role": "user", "content": f"{ask}\n\n---\n{text}\n---"},
+        {"role": "user", "content": f"{ask}\n\n{_language_rule(language)}\n\n---\n{text}\n---"},
     ]
 
 
@@ -271,7 +313,7 @@ def summarize(
 ) -> tuple[str, str, list[str]]:
     """(language, summary, action items) of a transcript. ``room``: the session started as a
     room session; if its mic speakers were numbered (no 'Me' line), the prompts say so."""
-    language = main_language(segments)
+    language = OUTPUT_LANGUAGE
     room = room and not any(s.speaker == "Me" for s in segments)
     text = _reduce(timed_transcript_lines(segments), generate, language, max_tokens, room)
     if not text:
@@ -319,7 +361,7 @@ def section_messages(
     system = " ".join(part for part in (_system(language, room), prompt.strip()) if part)
     return [
         {"role": "system", "content": system},
-        {"role": "user", "content": f"{ask}\n\n---\n{text}\n---"},
+        {"role": "user", "content": f"{ask}\n\n{_language_rule(language)}\n\n---\n{text}\n---"},
     ]
 
 
@@ -334,7 +376,7 @@ def summarize_sections(
     """(language, [(heading, answer)]) for a summary template: the notes pass of ``summarize`` on
     the timestamped lines, then one call per section on the reduced text, with ``prompt`` in each
     call's system message. An empty transcript needs no call."""
-    language = main_language(segments)
+    language = OUTPUT_LANGUAGE
     room = room and not any(s.speaker == "Me" for s in segments)
     text = _reduce(timed_transcript_lines(segments), generate, language, max_tokens, room)
     answers = []
@@ -403,7 +445,7 @@ def cloud_messages(
     system = f"{_system(language, room)} Answer in Markdown with ## headings."
     return [
         {"role": "system", "content": system},
-        {"role": "user", "content": f"{ask}\n\n---\n{text}\n---"},
+        {"role": "user", "content": f"{ask}\n\n{_language_rule(language)}\n\n---\n{text}\n---"},
     ]
 
 
@@ -418,7 +460,7 @@ def cloud_answer(
     """(language, Markdown answer) of a cloud summary: one call on the timestamped transcript, or
     past CLOUD_SINGLE_CALL_CHARS one call per part (with the same prompt) and one on the parts'
     answers. An empty transcript sends nothing: the answer is ""."""
-    language = main_language(segments)
+    language = OUTPUT_LANGUAGE
     room = room and not any(s.speaker == "Me" for s in segments)
     sections = template.sections
     lines = timed_transcript_lines(segments)
@@ -493,11 +535,20 @@ def summarize_session(
 
     def run(gen: Generator, name: str) -> tuple[str, str, str]:
         """(language, summary.md text, what the log says was written), made by model ``name``."""
+        speakers = {s.speaker for s in segments}
 
-        def call(messages: Messages, max_tokens: int) -> str:
+        def invoke(messages: Messages, max_tokens: int) -> str:
             if before_call is not None:
                 before_call()
             return gen(messages, max_tokens)
+
+        def call(messages: Messages, max_tokens: int) -> str:
+            answer = invoke(messages, max_tokens)
+            if not cloud and _needs_translation(answer, speakers):
+                answer = invoke(translation_messages(answer), max_tokens)
+                if not answer.strip() or _says_none(answer):
+                    raise SummaryUnavailable("the local model returned no English translation")
+            return answer
 
         if cloud:
             label = CLOUD_LABELS[settings.provider]
