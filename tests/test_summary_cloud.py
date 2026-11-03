@@ -136,6 +136,24 @@ def test_cloud_summary_without_a_key_fails_before_anything_is_sent(tmp_path):
     assert not (d / "summary.md").exists()
 
 
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+def test_a_cloud_answer_never_triggers_a_second_translation_request(
+    tmp_path, monkeypatch, fake_keychain, provider
+):
+    # An unexpected foreign answer must not silently make extra cloud requests.
+    foreign = "## Decisions\n- Выпустить обновление."
+    reply = (
+        {"output_text": foreign}
+        if provider == "openai"
+        else {"content": [{"type": "text", "text": foreign}]}
+    )
+    fake_keychain[("RecAndCC", provider)] = KEY
+    requests = serve(monkeypatch, reply)
+    d = make_session(tmp_path, [Segment(0, 5, "Выпустить обновление.", "Me", "ru")])
+    summary.summarize_session(d, cloud_cfg(provider))
+    assert len(requests) == 1
+
+
 def test_keys_come_from_the_keychain_and_the_environment_is_the_fallback(
     monkeypatch, fake_keychain
 ):

@@ -546,6 +546,8 @@ def summarize_session(
             answer = invoke(messages, max_tokens)
             if not cloud and _needs_translation(answer, speakers):
                 answer = invoke(translation_messages(answer), max_tokens)
+                if not answer.strip() or _says_none(answer):
+                    raise SummaryUnavailable("the local model returned no English translation")
             return answer
 
         if cloud:

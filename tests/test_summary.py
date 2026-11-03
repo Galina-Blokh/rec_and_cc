@@ -532,6 +532,44 @@ def test_non_latin_speaker_names_and_none_do_not_need_translation():
     assert summary._needs_translation("- Выпустить обновление.", {"Me"})
 
 
+@pytest.mark.parametrize("translation", ["", "  \n", "NONE"])
+def test_failed_translation_preserves_the_previous_summary_and_source(tmp_path, translation):
+    def generate(messages, max_tokens):
+        if messages[0]["content"].startswith("You translate text into English"):
+            return translation
+        return "- Выпустить обновление."
+
+    d = make_session(tmp_path, [seg("Выпустить обновление.", "ru")])
+    previous = "# Summary\n\nKeep this existing summary.\n"
+    (d / summary.SUMMARY_NAME).write_text(previous, "utf-8")
+    (d / summary.SOURCE_NAME).write_text("previous fingerprint", "utf-8")
+    with pytest.raises(summary.SummaryUnavailable, match="no English translation"):
+        summary.summarize_session(d, Config(), generate)
+    assert (d / summary.SUMMARY_NAME).read_text("utf-8") == previous
+    assert (d / summary.SOURCE_NAME).read_text("utf-8") == "previous fingerprint"
+
+
+def test_foreign_chunk_notes_are_translated_before_sections(tmp_path, monkeypatch):
+    monkeypatch.setattr(summary, "CHUNK_CHARS", 80)
+    notes, translations = [], []
+
+    def generate(messages, max_tokens):
+        if messages[0]["content"].startswith("You translate text into English"):
+            translations.append(messages)
+            return "- Friday release."
+        if "Write concise bullet-point notes" in messages[-1]["content"]:
+            notes.append(messages)
+            return "- Выпустить обновление."
+        assert "Выпустить" not in messages[-1]["content"]
+        return "NONE"
+
+    segments = [
+        seg("Выпустить обновление в пятницу.", "ru", f"Speaker {i}", i * 5) for i in range(4)
+    ]
+    summary.summarize_session(make_session(tmp_path, segments), Config(), generate)
+    assert len(notes) > 1 and len(translations) == len(notes)
+
+
 def test_empty_transcript_needs_no_model(tmp_path):
     d = make_session(tmp_path, [])
     gen = FakeGen()
