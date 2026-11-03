@@ -202,6 +202,8 @@ class TranscriptionConfig:
     # Remember speakers' voices so that a speaker named once (`recandcc name-speaker`) is named
     # in later sessions. Off by default: voice profiles are biometric data. See voices.py.
     speaker_names: bool = False
+    # Use unambiguous self-introductions for this transcript only; never learn voice profiles.
+    names_from_transcript: bool = True
     # macOS, opt-in, only with speaker_names: read the other participants' names from the call
     # app's visible participant list (Accessibility permission) and use them for `Speaker N`
     # when that is unambiguous. See participants.py.
@@ -764,6 +766,9 @@ def load_config(path: Path | None = None, *, migrate: bool = False) -> Config:
             det.room_window_s,
         )
     tr = _build(TranscriptionConfig, data.pop("transcription", {}))
+    if not isinstance(tr.names_from_transcript, bool):
+        log.warning("transcription.names_from_transcript must be true or false; using false")
+        tr.names_from_transcript = False
     raw = tr.languages
     tr.languages = normalize_languages(raw)
     if tr.languages != raw:

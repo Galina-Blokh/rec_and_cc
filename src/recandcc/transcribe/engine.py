@@ -30,7 +30,7 @@ import numpy as np
 from ..config import TranscriptionConfig
 from ..metrics import log_session_metrics, rounded
 from ..models import SAMPLE_RATE, Segment, SessionInfo, Track, TriggerKind
-from . import callnames, voices
+from . import callnames, names, voices
 from .chunking import Chunk, find_speech, load_track, merge_labelled, slice_chunk
 from .diarize import Diarizer, Turn, label_speakers, model_path
 from .gpu import MlxWhisper, hf_cache_folder, mlx_word_timestamps, use_gpu
@@ -772,8 +772,46 @@ class Transcriber:
             with voices.NAMING_LOCK:
                 self._write(session, segments, duration)
         self._name_from_call_app(session, gen)
+        mapping = self._name_from_transcript(session, gen, turns if diarization else None)
+        segments = [replace(s, speaker=mapping.get(s.speaker, s.speaker)) for s in segments]
         self._drop_audio(session)
         return segments
+
+    def _name_from_transcript(
+        self,
+        session: SessionInfo,
+        gen: int | None = None,
+        turns: list[Turn] | dict[Track, list[Turn] | None] | None = None,
+    ) -> dict[str, str]:
+        """Finish optional text-based naming before the final-label callbacks are released."""
+        if not self.cfg.names_from_transcript:
+            return {}
+        try:
+            by_track = turns if isinstance(turns, dict) else {diarized_tracks(session)[0]: turns}
+            single_labels = {
+                SPEAKERS[track]
+                for track, items in by_track.items()
+                if track == Track.OTHERS
+                and items
+                and len({t.speaker for t in items}) == 1
+                and not any(t.overlap for t in items)
+            }
+            mapping = names.apply_introductions(
+                Path(session.directory),
+                sync_voices=self.cfg.speaker_names,
+                single_labels=single_labels,
+                since=gen,
+            )
+            if mapping:
+                log.info(
+                    "session %s: %d speaker name(s) from introductions", session.id, len(mapping)
+                )
+            return mapping
+        except Exception as e:  # noqa: BLE001 - optional: keep unnamed labels on failure
+            log.warning(
+                "session %s: transcript naming unavailable (%s)", session.id, type(e).__name__
+            )
+            return {}
 
     def _name_from_call_app(self, session: SessionInfo, gen: int | None = None) -> None:
         """Opt-in: name the one unknown speaker after the one free call-app participant."""
@@ -962,6 +1000,7 @@ class Transcriber:
             self._prune_voices()
             if Path(session.directory).exists():
                 self._name_from_call_app(session, gen)
+                self._name_from_transcript(session, gen, turns)
             if getattr(future, "timing", None) and Path(session.directory).exists():
                 self._diarization_metrics(session, future)
                 session.save()
