@@ -407,8 +407,8 @@ its transcript, so that I know what was decided and who does what without reread
   a recording is in progress: it waits, and pauses between chunks) writes
   `summary.md` next to `transcript.md`: one section per section of the summary template (by
   default six: updates by person, decisions, action items, unresolved questions, unclear
-  transcription, personal data), in the meeting's main language (English headings by default;
-  Hebrew right to left).
+  transcription, personal data), always in English, regardless of the meeting's spoken language.
+  The transcript stays in its original languages.
 - **Given** a transcript longer than the model's context, **then** it is summarised in
   chunks and the chunk notes are merged (map-reduce).
 - **Then** the model runs locally (mlx-lm), pinned to an exact Hugging Face commit, loaded
@@ -419,12 +419,12 @@ its transcript, so that I know what was decided and who does what without reread
   (re)written, also with `summary.enabled = false`.
 - **Given** `summary.language_models = { he = "mlx-community/Qwen3.5-4B-MLX-4bit" }`
   (Apache-2.0), **when** a meeting's main spoken language (most speech time) is Hebrew,
-  **then** that pinned model writes its summary in Hebrew, loaded only then and freed
+  **then** that pinned model writes its summary in English, loaded only then and freed
   afterwards (one summary model in memory at a time), with thinking off and any thought
   block stripped; other
   meetings, and everyone with the default `{}`, keep `summary.model`. If the routed model
   can't be downloaded or loaded, `summary.model` writes that summary instead. The same
-  measure (most speech time) picks the summary's language and headings.
+  measure (most speech time) picks only the model; the summary is always English.
 - **Then** logs never contain transcript or summary text.
 - **Given** a 1-hour en/ru meeting on an M-series Mac, **then** the summary is ready within
   ~1–2 min, offline. Checked by the slow `test_summary_timing.py` (hard bound 120 s, a

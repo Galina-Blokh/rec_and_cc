@@ -288,13 +288,15 @@ enabled = false              # true = summary.md with action items after each me
 With `[summary] enabled = true`, each finished transcript also gets a
 `summary.md` in its folder: one section per section of the summary template (by default six: updates by person,
 decisions, action items with owners and deadlines, unresolved questions, unclear
-transcription, and the kinds of personal data mentioned), written in the meeting's main
-language. The default model is
+transcription, and the kinds of personal data mentioned), always written in English, including
+for Russian, Hebrew and mixed-language meetings. The transcript stays in its original languages.
+This also applies to summaries requested from the menu or CLI and to cloud summaries. If the local
+model copies a non-Latin passage, one extra translation pass converts it to English.
+The default model is
 Qwen3.5 4B (4-bit, Apache-2.0), a hybrid thinking model run with thinking off: ~3.0 GB
 download, ~2.9-3.4 GB of RAM while it runs (2.9 GB measured on one machine). Summaries take
 about 2.5x as long as with the 1.5B (measured on the synthetic one-hour meeting). The model
-writes English, Russian and Hebrew summaries; on our self-written test meetings its Hebrew
-summaries were fluent and got most owners and deadlines right, but not all. It runs in the
+understands English, Russian and Hebrew transcripts and summarizes them in English. It runs in the
 background after the transcript is final, and waits while you are recording, so captions are
 never slowed; it is downloaded once, pinned to an exact version, and nothing is sent anywhere.
 It is a draft: check names and dates against the transcript. Settings files saved while the
@@ -336,7 +338,7 @@ model; meetings in other languages keep `model`:
 he = "mlx-community/Qwen3.5-4B-MLX-4bit"   # the default already; ~3.0 GB once, ~2.9-3.4 GB RAM while it runs
 ```
 
-The language with the most speech time picks the model (and the summary's language). The
+The language with the most speech time picks the model; the summary is always in English. The
 model is downloaded once (pinned) on the first meeting that needs it, and freed after each
 summary; if it can't be downloaded or loaded, the default model writes that summary.
 
