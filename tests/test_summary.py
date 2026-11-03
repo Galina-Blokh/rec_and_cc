@@ -860,6 +860,7 @@ def _controller(cfg):
 
     ctrl = Controller.__new__(Controller)  # only the post-transcription wiring
     ctrl.events, ctrl.cfg, ctrl._lock = queue.Queue(), cfg, threading.Lock()
+    ctrl._signin_lock, ctrl._waiting_summaries = threading.Lock(), {}
     ctrl.refresh_async = lambda force=False: None
     ctrl._index_session = lambda directory: None
     ctrl.engine = types.SimpleNamespace(state=types.SimpleNamespace(status="idle"))

@@ -52,6 +52,8 @@ from .common import (
 from .present import (
     FORGET_VOICES_TEXT,
     MODE_LABELS,
+    SIGN_IN_TITLES,
+    SIGN_OUT_TITLE,
     check,
     dialog_timeout,
     forgot_notice,
@@ -68,8 +70,11 @@ from .present import (
     retention_menu,
     search_notice,
     search_open_target,
+    signin_answer,
+    signin_script,
     speaker_choice_label,
     speakers_notice,
+    summary_provider_rows,
     transcribed_notice,
 )
 
@@ -136,6 +141,9 @@ class MacApp(rumps.App):
         self.retention_menu = rumps.MenuItem("Delete audio after")
         self._retention_sig: list | None = None
         self._render_retention()
+        self.summaries_menu = rumps.MenuItem("Summaries with")
+        self._summaries_sig: list | None = None
+        self._render_summaries()
         self.lang_menu = rumps.MenuItem("Languages")
         self._lang_sig: list | None = None
         self._render_languages()
@@ -181,6 +189,7 @@ class MacApp(rumps.App):
             self.lang_menu,
             self.call_names_item,
             self.retention_menu,
+            self.summaries_menu,
             rumps.MenuItem("Settings…", callback=lambda _: self.ctrl.open_settings_async()),
             rumps.MenuItem("Edit config.toml", callback=lambda _: open_path(CONFIG_PATH, True)),
             rumps.MenuItem("Reveal logs", callback=lambda _: reveal_logs()),
@@ -269,6 +278,10 @@ class MacApp(rumps.App):
                 open_path(ev[1])
             elif kind == "retention_changed":
                 self._render_retention()
+            elif kind == "summaries_changed":
+                self._render_summaries()
+            elif kind == "summary_needs_key":
+                self.ctrl.on_summary_needs_key(ev[1], ev[2], self._ask_key)
             elif kind == "refreshed":
                 self._render_recent()
                 self._render_permissions()
@@ -293,6 +306,7 @@ class MacApp(rumps.App):
             self.captions_item.state = check(self.cfg.live_captions)
             self._apply_captions()
         self._render_retention()
+        self._render_summaries()
         if self.ctrl.sensitivity_preset() != self._sensitivity_shown:
             self._render_sensitivity()  # hand edits and config reloads too
         self._render_languages()
@@ -452,6 +466,40 @@ class MacApp(rumps.App):
     def _set_retention(self, sender) -> None:
         self.ctrl.set_retention(sender.retention_days)
         self._render_retention()
+
+    def _render_summaries(self) -> None:
+        """The "Summaries with" submenu: the providers (the current one checked), then sign-in
+        for each cloud provider and "Sign out". Rebuilt only when the rows change."""
+        rows = summary_provider_rows(self.cfg.summary.provider)
+        if rows == self._summaries_sig:
+            return
+        if self._summaries_sig is not None:
+            self.summaries_menu.clear()
+        self._summaries_sig = rows
+        for provider, title, on in rows:
+            item = rumps.MenuItem(title, callback=self._choose_summary)
+            item.state = 1 if on else 0
+            item.summary_provider = provider  # pyright: ignore[reportAttributeAccessIssue]
+            self.summaries_menu.add(item)
+        self.summaries_menu.add(rumps.separator)
+        for provider in ("openai", "anthropic"):
+            item = rumps.MenuItem(SIGN_IN_TITLES[provider], callback=self._sign_in)
+            item.summary_provider = provider  # pyright: ignore[reportAttributeAccessIssue]
+            self.summaries_menu.add(item)
+        self.summaries_menu.add(rumps.MenuItem(SIGN_OUT_TITLE, callback=self._sign_out))
+
+    def _choose_summary(self, sender) -> None:
+        self.ctrl.set_summary_provider(sender.summary_provider, self._ask_key)
+
+    def _sign_in(self, sender) -> None:
+        self.ctrl.sign_in_async(sender.summary_provider, self._ask_key)
+
+    def _sign_out(self, _sender) -> None:
+        self.ctrl.sign_out_async()
+
+    def _ask_key(self, provider: str) -> str:
+        """The sign-in prompt (osascript, hidden answer), run on the worker that asked."""
+        return signin_answer(osascript(signin_script(provider), timeout=DIALOG_TIMEOUT_S))
 
     def _toggle_captions(self, sender) -> None:
         self.ctrl.menu_set("live_captions", not self.cfg.live_captions)

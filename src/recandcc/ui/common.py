@@ -91,7 +91,8 @@ NET_PROBE_WAIT_S = 2.0  # how long a refresh waits for the network-volume probe
 # login item was changed, the captions panel shown/hidden, Off stopped a recording, the room
 # mic closed, call-app participant sampling stopped. Putting the old value back would undo the
 # click only on paper (autostart, captions) or, worse, resume recording, reopen the mic or read
-# participant names the user just turned off. They keep the new value and stay "unsaved"
+# participant names the user just turned off, or resume cloud summaries after a Local choice.
+# They keep the new value and stay "unsaved"
 # (``Controller._unsaved``): a config reload skips them and each refresh retries the save
 # until it succeeds.
 NO_ROLLBACK_KEYS = frozenset(
@@ -102,6 +103,7 @@ NO_ROLLBACK_KEYS = frozenset(
         "detection.app_modes",
         "detection.room_listening",
         "transcription.names_from_call_app",
+        "summary.provider",
     }
 )
 UNSAVED_NOTE = "The change stays in effect and is saved as soon as config.toml can be written."
@@ -487,6 +489,11 @@ class Controller:
         self._recent: list[Path] = []
         self._export_lock = threading.Lock()
         self._retention_lock = threading.Lock()  # one menu purge at a time
+        self._waiting_summaries: dict[str, list[Path]] = {}  # summaries waiting for a key
+        self._signin_started: set[str] = set()  # providers whose sign-in flow ran this run
+        self._signin_active: set[str] = set()  # automatic sign-in dialogs still open
+        self._summary_provider_request = 0  # a newer selection supersedes an older dialog
+        self._signin_lock = threading.Lock()
         self._refreshing = False
         self._last_refresh = 0.0
         self._config_mtime = self._mtime()
@@ -722,8 +729,13 @@ class Controller:
             with self._lock:
                 busy = set(getattr(self, "_in_flight", ()))
             in_flight = {d.resolve() for d in busy}  # resolve() may touch the disk
+            with self._signin_lock:
+                waiting = [d for sessions in self._waiting_summaries.values() for d in sessions]
+            waiting_for_keys = {d.resolve() for d in waiting}
             for d in pending_summaries(self.cfg.output_dir):
-                if d.resolve() in in_flight or (labels_pending and labels_pending(d)):
+                if d.resolve() in in_flight | waiting_for_keys or (
+                    labels_pending and labels_pending(d)
+                ):
                     continue
                 log.info("queueing the pending summary of %s", d.name)
                 self._summarize(d)
@@ -751,6 +763,7 @@ class Controller:
                     self.cfg,
                     notify=self.post_notice,
                     busy=lambda: self.engine.state.status != IDLE,  # never during a recording
+                    needs_key=self._summary_needs_key,
                     on_done=self._summary_finished,
                 )
         summaries.submit(directory, announce=announce)
@@ -1325,7 +1338,7 @@ class Controller:
         languages, keep_audio, audio_retention_days, speaker_names, live_captions, [summary],
         [export]).
         Read and apply are one step under ``_save_lock``: a menu write never interleaves."""
-        hotkey_changed = semantic_changed = False
+        hotkey_changed = semantic_changed = provider_changed = False
         with self._save_lock:
             m = self._mtime()
             if m == self._config_mtime:
@@ -1347,7 +1360,8 @@ class Controller:
             # set_mode, toggle_language) mark + set under it too, so their click lands either
             # before the snapshot (seen as dirty) or after the apply (kept), never between.
             # The Settings window applies and writes under _save_lock, which this holds too.
-            with self._dirty_lock:
+            with self._signin_lock, self._dirty_lock:
+                previous_provider = self.cfg.summary.provider
                 now = self._reloadable(self.cfg)
                 # changed in the menu, save not written yet (or failed: _unsaved)
                 dirty = set(self._dirty) | self._unsaved
@@ -1365,6 +1379,9 @@ class Controller:
                         if key == ("top", "hotkey") and value != now[key]:
                             hotkey_changed = True
                         setattr(self._reload_target(owner), name, value)
+                provider_changed = self.cfg.summary.provider != previous_provider
+                if provider_changed:
+                    self._summary_provider_request += 1
             # transcription.model is not reloaded (the loaded model stays until a restart), but
             # the Settings window shows what is on disk, a hand edit included
             tr = self.cfg.transcription
@@ -1375,6 +1392,9 @@ class Controller:
             semantic_changed = self.cfg.search.semantic != was_semantic
         if hotkey_changed:  # re-registering the listener may block: outside the lock
             self.apply_hotkey()  # reads cfg.hotkey under the hotkey lock
+        if provider_changed:
+            self._requeue_all_waiting_summaries()
+            self.events.put(("summaries_changed",))
         if semantic_changed:
             # Apply [search] semantic now, not at the next search: switched off, the embed
             # worker and any model download stop and the vectors are deleted; switched on,
@@ -1942,6 +1962,209 @@ class Controller:
         except BaseException:
             self._mark_dirty((RETENTION_KEY,), -1)  # apply() will never unmark
             raise
+
+    def set_summary_provider(self, provider: str, ask: Callable[[str], str]) -> None:
+        """ "Summaries with" menu (both shells), on a worker: a cloud provider without a stored key
+        asks for one first (``ask`` shows the sign-in prompt and returns the typed key, "" if
+        cancelled). Then ``summary.provider`` is applied in memory and saved on its own, as
+        ``set_retention`` does; the menus re-render on ``summaries_changed``."""
+        key = "summary.provider"
+        with self._signin_lock:
+            self._summary_provider_request += 1
+            request = self._summary_provider_request
+            if provider == "local":
+                self._mark_and_apply((key,), lambda: setattr(self.cfg.summary, "provider", "local"))
+        if provider == "local":
+            self.save_settings(key, title="Summaries with", marked=True)
+            self.events.put(("summaries_changed",))
+            threading.Thread(
+                target=self._requeue_all_waiting_summaries,
+                daemon=True,
+                name="summary-requeue",
+            ).start()
+            return
+        threading.Thread(
+            target=self._set_summary_provider,
+            args=(provider, ask, request),
+            daemon=True,
+            name="summary-provider",
+        ).start()
+
+    def _set_summary_provider(self, provider: str, ask: Callable[[str], str], request: int) -> None:
+        needs_key = False
+        if provider != "local":
+            from ..transcribe import summary_cloud
+
+            needs_key = summary_cloud.get_key(provider) is None
+        if needs_key and not self.sign_in(provider, ask):
+            self.events.put(("summaries_changed",))  # cancelled: the check stays put
+            return
+        key = "summary.provider"
+        with self._signin_lock:
+            if request != self._summary_provider_request:
+                return  # an older dialog must not undo a newer selection, especially local
+            self._mark_and_apply((key,), lambda: setattr(self.cfg.summary, "provider", provider))
+        try:
+            self._write_settings(key, title="Summaries with")
+        finally:
+            self._mark_dirty((key,), -1)
+        self.events.put(("summaries_changed",))
+        with self._signin_lock:
+            current = request == self._summary_provider_request
+        if current and self.cfg.summary.provider == provider:
+            self._requeue_all_waiting_summaries()
+
+    def _requeue_all_waiting_summaries(self) -> None:
+        for provider in ("openai", "anthropic"):
+            self.requeue_waiting_summaries(provider)
+
+    def sign_in(self, provider: str, ask: Callable[[str], str]) -> bool:
+        """Keep the API key ``ask`` returns for ``provider`` in the keychain ("" = cancelled).
+        True when it was saved. The key is never logged or shown."""
+        from ..transcribe import summary_cloud
+        from .present import KEY_PAGES
+
+        open_path(KEY_PAGES[provider])  # the key page first, then the prompt
+        key = ask(provider)
+        if not key:
+            return False
+        try:
+            summary_cloud.set_key(provider, key)
+        except ValueError:
+            self.post_notice("Summaries", "That is not an API key (no spaces); nothing was saved")
+            return False
+        except Exception as e:  # noqa: BLE001 - keychain unavailable: the type only
+            log.warning("could not save the %s key (%s)", provider, type(e).__name__)
+            self.post_notice("Summaries", "The API key could not be saved to the keychain")
+            return False
+        return True
+
+    def sign_in_async(self, provider: str, ask: Callable[[str], str]) -> None:
+        """Menu "Sign in to ChatGPT…" / "Sign in to Claude…": keep a key; the provider stays."""
+        from .present import SUMMARY_PROVIDER_TITLES
+
+        def run() -> None:
+            if self.sign_in(provider, ask):
+                self.post_notice("Summaries", f"{SUMMARY_PROVIDER_TITLES[provider]}: key saved")
+                self.requeue_waiting_summaries(provider)
+
+        threading.Thread(target=run, daemon=True, name="summary-sign-in").start()
+
+    def sign_out_async(self) -> None:
+        """Menu "Sign out": remove the stored keys of both cloud providers (on a worker)."""
+
+        def run() -> None:
+            from ..transcribe import summary_cloud
+
+            failed = False
+            for provider in ("openai", "anthropic"):
+                try:
+                    summary_cloud.delete_key(provider)
+                except Exception as e:  # noqa: BLE001 - keychain unavailable: the type only
+                    failed = True
+                    log.warning("could not remove the %s key (%s)", provider, type(e).__name__)
+            if failed:
+                self.post_notice(
+                    "Summaries", "Some API keys could not be removed from the keychain"
+                )
+                return
+            note = ""
+            if self.cfg.summary.provider != "local":
+                note = " Summaries with it wait until you sign in again."
+            self.post_notice("Summaries", "Signed out: the stored API keys are removed." + note)
+
+        threading.Thread(target=run, daemon=True, name="summary-sign-out").start()
+
+    def _summary_needs_key(self, provider: str, directory: Path) -> None:
+        """Worker thread (summary queue): hand the waiting summary to the UI thread."""
+        self.events.put(("summary_needs_key", provider, directory))
+
+    def on_summary_needs_key(
+        self, provider: str, directory: Path, ask: Callable[[str], str]
+    ) -> None:
+        """UI thread: a cloud summary waits for ``provider``'s key and joins the waiting list. The
+        first one for a provider posts a notice and starts the sign-in (key page, then prompt, on
+        a worker), once per run; a key saved then queues the waiting summaries again."""
+        already_started = active = False
+        with self._signin_lock:
+            stale_provider = self.cfg.summary.provider != provider
+            if not stale_provider:
+                waiting = self._waiting_summaries.setdefault(provider, [])
+                if directory not in waiting:
+                    waiting.append(directory)
+                already_started = provider in self._signin_started
+                active = provider in self._signin_active
+                if not already_started:
+                    self._signin_started.add(provider)
+                    self._signin_active.add(provider)
+        if stale_provider:
+            threading.Thread(
+                target=self._summarize,
+                args=(directory,),
+                daemon=True,
+                name="summary-requeue",
+            ).start()
+            return  # retry with the current choice; never prompt for a provider we left
+        if already_started:
+            if not active:
+                threading.Thread(
+                    target=self._retry_waiting_or_notice,
+                    args=(provider,),
+                    daemon=True,
+                    name="summary-key-check",
+                ).start()
+            return
+        from .present import SUMMARY_PROVIDER_TITLES
+
+        self.post_notice(
+            "Summaries",
+            f"{SUMMARY_PROVIDER_TITLES[provider]} needs an API key for this summary. The sign-in "
+            "page is opening; the summary is written once a key is saved.",
+        )
+        threading.Thread(
+            target=self._sign_in_for_summaries,
+            args=(provider, ask),
+            daemon=True,
+            name="summary-sign-in",
+        ).start()
+
+    def _sign_in_for_summaries(self, provider: str, ask: Callable[[str], str]) -> None:
+        saved = False
+        try:
+            saved = self.sign_in(provider, ask)
+        finally:
+            with self._signin_lock:
+                self._signin_active.discard(provider)
+        if saved:
+            self.requeue_waiting_summaries(provider)
+        else:
+            self._key_waiting_notice(provider)
+
+    def _key_waiting_notice(self, provider: str) -> None:
+        from .present import SIGN_IN_TITLES
+
+        with self._signin_lock:
+            if self.cfg.summary.provider != provider or not self._waiting_summaries.get(provider):
+                return
+        self.post_notice(
+            "Summary waiting for API key",
+            f"Use {SIGN_IN_TITLES[provider]} in the menu to finish this summary.",
+        )
+
+    def _retry_waiting_or_notice(self, provider: str) -> None:
+        from ..transcribe import summary_cloud
+
+        if summary_cloud.get_key(provider) is not None:
+            self.requeue_waiting_summaries(provider)
+        else:
+            self._key_waiting_notice(provider)
+
+    def requeue_waiting_summaries(self, provider: str) -> None:
+        """Queue again the summaries that waited for ``provider``'s key."""
+        with self._signin_lock:
+            waiting = self._waiting_summaries.pop(provider, [])
+        for directory in waiting:
+            self._summarize(directory)
 
     def sensitivity_preset(self) -> str | None:
         return current_preset(self.cfg.detection)

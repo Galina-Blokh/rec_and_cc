@@ -393,6 +393,21 @@ recognized voice or `Me` is never overridden.
 > This section is general information, not legal advice. Laws differ between countries and
 > states and change over time; check the rules that apply to you and to everyone you record.
 
+### Cloud summaries (opt-in)
+
+Off by default. Choose **Summaries with** in the menu (or `[summary] provider = "openai"` or
+`"anthropic"` in `config.toml`) to have ChatGPT or Claude write the summary instead of the local
+model. Each summary then sends that one meeting's transcript (with its times and speaker labels)
+to the provider over HTTPS, and nothing else leaves the computer; a failure skips the summary and
+never falls back to the local model. **Sign in to ChatGPT…** / **Sign in to Claude…** opens the
+provider's API-key page, then asks for the key, which is kept in your keychain. The key is billed
+per use as API credit, separate from a ChatGPT or Claude subscription: set a spending limit on
+that site. A summary that needs a key and has none opens the same sign-in once and is written
+after the key is saved. If you cancel setup, use the menu's **Sign in** action to finish the
+waiting summary later; it does not keep retrying in the background. Choosing **This Mac (local)**
+takes effect immediately for new summaries, and an older cloud sign-in dialog cannot change that selection.
+**Sign out** removes the stored keys.
+
 ### Recording people is regulated
 
 - **One-party consent** (e.g. US federal law and most US states): you may record a

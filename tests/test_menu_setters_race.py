@@ -72,7 +72,8 @@ def test_mac_retention_click_survives_a_reload_while_its_save_is_blocked(tmp_pat
     ctrl, path = _ctrl(tmp_path, monkeypatch, "[transcription]\naudio_retention_days = 7\n")
     app = mac.MacApp.__new__(mac.MacApp)
     app.ctrl, app.cfg = ctrl, ctrl.cfg
-    app._render_retention = lambda: None
+    rendered = []
+    app._render_retention = lambda: rendered.append(True)
     purged = []
     monkeypatch.setattr(ctrl, "purge_audio_now", lambda days=None: purged.append(days))
     hand = "[transcription]\naudio_retention_days = 9\nkeep_audio = false\n"
@@ -89,6 +90,7 @@ def test_mac_retention_click_survives_a_reload_while_its_save_is_blocked(tmp_pat
     saved = load_config(path).transcription
     assert saved.audio_retention_days == 30 and saved.keep_audio is False
     assert purged == [30]  # the purge ran after the write, with the saved value
+    assert rendered  # the macOS check mark updates immediately after the click
     assert not ctrl._dirty
 
 

@@ -523,7 +523,7 @@ dropped; names also never override `Me`.
 Off by default (`summary.provider = "local"`). With `openai` or `anthropic`, each summary sends
 the transcript text of its own session (times and speaker labels, the prompt, the template's
 sections) over HTTPS to that provider, and nothing else leaves the device: no audio, no other
-session, no telemetry. Keys live in the OS keychain, never in `config.toml`. A cloud failure
+session, no telemetry. Keys live in the OS keychain, never in `config.toml`. The sign-in opens the provider's key page, then asks for the key; a summary without one waits for it (`NeedsKey`) and is queued again once it is saved. A cloud failure
 skips that summary with a notice (not retried at each start) and is never answered by the local
 model. The network code is imported only for a cloud provider; `test_summary_cloud.py` checks
 that the local path builds none, and `test_offline.py` keeps the default offline.

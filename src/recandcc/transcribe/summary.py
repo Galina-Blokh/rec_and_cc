@@ -121,6 +121,14 @@ class SummaryUnavailable(RuntimeError):
     fixed reason without any transcript text."""
 
 
+class NeedsKey(SummaryUnavailable):
+    """A cloud provider has no API key stored: the summary waits for one (``provider``)."""
+
+    def __init__(self, provider: str, message: str) -> None:
+        super().__init__(message)
+        self.provider = provider
+
+
 class ModelUnavailable(SummaryUnavailable):
     """This summary model can't be downloaded or loaded (another one may still work)."""
 
@@ -525,7 +533,7 @@ def summarize_session(
         model = resolve_cloud_model(settings.provider, settings.cloud_model)
     else:
         model = summary_model(cfg, segments)
-    template = load_template(cfg.summary.template)  # "" or an unusable file: the built-in sections
+    template = load_template(settings.template)  # empty or unusable: the built-in sections
     try:
         room = SessionInfo.load(directory).started_as_room
     except Exception as e:  # noqa: BLE001 - only a hint for the prompt
@@ -782,7 +790,9 @@ class SummaryQueue:
     It never competes with a recording for the GPU: while ``busy()`` is true (the engine is
     recording or asking) it waits before a session and between model calls. ``notify(title,
     message)`` gets a one-time notice per skip reason and before the model's first download.
-    ``on_done(directory, written, announce)`` runs on the summary thread after every job.
+    ``on_done(directory, written, announce)`` runs on the summary thread after a completed or
+    skipped job. A missing key calls ``needs_key`` after releasing the queued slot instead,
+    preserving the announce flag for the retry after sign-in.
     ``written``: its summary.md was written. ``announce``: it was submitted with
     ``announce=True``, a summary the user asked for. That flag is read when the job ends, under
     the queue's lock, so a request made while the job is queued or running is never lost.
@@ -795,9 +805,11 @@ class SummaryQueue:
         busy: Callable[[], bool] | None = None,
         generate: Generator | None = None,
         poll_s: float = 1.0,
+        needs_key: Callable[[str, Path], None] | None = None,
         on_done: Callable[[Path, bool, bool], None] | None = None,
     ) -> None:
         self.cfg = cfg
+        self.needs_key = needs_key or (lambda provider, directory: None)
         self.notify = notify or (lambda title, message: None)
         self.busy = busy or (lambda: False)
         self.generate = generate
@@ -842,6 +854,7 @@ class SummaryQueue:
         while True:
             directory = self._q.get()
             written = False
+            waiting_for_key = None
             try:
                 self._wait_idle()
                 if not directory.exists():
@@ -852,6 +865,9 @@ class SummaryQueue:
                 self._job(directory)
                 clear_pending(directory)
                 written = True
+            except NeedsKey as e:  # keep the summary owed until a key is saved
+                log.info("summary of %s waits for a %s key", directory.name, e.provider)
+                waiting_for_key = e.provider
             except SummaryUnavailable as e:
                 clear_pending(directory)  # no model here: retrying at every start won't help
                 log.info("summary of %s skipped: %s", directory.name, e)
@@ -867,9 +883,13 @@ class SummaryQueue:
                 with self._queued_lock:
                     self._queued.discard(key)
                     announce = key in self._announce
-                    self._announce.discard(key)
+                    if waiting_for_key is None:
+                        self._announce.discard(key)
                 try:  # before task_done: join() also waits for the callback
-                    self.on_done(directory, written, announce)
+                    if waiting_for_key is not None:
+                        self.needs_key(waiting_for_key, directory)
+                    else:
+                        self.on_done(directory, written, announce)
                 except Exception as e:  # noqa: BLE001 - a callback must never kill the thread
                     log.error("summary callback failed: %s", type(e).__name__)
                 self._q.task_done()

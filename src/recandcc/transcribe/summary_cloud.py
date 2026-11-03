@@ -21,7 +21,7 @@ from time import sleep as _sleep  # a module name, so a test can replace it
 from typing import Any
 
 from ..config import resolve_cloud_model
-from .summary import CLOUD_LABELS, Messages, SummaryUnavailable
+from .summary import CLOUD_LABELS, Messages, NeedsKey, SummaryUnavailable
 
 log = logging.getLogger("recandcc.transcribe")
 
@@ -46,8 +46,10 @@ _KEY = re.compile(r"[!-~]+")  # an API key: printable ASCII, no spaces
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """A redirect would send the key on to wherever it points: a 3xx is an error instead."""
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+    def http_error_302(self, req, fp, code, msg, headers):
+        return None  # before the Location is parsed: a malformed one must not raise
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
 
 
 _OPENER = urllib.request.build_opener(_NoRedirect)
@@ -60,18 +62,21 @@ def _keyring():
 
 
 def get_key(provider: str) -> str | None:
-    """The API key of ``provider``: the keychain entry, else its environment variable. A key that
-    is not printable ASCII is ignored (it could not be sent); the warning does not show it."""
-    key = ""
+    """The API key of ``provider``: the keychain entry, else its environment variable. Each
+    source is checked in turn; one that is not printable ASCII is skipped (never shown)."""
+    stored = ""
     try:
-        key = (_keyring().get_password(SERVICE, provider) or "").strip()
+        stored = _keyring().get_password(SERVICE, provider) or ""
     except Exception as e:  # noqa: BLE001 - a locked or unavailable keychain: the type only
         log.warning("could not read the %s key from the keychain (%s)", provider, type(e).__name__)
-    key = key or os.environ.get(ENV_VARS[provider], "").strip()
-    if key and not _KEY.fullmatch(key):
-        log.warning("the %s API key is not printable ASCII; ignoring it", provider)
-        return None
-    return key or None
+    for raw in (stored, os.environ.get(ENV_VARS[provider], "")):
+        key = raw.strip()
+        if not key:
+            continue
+        if _KEY.fullmatch(key):
+            return key
+        log.warning("a stored or environment %s API key is not printable ASCII; skipped", provider)
+    return None
 
 
 def set_key(provider: str, key: str) -> None:
@@ -140,9 +145,12 @@ def _retry_wait(headers: Any, retries: int) -> float:
     """Seconds before a retry: the server's Retry-After (at most MAX_RETRY_WAIT_S), else 2 s and
     then 4 s."""
     try:
-        return max(0.0, min(float(headers.get("Retry-After")), MAX_RETRY_WAIT_S))
+        wait = float(headers.get("Retry-After"))
     except (AttributeError, TypeError, ValueError):
         return 2.0 * 2**retries
+    if not wait >= 0:  # negative or NaN: not a wait
+        return 2.0 * 2**retries
+    return min(wait, MAX_RETRY_WAIT_S)
 
 
 def _http_reason(label: str, status: int) -> str:
@@ -168,9 +176,10 @@ class CloudGenerator:
         self.effort = effort
         self._key = get_key(provider) or ""
         if not self._key:
-            raise SummaryUnavailable(
+            raise NeedsKey(
+                provider,
                 f"no {CLOUD_LABELS[provider]} API key: set {ENV_VARS[provider]} or store one in "
-                "the keychain"
+                "the keychain",
             )
 
     def __call__(self, messages: Messages, max_tokens: int) -> str:
