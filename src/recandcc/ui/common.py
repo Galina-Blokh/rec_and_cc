@@ -460,7 +460,12 @@ def _is_days(value: object) -> bool:
 
 # Settings-window fields that are NO_ROLLBACK_KEYS: a successful window save writes them.
 WINDOW_KEYS = {"live_captions": "live_captions", "mode": "detection.mode"}
-RELOADED_TRANSCRIPTION_KEYS = ("keep_audio", "audio_retention_days", "speaker_names")
+RELOADED_TRANSCRIPTION_KEYS = (
+    "keep_audio",
+    "audio_retention_days",
+    "speaker_names",
+    "names_from_transcript",
+)
 MODEL_CHANGE_NOTICE = (
     "Applies after RecAndCC restarts; a model not on disk yet is downloaded once then."
 )

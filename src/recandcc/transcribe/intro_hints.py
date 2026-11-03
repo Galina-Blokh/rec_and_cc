@@ -1,6 +1,7 @@
 """Self-introduction hints: "I'm Anna" in a speaker's first minutes suggests a name (#1 A.4).
 
-Only a hint for ``recandcc speakers``: it reads the transcript, never renames, stores or logs
+``recandcc speakers`` only suggests hints. ``confident_names`` also builds a conservative
+session-only rename plan for the post-transcription step; neither function writes or logs
 anything (the matched text is transcript content). The patterns are deliberately strict, so
 a wrong suggestion is rarer than a missed one:
 
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -134,4 +136,44 @@ def transcript_hints(directory: Path) -> dict[str, Hint]:
     return intro_hints([Segment(**s) for s in data.get("segments", [])])
 
 
-__all__ = ["WINDOW", "Hint", "find_intro", "intro_hints", "transcript_hints"]
+def confident_names(
+    segments: list[Segment], window: float = WINDOW, *, single_labels: Collection[str] = ()
+) -> dict[str, str]:
+    """Unambiguous direct introductions for unnamed speakers. Conflicting introductions,
+    names shared by two labels, reported speech and existing names are never assigned.
+    ``single_labels`` contains tracks known to have one speaker; ``Me`` always stays stable."""
+    first: dict[str, float] = {}
+    found: dict[str, dict[str, str]] = {}
+    direct: dict[str, set[str]] = {}
+    taken = {s.speaker.casefold() for s in segments}
+    greeting = re.compile(rf"(?:{_HELLO}|(?:שלום|היי)[,!]?\s+)", _I)
+    for s in sorted(segments, key=lambda s: s.start):
+        label, text = s.speaker, s.text.strip()
+        start = first.setdefault(label, s.start)
+        for trigger, needs in TRIGGERS:
+            for match in trigger.finditer(text):
+                name = _name_after(text[match.end() :], needs)
+                if not name:
+                    continue
+                folded = name.casefold()
+                found.setdefault(label, {})[folded] = name
+                prefix = text[: match.start()].strip()
+                if s.start - start <= window and (not prefix or greeting.fullmatch(prefix + " ")):
+                    direct.setdefault(label, set()).add(folded)
+    planned = {
+        label: next(iter(names.values()))
+        for label, names in found.items()
+        if label != ME
+        and (NUMBERED.fullmatch(label.casefold()) or label in single_labels)
+        and len(names) == 1
+        and set(names) & direct.get(label, set())
+        and not set(names) & taken
+    }
+    return {
+        label: name
+        for label, name in planned.items()
+        if sum(name.casefold() in candidates for candidates in found.values()) == 1
+    }
+
+
+__all__ = ["WINDOW", "Hint", "find_intro", "intro_hints", "transcript_hints", "confident_names"]

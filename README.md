@@ -14,6 +14,11 @@ account, nothing uploaded.
   recognize that voice and write `Anna` instead of `Speaker 2`. Optionally (macOS,
   `names_from_call_app`, off by default) the name shown in the call app's open participants
   panel can be used when it is unambiguous; see [Names from the call app](#names-from-the-call-app).
+- 🏷️ **Names from introductions**: after transcription, clear self-introductions such as
+  “My name is Sebastian” replace speaker labels in every transcript format. This local step
+  is on by default (`names_from_transcript`); uncertain names keep their labels and `Me`
+  stays the owner label. It does not
+  learn voice profiles.
 - 🌍 **English and Russian** are detected automatically, even when the language switches
   mid-meeting. **Hebrew** can be added (`languages = ["en", "ru", "he"]`): captions and
   transcripts show it right to left (Windows captions reorder RTL text themselves, as Tk does no
@@ -325,7 +330,7 @@ install falls back to this CPU 1.5B (logged at INFO). The CPU path peaks at abou
 while loading and about 3.2 GB while generating (measured on an Apple M-series machine), so 8 GB
 Windows laptops may struggle.
 It waits for
-the speaker labels (a slow diarization delays it), a summary cut short by quitting is redone
+the speaker labels and names have been saved (a slow diarization delays it), a summary cut short by quitting is redone
 at the next start (a `.summary-pending` marker in the session folder; a `.summary-source` file records a fingerprint of the transcript text the summary was made from), and after
 `recandcc name-speaker` the app redoes an existing `summary.md` with the new name once idle. Renaming a speaker in the menu, or call-app names, keeps the existing summary, whose text may still mention the old label. Old summaries are not given a fingerprint afterwards: one computed now could describe a transcript that already differs from what the summary was made from.
 

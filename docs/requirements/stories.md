@@ -287,7 +287,14 @@ I don't have to work out who `Speaker 2` was every time.*
   **then** it shows `suggested: Anna (said: …)` next to that label (at most one per label,
   never for `Me`; "I'm sure", "Я думаю", "This is Paris." or "אני מדבר" are not names), with
   `speaker_names` on or off, and
-  nothing is renamed, stored or logged until I run `name-speaker`.
+  that command never renames, stores or logs anything.
+- **Given** `names_from_transcript = true` (default), **when** final speaker labels are ready,
+  **then** direct introductions in a speaker's first 2 minutes rename that speaker in all
+  transcript formats before automatic summaries. Conflicts, duplicates, existing names and
+  reported speech are rejected; unknown speakers retain their labels. Numbered speakers and an
+  `Others` track diarized as a single speaker are eligible. `Me` stays unchanged for summary
+  ownership; an unseparated room track is never guessed. No voice profile is learned; this works with `speaker_names` off.
+- **Given** `names_from_transcript = false`, **then** no automatic introduction names apply.
 - **Measured (synthetic only, not validated):** a voice named once got its name on 21/21 of
   its segments in three later `say`-voice sessions; an unnamed voice was wrongly named on
   5/9 of its segments at threshold 0.6 and 3/9 at the shipped 0.75, which was tuned on the
@@ -403,7 +410,7 @@ its transcript, so that I know what was decided and who does what without reread
 - **Given** `summary.enabled = false` (default), **then** no summary is generated and no
   summary model is downloaded or loaded.
 - **Given** `summary.enabled = true` on Apple silicon, **when** a session's final transcript
-  is written, **then** a background job (never on the audio or UI threads, and never while
+  is saved and final speaker naming is complete (including delayed diarization), **then** a background job (never on the audio or UI threads, and never while
   a recording is in progress: it waits, and pauses between chunks) writes
   `summary.md` next to `transcript.md`: one section per section of the summary template (by
   default six: updates by person, decisions, action items, unresolved questions, unclear
