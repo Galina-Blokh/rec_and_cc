@@ -9,6 +9,7 @@ test never downloads). The transcript is generated text, not a real recording.
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ from recandcc.config import Config
 from recandcc.models import Segment, SessionInfo, TriggerKind
 from recandcc.transcribe import summary
 from recandcc.transcribe.output import write_outputs
+from recandcc.transcribe.summary_template import builtin
 
 HARD_BOUND_S = 120.0  # the story's target: an hour in at most 2 min (slow-only test)
 TARGET_WORDS = 9_000
@@ -104,6 +106,37 @@ def _model_cached(repo: str) -> bool:
 
 
 @pytest.mark.slow
+@pytest.mark.skipif(not summary.mlx_lm_available(), reason="needs Apple silicon with mlx-lm")
+@pytest.mark.parametrize(
+    "language, speech",
+    [
+        ("ru", "Мы решили выпустить обновление в пятницу. Я отправлю отчет завтра."),
+        ("he", "החלטנו לשחרר את העדכון ביום שישי. אשלח את הדוח מחר."),
+    ],
+)
+def test_non_english_meeting_produces_english_summary_offline(
+    tmp_path, monkeypatch, language, speech
+):
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    import huggingface_hub.constants as hub_constants
+
+    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", True)
+    cfg = Config()
+    if not _model_cached(cfg.summary.model):
+        pytest.skip("pinned summary model is not cached (tests never download)")
+    session = SessionInfo(
+        "english-summary", tmp_path, datetime(2026, 11, 3, 10), TriggerKind.MANUAL
+    )
+    session.save()
+    write_outputs(session, [Segment(0, 10, speech, "Me", language)], 10.0, "fake")
+
+    text = summary.summarize_session(tmp_path, cfg).read_text("utf-8")
+    assert re.findall(r"^## (.+)$", text, re.M) == [h for h, _ in builtin().sections]
+    assert not re.search(r"[\u0400-\u04ff\u0590-\u05ff]", text), "summary was not translated"
+    assert "friday" in text.casefold(), "the release decision was lost"
+
+
+@pytest.mark.slow
 @pytest.mark.skipif(
     not summary.mlx_lm_available(), reason="summaries need Apple silicon with mlx-lm"
 )
@@ -144,16 +177,14 @@ def test_summary_timing_one_hour_meeting_offline(tmp_path: Path, monkeypatch, ca
 
     text = path.read_text(encoding="utf-8")
     assert path.name == "summary.md"
-    head, _, actions = text.partition("\n## ")
-    assert head.startswith(("# Summary", "# Краткое содержание"))
-    body = head.split("\n", 1)[1].strip()
-    assert body and body not in ("None.", "Нет."), "empty summary"
-    assert actions.startswith(("Action items", "Задачи"))
-    items = [ln for ln in actions.splitlines()[1:] if ln.startswith("- ")]
+    assert text.startswith("# Meeting summary\n")
+    assert re.findall(r"^## (.+)$", text, re.M) == [h for h, _ in builtin().sections]
+    action = text.split("\n## Action items\n", 1)[1].split("\n## ", 1)[0]
+    items = [ln for ln in action.splitlines() if ln.startswith("- ")]
     # The default (Qwen3.5 4B) finds the planted action items; the Qwen2.5 models it replaced
     # found none on this text (always "None."). Only the format is asserted here; real quality
     # needs the consented set.
-    assert items or actions.split("\n")[2] in ("None.", "Нет."), "malformed action list"
+    assert items or action.strip() in ("None.", "Нет."), "malformed action list"
     assert all(len(i) > 3 and i[2:] not in ("None.", "Нет.") for i in items), "bad action items"
     assert chunk_counts and chunk_counts[0] > 1, "map-reduce path did not run"
     assert elapsed < HARD_BOUND_S, f"summary took {elapsed:.0f}s (story: ~1-2 min)"

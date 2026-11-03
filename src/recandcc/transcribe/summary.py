@@ -1,14 +1,18 @@
-"""Local meeting summaries: ``summary.md`` (short summary + action items) next to a transcript.
+"""Local meeting summaries: ``summary.md`` next to a transcript, one section per template section.
 
 Opt-in (``summary.enabled``). A small instruct model runs through mlx-lm on Apple silicon
 (elsewhere on the CPU through ONNX Runtime, see summary_cpu.py and create_generator),
 pinned in revisions.py and loaded offline-first like Whisper (gpu.local_model_path); with
-``summary.language_models`` the transcript's main spoken language picks it. Long
-transcripts are summarised map-reduce: notes per chunk, then the summary and the action list
-from the notes. ``summary.template`` (summary_template.py) replaces that layout with the sections
-of a template, one model call each. ``summary.provider`` = "openai" or "anthropic" makes one
-call on the timestamped transcript instead (cloud_answer, summary_cloud.py). Everything runs on one
-background ``summary`` thread; logs never contain transcript or summary text.
+``summary.language_models`` the transcript's main spoken language picks it. Summaries are always
+written in English, regardless of the spoken language. Long transcripts
+are reduced map-reduce first: notes per chunk, keeping the timestamps. Then each section of the
+summary template (summary_template.py; by default the built-in six sections) gets one model call
+on those notes, with ``summary.prompt`` in its system message. ``summary.provider`` = "openai" or
+"anthropic" makes one call on the timestamped transcript instead (cloud_answer, summary_cloud.py).
+A local answer that copies non-Latin passages gets one extra translation call; known speaker
+names and empty-section markers are exempt. Cloud answers rely on the English instruction.
+Everything runs on one background ``summary`` thread; logs never contain transcript or summary
+text.
 """
 
 from __future__ import annotations
@@ -26,12 +30,14 @@ import re
 import sys
 import threading
 import time
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
 from ..config import (
     DEFAULT_SUMMARY_MODEL,
+    DEFAULT_SUMMARY_PROMPT,
     PREVIOUS_DEFAULT_SUMMARY_MODEL,
     QWEN_RESEARCH_SUMMARY_MODEL,
     Config,
@@ -65,6 +71,7 @@ MODEL_SIZES = {
 THOUGHT_MARKERS = (("<think>", "</think>"), ("<|channel>thought", "<channel|>"))
 CUT_OFF = "the summary model ran out of tokens while thinking"
 MAX_ROUNDS = 3  # reduce rounds before the notes are cut to fit
+OUTPUT_LANGUAGE = "en"  # independent of the spoken language used to route the model
 LANGUAGE_NAMES = {"en": "English", "ru": "Russian", "he": "Hebrew"}
 # (summary heading, action items heading, "none") per language; English otherwise.
 HEADINGS = {
@@ -127,8 +134,8 @@ class ModelUnavailable(SummaryUnavailable):
 
 
 def main_language(segments: list[Segment]) -> str:
-    """The language with the most speech time ("en" if none is known). It picks both the
-    summary's language (prompt, headings) and its model (summary_model). Overlapping
+    """The language with the most speech time ("en" if none is known). It picks the
+    model (summary_model); summaries are always English. Overlapping
     segments (Me and Others at once) count their shared time once."""
     spans: dict[str, list[tuple[float, float]]] = {}
     for s in segments:
@@ -199,13 +206,50 @@ def chunk_lines(lines: list[str], max_chars: int = 0) -> list[str]:
     return chunks
 
 
+def _language_rule(language: str) -> str:
+    lang = LANGUAGE_NAMES.get(language, f"the language with code '{language}'")
+    return (
+        f"Always answer in {lang}, even when the entire transcript is in another language. "
+        f"Translate all content, including quotations, into {lang}; do not repeat passages in "
+        "their original language. Preserve names, speaker labels and timestamps. "
+        f"For unclear transcription, describe the issue in {lang} without quoting the source."
+    )
+
+
+def _needs_translation(answer: str, speakers: set[str]) -> bool:
+    """Catch copied non-Latin passages in local answers; known speaker names may stay as-is.
+    Latin-script languages rely on the English instruction, as do cloud answers."""
+    for speaker in sorted(speakers, key=len, reverse=True):
+        if speaker:
+            answer = answer.replace(speaker, "")
+    return not _says_none(answer) and any(
+        char.isalpha() and "LATIN" not in unicodedata.name(char, "") for char in answer
+    )
+
+
+def translation_messages(answer: str) -> Messages:
+    """Translate a local model's copied foreign passages without re-summarizing the answer."""
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You translate text into English. Return only the English translation. "
+                "Translate all non-English passages, including text inside quotation marks. "
+                "Keep existing English, Markdown structure, names, speaker labels, numbers and "
+                "timestamps. Do not summarize, add facts, explain or comment."
+            ),
+        },
+        {"role": "user", "content": f"Translate the following text into English:\n\n{answer}"},
+    ]
+
+
 def _system(language: str, room: bool) -> str:
     """The system prompt of every summary call: the answer's language, and who 'Me' is."""
-    lang = LANGUAGE_NAMES.get(language, f"the language with code '{language}'")
     owner = "the owner is one of the numbered speakers in the room" if room else "'Me' is the owner"
     return (
-        f"You summarise meeting transcripts. Lines are 'Speaker: text'; {owner}. "
-        f"Always answer in {lang}, even if parts of the input are in another language. "
+        f"You summarise meeting transcripts. Lines are '[HH:MM:SS] Speaker: text'; {owner}. "
+        f"{_language_rule(language)} "
+        "A different language alone does not make the transcription unclear. "
         "Use only facts from the input; do not invent names, dates or tasks."
     )
 
@@ -219,7 +263,8 @@ def build_messages(
     if task == "notes":
         ask = (
             f"Write concise bullet-point notes of this {what}: key points, decisions, and every "
-            "task with who will do it and when, if said."
+            "task with who will do it and when, if said. Keep the [HH:MM:SS] time of each "
+            "decision and task."
         )
     elif task == "summary":
         ask = f"Summarise this {what} in 3-6 sentences: topic, key points and decisions."
@@ -232,7 +277,7 @@ def build_messages(
         )
     return [
         {"role": "system", "content": _system(language, room)},
-        {"role": "user", "content": f"{ask}\n\n---\n{text}\n---"},
+        {"role": "user", "content": f"{ask}\n\n{_language_rule(language)}\n\n---\n{text}\n---"},
     ]
 
 
@@ -276,9 +321,9 @@ def summarize(
 ) -> tuple[str, str, list[str]]:
     """(language, summary, action items) of a transcript. ``room``: the session started as a
     room session; if its mic speakers were numbered (no 'Me' line), the prompts say so."""
-    language = main_language(segments)
+    language = OUTPUT_LANGUAGE
     room = room and not any(s.speaker == "Me" for s in segments)
-    text = _reduce(transcript_lines(segments), generate, language, max_tokens, room)
+    text = _reduce(timed_transcript_lines(segments), generate, language, max_tokens, room)
     if not text:
         return language, "", []
     summary = generate(build_messages("summary", text, language, room=room), max_tokens).strip()
@@ -307,17 +352,24 @@ def format_summary(language: str, summary: str, items: list[str], model: str) ->
 
 
 def section_messages(
-    heading: str, instruction: str, text: str, language: str, room: bool = False
+    heading: str,
+    instruction: str,
+    text: str,
+    language: str,
+    room: bool = False,
+    prompt: str = DEFAULT_SUMMARY_PROMPT,
 ) -> Messages:
-    """Chat messages for one section of a summary template: that section's content only."""
+    """Chat messages for one section of a summary template: that section's content only, under
+    the rules of ``prompt`` (summary.prompt, the same for every summary)."""
     ask = (
         f"Write only the '{heading}' part of a summary of this meeting transcript, without a "
         f"heading. {instruction or 'Summarise what the meeting says about it.'} "
         f"Write {NONE_MARK} if the transcript has nothing for it."
     )
+    system = " ".join(part for part in (_system(language, room), prompt.strip()) if part)
     return [
-        {"role": "system", "content": _system(language, room)},
-        {"role": "user", "content": f"{ask}\n\n---\n{text}\n---"},
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"{ask}\n\n{_language_rule(language)}\n\n---\n{text}\n---"},
     ]
 
 
@@ -327,17 +379,19 @@ def summarize_sections(
     sections: tuple[tuple[str, str], ...],
     max_tokens: int = 400,
     room: bool = False,
+    prompt: str = DEFAULT_SUMMARY_PROMPT,
 ) -> tuple[str, list[tuple[str, str]]]:
-    """(language, [(heading, answer)]) for a summary template: the notes pass of ``summarize``,
-    then one call per section on the reduced text. An empty transcript needs no call."""
-    language = main_language(segments)
+    """(language, [(heading, answer)]) for a summary template: the notes pass of ``summarize`` on
+    the timestamped lines, then one call per section on the reduced text, with ``prompt`` in each
+    call's system message. An empty transcript needs no call."""
+    language = OUTPUT_LANGUAGE
     room = room and not any(s.speaker == "Me" for s in segments)
-    text = _reduce(transcript_lines(segments), generate, language, max_tokens, room)
+    text = _reduce(timed_transcript_lines(segments), generate, language, max_tokens, room)
     answers = []
     for heading, instruction in sections:
         answer = ""
         if text:
-            messages = section_messages(heading, instruction, text, language, room)
+            messages = section_messages(heading, instruction, text, language, room, prompt)
             answer = generate(messages, max_tokens)
         answers.append((heading, answer))
     return language, answers
@@ -365,7 +419,7 @@ def format_sections(
     language: str, sections: list[tuple[str, str]], model: str, title: str = ""
 ) -> str:
     """summary.md for a template: its title, then each section as ``##`` with the model's answer
-    under it, then the same note as the default layout."""
+    under it, then the note that it was made on this computer."""
     default_title, _, none = HEADINGS.get(language, HEADINGS["en"])
     out = [f"# {title or default_title}", ""]
     for heading, answer in sections:
@@ -399,7 +453,7 @@ def cloud_messages(
     system = f"{_system(language, room)} Answer in Markdown with ## headings."
     return [
         {"role": "system", "content": system},
-        {"role": "user", "content": f"{ask}\n\n---\n{text}\n---"},
+        {"role": "user", "content": f"{ask}\n\n{_language_rule(language)}\n\n---\n{text}\n---"},
     ]
 
 
@@ -408,15 +462,15 @@ def cloud_answer(
     call: Generator,
     prompt: str,
     budget: int,
-    template: SummaryTemplate | None,
+    template: SummaryTemplate,
     room: bool = False,
 ) -> tuple[str, str]:
     """(language, Markdown answer) of a cloud summary: one call on the timestamped transcript, or
     past CLOUD_SINGLE_CALL_CHARS one call per part (with the same prompt) and one on the parts'
     answers. An empty transcript sends nothing: the answer is ""."""
-    language = main_language(segments)
+    language = OUTPUT_LANGUAGE
     room = room and not any(s.speaker == "Me" for s in segments)
-    sections = template.sections if template else ()
+    sections = template.sections
     lines = timed_transcript_lines(segments)
     if not lines:
         return language, ""
@@ -479,7 +533,7 @@ def summarize_session(
         model = resolve_cloud_model(settings.provider, settings.cloud_model)
     else:
         model = summary_model(cfg, segments)
-    template = load_template(settings.template)  # None: the default layout
+    template = load_template(settings.template)  # empty or unusable: the built-in sections
     try:
         room = SessionInfo.load(directory).started_as_room
     except Exception as e:  # noqa: BLE001 - only a hint for the prompt
@@ -489,11 +543,20 @@ def summarize_session(
 
     def run(gen: Generator, name: str) -> tuple[str, str, str]:
         """(language, summary.md text, what the log says was written), made by model ``name``."""
+        speakers = {s.speaker for s in segments}
 
-        def call(messages: Messages, max_tokens: int) -> str:
+        def invoke(messages: Messages, max_tokens: int) -> str:
             if before_call is not None:
                 before_call()
             return gen(messages, max_tokens)
+
+        def call(messages: Messages, max_tokens: int) -> str:
+            answer = invoke(messages, max_tokens)
+            if not cloud and _needs_translation(answer, speakers):
+                answer = invoke(translation_messages(answer), max_tokens)
+                if not answer.strip() or _says_none(answer):
+                    raise SummaryUnavailable("the local model returned no English translation")
+            return answer
 
         if cloud:
             label = CLOUD_LABELS[settings.provider]
@@ -502,14 +565,10 @@ def summarize_session(
             )
             budget = max(settings.max_tokens, CLOUD_ANSWER_TOKENS)
             language, answer = cloud_answer(segments, call, settings.prompt, budget, template, room)
-            title = template.title if template else ""
+            title = template.title
             return language, format_cloud(language, answer, name, label, title), "a cloud answer"
-        if template is None:
-            language, summary, items = summarize(segments, call, cfg.summary.max_tokens, room)
-            text = format_summary(language, summary, items, name)
-            return language, text, f"{len(items)} action item(s)"
         language, answers = summarize_sections(
-            segments, call, template.sections, cfg.summary.max_tokens, room
+            segments, call, template.sections, cfg.summary.max_tokens, room, settings.prompt
         )
         text = format_sections(language, answers, name, template.title)
         return language, text, f"{len(answers)} section(s)"
@@ -731,6 +790,12 @@ class SummaryQueue:
     It never competes with a recording for the GPU: while ``busy()`` is true (the engine is
     recording or asking) it waits before a session and between model calls. ``notify(title,
     message)`` gets a one-time notice per skip reason and before the model's first download.
+    ``on_done(directory, written, announce)`` runs on the summary thread after a completed or
+    skipped job. A missing key calls ``needs_key`` after releasing the queued slot instead,
+    preserving the announce flag for the retry after sign-in.
+    ``written``: its summary.md was written. ``announce``: it was submitted with
+    ``announce=True``, a summary the user asked for. That flag is read when the job ends, under
+    the queue's lock, so a request made while the job is queued or running is never lost.
     """
 
     def __init__(
@@ -741,6 +806,7 @@ class SummaryQueue:
         generate: Generator | None = None,
         poll_s: float = 1.0,
         needs_key: Callable[[str, Path], None] | None = None,
+        on_done: Callable[[Path, bool, bool], None] | None = None,
     ) -> None:
         self.cfg = cfg
         self.needs_key = needs_key or (lambda provider, directory: None)
@@ -748,17 +814,21 @@ class SummaryQueue:
         self.busy = busy or (lambda: False)
         self.generate = generate
         self.poll_s = poll_s
+        self.on_done = on_done or (lambda directory, written, announce: None)
         self._q: queue.Queue[Path] = queue.Queue()
         self._skipped: set[str] = set()
         self._queued: set[Path] = set()  # queued or running (resolved): never twice at once
+        self._announce: set[Path] = set()  # queued or running and asked for: under _queued_lock
         self._queued_lock = threading.Lock()
         threading.Thread(target=self._loop, name="summary", daemon=True).start()
 
-    def submit(self, directory: Path) -> None:
+    def submit(self, directory: Path, announce: bool = False) -> None:
         directory = Path(directory)
         mark_pending(directory)  # removed when done; startup re-queues it if we quit first
         key = directory.resolve()
         with self._queued_lock:
+            if announce:  # read when the job ends (see _loop): a late request still counts
+                self._announce.add(key)
             if key in self._queued:
                 return
             self._queued.add(key)
@@ -783,6 +853,8 @@ class SummaryQueue:
     def _loop(self) -> None:
         while True:
             directory = self._q.get()
+            written = False
+            waiting_for_key = None
             try:
                 self._wait_idle()
                 if not directory.exists():
@@ -792,9 +864,10 @@ class SummaryQueue:
                     continue  # discarded: purge_discarded_sessions deletes it
                 self._job(directory)
                 clear_pending(directory)
-            except NeedsKey as e:  # no key yet: the summary stays owed until one is saved
+                written = True
+            except NeedsKey as e:  # keep the summary owed until a key is saved
                 log.info("summary of %s waits for a %s key", directory.name, e.provider)
-                self.needs_key(e.provider, directory)
+                waiting_for_key = e.provider
             except SummaryUnavailable as e:
                 clear_pending(directory)  # no model here: retrying at every start won't help
                 log.info("summary of %s skipped: %s", directory.name, e)
@@ -806,6 +879,17 @@ class SummaryQueue:
                 log.error("summary of %s failed: %s", directory.name, type(e).__name__)
                 clear_pending(directory)  # e.g. a broken transcript: don't retry every start
             finally:
+                key = directory.resolve()
                 with self._queued_lock:
-                    self._queued.discard(directory.resolve())
+                    self._queued.discard(key)
+                    announce = key in self._announce
+                    if waiting_for_key is None:
+                        self._announce.discard(key)
+                try:  # before task_done: join() also waits for the callback
+                    if waiting_for_key is not None:
+                        self.needs_key(waiting_for_key, directory)
+                    else:
+                        self.on_done(directory, written, announce)
+                except Exception as e:  # noqa: BLE001 - a callback must never kill the thread
+                    log.error("summary callback failed: %s", type(e).__name__)
                 self._q.task_done()

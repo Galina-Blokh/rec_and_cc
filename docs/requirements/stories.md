@@ -405,8 +405,10 @@ its transcript, so that I know what was decided and who does what without reread
 - **Given** `summary.enabled = true` on Apple silicon, **when** a session's final transcript
   is written, **then** a background job (never on the audio or UI threads, and never while
   a recording is in progress: it waits, and pauses between chunks) writes
-  `summary.md` next to `transcript.md`: a short summary and an **Action items** list, in the
-  meeting's main language (English, Russian or Hebrew headings; Hebrew right to left).
+  `summary.md` next to `transcript.md`: one section per section of the summary template (by
+  default six: updates by person, decisions, action items, unresolved questions, unclear
+  transcription, personal data), always in English, regardless of the meeting's spoken language.
+  The transcript stays in its original languages.
 - **Given** a transcript longer than the model's context, **then** it is summarised in
   chunks and the chunk notes are merged (map-reduce).
 - **Then** the model runs locally (mlx-lm), pinned to an exact Hugging Face commit, loaded
@@ -417,12 +419,12 @@ its transcript, so that I know what was decided and who does what without reread
   (re)written, also with `summary.enabled = false`.
 - **Given** `summary.language_models = { he = "mlx-community/Qwen3.5-4B-MLX-4bit" }`
   (Apache-2.0), **when** a meeting's main spoken language (most speech time) is Hebrew,
-  **then** that pinned model writes its summary in Hebrew, loaded only then and freed
+  **then** that pinned model writes its summary in English, loaded only then and freed
   afterwards (one summary model in memory at a time), with thinking off and any thought
   block stripped; other
   meetings, and everyone with the default `{}`, keep `summary.model`. If the routed model
   can't be downloaded or loaded, `summary.model` writes that summary instead. The same
-  measure (most speech time) picks the summary's language and headings.
+  measure (most speech time) picks only the model; the summary is always English.
 - **Then** logs never contain transcript or summary text.
 - **Given** a 1-hour en/ru meeting on an M-series Mac, **then** the summary is ready within
   ~1–2 min, offline. Checked by the slow `test_summary_timing.py` (hard bound 120 s, a
@@ -628,7 +630,7 @@ leaves this computer.* (#177)
   provider with the prompt, the transcript with the time of each paragraph and the template's
   sections (a transcript over 400,000 characters goes in parts first); `summary.md` keeps the
   usual title and says it was written in the cloud, and by which model.
-- **Given** no key (keychain or `RECANDCC_*_API_KEY`), a rejected key, a network failure or a
+- **Given** a rejected key, a network failure or a
   provider error, **then** the summary is skipped with a notice (once for each reason, as for
   local summaries), and the local model is not used. Rate limits and server errors are retried
   twice first (after the server's `Retry-After`, at most 60 s, else 2 s and then 4 s).
@@ -636,4 +638,9 @@ leaves this computer.* (#177)
   requests use HTTPS with certificate checks.
 - **Given** a cloud summary has no key, **then** the provider's key page opens once, the key prompt
   follows, and the summary is written after a key is saved (no failure notice is the only outcome).
+- **When** that setup is cancelled, **then** the summary waits without repeated idle retries and
+  a notice explains how to sign in from the menu. A provider change, including a config reload,
+  resumes waiting summaries using the current choice.
+- **When** Local is selected, **then** it applies immediately for new summary work, an older cloud
+  dialog cannot override it, and a failed settings save never silently restores cloud summaries.
 - **Not yet:** the Windows tray on real hardware; a quality evaluation on real meetings (#4).

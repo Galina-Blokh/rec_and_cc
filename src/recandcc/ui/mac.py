@@ -180,6 +180,9 @@ class MacApp(rumps.App):
             rumps.MenuItem("Forget all voices…", callback=self._forget_voices),
             rumps.MenuItem("Export latest transcript (DOCX + PDF)", callback=self._export),
             rumps.MenuItem("Meeting notes…", callback=lambda _: ctrl.notes_async()),
+            rumps.MenuItem(
+                "Summarize a meeting…", callback=lambda _: ctrl.notes_async(purpose="summarize")
+            ),
             None,
             self.perm_menu,
             self.login_item,
@@ -268,6 +271,11 @@ class MacApp(rumps.App):
                 self._notify(*forgot_notice(ev[1]))
             elif kind == "notes":
                 self._show_notes(ev[1])
+            elif kind == "summary_notes":
+                self._show_summary_pick(ev[1])
+            elif kind == "summary_ready":
+                self._notify("Summary ready", ev[2])
+                open_path(ev[1])
             elif kind == "retention_changed":
                 self._render_retention()
             elif kind == "summaries_changed":
@@ -457,6 +465,7 @@ class MacApp(rumps.App):
 
     def _set_retention(self, sender) -> None:
         self.ctrl.set_retention(sender.retention_days)
+        self._render_retention()
 
     def _render_summaries(self) -> None:
         """The "Summaries with" submenu: the providers (the current one checked), then sign-in
@@ -491,7 +500,6 @@ class MacApp(rumps.App):
     def _ask_key(self, provider: str) -> str:
         """The sign-in prompt (osascript, hidden answer), run on the worker that asked."""
         return signin_answer(osascript(signin_script(provider), timeout=DIALOG_TIMEOUT_S))
-        self._render_retention()
 
     def _toggle_captions(self, sender) -> None:
         self.ctrl.menu_set("live_captions", not self.cfg.live_captions)
@@ -695,6 +703,24 @@ class MacApp(rumps.App):
                 self._notes_lock.release()
 
         threading.Thread(target=run, daemon=True, name="notes-dialog").start()
+
+    def _show_summary_pick(self, notes: list) -> None:
+        """The "Summarize a meeting…" picker: one list of the meetings with a transcript, as a
+        dialog on a worker thread (it shares the meeting notes' one-dialog guard). The pick goes
+        to the Controller, which announces the summary when it is written."""
+        if not notes_ui.summary_choices(notes):
+            self._notify("No transcripts to summarize yet", "Transcribe a meeting first.")
+            return
+        if not self._notes_lock.acquire(blocking=False):
+            return
+
+        def run():
+            try:
+                notes_ui.run_summary_pick(notes, osascript, self.ctrl.note_action_async)
+            finally:
+                self._notes_lock.release()
+
+        threading.Thread(target=run, daemon=True, name="summary-pick").start()
 
     def _maybe_onboard(self) -> None:
         if self._onboarded:

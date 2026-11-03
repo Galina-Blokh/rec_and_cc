@@ -636,6 +636,7 @@ class TrayApp:
         self._naming_since = 0.0  # monotonic start of the open flow
         self._naming_lock = threading.Lock()
         self._forget_open = False  # the forget confirmation is up
+        self._summary_open = False  # the "Summarize a meeting…" list is up
         self.icon = pystray.Icon(
             "RecAndCC", make_icon(COLORS["ask"], False, False), "RecAndCC", menu=self._menu()
         )
@@ -774,6 +775,7 @@ class TrayApp:
             Item("Search transcripts…", lambda: self.search.post("ask")),
             Item("Export latest transcript (DOCX + PDF)", lambda: self.ctrl.export_async()),
             Item("Meeting notes…", lambda: self.ctrl.notes_async()),
+            Item("Summarize a meeting…", lambda: self.ctrl.notes_async(purpose="summarize")),
             Item("Forget all voices…", self._forget_voices),
             Item("Permissions", pystray.Menu(perms)),
             Item("Languages", pystray.Menu(languages)),
@@ -948,6 +950,32 @@ class TrayApp:
 
         threading.Thread(target=run, daemon=True, name="forget-voices-dialog").start()
 
+    def _summary_pick(self, notes) -> None:
+        """The "Summarize a meeting…" picker: one list of the meetings with a transcript, in a
+        dialog on a worker thread (as the speaker pickers are); the pick goes to the Controller.
+        One list at a time, as on macOS."""
+        choices = notes_ui.summary_choices(notes)
+        if not choices:
+            self._notify("No transcripts to summarize yet", "Transcribe a meeting first.")
+            return
+        with self._naming_lock:
+            if self._summary_open:
+                return
+            self._summary_open = True
+        labels = [notes_ui.note_label(n) for n in choices]
+        pick = notes_ui.SUMMARY_PICK
+
+        def run() -> None:
+            try:
+                i = self._dialog(pick["title"], pick["prompt"], choices=labels, ok=pick["ok"])
+                if isinstance(i, int) and 0 <= i < len(choices):
+                    self.ctrl.note_action_async(choices[i].directory, "summarize", reopen=False)
+            finally:
+                with self._naming_lock:
+                    self._summary_open = False
+
+        threading.Thread(target=run, daemon=True, name="summary-pick").start()
+
     # ------------------------------------------------------------------ polling
     def _poll(self) -> None:
         while not self._stop.wait(0.5):
@@ -999,7 +1027,12 @@ class TrayApp:
                 self.search.post("results", ev[1], ev[2])  # failures and no matches too
             elif ev[0] == "notes":
                 self.notes.post("notes", ev[1])
-            elif ev[0] in ("retention_changed", "summaries_changed"):  # e.g. a reverted save
+            elif ev[0] == "summary_notes":
+                self._summary_pick(ev[1])
+            elif ev[0] == "summary_ready":
+                self._notify("Summary ready", ev[2])
+                threading.Thread(target=open_path, args=(ev[1],), daemon=True).start()
+            elif ev[0] in ("retention_changed", "summaries_changed"):
                 self.icon.update_menu()
             elif ev[0] == "summary_needs_key":
                 self.ctrl.on_summary_needs_key(ev[1], ev[2], self._ask_key)

@@ -1496,6 +1496,7 @@ def test_hand_edited_semantic_setting_is_applied_to_a_running_app(tmp_path, monk
         _save_lock=threading.Lock(),
         _sync_index_lock=threading.Lock(),
         _lang_lock=threading.Lock(),
+        _signin_lock=threading.Lock(),
         _dirty_lock=threading.Lock(),
         _dirty={},
         _unsaved=set(),
@@ -1658,6 +1659,7 @@ def _reload_ctrl(cfg, new, sync_index=None):
     ctrl = SimpleNamespace(
         cfg=cfg,
         _save_lock=threading.Lock(),
+        _signin_lock=threading.Lock(),
         _sync_index_lock=threading.Lock(),
         _lang_lock=threading.Lock(),
         _dirty_lock=threading.Lock(),

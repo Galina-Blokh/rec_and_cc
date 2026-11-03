@@ -37,8 +37,12 @@ from recandcc.transcribe.output import PDI, RLI, write_outputs
 SPOKEN = "the merger price is 42 million"
 
 
+SECTION = re.compile(r"Write only the '(.+?)' part")
+
+
 class FakeGen:
-    """Records prompts; answers by task, so the output shows which step produced what."""
+    """Records prompts; answers by task, so the output shows which step produced what. A section
+    of summary.md gets ``actions`` under "Action items" and one summary line under any other."""
 
     def __init__(self, actions: str = "- Anna sends the deck by Friday\n- Me books the room"):
         self.calls: list[str] = []
@@ -46,6 +50,10 @@ class FakeGen:
 
     def __call__(self, messages, max_tokens):
         user = messages[-1]["content"]
+        section = SECTION.search(user)
+        if section:
+            self.calls.append("section")
+            return self.actions if section.group(1) == "Action items" else "We agreed on the plan."
         task = "notes" if "notes" in user else "summary" if "Summarise" in user else "actions"
         self.calls.append(task)
         return {"notes": "- a note", "summary": "We agreed on the plan.", "actions": self.actions}[
@@ -73,7 +81,7 @@ def seg(text: str, lang: str = "en", speaker: str = "Me", t: float = 0) -> Segme
     "lang, name",
     [("en", "English"), ("ru", "Russian"), ("he", "Hebrew"), ("de", "the language with code 'de'")],
 )
-def test_prompts_ask_for_the_meetings_language(lang, name):
+def test_message_builder_honors_its_output_language(lang, name):
     for task, phrase in [("notes", "notes"), ("summary", "Summarise"), ("actions", "NONE")]:
         system, user = summary.build_messages(task, "Me: hi", lang, "2 of 3")
         assert f"Always answer in {name}" in system["content"]
@@ -114,9 +122,8 @@ def test_unpinned_language_model_is_ignored_unless_allowed(tmp_path, caplog):
     assert summary.summary_model(cfg, segs) == "someone/unpinned-llm"
 
 
-def test_mixed_meeting_uses_one_language_for_model_prompt_and_headings(tmp_path, monkeypatch):
-    """Long Hebrew speech with few characters, plus a wordy English line: Hebrew wins for
-    the model and for the summary's language."""
+def test_mixed_meeting_routes_by_spoken_language_but_summarizes_in_english(tmp_path, monkeypatch):
+    """Hebrew still picks its routed model; the summary is always in English."""
     seen = []
 
     class Gen(FakeGen):
@@ -133,8 +140,34 @@ def test_mixed_meeting_uses_one_language_for_model_prompt_and_headings(tmp_path,
     cfg.summary.language_models = {"he": PREVIOUS_DEFAULT_SUMMARY_MODEL}  # not the default
     segs = [Segment(0, 30, "כן", "Me", "he"), seg("a much longer English sentence", t=40)]
     text = summary.summarize_session(make_session(tmp_path, segs), cfg).read_text("utf-8")
-    assert seen[0] == PREVIOUS_DEFAULT_SUMMARY_MODEL and "Always answer in Hebrew" in seen[1]
-    assert text.startswith("# סיכום")
+    assert seen[0] == PREVIOUS_DEFAULT_SUMMARY_MODEL
+    assert all("Always answer in English" in system for system in seen[1:])
+    assert text.startswith("# Meeting summary")
+
+
+@pytest.mark.parametrize("lang", ["ru", "he", "ja", ""])
+@pytest.mark.parametrize("chunk_chars", [80, 8_000])
+@pytest.mark.parametrize("templated", [False, True])
+def test_local_summaries_and_chunk_notes_are_english(lang, chunk_chars, templated, monkeypatch):
+    monkeypatch.setattr(summary, "CHUNK_CHARS", chunk_chars)
+    segments = [
+        seg("Обсудим бюджет. נדבר על התקציב.", lang, f"Speaker {i}", i * 5) for i in range(4)
+    ]
+    calls = []
+
+    def generate(messages, max_tokens):
+        calls.append(messages)
+        return "- Budget approved."
+
+    if templated:
+        language, _ = summary.summarize_sections(segments, generate, (("Decisions", "Decisions."),))
+    else:
+        language, _, _ = summary.summarize(segments, generate)
+    assert language == "en"
+    assert calls and all("Always answer in English" in m[0]["content"] for m in calls)
+    assert any("Обсудим бюджет" in m[-1]["content"] for m in calls)
+    if chunk_chars == 80:
+        assert any("(part " in m[-1]["content"] for m in calls)
 
 
 def test_routed_model_unavailable_falls_back_to_the_default(tmp_path, monkeypatch, caplog):
@@ -453,15 +486,88 @@ def test_summary_md_next_to_the_transcript(tmp_path):
     path = summary.summarize_session(d, Config(), FakeGen(actions="NONE"))
     assert path == d / "summary.md"
     text = path.read_text("utf-8")
-    assert text.startswith("# Краткое содержание\n\nWe agreed on the plan.\n\n## Задачи\n\nНет.")
+    assert text.startswith(
+        "# Meeting summary\n\n## Updates by person\n\nWe agreed on the plan.\n\n"
+    )
+    assert "## Action items\n\nNone.\n" in text
     assert "by Qwen3.5-4B-MLX-4bit;" in text  # the footer names the model that wrote it
 
 
-def test_hebrew_summary_is_right_to_left(tmp_path):
+def test_hebrew_meeting_summary_is_english_without_rtl_isolates(tmp_path):
     d = make_session(tmp_path, [seg("שלום, נדבר על התקציב", "he")])
     text = summary.summarize_session(d, Config(), FakeGen()).read_text("utf-8")
-    assert "# סיכום" in text and "## משימות" in text
-    assert f"- {RLI}Anna sends the deck by Friday{PDI}" in text
+    assert "# Meeting summary" in text and "## Action items" in text
+    assert "- Anna sends the deck by Friday" in text
+    assert RLI not in text and PDI not in text
+
+
+def test_copied_foreign_quotes_get_one_local_translation_and_pause_hook(tmp_path):
+    translated = []
+    pauses = []
+
+    class Gen(FakeGen):
+        def __call__(self, messages, max_tokens):
+            if messages[0]["content"].startswith("You translate text into English"):
+                translated.append(messages)
+                return '- [00:00:00] "Release the update on Friday."'
+            if "Write only the 'Unclear transcription' part" in messages[-1]["content"]:
+                return '- [00:00:00] "Выпустить обновление в пятницу."'
+            return super().__call__(messages, max_tokens)
+
+    d = make_session(tmp_path, [seg("Выпустить обновление в пятницу.", "ru")])
+    before = (d / "transcript.json").read_bytes()
+    text = summary.summarize_session(
+        d, Config(), Gen(), before_call=lambda: pauses.append(True)
+    ).read_text("utf-8")
+    assert len(translated) == 1 and len(pauses) == 7
+    assert "Выпустить" in translated[0][-1]["content"]
+    assert '"Release the update on Friday."' in text and "Выпустить" not in text
+    assert (d / "transcript.json").read_bytes() == before
+
+
+def test_non_latin_speaker_names_and_none_do_not_need_translation():
+    assert not summary._needs_translation("- Гали: Send the report.", {"Гали"})
+    assert not summary._needs_translation("אין.", set())
+    assert not summary._needs_translation("- René: Send the report.", set())
+    assert summary._needs_translation("- Выпустить обновление.", {"Me"})
+
+
+@pytest.mark.parametrize("translation", ["", "  \n", "NONE"])
+def test_failed_translation_preserves_the_previous_summary_and_source(tmp_path, translation):
+    def generate(messages, max_tokens):
+        if messages[0]["content"].startswith("You translate text into English"):
+            return translation
+        return "- Выпустить обновление."
+
+    d = make_session(tmp_path, [seg("Выпустить обновление.", "ru")])
+    previous = "# Summary\n\nKeep this existing summary.\n"
+    (d / summary.SUMMARY_NAME).write_text(previous, "utf-8")
+    (d / summary.SOURCE_NAME).write_text("previous fingerprint", "utf-8")
+    with pytest.raises(summary.SummaryUnavailable, match="no English translation"):
+        summary.summarize_session(d, Config(), generate)
+    assert (d / summary.SUMMARY_NAME).read_text("utf-8") == previous
+    assert (d / summary.SOURCE_NAME).read_text("utf-8") == "previous fingerprint"
+
+
+def test_foreign_chunk_notes_are_translated_before_sections(tmp_path, monkeypatch):
+    monkeypatch.setattr(summary, "CHUNK_CHARS", 80)
+    notes, translations = [], []
+
+    def generate(messages, max_tokens):
+        if messages[0]["content"].startswith("You translate text into English"):
+            translations.append(messages)
+            return "- Friday release."
+        if "Write concise bullet-point notes" in messages[-1]["content"]:
+            notes.append(messages)
+            return "- Выпустить обновление."
+        assert "Выпустить" not in messages[-1]["content"]
+        return "NONE"
+
+    segments = [
+        seg("Выпустить обновление в пятницу.", "ru", f"Speaker {i}", i * 5) for i in range(4)
+    ]
+    summary.summarize_session(make_session(tmp_path, segments), Config(), generate)
+    assert len(notes) > 1 and len(translations) == len(notes)
 
 
 def test_empty_transcript_needs_no_model(tmp_path):
@@ -754,6 +860,7 @@ def _controller(cfg):
 
     ctrl = Controller.__new__(Controller)  # only the post-transcription wiring
     ctrl.events, ctrl.cfg, ctrl._lock = queue.Queue(), cfg, threading.Lock()
+    ctrl._signin_lock, ctrl._waiting_summaries = threading.Lock(), {}
     ctrl.refresh_async = lambda force=False: None
     ctrl._index_session = lambda directory: None
     ctrl.engine = types.SimpleNamespace(state=types.SimpleNamespace(status="idle"))
@@ -881,10 +988,10 @@ def test_a_queued_session_is_not_summarised_twice(tmp_path):
     q.submit(Path(str(d) + "/."))  # e.g. startup's re-queue of the same session
     gate.set()
     q.join()
-    assert gen.calls == ["summary", "actions"]  # one summary
+    assert gen.calls == ["section"] * 6  # one summary: one call per section of the built-in one
     q.submit(d)  # done: a later stale marker runs again
     q.join()
-    assert len(gen.calls) == 4
+    assert len(gen.calls) == 12
 
 
 def test_discarded_session_is_skipped_and_its_marker_cleared(tmp_path):
@@ -894,6 +1001,68 @@ def test_discarded_session_is_skipped_and_its_marker_cleared(tmp_path):
     q.submit(d)
     q.join()
     assert not (d / "summary.md").exists() and not (d / summary.PENDING_MARKER).exists()
+
+
+class Flaky(FakeGen):
+    """Fails on any transcript that says "boom", as a model error would."""
+
+    def __call__(self, messages, max_tokens):
+        if any("boom" in m["content"] for m in messages):
+            raise RuntimeError("the model fell over")
+        return super().__call__(messages, max_tokens)
+
+
+def test_on_done_reports_each_job_with_whether_it_wrote_and_was_asked_for(tmp_path):
+    written = make_session(tmp_path / "a", [seg("hello")])
+    discarded = make_session(tmp_path / "b", [seg("hi")])
+    (discarded / SessionInfo.DISCARD_MARKER).touch()
+    failed = make_session(tmp_path / "c", [seg("boom")])
+    reports = []
+
+    def on_done(directory, ok, asked):
+        reports.append((directory, ok, asked))
+
+    q = summary.SummaryQueue(Config(), generate=Flaky(), on_done=on_done)
+    q.submit(written, announce=True)
+    q.submit(discarded)
+    q.submit(failed, announce=True)
+    q.join()  # join() also waits for the callbacks
+    assert reports == [(written, True, True), (discarded, False, False), (failed, False, True)]
+
+
+def test_a_request_made_while_its_job_is_queued_is_announced_by_that_job(tmp_path):
+    d = make_session(tmp_path, [seg("hello")])
+    gate = threading.Event()  # the job waits while the queue is busy
+    reports = []
+
+    def on_done(directory, ok, asked):
+        reports.append((ok, asked))
+
+    q = summary.SummaryQueue(
+        Config(), generate=FakeGen(), busy=lambda: not gate.is_set(), poll_s=0.001, on_done=on_done
+    )
+    q.submit(d)  # automatic
+    q.submit(d, announce=True)  # asked for before the job starts: one job, announced
+    gate.set()
+    q.join()
+    assert reports == [(True, True)]
+
+
+def test_a_raising_on_done_never_stops_the_queue(tmp_path):
+    first = make_session(tmp_path / "a", [seg("hello")])
+    second = make_session(tmp_path / "b", [seg("hi")])
+    seen = []
+
+    def on_done(directory, ok, asked):
+        seen.append(directory)
+        if directory == first:
+            raise RuntimeError("callback")
+
+    q = summary.SummaryQueue(Config(), generate=FakeGen(), on_done=on_done)
+    q.submit(first)
+    q.submit(second)
+    q.join()
+    assert seen == [first, second] and (second / "summary.md").exists()
 
 
 def test_missing_model_offline_is_skipped_with_one_notice(tmp_path, monkeypatch, caplog):
@@ -926,7 +1095,7 @@ def test_other_platforms_skip_the_summary(tmp_path, monkeypatch):
 def test_logs_never_contain_transcript_or_summary_text(tmp_path, caplog):
     class Leaky(FakeGen):
         def __call__(self, messages, max_tokens):
-            if "Summarise" in messages[-1]["content"]:
+            if "Write only the" in messages[-1]["content"]:
                 raise RuntimeError(messages[-1]["content"])  # an error quoting the prompt
             return SPOKEN
 
@@ -936,7 +1105,7 @@ def test_logs_never_contain_transcript_or_summary_text(tmp_path, caplog):
         q = summary.SummaryQueue(Config(), generate=Leaky())
         q.submit(d)
         q.join()
-    assert "written: 1 action item(s)" in caplog.text
+    assert "written: 6 section(s)" in caplog.text
     assert "failed: RuntimeError" in caplog.text
     assert SPOKEN not in caplog.text
 
@@ -1046,8 +1215,7 @@ def test_real_model_summarises_en_and_ru(tmp_path):
             tmp_path / lang, [seg(t, lang, f"Speaker {i}") for i, t in enumerate(lines)]
         )
         text = summary.summarize_session(d, Config()).read_text("utf-8")
-        heading = summary.HEADINGS[lang][1]
-        assert f"## {heading}" in text and len(text) > 80
+        assert "## Action items" in text and "## Updates by person" in text and len(text) > 80
 
 
 def test_a_numbered_room_session_says_the_owner_is_one_of_the_room_speakers():

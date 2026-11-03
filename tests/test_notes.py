@@ -323,10 +323,12 @@ def test_mac_dialog_flow(tmp_path):
     listed = notes.scan_notes(tmp_path)
     acted, opened = [], []
 
+    def act(directory, action, title="", reopen=True):
+        acted.append((directory, action, title, reopen))
+
     def run(*answers):
         replies = iter(answers)
-        notes.run_dialogs(listed, lambda _script: next(replies), lambda *a: acted.append(a),
-                          opened.append)  # fmt: skip
+        notes.run_dialogs(listed, lambda _script: next(replies), act, opened.append)
 
     run("false")  # cancelled
     run("1. x", "Open transcript")
@@ -338,9 +340,9 @@ def test_mac_dialog_flow(tmp_path):
     run("1. x", "Summarize")
     assert opened == [s.directory / "transcript.md"]
     assert acted == [
-        (s.directory, "rename", "A, text returned: B"),
-        (s.directory, "delete"),
-        (s.directory, "summarize"),
+        (s.directory, "rename", "A, text returned: B", True),
+        (s.directory, "delete", "", True),
+        (s.directory, "summarize", "", False),  # no Meeting notes list again after it
     ]
 
 
@@ -361,7 +363,7 @@ def test_summarize_queues_a_summary_for_a_chosen_meeting(tmp_path, monkeypatch):
     s = make_session(tmp_path, "140312_zoom-us", T0, transcribed=True)
     write_transcript(s.directory)
     queued: list[Path] = []
-    monkeypatch.setattr(Controller, "_summarize", lambda self, d: queued.append(d))
+    monkeypatch.setattr(Controller, "_summarize", lambda self, d, announce=False: queued.append(d))
     c = _ctrl(tmp_path)
     assert not c.cfg.summary.enabled  # works with automatic summaries off
     c.note_action_async(s.directory, "summarize")
@@ -371,3 +373,151 @@ def test_summarize_queues_a_summary_for_a_chosen_meeting(tmp_path, monkeypatch):
     c.note_action_async(s.directory, "summarize")
     assert _wait_for(c, "notice")[1] == "No transcript to summarize"
     assert queued == [s.directory]
+
+
+def test_summary_pick_lists_only_meetings_with_a_transcript(tmp_path):
+    done = make_session(tmp_path, "140312_zoom-us", T0, transcribed=True)
+    write_transcript(done.directory)
+    make_session(tmp_path, "150000_manual", T0 + timedelta(hours=1), app=None)  # no transcript
+    listed = notes.scan_notes(tmp_path)
+    assert [n.directory for n in notes.summary_choices(listed)] == [done.directory]
+    shown, acted = [], []
+
+    def act(directory, action, reopen=True):
+        acted.append((directory, action, reopen))
+
+    notes.run_summary_pick(listed, lambda s: shown.append(s) or "1. x", act)
+    assert "zoom.us" in shown[0] and "Manual recording" not in shown[0]
+    assert "Summarize a meeting" in shown[0]
+    notes.run_summary_pick(listed, lambda s: "false", act)  # cancelled
+    assert acted == [(done.directory, "summarize", False)]
+
+
+def test_summarize_scan_posts_the_picker_list(tmp_path):
+    s = make_session(tmp_path, "140312_zoom-us", T0, transcribed=True)
+    write_transcript(s.directory)
+    c = _ctrl(tmp_path)
+    c.notes_async(purpose="summarize")
+    assert [n.directory for n in _wait_for(c, "summary_notes")[1]] == [s.directory]
+
+
+def test_only_summaries_asked_for_from_the_menu_are_announced(tmp_path, monkeypatch):
+    from recandcc.engine import IDLE
+    from recandcc.transcribe import summary
+
+    s = make_session(tmp_path, "140312_zoom-us", T0, transcribed=True)
+    write_transcript(s.directory)
+    fail, scanned = [False], threading.Event()  # fail: the next model run errors
+
+    def writer(directory, *args, **kwargs):  # stands in for the local model
+        if fail[0]:
+            raise RuntimeError("model fell over")
+        (directory / "summary.md").write_text("# Summary\n", encoding="utf-8")
+        return directory / "summary.md"
+
+    def announced():
+        return [e for e in list(c.events.queue) if e[0] == "summary_ready"]
+
+    monkeypatch.setattr(summary, "summarize_session", writer)
+    # the last step of a menu action (after its notice): the job is queued by then
+    monkeypatch.setattr(notes, "scan_notes", lambda d: (scanned.set(), [])[1])
+    c = _ctrl(tmp_path)
+    c.engine.state.status = IDLE  # the real queue, never busy here
+    c._summarize(s.directory)  # automatic, after transcription: opens nothing
+    c._summaries.join()
+    assert announced() == []
+    fail[0] = True
+    c.note_action_async(s.directory, "summarize")  # asked for, and it fails
+    assert scanned.wait(5)
+    c._summaries.join()
+    assert ("notice", "Summary not written", "zoom.us") in list(c.events.queue)
+    fail[0], scanned = False, threading.Event()
+    c._summarize(s.directory)  # the failed request left nothing behind: still nothing opens
+    c._summaries.join()
+    assert announced() == []
+    c.note_action_async(s.directory, "summarize")  # asked for, and written
+    assert scanned.wait(5)
+    c._summaries.join()
+    assert announced() == [("summary_ready", s.directory / "summary.md", "zoom.us")]
+
+
+def test_a_request_made_while_labels_are_pending_is_one_summary_after_them(tmp_path, monkeypatch):
+    from recandcc.engine import IDLE
+    from recandcc.transcribe import summary
+
+    s = make_session(tmp_path, "140312_zoom-us", T0, transcribed=True)
+    write_transcript(s.directory)
+    writes, gate = [], threading.Event()
+
+    def writer(directory, *args, **kwargs):  # stands in for the local model
+        writes.append(directory)
+        gate.wait(5)  # runs until the test has queued the rest, as a slow model would
+        (directory / "summary.md").write_text("# Summary\n", encoding="utf-8")
+        return directory / "summary.md"
+
+    class LabelsPending:  # a transcriber whose speaker labels are still to come
+        def __init__(self):
+            self.waiting = []
+
+        def after_labels(self, directory, fn):
+            self.waiting.append(fn)
+
+    monkeypatch.setattr(summary, "summarize_session", writer)
+    monkeypatch.setattr(notes, "scan_notes", lambda d: [])
+    c = _ctrl(tmp_path)
+    c.engine.state.status = IDLE
+    c.transcriber = LabelsPending()
+    c._summarize_when_labelled(s.directory)  # the automatic one, queued at transcription
+    c.note_action_async(s.directory, "summarize")  # the menu's, before the labels are final
+    assert _wait_for(c, "notice")[1] == "Writing the summary"
+    assert writes == []  # nothing is written from the unlabelled transcript
+    for fn in c.transcriber.waiting:  # the labels are final: both waiters run, in order
+        fn()
+    gate.set()
+    c._summaries.join()
+    assert writes == [s.directory]  # one summary, and it is the one announced
+    announced = [e for e in list(c.events.queue) if e[0] == "summary_ready"]
+    assert announced == [("summary_ready", s.directory / "summary.md", "zoom.us")]
+
+
+def test_a_summary_picked_from_the_picker_does_not_reopen_meeting_notes(tmp_path, monkeypatch):
+    s = make_session(tmp_path, "140312_zoom-us", T0, transcribed=True)
+    write_transcript(s.directory)
+    scanned = threading.Event()
+    monkeypatch.setattr(Controller, "_summarize", lambda self, d, announce=False: None)
+    monkeypatch.setattr(notes, "scan_notes", lambda d: (scanned.set(), [])[1])
+    c = _ctrl(tmp_path)
+    c.note_action_async(s.directory, "summarize", reopen=False)
+    assert _wait_for(c, "notice")[1] == "Writing the summary"
+    assert not scanned.wait(0.2)  # the picker leaves Meeting notes closed
+    c.note_action_async(s.directory, "summarize")  # from Meeting notes: a fresh list follows
+    assert _wait_for(c, "notes")[1] == []
+
+
+def test_mac_summary_picker_and_ready_notice(tmp_path, monkeypatch):
+    pytest.importorskip("rumps")
+    from recandcc.ui import mac
+
+    s = make_session(tmp_path, "140312_zoom-us", T0, transcribed=True)
+    write_transcript(s.directory)
+    notices, opened, acted, picked = [], [], [], threading.Event()
+    monkeypatch.setattr(mac, "osascript", lambda script, timeout=None: "1. x")
+    monkeypatch.setattr(mac, "open_path", opened.append)
+    app = mac.MacApp.__new__(mac.MacApp)  # only the picker wiring: no menu, no timer
+    app._notify = lambda title, message: notices.append((title, message))
+    app._notes_lock = threading.Lock()
+    app.ctrl = types.SimpleNamespace(
+        events=queue.Queue(),
+        note_action_async=lambda d, action, reopen=True: (
+            acted.append((d, action, reopen)),
+            picked.set(),
+        ),
+    )
+    app._show_summary_pick([])
+    assert notices == [("No transcripts to summarize yet", "Transcribe a meeting first.")]
+    app._show_summary_pick(notes.scan_notes(tmp_path))
+    assert picked.wait(5) and acted == [(s.directory, "summarize", False)]
+    app.ctrl.events.put(("summary_ready", s.directory / "summary.md", "zoom.us"))
+    app._drain_events()
+    assert notices[-1] == ("Summary ready", "zoom.us")
+    assert opened == [s.directory / "summary.md"]

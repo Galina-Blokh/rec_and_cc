@@ -24,6 +24,7 @@ from recandcc.config import DEFAULT_SUMMARY_PROMPT, Config, load_config
 from recandcc.models import Segment, SessionInfo, TriggerKind
 from recandcc.transcribe import summary, summary_cloud
 from recandcc.transcribe.output import PDI, RLI, write_outputs
+from recandcc.transcribe.summary_template import builtin
 
 KEY = "sk-test-do-not-leak"
 REAL_OPENER = summary_cloud._OPENER  # the no_network guard replaces it per test
@@ -99,7 +100,7 @@ class Local:
         pass
 
 
-def test_local_summaries_build_no_cloud_generator_and_keep_their_prompts(tmp_path, monkeypatch):
+def test_local_summaries_build_no_cloud_generator_and_share_the_prompt(tmp_path, monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("a local summary built a cloud generator")
 
@@ -110,8 +111,24 @@ def test_local_summaries_build_no_cloud_generator_and_keep_their_prompts(tmp_pat
     text = summary.summarize_session(d, Config()).read_text("utf-8")
     sent = json.dumps(Local.calls)
     assert "Generated on this computer" in text
-    assert DEFAULT_SUMMARY_PROMPT not in sent and "Answer in Markdown" not in sent
-    assert "[00:00:05]" not in sent  # the local prompts keep their own transcript lines
+    assert len(Local.calls) == 6  # one call per section of the built-in template
+    assert DEFAULT_SUMMARY_PROMPT in sent  # the prompt applies to local summaries too
+    assert "Answer in Markdown" not in sent  # the cloud's own instruction stays cloud-only
+    assert "[00:00:05] Me: we ship the beta on Friday" in sent  # timed, as in the cloud
+
+
+def test_cloud_summary_without_a_template_asks_for_the_builtin_sections(
+    tmp_path, monkeypatch, fake_keychain
+):
+    fake_keychain[("RecAndCC", "openai")] = KEY
+    seen = serve(monkeypatch, {"output_text": "## Decisions\n- Ship on Friday."})
+    d = make_session(tmp_path, [Segment(5, 9, SPOKEN, "Me", "en")])
+    text = summary.summarize_session(d, cloud_cfg("openai")).read_text("utf-8")
+    user = json.loads(seen[0].data)["input"][-1]["content"]
+    assert user.startswith(DEFAULT_SUMMARY_PROMPT)
+    for heading, _ in builtin().sections:
+        assert f"- {heading}:" in user
+    assert text.startswith("# Meeting summary\n")
 
 
 def test_cloud_summary_without_a_key_fails_before_anything_is_sent(tmp_path):
@@ -119,6 +136,24 @@ def test_cloud_summary_without_a_key_fails_before_anything_is_sent(tmp_path):
     with pytest.raises(summary.SummaryUnavailable, match="OpenAI API key"):
         summary.summarize_session(d, cloud_cfg("openai"))
     assert not (d / "summary.md").exists()
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+def test_a_cloud_answer_never_triggers_a_second_translation_request(
+    tmp_path, monkeypatch, fake_keychain, provider
+):
+    # An unexpected foreign answer must not silently make extra cloud requests.
+    foreign = "## Decisions\n- Выпустить обновление."
+    reply = (
+        {"output_text": foreign}
+        if provider == "openai"
+        else {"content": [{"type": "text", "text": foreign}]}
+    )
+    fake_keychain[("RecAndCC", provider)] = KEY
+    requests = serve(monkeypatch, reply)
+    d = make_session(tmp_path, [Segment(0, 5, "Выпустить обновление.", "Me", "ru")])
+    summary.summarize_session(d, cloud_cfg(provider))
+    assert len(requests) == 1
 
 
 def test_keys_come_from_the_keychain_and_the_environment_is_the_fallback(
@@ -147,14 +182,17 @@ def test_a_key_that_is_not_printable_ascii_is_refused_without_being_shown(
     assert summary_cloud.get_key("openai") == "sk-env"  # the next source is still tried
 
 
+@pytest.mark.parametrize(
+    "language, speech", [("en", SPOKEN), ("ru", "Выпустим в пятницу."), ("he", "נשחרר ביום שישי.")]
+)
 def test_openai_request_carries_prompt_timed_transcript_and_template(
-    tmp_path, monkeypatch, fake_keychain
+    tmp_path, monkeypatch, fake_keychain, language, speech
 ):
     fake_keychain[("RecAndCC", "openai")] = KEY
     seen = serve(monkeypatch, {"output_text": "## Decisions\n- Ship on Friday [00:00:05]."})
     template = tmp_path / "review.md"
     template.write_text(TEMPLATE, encoding="utf-8")
-    d = make_session(tmp_path, [Segment(5, 9, SPOKEN, "Me", "en")])
+    d = make_session(tmp_path, [Segment(5, 9, speech, "Me", language)])
     out = summary.summarize_session(d, cloud_cfg("openai", template=str(template)))
     text = out.read_text("utf-8")
     req = seen[0]
@@ -166,17 +204,21 @@ def test_openai_request_carries_prompt_timed_transcript_and_template(
     assert body["max_output_tokens"] == 32_000  # 8 x the 4000-token answer budget
     assert body["store"] is False
     assert body["instructions"].endswith("Answer in Markdown with ## headings.")
+    assert "Always answer in English" in body["instructions"]
     user = body["input"][-1]["content"]
     assert user.startswith(DEFAULT_SUMMARY_PROMPT)
     assert "Use exactly these sections, in this order" in user
     assert "- Decisions: What was decided, with the time." in user
-    assert "[00:00:05] Me: we ship the beta on Friday" in user
+    assert f"[00:00:05] Me: {speech}" in user
     assert text.startswith("# Review\n") and "## Decisions" in text
     assert "_Generated in the cloud by gpt-6.1 (OpenAI)" in text
 
 
+@pytest.mark.parametrize(
+    "language, speech", [("en", SPOKEN), ("ru", "Выпустим в пятницу."), ("he", "נשחרר ביום שישי.")]
+)
 def test_anthropic_request_has_its_headers_effort_and_timed_transcript(
-    tmp_path, monkeypatch, fake_keychain, caplog
+    tmp_path, monkeypatch, fake_keychain, caplog, language, speech
 ):
     fake_keychain[("RecAndCC", "anthropic")] = KEY
     reply = {
@@ -187,7 +229,7 @@ def test_anthropic_request_has_its_headers_effort_and_timed_transcript(
         ],
     }
     seen = serve(monkeypatch, reply)
-    d = make_session(tmp_path, [Segment(3700, 3704, SPOKEN, "Others", "en")])
+    d = make_session(tmp_path, [Segment(3700, 3704, speech, "Others", language)])
     with caplog.at_level(logging.DEBUG, logger="recandcc"):
         text = summary.summarize_session(d, cloud_cfg("anthropic")).read_text("utf-8")
     req = seen[0]
@@ -198,10 +240,11 @@ def test_anthropic_request_has_its_headers_effort_and_timed_transcript(
     assert body["output_config"] == {"effort": "xhigh"}
     assert body["thinking"] == {"type": "adaptive"}
     assert "Answer in Markdown with ## headings." in body["system"]
-    assert "[01:01:40] Others: we ship the beta on Friday" in body["messages"][0]["content"]
+    assert "Always answer in English" in body["system"]
+    assert f"[01:01:40] Others: {speech}" in body["messages"][0]["content"]
     assert "## Summary\nShip on Friday." in text
     assert "_Generated in the cloud by claude-opus-5-5 (Anthropic)" in text
-    assert SPOKEN not in caplog.text and KEY not in caplog.text  # logs hold no text or key
+    assert speech not in caplog.text and KEY not in caplog.text  # logs hold no text or key
 
 
 @pytest.mark.parametrize(
@@ -362,13 +405,14 @@ def test_a_transcript_past_the_single_call_limit_goes_in_parts_then_once_more(
 
     class Gen:
         def __call__(self, messages, max_tokens):
+            assert "Always answer in English" in messages[0]["content"]
             calls.append(messages[-1]["content"])
             return f"notes {len(calls)}"
 
         def close(self):
             pass
 
-    segs = [Segment(i * 10, i * 10 + 5, f"sentence number {i}", "Me", "en") for i in range(12)]
+    segs = [Segment(i * 10, i * 10 + 5, f"предложение {i}", "Me", "ru") for i in range(12)]
     d = make_session(tmp_path, segs)
     text = summary.summarize_session(d, cloud_cfg("openai"), generate=Gen()).read_text("utf-8")
     assert len(calls) >= 3
