@@ -63,7 +63,8 @@ def test_a_name_written_in_lowercase_once_is_still_a_name():
 def test_the_addressed_speaker_who_answers_gets_the_name():
     segments = [
         seg(0, "Me", "Tobias, I have a question. What is it?"),
-        seg(3, "Speaker 1", "It is the leadership event. Ask Tobias anything."),
+        seg(3, "Speaker 1", "It is the leadership event."),
+        seg(6, "Speaker 2", "Ask Tobias anything."),
         seg(9, "Speaker 1", "Mira, you were there?"),
         seg(11, "Speaker 2", "Yes."),
         seg(13, "Speaker 1", "and Mira you were with them"),
@@ -83,7 +84,7 @@ def test_only_the_last_address_of_a_turn_is_answered():
 
 
 def test_one_vote_needs_the_name_to_open_the_turn_and_be_said_again():
-    mention = seg(20, "Speaker 2", "I met Mira last week.")
+    mention = seg(20, "Me", "I met Mira last week.")
     mid_turn = [seg(0, "Me", "So we met. Mira, are you in?"), seg(3, "Speaker 1", "Yes."), mention]
     opening = [seg(0, "Me", "Mira, are you in?"), seg(3, "Speaker 1", "Yes.")]
     assert addressed_names(mid_turn) == {}
@@ -152,7 +153,8 @@ def test_single_label_tracks_can_be_named():
 def test_saved_transcript_and_summary_use_the_addressed_names(tmp_path, monkeypatch):
     segments = [
         seg(0, "Me", "Tobias, I have a question. What is it?"),
-        seg(3, "Speaker 1", "It is the leadership event. Ask Tobias anything."),
+        seg(3, "Speaker 1", "It is the leadership event."),
+        seg(6, "Speaker 2", "Ask Tobias anything."),
         seg(9, "Speaker 1", "Mira, you were there?"),
         seg(11, "Speaker 2", "Yes, I will send the notes tomorrow."),
         seg(14, "Speaker 1", "and Mira you were with them"),
@@ -192,7 +194,7 @@ def _controller(cfg):
 def test_summarizing_an_older_meeting_names_its_speakers_first(tmp_path, enabled):
     segments = [
         seg(0, "Me", "Mira, are you in?"),
-        seg(3, "Speaker 1", "Yes. I met Mira before."),
+        seg(3, "Speaker 1", "Yes."),
         seg(6, "Me", "and Mira you were with them"),
         seg(9, "Speaker 1", "I was."),
     ]
@@ -206,3 +208,76 @@ def test_summarizing_an_older_meeting_names_its_speakers_first(tmp_path, enabled
         s["speaker"] for s in json.loads((tmp_path / "transcript.json").read_text())["segments"]
     }
     assert speakers == ({"Me", "Mira"} if enabled else {"Me", "Speaker 1"})
+
+
+# --- regressions from the Codex review (gpt-6.1-sol): each was a wrong name before
+
+
+def test_an_introduction_claim_vetoes_the_same_name_for_another_label(tmp_path):
+    segments = [
+        seg(0, "Me", "My name is Mira."),
+        seg(3, "Speaker 1", "Mira, do you have the notes?"),
+        seg(6, "Speaker 2", "I can find them for you."),
+        seg(9, "Speaker 1", "Mira, can you open the slides?"),
+        seg(12, "Speaker 2", "I can do it instead."),
+    ]
+    info = SessionInfo("veto", tmp_path, datetime(2026, 11, 10, 10), TriggerKind.CALL, "test")
+    info.save()
+    write_outputs(info, segments, 15.0, "fake")
+    assert names.apply_introductions(tmp_path) == {}
+    data = json.loads((tmp_path / "transcript.json").read_text("utf-8"))
+    assert {s["speaker"] for s in data["segments"]} == {"Me", "Speaker 1", "Speaker 2"}
+
+
+def test_one_turn_cut_into_segments_gives_one_vote_the_last_address():
+    segments = [
+        seg(0, "Me", "Mira, are you there?"),
+        seg(2, "Me", "Mira, can you hear us?"),
+        seg(4, "Me", "Omar, please cover for her."),
+        seg(7, "Speaker 1", "I will cover for her."),
+        seg(10, "Me", "Omar, are you ready?"),
+        seg(12, "Speaker 1", "Yes."),
+        seg(14, "Me", "We met Omar before."),
+    ]
+    assert addressed_names(segments) == {"Speaker 1": "Omar"}
+
+
+def test_an_answer_that_says_the_name_is_no_evidence():
+    segments = [
+        seg(0, "Me", "Mira, are you there?"),
+        seg(3, "Speaker 1", "Mira is absent. I can cover for her."),
+    ]
+    assert addressed_names(segments) == {}
+    # nor do the speaker's own mentions make a one-off name look real
+    own = [
+        seg(0, "Me", "Mira, are you there?"),
+        seg(3, "Speaker 1", "Yes. We asked Mira earlier."),
+        seg(6, "Speaker 1", "Mira will come."),
+    ]
+    assert addressed_names(own) == {}
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "The email says: Mira, send the notes.",  # reported speech
+        "Budget, scope and staffing are open.",  # a list that starts a sentence
+        "Anna, Bob and Carl, can you join?",
+    ],
+)
+def test_reported_speech_and_lists_are_not_addresses(turn):
+    assert addresses(turn) == []
+    segments = [
+        seg(0, "Me", turn),
+        seg(3, "Speaker 1", "We should discuss that."),
+        seg(6, "Me", turn),
+        seg(9, "Speaker 1", "We should discuss that too."),
+    ]
+    assert addressed_names(segments) == {}
+
+
+def test_a_minority_of_all_votes_is_not_a_clear_majority():
+    segments = []
+    for k, name in enumerate(["Mira", "Mira", "Omar", "Nina", "Pavel"]):
+        segments += [seg(6 * k, "Me", f"{name}, are you in?"), seg(6 * k + 3, "Speaker 1", "Yes.")]
+    assert addressed_names(segments) == {}
