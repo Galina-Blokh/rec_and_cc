@@ -281,3 +281,70 @@ def test_a_minority_of_all_votes_is_not_a_clear_majority():
     for k, name in enumerate(["Mira", "Mira", "Omar", "Nina", "Pavel"]):
         segments += [seg(6 * k, "Me", f"{name}, are you in?"), seg(6 * k + 3, "Speaker 1", "Yes.")]
     assert addressed_names(segments) == {}
+
+
+# --- regressions from the second Codex pass
+
+
+def test_speech_that_goes_on_after_a_comma_is_not_a_list():
+    segments = [
+        seg(0, "Me", "Mira, are you there? Omar, and can you cover for her?"),
+        seg(3, "Speaker 1", "I can cover."),
+        seg(6, "Me", "Mira, can you hear us? Omar, and please send her a message."),
+        seg(9, "Speaker 1", "I will."),
+    ]
+    assert addressed_names(segments) == {"Speaker 1": "Omar"}
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "Budget, scope, and staffing are open.",  # an Oxford comma
+        "Budget, project scope and staffing are open.",  # several words per entry
+    ],
+)
+def test_lists_with_a_final_conjunction_are_not_addresses(turn):
+    assert addresses(turn) == []
+
+
+def test_the_answer_veto_covers_the_whole_turn_and_possessives():
+    split_reply = [
+        seg(0, "Me", "Mira, are you there?"),
+        seg(3, "Speaker 1", "Sorry."),
+        seg(5, "Speaker 1", "Mira is absent."),
+        seg(8, "Me", "Mira, can you hear us?"),
+        seg(11, "Speaker 1", "I can cover."),
+        seg(13, "Speaker 1", "Mira is still absent."),
+    ]
+    possessive = [
+        seg(0, "Me", "Mira, are you there?"),
+        seg(3, "Speaker 1", "Mira's absent."),
+        seg(6, "Me", "Mira, can you hear us?"),
+        seg(9, "Speaker 1", "Mira’s still absent."),
+    ]
+    assert addressed_names(split_reply) == {}
+    assert addressed_names(possessive) == {}
+
+
+def test_answers_by_me_count_as_competing_evidence():
+    segments = [
+        seg(0, "Speaker 1", "Mira, can you hear us?"),
+        seg(3, "Me", "Yes."),
+        seg(6, "Speaker 1", "Mira, can you open the notes?"),
+        seg(9, "Me", "Sure."),
+        seg(12, "Speaker 1", "Mira, are you ready?"),
+        seg(15, "Speaker 2", "I will cover for her."),
+    ]
+    assert addressed_names(segments) == {}
+
+
+def test_a_full_name_introduction_reserves_the_first_name():
+    segments = [
+        seg(0, "Me", "My name is Mira Stone."),
+        seg(3, "Speaker 1", "Mira, are you in?"),
+        seg(6, "Speaker 2", "She is absent. I can cover."),
+        seg(9, "Speaker 1", "Mira, do you have the notes?"),
+        seg(12, "Speaker 2", "She is not here."),
+    ]
+    assert addressed_names(segments, reserved={"mira stone"}) == {}
+    assert addressed_names(segments) == {"Speaker 2": "Mira"}  # without the claim it would name

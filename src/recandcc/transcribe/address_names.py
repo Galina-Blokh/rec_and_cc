@@ -42,6 +42,13 @@ _LEAD_WORDS = (
     "morning afternoon evening да ну так привет спасибо хорошо ладно"
 )
 _LEAD = frozenset(_LEAD_WORDS.split())
+_CONTINUE_WORDS = (
+    "and or but so then you your i we me us let please can could would will shall do did does "
+    "are is were was have has had what why how when where who which if just also still yes no "
+    "okay ok thanks thank sorry ты вы можешь можете будешь будете пожалуйста я мы а но и "
+    "что как когда где"
+)
+_CONTINUE = frozenset(_CONTINUE_WORDS.split())
 _ADDRESS_WORDS = "you your ты твой твоя твои вы ваш ваша ваши"
 _AND_WORDS = "and or и или"
 _AND = frozenset(_AND_WORDS.split())
@@ -70,9 +77,17 @@ def _starts_clause(tokens: list[str], i: int, lead: frozenset[str]) -> bool:
 
 
 def _is_list(tokens: list[str], i: int) -> bool:
-    """Whether the words from ``i`` continue a list: "scope and ...", "Omar, and ..."."""
-    rest = [t.casefold() for t in tokens[i : i + 3]]
-    return bool(rest) and (rest[0] in _AND or (len(rest) > 1 and rest[1] in _AND))
+    """Whether the words from ``i`` (after a name and its comma) continue a list: "scope and
+    staffing", "scope, and staffing", "project scope and staffing". Words that go on like
+    speech to someone ("can you", "and please") never do."""
+    if i >= len(tokens) or tokens[i].casefold() in _CONTINUE:
+        return False
+    for token in tokens[i : i + 5]:
+        if token in _END:
+            return False
+        if token.casefold() in _AND:
+            return True
+    return False
 
 
 def _opens_turn(tokens: list[str], i: int) -> bool:
@@ -120,6 +135,23 @@ def _replier(segments: list[Segment], i: int) -> int | None:
     return None
 
 
+def _words(text: str) -> set[str]:
+    """The casefolded words of ``text`` without a possessive ("Mira's" -> "mira")."""
+    return {re.sub(r"[’']s$", "", w.casefold()) for w in _ALPHA.findall(text)}
+
+
+def _turn_words(segments: list[Segment], j: int) -> set[str]:
+    """The words of the whole turn that starts at ``segments[j]`` (same speaker, close by)."""
+    speaker, end = segments[j].speaker, segments[j].end
+    words = _words(segments[j].text)
+    for nxt in segments[j + 1 : j + 8]:
+        if nxt.speaker != speaker or nxt.start - end > CONTINUE_MAX:
+            break
+        words |= _words(nxt.text)
+        end = max(end, nxt.end)
+    return words
+
+
 def addressed_names(
     segments: list[Segment],
     *,
@@ -131,7 +163,8 @@ def addressed_names(
     named already; ``reserved``: names that are taken. ``single_labels``: tracks known to
     have one speaker, which may be renamed like numbered labels."""
     ordered = sorted(segments, key=lambda s: s.start)
-    taken = {s.speaker.casefold() for s in ordered} | {n.casefold() for n in reserved}
+    taken = {w for s in ordered for w in s.speaker.casefold().split()}
+    taken |= {w for n in reserved for w in n.casefold().split()}  # "Mira Stone" takes "Mira"
     capitalised: Counter[str] = Counter()
     capitalised_by: dict[str, Counter[str]] = defaultdict(Counter)
     plain: Counter[str] = Counter()
@@ -157,14 +190,14 @@ def addressed_names(
     shown: dict[str, str] = {}
     for j, (name, opens) in asked.items():
         label = ordered[j].speaker
-        if label in skip or not (NUMBERED.fullmatch(label.casefold()) or label in single_labels):
-            continue
         folded = name.casefold()
-        if folded in {w.casefold() for w in _ALPHA.findall(ordered[j].text)}:
+        if folded in _turn_words(ordered, j):
             continue  # "Mira is absent": an answer that says the name is not Mira answering
         shown.setdefault(folded, name)
+        by_name[folded][label] += 1  # every answer competes, also by `Me` or a named label
+        if label in skip or not (NUMBERED.fullmatch(label.casefold()) or label in single_labels):
+            continue
         by_label[label][folded] += 1
-        by_name[folded][label] += 1
         if opens:
             opening.add((label, folded))
     plan: dict[str, str] = {}
