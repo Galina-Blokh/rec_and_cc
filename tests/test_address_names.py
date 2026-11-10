@@ -1,0 +1,208 @@
+"""Names from direct address ("Tobias, I have a question" and another speaker answers).
+
+Synthetic transcripts only (invented names), never fixtures from real recordings.
+Stories: US-21, US-27.
+"""
+
+import json
+from datetime import datetime
+
+import pytest
+
+from recandcc.config import Config
+from recandcc.models import Segment, SessionInfo, TriggerKind
+from recandcc.transcribe import names, summary
+from recandcc.transcribe.address_names import addressed_names, addresses
+from recandcc.transcribe.output import write_outputs
+
+
+def seg(start, speaker, text, length=2.0):
+    return Segment(start, start + length, text, speaker, "en")
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("Tobias, I have a question.", [("Tobias", True)]),
+        ("Okay, Mira, you were there?", [("Mira", True)]),
+        ("So we met. Mira, are you in?", [("Mira", False)]),
+        ("and Mira you were with them", [("Mira", False)]),
+        ("Nina and Omar, I believe.", []),  # a list, not an address
+        ("I told Mira, then left.", []),
+        ("Tomorrow, we ship it.", []),  # a clause opener
+        ("Honestly, it works.", []),
+        ("Okay, thank you.", []),  # fillers are not names
+        ("Yep, project review.", []),
+        ("Mira is there, Omar is there.", []),
+        ("שלום דנה, מה שלומך", []),  # no capitals: can't tell a name from a word
+    ],
+)
+def test_only_clause_initial_capitalised_names_are_addressed(text, expected):
+    assert addresses(text) == expected
+
+
+def test_words_seen_in_lowercase_are_not_names():
+    assert addresses("Tomorrow, we ship it.", lowercase={"tomorrow"}) == []
+    assert addresses("Sound, I mean.", lowercase={"sound"}) == []
+    assert addresses("Tobias, hi.", lowercase={"sound"}) == [("Tobias", True)]
+
+
+def test_a_name_written_in_lowercase_once_is_still_a_name():
+    # Whisper capitalises inconsistently: "Mira" 3 times, "mira" once
+    segments = [
+        seg(0, "Me", "Mira, are you in?"),
+        seg(3, "Speaker 1", "Yes."),
+        seg(6, "Me", "and mira you were with them"),
+        seg(9, "Speaker 1", "I was."),
+        seg(12, "Me", "Thanks Mira."),
+        seg(14, "Me", "Mira is great."),
+    ]
+    assert addressed_names(segments) == {"Speaker 1": "Mira"}
+
+
+def test_the_addressed_speaker_who_answers_gets_the_name():
+    segments = [
+        seg(0, "Me", "Tobias, I have a question. What is it?"),
+        seg(3, "Speaker 1", "It is the leadership event. Ask Tobias anything."),
+        seg(9, "Speaker 1", "Mira, you were there?"),
+        seg(11, "Speaker 2", "Yes."),
+        seg(13, "Speaker 1", "and Mira you were with them"),
+        seg(15, "Speaker 2", "I was."),
+    ]
+    assert addressed_names(segments) == {"Speaker 1": "Tobias", "Speaker 2": "Mira"}
+
+
+def test_only_the_last_address_of_a_turn_is_answered():
+    segments = [
+        seg(0, "Speaker 1", "Nina and Omar, I believe. Mira, you were there, I believe."),
+        seg(3, "Speaker 2", "Yeah."),
+        seg(6, "Speaker 1", "and Mira you were with them"),
+        seg(8, "Speaker 2", "I was."),
+    ]
+    assert addressed_names(segments) == {"Speaker 2": "Mira"}
+
+
+def test_one_vote_needs_the_name_to_open_the_turn_and_be_said_again():
+    mention = seg(20, "Speaker 2", "I met Mira last week.")
+    mid_turn = [seg(0, "Me", "So we met. Mira, are you in?"), seg(3, "Speaker 1", "Yes."), mention]
+    opening = [seg(0, "Me", "Mira, are you in?"), seg(3, "Speaker 1", "Yes.")]
+    assert addressed_names(mid_turn) == {}
+    assert addressed_names(opening) == {}  # said once: could be a garbled word ("Sustain, I...")
+    assert addressed_names([*opening, mention]) == {"Speaker 1": "Mira"}
+
+
+@pytest.mark.parametrize(
+    "segments",
+    [
+        # the answer comes too late, from the speaker themself, or overlapped
+        [seg(0, "Me", "Mira, are you in?"), seg(12, "Speaker 1", "Yes.")],
+        [seg(0, "Speaker 1", "Mira, are you in?"), seg(3, "Speaker 1", "Hello?")],
+        [
+            seg(0, "Me", "Mira, are you in?"),
+            Segment(3, 5, "Yes.", "Speaker 1", "en", overlap=True),
+        ],
+        # two names tie for one label
+        [
+            seg(0, "Me", "Mira, are you in?"),
+            seg(3, "Speaker 1", "Yes."),
+            seg(6, "Me", "Omar, are you in?"),
+            seg(9, "Speaker 1", "Yes."),
+        ],
+        # the owner is never renamed, whoever addresses them
+        [seg(0, "Speaker 1", "Gali, are you in?"), seg(3, "Me", "Yes.")],
+        # not a numbered label
+        [seg(0, "Me", "Mira, are you in?"), seg(3, "Others", "Yes.")],
+    ],
+)
+def test_weak_or_ambiguous_evidence_names_nobody(segments):
+    assert addressed_names(segments) == {}
+
+
+def test_taken_names_and_named_labels_are_left_alone():
+    segments = [
+        seg(0, "Me", "Mira, are you in?"),
+        seg(3, "Speaker 1", "Yes."),
+        seg(6, "Mira", "Hello."),
+    ]
+    assert addressed_names(segments) == {}
+    plain = segments[:2]
+    assert addressed_names(plain, reserved=["mira"]) == {}
+    assert addressed_names(plain, skip=["Speaker 1"]) == {}
+
+
+def test_two_labels_never_share_a_name():
+    segments = [
+        seg(0, "Me", "Mira, are you in?"),
+        seg(3, "Speaker 1", "Yes."),
+        seg(6, "Me", "Mira, are you in?"),
+        seg(9, "Speaker 2", "Yes."),
+    ]
+    assert addressed_names(segments) == {}
+
+
+def test_single_label_tracks_can_be_named():
+    segments = [
+        seg(0, "Me", "Mira, are you in?"),
+        seg(3, "Others", "Yes."),
+        seg(6, "Me", "We spoke to Mira before."),
+    ]
+    assert addressed_names(segments, single_labels={"Others"}) == {"Others": "Mira"}
+
+
+def test_saved_transcript_and_summary_use_the_addressed_names(tmp_path, monkeypatch):
+    segments = [
+        seg(0, "Me", "Tobias, I have a question. What is it?"),
+        seg(3, "Speaker 1", "It is the leadership event. Ask Tobias anything."),
+        seg(9, "Speaker 1", "Mira, you were there?"),
+        seg(11, "Speaker 2", "Yes, I will send the notes tomorrow."),
+        seg(14, "Speaker 1", "and Mira you were with them"),
+        seg(16, "Speaker 2", "I was."),
+    ]
+    info = SessionInfo("addr", tmp_path, datetime(2026, 11, 10, 10), TriggerKind.CALL, "test")
+    info.save()
+    write_outputs(info, segments, 20.0, "fake")
+    assert names.apply_introductions(tmp_path) == {"Speaker 1": "Tobias", "Speaker 2": "Mira"}
+    data = json.loads((tmp_path / "transcript.json").read_text("utf-8"))
+    assert {s["speaker"] for s in data["segments"]} == {"Me", "Tobias", "Mira"}
+    assert "Mira:" in (tmp_path / "transcript.md").read_text("utf-8")
+
+    prompts = []
+
+    def generate(messages, max_tokens):
+        prompts.append(messages[-1]["content"])
+        return "- Mira: Send the notes."
+
+    cfg = Config(output_dir=tmp_path)
+    cfg.summary.enabled = True
+    summary.summarize_session(tmp_path, cfg, generate=generate)
+    text = "\n".join(prompts)
+    assert "Mira:" in text and "Tobias:" in text
+    assert "Speaker 1" not in text and "Speaker 2" not in text
+
+
+def _controller(cfg):
+    from recandcc.ui.common import Controller
+
+    return Controller(
+        cfg, monitor=object(), recorder=object(), tq=object(), transcriber=None, start_threads=False
+    )
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_summarizing_an_older_meeting_names_its_speakers_first(tmp_path, enabled):
+    segments = [
+        seg(0, "Me", "Mira, are you in?"),
+        seg(3, "Speaker 1", "Yes. I met Mira before."),
+        seg(6, "Me", "and Mira you were with them"),
+        seg(9, "Speaker 1", "I was."),
+    ]
+    info = SessionInfo("old", tmp_path, datetime(2026, 11, 2, 10), TriggerKind.CALL, "test")
+    info.save()
+    write_outputs(info, segments, 12.0, "fake")
+    cfg = Config(output_dir=tmp_path)
+    cfg.transcription.names_from_transcript = enabled
+    _controller(cfg)._name_from_transcript(tmp_path)
+    speakers = {
+        s["speaker"] for s in json.loads((tmp_path / "transcript.json").read_text())["segments"]
+    }
+    assert speakers == ({"Me", "Mira"} if enabled else {"Me", "Speaker 1"})

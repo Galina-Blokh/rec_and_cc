@@ -804,7 +804,7 @@ class Transcriber:
             )
             if mapping:
                 log.info(
-                    "session %s: %d speaker name(s) from introductions", session.id, len(mapping)
+                    "session %s: %d speaker name(s) from the transcript", session.id, len(mapping)
                 )
             return mapping
         except Exception as e:  # noqa: BLE001 - optional: keep unnamed labels on failure

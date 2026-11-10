@@ -62,7 +62,8 @@ across platforms.
 | `transcribe/voices.py` | Opt-in voice profiles (`speaker_names`): speaker names remembered across sessions, kept in the owner-only voices store |
 | `transcribe/callnames.py` | Assigns participant names from the call app to `Speaker N` labels, only when nothing is left to guess |
 | `transcribe/intro_hints.py` | Read-only self-introduction hints for `recandcc speakers` and conservative automatic rename plans |
-| `transcribe/names.py` | Apply clear introduction names to every transcript format after diarization/call-app naming and before summary callbacks; session labels only, no profile learning |
+| `transcribe/address_names.py` | Conservative rename plan from names the others address a speaker by (vote counting, no I/O, nothing logged) |
+| `transcribe/names.py` | Apply clear introduction and addressed names to every transcript format after diarization/call-app naming and before summary callbacks; session labels only, no profile learning |
 | `transcribe/export.py` | Export a finished session to `transcript.docx` / `transcript.pdf` (Hebrew right to left) |
 | `transcribe/revisions.py` | Pinned Hugging Face commit revisions for every offered Whisper model (MLX and faster-whisper) |
 | `transcribe/summary.py` | Opt-in `summary.md` (one section per template section, action items among them) with a local LLM via mlx-lm: English output for every spoken language (including chunk notes and cloud summaries), model routing by the meeting's main spoken language, map-reduce over chunks, pinned offline-first model load (`gpu.local_model_path`); `create_generator` picks mlx-lm on Apple silicon, else `summary_cpu.py` |
@@ -430,7 +431,7 @@ session files carry their generation, so a file a failed forget left behind neve
 `Speaker N` who introduces themself in their first 2 minutes ("I'm Anna", "Меня зовут Анна",
 "קוראים לי דנה"); strict patterns, nothing stored, renamed or logged by that command.
 With `names_from_transcript` (default true), `names.py` applies only direct, unique and
-uncontested introductions before `after_labels` releases summary callbacks. All transcript
+uncontested introductions, and names addressed to a speaker who answers (`address_names.py`), before `after_labels` releases summary callbacks. The menu's Summarize runs the same step first, for meetings recorded earlier. All transcript
 formats change together with existing session voice keys when voice storage is enabled; a
 failed write restores the transcript. Names stay session-local: no voice profiles are learned.
 Ambiguous or unavailable names leave labels intact and do not block automatic summaries.

@@ -705,6 +705,27 @@ class Controller:
             if self.cfg.summary.enabled:
                 self._summarize_when_labelled(Path(session.directory))
 
+    def _name_from_transcript(self, directory: Path) -> None:
+        """Name the `Speaker N` labels of an already transcribed meeting from what was said
+        (introductions, names the others address them by), as after a new transcription.
+        Optional: any failure keeps the labels and still lets the summary run."""
+        try:
+            if not self.cfg.transcription.names_from_transcript:
+                return
+            from ..transcribe import names
+
+            mapping = names.apply_introductions(
+                directory, sync_voices=self.cfg.transcription.speaker_names
+            )
+            if mapping:
+                log.info(
+                    "meeting %s: %d speaker name(s) from the transcript",
+                    directory.name,
+                    len(mapping),
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning("transcript naming unavailable (%s)", type(e).__name__)
+
     def _summarize_when_labelled(self, directory: Path, announce: bool = False) -> None:
         """Summarise once the transcript has its final speaker labels (a slow diarization
         rewrites it later), so action items aren't credited to "Others". ``announce``: the user
@@ -867,6 +888,7 @@ class Controller:
                         self.events.put(("notice", "No transcript to summarize", directory.name))
                         return
                     log.info("summary of %s asked for from the menu", directory.name)
+                    self._name_from_transcript(directory)  # older meetings get their names too
                     self._summarize_when_labelled(directory, announce=True)
                     self.events.put(
                         ("notice", "Writing the summary", "Open summary shows it when it's done.")

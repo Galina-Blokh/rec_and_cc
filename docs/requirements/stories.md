@@ -294,7 +294,13 @@ I don't have to work out who `Speaker 2` was every time.*
   reported speech are rejected; unknown speakers retain their labels. Numbered speakers and an
   `Others` track diarized as a single speaker are eligible. `Me` stays unchanged for summary
   ownership; an unseparated room track is never guessed. No voice profile is learned; this works with `speaker_names` off.
-- **Given** `names_from_transcript = false`, **then** no automatic introduction names apply.
+- **Given** a `Speaker N` whom another speaker addresses by name at the start of a clause
+  ("Mira, are you in?") and who answers within a few seconds, **then** that speaker is named
+  Mira when the evidence is consistent: two such answers, or one when the name is capitalised
+  at least twice in the transcript. Lists ("Nina and Omar, I believe"), fillers and clause
+  openers ("Tomorrow,", "Yep,"), ties and names another label has are rejected; `Me` is never
+  renamed. **Summarize a meeting…** applies this to an older meeting before summarizing it.
+- **Given** `names_from_transcript = false`, **then** no automatic introduction or addressed names apply.
 - **Measured (synthetic only, not validated):** a voice named once got its name on 21/21 of
   its segments in three later `say`-voice sessions; an unnamed voice was wrongly named on
   5/9 of its segments at threshold 0.6 and 3/9 at the shipped 0.75, which was tuned on the
