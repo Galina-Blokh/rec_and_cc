@@ -250,6 +250,8 @@ def _system(language: str, room: bool) -> str:
         f"You summarise meeting transcripts. Lines are '[HH:MM:SS] Speaker: text'; {owner}. "
         f"{_language_rule(language)} "
         "A different language alone does not make the transcription unclear. "
+        "A speaker label that is a name is that person's name: use it as written. "
+        "'Speaker N' means the name is not known: keep that label and do not guess a name. "
         "Use only facts from the input; do not invent names, dates or tasks."
     )
 

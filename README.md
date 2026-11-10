@@ -14,11 +14,13 @@ account, nothing uploaded.
   recognize that voice and write `Anna` instead of `Speaker 2`. Optionally (macOS,
   `names_from_call_app`, off by default) the name shown in the call app's open participants
   panel can be used when it is unambiguous; see [Names from the call app](#names-from-the-call-app).
-- 🏷️ **Names from introductions**: after transcription, clear self-introductions such as
-  “My name is Sebastian” replace speaker labels in every transcript format. This local step
+- 🏷️ **Names from the conversation**: after transcription, clear self-introductions such as
+  “My name is Sebastian”, and names the others address a speaker by (“Donovan, you were
+  there?” followed by that speaker's answer), replace speaker labels in every transcript
+  format, so summaries use real names. A name said only once is not trusted. This local step
   is on by default (`names_from_transcript`); uncertain names keep their labels and `Me`
-  stays the owner label. It does not
-  learn voice profiles.
+  stays the owner label. **Summarize a meeting…** applies it to older meetings too. It does
+  not learn voice profiles.
 - 🌍 **English and Russian** are detected automatically, even when the language switches
   mid-meeting. **Hebrew** can be added (`languages = ["en", "ru", "he"]`): captions and
   transcripts show it right to left (Windows captions reorder RTL text themselves, as Tk does no

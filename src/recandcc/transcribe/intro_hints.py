@@ -176,4 +176,25 @@ def confident_names(
     }
 
 
-__all__ = ["WINDOW", "Hint", "find_intro", "intro_hints", "transcript_hints", "confident_names"]
+def introduced_names(segments: list[Segment]) -> dict[str, set[str]]:
+    """label -> the casefolded names it introduces itself with anywhere (also `Me`, also
+    conflicting or late ones): claims that other naming steps must not contradict."""
+    claims: dict[str, set[str]] = {}
+    for s in segments:
+        text = s.text.strip()
+        for trigger, needs in TRIGGERS:
+            for match in trigger.finditer(text):
+                if name := _name_after(text[match.end() :], needs):
+                    claims.setdefault(s.speaker, set()).add(name.casefold())
+    return claims
+
+
+__all__ = [
+    "WINDOW",
+    "Hint",
+    "find_intro",
+    "intro_hints",
+    "transcript_hints",
+    "confident_names",
+    "introduced_names",
+]

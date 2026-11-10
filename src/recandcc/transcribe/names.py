@@ -1,5 +1,6 @@
-"""Apply explicit transcript introductions after diarization and call-app naming, before
-summary callbacks. Session labels only: no new voice profile is learned from an introduction.
+"""Apply names found in the transcript (self-introductions, and names the others address a
+speaker by) after diarization and call-app naming, before summary callbacks. Session labels
+only: no new voice profile is learned from them.
 """
 
 from __future__ import annotations
@@ -12,7 +13,8 @@ from pathlib import Path
 
 from ..models import Segment, SessionInfo
 from . import voices
-from .intro_hints import confident_names
+from .address_names import addressed_names
+from .intro_hints import confident_names, introduced_names
 from .output import JSON_NAME, write_outputs
 
 
@@ -32,6 +34,16 @@ def apply_introductions(
         data = json.loads((directory / JSON_NAME).read_text(encoding="utf-8"))
         segments = [Segment(**s) for s in data["segments"]]
         mapping = confident_names(segments, single_labels=single_labels)
+        claims = introduced_names(segments)  # any introduction vetoes a contradicting address
+        mapping = {
+            **addressed_names(
+                segments,
+                single_labels=single_labels,
+                skip={*mapping, *claims},
+                reserved={*mapping.values(), *(n for names in claims.values() for n in names)},
+            ),
+            **mapping,
+        }
         if not mapping:
             return {}
         stored = voices.read_session_voices(session.id) if sync_voices else {}
