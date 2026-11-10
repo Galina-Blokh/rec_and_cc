@@ -32,6 +32,7 @@ from .intro_hints import _is_name  # pyright: ignore[reportPrivateUsage]
 from .voices import NUMBERED, check_name
 
 REPLY_GAP = 4.0  # seconds from the end of the addressing speech to the answer
+OVERLAP_SLACK = 0.3  # an answer may start this much before the question ends
 CONTINUE_MAX = 6.0  # the addressing speaker may keep talking this long before the answer
 _TOKENS = re.compile(r"[^\W\d_]+(?:[-’'][^\W\d_]+)*|[^\w\s]")
 _ALPHA = re.compile(r"[^\W\d_]+(?:[-’'][^\W\d_]+)*")
@@ -77,15 +78,16 @@ def _starts_clause(tokens: list[str], i: int, lead: frozenset[str]) -> bool:
 
 
 def _is_list(tokens: list[str], i: int) -> bool:
-    """Whether the words from ``i`` (after a name and its comma) continue a list: "scope and
-    staffing", "scope, and staffing", "project scope and staffing". Words that go on like
-    speech to someone ("can you", "and please") never do."""
+    """Whether the words from ``i`` (after a name and its comma) may be a list: they don't go
+    on like speech to someone ("can you", "and please") and a conjunction or another comma
+    follows in the same sentence ("scope and staffing", "scope, staffing", "send the notes and
+    slides"). Such a candidate is uncertain: it cancels the turn's vote."""
     if i >= len(tokens) or tokens[i].casefold() in _CONTINUE:
         return False
-    for token in tokens[i : i + 5]:
-        if token in _END:
+    for word in tokens[i : i + 12]:
+        if word in _END:
             return False
-        if token.casefold() in _AND:
+        if word == "," or word.casefold() in _AND:
             return True
     return False
 
@@ -97,8 +99,14 @@ def _opens_turn(tokens: list[str], i: int) -> bool:
 def addresses(text: str, lowercase: Collection[str] = ()) -> list[tuple[str, bool]]:
     """(name, opens_the_turn) for each name addressed in ``text``, in order. ``lowercase``:
     words that are mostly uncapitalised in the transcript, which are not names."""
+    return [(n, opens) for n, opens, unsure in _candidates(text, lowercase) if not unsure]
+
+
+def _candidates(text: str, lowercase: Collection[str]) -> list[tuple[str, bool, bool]]:
+    """(name, opens_the_turn, may_be_a_list) for each name at the start of a clause that is
+    followed by a comma or by "you"/"your"."""
     tokens = _TOKENS.findall(text)
-    found: list[tuple[str, bool]] = []
+    found: list[tuple[str, bool, bool]] = []
     for i, token in enumerate(tokens):
         folded = token.casefold()
         if (
@@ -111,12 +119,10 @@ def addresses(text: str, lowercase: Collection[str] = ()) -> list[tuple[str, boo
         ):
             continue
         nxt = tokens[i + 1].casefold() if i + 1 < len(tokens) else ""
-        if nxt == "," and _is_list(tokens, i + 2):
-            continue  # "Budget, scope and staffing": a list, not an address
         if nxt == "," and _starts_clause(tokens, i, _LEAD):
-            found.append((token, _opens_turn(tokens, i)))
+            found.append((token, _opens_turn(tokens, i), _is_list(tokens, i + 2)))
         elif nxt in _ADDRESS and _starts_clause(tokens, i, _LEAD | {"and", "и"}):
-            found.append((token, False))
+            found.append((token, False, False))
     return found
 
 
@@ -131,7 +137,9 @@ def _replier(segments: list[Segment], i: int) -> int | None:
                 return None
             end = max(end, nxt.end)
             continue
-        return None if nxt.overlap or nxt.start - end > REPLY_GAP else j
+        if nxt.overlap or not -OVERLAP_SLACK <= nxt.start - end <= REPLY_GAP:
+            return None  # cross-talk (it started before the question ended) is no answer
+        return j
     return None
 
 
@@ -144,7 +152,7 @@ def _turn_words(segments: list[Segment], j: int) -> set[str]:
     """The words of the whole turn that starts at ``segments[j]`` (same speaker, close by)."""
     speaker, end = segments[j].speaker, segments[j].end
     words = _words(segments[j].text)
-    for nxt in segments[j + 1 : j + 8]:
+    for nxt in segments[j + 1 :]:
         if nxt.speaker != speaker or nxt.start - end > CONTINUE_MAX:
             break
         words |= _words(nxt.text)
@@ -180,10 +188,15 @@ def addressed_names(
     # One vote per answer: the last address before it (a turn may be cut into many segments)
     asked: dict[int, tuple[str, bool]] = {}
     for i, seg in enumerate(ordered):
-        found = addresses(seg.text.strip(), lowercase)
+        found = _candidates(seg.text.strip(), lowercase)
         reply = _replier(ordered, i) if found and not seg.overlap else None
-        if reply is not None:
-            asked[reply] = found[-1]  # the last address of a turn is the one that gets answered
+        if reply is None:
+            continue
+        name, opens, unsure = found[-1]  # the last address of a turn is the one that gets answered
+        if unsure:
+            asked.pop(reply, None)  # "Omar, send the notes and slides": maybe a list: no vote
+        else:
+            asked[reply] = (name, opens)
     by_label: dict[str, Counter[str]] = defaultdict(Counter)
     by_name: dict[str, Counter[str]] = defaultdict(Counter)
     opening: set[tuple[str, str]] = set()

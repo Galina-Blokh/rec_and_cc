@@ -348,3 +348,58 @@ def test_a_full_name_introduction_reserves_the_first_name():
     ]
     assert addressed_names(segments, reserved={"mira stone"}) == {}
     assert addressed_names(segments) == {"Speaker 2": "Mira"}  # without the claim it would name
+
+
+# --- regressions from the third Codex pass
+
+
+def test_an_uncertain_last_address_cancels_the_turn_instead_of_falling_back():
+    segments = [
+        seg(0, "Me", "Mira, are you there? Omar, send the notes and slides.", 6),
+        seg(7, "Speaker 1", "I will send both."),
+        seg(12, "Me", "Mira, can you hear us? Omar, share your screen and notes.", 6),
+        seg(19, "Speaker 1", "I will share both."),
+        seg(22, "Me", "We spoke to Mira and Omar before."),
+    ]
+    assert addressed_names(segments) == {}
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "Budget, the scope of this release, and staffing are open.",
+        "Budget, scope, staffing.",
+    ],
+)
+def test_long_and_bare_comma_lists_are_not_addresses(turn):
+    assert addresses(turn) == []
+    segments = [
+        seg(0, "Me", turn),
+        seg(3, "Speaker 1", "We should discuss that."),
+        seg(6, "Me", turn),
+        seg(9, "Speaker 1", "We should discuss that too."),
+    ]
+    assert addressed_names(segments) == {}
+
+
+def test_cross_talk_that_started_before_the_question_ended_is_no_answer():
+    segments = [
+        seg(0, "Me", "I have a question about the build. Mira, are you there?", 8),
+        seg(1, "Speaker 1", "The previous item also needs approval."),
+        seg(12, "Me", "One more thing about the build. Mira, can you hear us?", 8),
+        seg(13, "Speaker 1", "I was still explaining that earlier item."),
+        seg(22, "Me", "We spoke to Mira before."),
+    ]
+    assert addressed_names(segments) == {}
+
+
+def test_the_answer_veto_reads_a_long_turn_to_its_end():
+    filler = [seg(3 + 2 * k, "Speaker 1", "The tests are passing.") for k in range(12)]
+    absent = seg(3 + 2 * 12, "Speaker 1", "Mira is absent; I am covering for her.")
+    segments = [
+        seg(0, "Me", "Mira, can you give us the status?"),
+        *filler,
+        absent,
+        seg(31, "Me", "Thanks, I will catch up with Mira later."),
+    ]
+    assert addressed_names(segments) == {}
