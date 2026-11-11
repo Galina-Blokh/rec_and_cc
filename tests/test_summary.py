@@ -1249,4 +1249,5 @@ def test_summarize_session_reads_a_room_start_from_session_json(tmp_path):
         return "- x"
 
     summary.summarize_session(d, Config(), gen)
-    assert asked and all("one of the numbered speakers in the room" in a for a in asked)
+    summaries = [a for a in asked if not a.startswith("You identify the speakers")]
+    assert summaries and all("one of the numbered speakers in the room" in a for a in summaries)

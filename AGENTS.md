@@ -48,7 +48,7 @@ native/macos/AudioTap/      SwiftPM: rcc-audiotap (monitor/capture/permissions/h
    `./native/macos/build.sh` (the helper lives in `bin/`, outside the bundle).
 5. **Offline guarantee.** No network access except the one-time, checksum-verified model
    download and, only when the owner sets `summary.provider` to `openai` or `anthropic` (off by
-   default), one HTTPS request per cloud summary (`transcribe/summary_cloud.py`). With the
+   default), up to two HTTPS requests per cloud summary, both with that session's transcript (speaker names when `names_from_transcript` is on, then the summary; `transcribe/summary_cloud.py`). With the
    default settings, nothing contacts the network once models are on disk (`tests/test_offline.py`).
    No telemetry, update checks or new remote dependencies at runtime.
 6. **Privacy.** Audio never leaves the device. A transcript leaves it only for a cloud summary the

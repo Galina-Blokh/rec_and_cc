@@ -17,10 +17,13 @@ account, nothing uploaded.
 - 🏷️ **Names from the conversation**: after transcription, clear self-introductions such as
   “My name is Sebastian”, and names the others address a speaker by (“Donovan, you were
   there?” followed by that speaker's answer), replace speaker labels in every transcript
-  format, so summaries use real names. A name said only once is not trusted. This local step
-  is on by default (`names_from_transcript`); uncertain names keep their labels and `Me`
-  stays the owner label. **Summarize a meeting…** applies it to older meetings too. It does
-  not learn voice profiles.
+  format, so summaries use real names. Then, before each summary, the summary model reads
+  who is who from the whole conversation (as a person would) and names the remaining
+  `Speaker N` too; a name is written into the transcript only when the name and a quote
+  proving it are really in the transcript. On by default (`names_from_transcript`);
+  uncertain names keep their labels and `Me` stays the owner label. **Summarize a
+  meeting…** applies it to older meetings too. With a cloud summary provider this is one
+  more request with the same transcript. It does not learn voice profiles.
 - 🌍 **English and Russian** are detected automatically, even when the language switches
   mid-meeting. **Hebrew** can be added (`languages = ["en", "ru", "he"]`): captions and
   transcripts show it right to left (Windows captions reorder RTL text themselves, as Tk does no

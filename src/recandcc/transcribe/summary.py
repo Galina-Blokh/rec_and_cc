@@ -545,12 +545,16 @@ def summarize_session(
 
     def run(gen: Generator, name: str) -> tuple[str, str, str]:
         """(language, summary.md text, what the log says was written), made by model ``name``."""
-        speakers = {s.speaker for s in segments}
+        nonlocal segments
 
         def invoke(messages: Messages, max_tokens: int) -> str:
             if before_call is not None:
                 before_call()
             return gen(messages, max_tokens)
+
+        if cfg.transcription.names_from_transcript:
+            segments = _name_speakers(directory, segments, invoke, cfg, cloud)
+        speakers = {s.speaker for s in segments}
 
         def call(messages: Messages, max_tokens: int) -> str:
             answer = invoke(messages, max_tokens)
@@ -611,6 +615,8 @@ def summarize_session(
     with contextlib.suppress(OSError):  # an old fingerprint must not sit next to a new summary
         (directory / SOURCE_NAME).unlink(missing_ok=True)
     path = atomic_write(directory / SUMMARY_NAME, text)
+    with contextlib.suppress(OSError, ValueError):  # the transcript may have new names now
+        data = json.loads((directory / JSON_NAME).read_text(encoding="utf-8"))
     with contextlib.suppress(OSError):  # no fingerprint: export falls back to the mtime rule
         atomic_write(directory / SOURCE_NAME, transcript_fingerprint(data.get("segments", [])))
     log.info(
@@ -621,6 +627,44 @@ def summarize_session(
         time.monotonic() - t0,
     )
     return path
+
+
+def _name_speakers(
+    directory: Path,
+    segments: list[Segment],
+    generate: Generator,
+    cfg: Config,
+    cloud: bool,
+) -> list[Segment]:
+    """Before a summary: the summary model reads who is who from the conversation, and the
+    checked names (speaker_names) are written into every transcript format, so the summary and
+    the transcript agree. Optional: any failure keeps the labels and the summary still runs."""
+    from dataclasses import replace
+
+    from . import names, speaker_names
+
+    try:
+        mapping = speaker_names.infer_names(
+            segments,
+            generate,
+            max_chars=speaker_names.CLOUD_CHARS if cloud else speaker_names.LOCAL_CHARS,
+            max_tokens=max(cfg.summary.max_tokens, CLOUD_ANSWER_TOKENS if cloud else 400),
+        )
+        if mapping:
+            mapping = names.apply_names(
+                directory, mapping, sync_voices=cfg.transcription.speaker_names
+            )
+    except SummaryUnavailable:
+        raise  # e.g. a rejected cloud key: the summary would fail the same way
+    except Exception as e:  # noqa: BLE001 - optional: keep the labels
+        log.warning("speaker names for %s unavailable (%s)", directory.name, type(e).__name__)
+        return segments
+    if not mapping:
+        return segments
+    log.info(
+        "summary of %s: %d speaker name(s) from the conversation", directory.name, len(mapping)
+    )
+    return [replace(s, speaker=mapping.get(s.speaker, s.speaker)) for s in segments]
 
 
 def mark_pending(directory: Path) -> None:
