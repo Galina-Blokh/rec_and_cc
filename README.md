@@ -405,6 +405,22 @@ recognized voice or `Me` is never overridden.
 
 ### Cloud summaries (opt-in)
 
+**With your coding tools (no API key):** **Summaries with → Claude Code (your Claude plan)**,
+**Codex (your ChatGPT login)** or **Grok (Cursor)** (`provider = "claude-code"`, `"codex"` or
+`"grok"`) hand each meeting to that signed-in command-line tool (`claude`, `codex` or
+`cursor-agent`), which reads the *whole* meeting for speaker names and the summary. It is run
+once per model call in an empty temporary folder and contained, because a meeting is untrusted
+input ("read my files…"): Claude Code with no tools, MCP servers, user settings or skills;
+Codex and Grok only on macOS, inside the system sandbox (`sandbox-exec`) that blocks reading
+your home folder (except the tool's own sign-in folder and the encrypted keychain files) and
+the transcripts folder. Only the prompt is passed (never on a command line), and only a few
+environment variables. No separate billing, but every summary (two calls:
+names, then the summary, also the automatic ones after each recording) counts against that
+plan's usage limits. Codex uses `reasoning_effort` (default `xhigh`, the most thorough and
+the most usage). Grok needs a Cursor API key (**Sign in to Cursor (Grok)…**, or
+`CURSOR_API_KEY`) and tries `grok-4.7-high`, then older Grok models when one is over its usage
+limit.
+
 Off by default. Choose **Summaries with** in the menu (or `[summary] provider = "openai"` or
 `"anthropic"` in `config.toml`) to have ChatGPT or Claude write the summary instead of the local
 model. Each summary then sends that one meeting's transcript (with its times and speaker labels)
@@ -436,8 +452,8 @@ takes effect immediately for new summaries, and an older cloud sign-in dialog ca
 ### Where your data lives
 
 Audio and transcripts never leave your computer, with one opt-in exception: a cloud summary
-(`[summary] provider = "openai"` or `"anthropic"`, off by default) sends the transcript of that
-one meeting, with its times and speaker labels, to the chosen provider over HTTPS, and nothing
+(`[summary] provider = "openai"`, `"anthropic"`, `"claude-code"`, `"codex"` or `"grok"`, off by
+default) sends the transcript of that one meeting, with its times and speaker labels, to the chosen provider over HTTPS, and nothing
 else. The only other network access is the one-time
 model download: Whisper (and, with summaries on, the summary model) from Hugging Face, pinned to exact repo commits
 ([`revisions.py`](src/recandcc/transcribe/revisions.py), and the Windows and Linux CPU summary model

@@ -72,12 +72,20 @@ SUMMARY_PROVIDER_TITLES = {
     "local": "This Mac (local)",
     "openai": "ChatGPT (OpenAI)",
     "anthropic": "Claude (Anthropic)",
+    "claude-code": "Claude Code (your Claude plan)",
+    "codex": "Codex (your ChatGPT login)",
+    "grok": "Grok (Cursor)",
 }
-SIGN_IN_TITLES = {"openai": "Sign in to ChatGPT…", "anthropic": "Sign in to Claude…"}
+SIGN_IN_TITLES = {
+    "openai": "Sign in to ChatGPT…",
+    "anthropic": "Sign in to Claude…",
+    "grok": "Sign in to Cursor (Grok)…",
+}
 SIGN_OUT_TITLE = "Sign out"
 KEY_PAGES = {
     "openai": "https://platform.openai.com/api-keys",
     "anthropic": "https://console.anthropic.com/settings/keys",
+    "grok": "https://cursor.com/dashboard?tab=integrations",
 }
 SIGN_IN_TEXT = {
     "openai": (
@@ -91,6 +99,11 @@ SIGN_IN_TEXT = {
         "billed per use as API credit, separate from a Claude subscription: set a spending limit "
         "on that site. It is kept in this computer's keychain; summaries with Claude send that "
         "meeting's transcript to Anthropic."
+    ),
+    "grok": (
+        "Paste your Cursor API key (create one on the page that just opened). Grok runs through "
+        "the Cursor CLI (cursor-agent) and counts against your Cursor plan. It is kept in this "
+        "computer's keychain; summaries with Grok send that meeting's transcript to Cursor."
     ),
 }
 

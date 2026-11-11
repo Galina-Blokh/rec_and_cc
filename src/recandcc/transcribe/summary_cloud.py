@@ -26,7 +26,11 @@ from .summary import CLOUD_LABELS, Messages, NeedsKey, SummaryUnavailable
 log = logging.getLogger("recandcc.transcribe")
 
 SERVICE = "RecAndCC"
-ENV_VARS = {"openai": "RECANDCC_OPENAI_API_KEY", "anthropic": "RECANDCC_ANTHROPIC_API_KEY"}
+ENV_VARS = {
+    "openai": "RECANDCC_OPENAI_API_KEY",
+    "anthropic": "RECANDCC_ANTHROPIC_API_KEY",
+    "grok": "CURSOR_API_KEY",  # Grok runs through the Cursor CLI (summary_cli.py)
+}
 URLS = {
     "openai": "https://api.openai.com/v1/responses",
     "anthropic": "https://api.anthropic.com/v1/messages",

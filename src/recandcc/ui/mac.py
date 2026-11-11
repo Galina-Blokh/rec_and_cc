@@ -24,7 +24,7 @@ import threading
 import rumps  # pyright: ignore[reportMissingImports] - macOS-only dependency
 
 from .. import autostart
-from ..config import CONFIG_PATH
+from ..config import CONFIG_PATH, KEY_PROVIDERS
 from ..engine import IDLE, RECORDING
 from ..models import Mode, TriggerKind
 from . import notes as notes_ui
@@ -482,7 +482,7 @@ class MacApp(rumps.App):
             item.summary_provider = provider  # pyright: ignore[reportAttributeAccessIssue]
             self.summaries_menu.add(item)
         self.summaries_menu.add(rumps.separator)
-        for provider in ("openai", "anthropic"):
+        for provider in KEY_PROVIDERS:
             item = rumps.MenuItem(SIGN_IN_TITLES[provider], callback=self._sign_in)
             item.summary_provider = provider  # pyright: ignore[reportAttributeAccessIssue]
             self.summaries_menu.add(item)

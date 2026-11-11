@@ -307,8 +307,17 @@ def _snapshot_complete(snap: Path) -> bool:
 # same order; tests/test_summary_template.py keeps the two in step. Cloud summaries (opt-in,
 # transcribe/summary_cloud.py) also need each provider's default model and the reasoning effort
 # levels (OpenAI takes none..xhigh, Claude low..max).
-SUMMARY_PROVIDERS = ("local", "openai", "anthropic")
-DEFAULT_CLOUD_MODELS = {"openai": "gpt-6.1", "anthropic": "claude-opus-5-5"}
+SUMMARY_PROVIDERS = ("local", "openai", "anthropic", "claude-code", "codex", "grok")
+# The last three run a signed-in coding CLI (transcribe/summary_cli.py) instead of an API key;
+# these need one (in the keychain, see summary_cloud.get_key): Grok's is a Cursor key
+KEY_PROVIDERS = ("openai", "anthropic", "grok")
+DEFAULT_CLOUD_MODELS = {
+    "openai": "gpt-6.1",
+    "anthropic": "claude-opus-5-5",
+    "claude-code": "opus",
+    "codex": "gpt-6.1-sol",
+    "grok": "grok-4.7-high",
+}
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 DEFAULT_REASONING_EFFORT = "xhigh"
 DEFAULT_SUMMARY_PROMPT = (
@@ -789,7 +798,7 @@ def load_config(path: Path | None = None, *, migrate: bool = False) -> Config:
         log.warning("summary.template must be a path string; ignoring it")
         summary.template = ""
     if summary.provider not in SUMMARY_PROVIDERS:
-        log.warning("summary.provider must be local, openai or anthropic; using local")
+        log.warning("summary.provider must be one of %s; using local", ", ".join(SUMMARY_PROVIDERS))
         summary.provider = "local"
     if summary.reasoning_effort not in REASONING_EFFORTS:
         log.warning(
