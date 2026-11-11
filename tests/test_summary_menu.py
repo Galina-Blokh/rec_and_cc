@@ -73,7 +73,8 @@ def make_session(tmp_path: Path, segments: list[Segment]) -> Path:
 
 def test_the_submenu_checks_only_the_current_provider():
     rows = present.summary_provider_rows("openai")
-    assert [p for p, _, _ in rows] == ["local", "openai", "anthropic", "claude-code", "codex", "grok"]
+    expected = ["local", "openai", "anthropic", "claude-code", "codex", "grok"]
+    assert [p for p, _, _ in rows] == expected
     assert [title for _, title, on in rows if on] == ["ChatGPT (OpenAI)"]
 
 

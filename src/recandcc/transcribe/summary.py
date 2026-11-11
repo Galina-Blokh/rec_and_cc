@@ -600,7 +600,10 @@ def summarize_session(
             from . import summary_cli  # a signed-in coding CLI instead of an API key
 
             gen = summary_cli.CliGenerator(
-                settings.provider, settings.cloud_model, settings.reasoning_effort
+                settings.provider,
+                settings.cloud_model,
+                settings.reasoning_effort,
+                private=[cfg.output_dir, directory],  # the transcripts: never readable
             )
         else:
             from . import summary_cloud  # only a cloud provider imports the network code

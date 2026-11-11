@@ -7,7 +7,8 @@ Stories: US-27.
 
 import json
 import logging
-import subprocess
+import os
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -24,28 +25,42 @@ TRANSCRIPT = "transcript text that must never be logged"
 
 
 class FakeRun:
-    """Records each CLI call; answers from ``replies`` in turn: (returncode, stdout, stderr)."""
+    """Stands in for summary_cli._call: records each CLI call and answers from ``replies`` in
+    turn: (returncode, stdout, stderr)."""
 
     def __init__(self, *replies):
         self.calls: list[dict] = []
         self.replies = list(replies) or [(0, "an answer", "")]
 
-    def __call__(self, argv, **kw):
-        self.calls.append({"argv": argv, **kw})
+    def __call__(self, argv, stdin, cwd, env):
+        prompt_file = Path(cwd) / summary_cli.PROMPT_FILE
+        self.calls.append(
+            {
+                "argv": argv,
+                "input": stdin,
+                "cwd": cwd,
+                "env": env,
+                "file": prompt_file.read_text("utf-8") if prompt_file.exists() else None,
+                "profile": (Path(cwd) / "sandbox.sb").read_text("utf-8")
+                if (Path(cwd) / "sandbox.sb").exists()
+                else None,
+            }
+        )
         code, out, err = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
-        if argv[1] == "exec" and code == 0:  # codex writes its last message to -o FILE
+        if "exec" in argv and code == 0:  # codex writes its last message to -o FILE
             Path(argv[argv.index("-o") + 1]).write_text(out, "utf-8")
             out = "progress noise"
-        return subprocess.CompletedProcess(argv, code, out, err)
+        return code, out, err
 
 
 @pytest.fixture
 def cli(monkeypatch):
     monkeypatch.setattr(summary_cli, "find_cli", lambda p: f"/bin/{summary_cli.EXECUTABLES[p]}")
+    monkeypatch.setattr(summary_cli.sys, "platform", "darwin")
 
     def install(*replies):
         fake = FakeRun(*replies)
-        monkeypatch.setattr(summary_cli.subprocess, "run", fake)
+        monkeypatch.setattr(summary_cli, "_call", fake)
         return fake
 
     return install
@@ -61,6 +76,9 @@ def test_claude_code_runs_print_mode_without_tools_and_reads_stdout(cli):
     call = fake.calls[0]
     argv = call["argv"]
     assert argv[:6] == ["/bin/claude", "-p", "--tools", "", "--output-format", "text"]
+    assert "--strict-mcp-config" in argv and '{"mcpServers":{}}' in argv  # no MCP servers
+    assert argv[argv.index("--setting-sources") + 1] == "local"  # no user hooks or settings
+    assert "--disable-slash-commands" in argv and call["profile"] is None
     assert argv[argv.index("--model") + 1] == "opus"
     assert argv[argv.index("--effort") + 1] == "xhigh"
     assert call["input"] == "SYS\n\n" + TRANSCRIPT  # the prompt goes on stdin, not argv
@@ -75,7 +93,15 @@ def test_codex_runs_read_only_and_reads_its_last_message_file(cli):
     gen = summary_cli.CliGenerator("codex", "", "xhigh")
     assert gen(MESSAGES, 400) == "codex answer"
     argv = fake.calls[0]["argv"]
-    assert argv[:2] == ["/bin/codex", "exec"] and argv[-1] == "-"
+    assert argv[:3] == [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        str(Path(fake.calls[0]["cwd"]) / "sandbox.sb"),
+    ]
+    assert argv[3:5] == ["/bin/codex", "exec"] and argv[-1] == "-"
+    profile = fake.calls[0]["profile"]
+    assert f'(deny file-read* (subpath "{Path.home()}"))' in profile
+    assert f'(allow file-read* (subpath "{Path.home()}/.codex"))' in profile
     assert "read-only" in argv and "--skip-git-repo-check" in argv and "--ephemeral" in argv
     assert "gpt-6.1-sol" in argv and "model_reasoning_effort=xhigh" in argv
     assert fake.calls[0]["input"].endswith(TRANSCRIPT)
@@ -94,7 +120,10 @@ def test_grok_needs_a_cursor_key_and_falls_back_past_usage_limits(cli, monkeypat
     models = [c["argv"][c["argv"].index("--model") + 1] for c in fake.calls]
     assert models == ["grok-4.7-high", "cursor-grok-4.6-high"]
     assert all(c["env"]["CURSOR_API_KEY"] == "cur-key" for c in fake.calls)
-    assert fake.calls[0]["input"] is None and fake.calls[0]["argv"][-1].endswith(TRANSCRIPT)
+    first = fake.calls[0]
+    assert first["input"] is None and first["file"].endswith(TRANSCRIPT)  # prompt in a file
+    assert TRANSCRIPT not in " ".join(first["argv"]) and first["argv"][-1] == summary_cli.GROK_ASK
+    assert first["argv"][0] == "/usr/bin/sandbox-exec" and "ask" in first["argv"]
 
 
 @pytest.mark.parametrize(
@@ -113,18 +142,45 @@ def test_failures_raise_a_fixed_reason_without_any_output(cli, reply, reason):
     assert reason in str(e.value) and TRANSCRIPT not in str(e.value)
 
 
-def test_a_missing_cli_or_timeout_is_unavailable(monkeypatch):
+def test_a_missing_cli_is_unavailable_and_tool_agents_need_macos(monkeypatch):
     monkeypatch.setattr(summary_cli, "find_cli", lambda p: None)
     with pytest.raises(SummaryUnavailable, match="command was not found"):
         summary_cli.CliGenerator("codex")
-    monkeypatch.setattr(summary_cli, "find_cli", lambda p: "/bin/claude")
+    monkeypatch.setattr(summary_cli, "find_cli", lambda p: "/bin/x")
+    monkeypatch.setattr(summary_cli.sys, "platform", "win32")
+    for provider in ("codex", "grok"):
+        with pytest.raises(SummaryUnavailable, match="need macOS"):
+            summary_cli.CliGenerator(provider)
+    assert summary_cli.CliGenerator("claude-code").exe == "/bin/x"  # tool-free: allowed
 
-    def slow(argv, **kw):
-        raise subprocess.TimeoutExpired(argv, 1)
 
-    monkeypatch.setattr(summary_cli.subprocess, "run", slow)
+def test_only_listed_environment_variables_are_passed(cli, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "would-switch-billing")
+    monkeypatch.setenv("SOME_TOKEN", "secret")
+    fake = cli((0, "ok", ""))
+    summary_cli.CliGenerator("claude-code")(MESSAGES, 400)
+    env = fake.calls[0]["env"]
+    assert "ANTHROPIC_API_KEY" not in env and "SOME_TOKEN" not in env
+    assert set(env) <= set(summary_cli.ENV_KEEP)
+
+
+def test_the_profile_also_hides_the_transcripts_folder(tmp_path):
+    profile = summary_cli.sandbox_profile("codex", "/opt/homebrew/bin/codex", [tmp_path])
+    assert f'(deny file-read* (subpath "{tmp_path.resolve()}"))' in profile
+    assert "Library/Keychains" in profile  # else macOS reports a lost keychain
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+def test_a_timeout_kills_the_process_tree(tmp_path, monkeypatch):
+    monkeypatch.setattr(summary_cli, "TIMEOUT_S", 0.5)
+    monkeypatch.setattr(summary_cli, "DRAIN_S", 2.0)
+    pid_file = tmp_path / "child.pid"
+    script = f"sleep 30 & echo $! > {pid_file}; wait"
     with pytest.raises(SummaryUnavailable, match="did not answer in time"):
-        summary_cli.CliGenerator("claude-code")(MESSAGES, 400)
+        summary_cli._call(["/bin/sh", "-c", script], None, tmp_path, dict(os.environ))
+    child = int(pid_file.read_text())
+    with pytest.raises(ProcessLookupError):  # the grandchild was killed with its group
+        os.kill(child, 0)
 
 
 def test_find_cli_also_looks_where_installers_put_it(tmp_path, monkeypatch):

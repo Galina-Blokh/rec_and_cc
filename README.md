@@ -409,8 +409,12 @@ recognized voice or `Me` is never overridden.
 **Codex (your ChatGPT login)** or **Grok (Cursor)** (`provider = "claude-code"`, `"codex"` or
 `"grok"`) hand each meeting to that signed-in command-line tool (`claude`, `codex` or
 `cursor-agent`), which reads the *whole* meeting for speaker names and the summary. It is run
-once per model call in an empty temporary folder with tools off (Claude Code) or a read-only
-sandbox (Codex); only the prompt is passed. No separate billing, but every summary (two calls:
+once per model call in an empty temporary folder and contained, because a meeting is untrusted
+input ("read my files…"): Claude Code with no tools, MCP servers, user settings or skills;
+Codex and Grok only on macOS, inside the system sandbox (`sandbox-exec`) that blocks reading
+your home folder (except the tool's own sign-in folder and the encrypted keychain files) and
+the transcripts folder. Only the prompt is passed (never on a command line), and only a few
+environment variables. No separate billing, but every summary (two calls:
 names, then the summary, also the automatic ones after each recording) counts against that
 plan's usage limits. Codex uses `reasoning_effort` (default `xhigh`, the most thorough and
 the most usage). Grok needs a Cursor API key (**Sign in to Cursor (Grok)…**, or
