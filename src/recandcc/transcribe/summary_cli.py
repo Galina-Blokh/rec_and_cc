@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -52,6 +53,27 @@ OWN_DIRS = {
     "codex": ("~/.codex",),
     "grok": ("~/.cursor", "~/.local/share/cursor-agent", "~/.local/bin"),
 }
+# ... but never the owner's own history inside them (past conversations, chats, memories)
+HISTORY = {
+    "codex": (
+        "~/.codex/sessions",
+        "~/.codex/archived_sessions",
+        "~/.codex/shell_snapshots",
+        "~/.codex/attachments",
+        "~/.codex/memories",
+        "~/.codex/session_index.jsonl",
+        "~/.codex/history.jsonl",
+        "~/.codex/external_agent_session_imports.json",
+    ),
+    "grok": (
+        "~/.cursor/chats",
+        "~/.cursor/projects",
+        "~/.cursor/agents",
+        "~/.cursor/ai-tracking",
+        "~/.cursor/ide_state.json",
+    ),
+}
+HISTORY_DBS = {"codex": ("memories", "logs", "goals")}  # ~/.codex/<name>_<n>.sqlite*
 GROK_FALLBACKS = ("grok-4.7-high", "cursor-grok-4.6-high", "cursor-grok-4.5-high")
 TIMEOUT_S = 900.0
 DRAIN_S = 5.0  # after a kill, how long the pipes may take to close
@@ -103,6 +125,11 @@ def sandbox_profile(provider: str, exe: str, private: Collection[Path] = ()) -> 
     lines = ["(version 1)", "(allow default)"]
     lines += [f"(deny file-read* (subpath {_sb(d)}))" for d in denied]
     lines += [f"(allow file-read* (subpath {_sb(d)}))" for d in own if d.startswith(home)]
+    hidden = [str(Path(d).expanduser()) for d in HISTORY.get(provider, ())]
+    lines += [f"(deny file-read* (subpath {_sb(d)}))" for d in hidden]
+    for name in HISTORY_DBS.get(provider, ()):
+        codex = re.escape(str(Path("~/.codex").expanduser()))
+        lines.append(f'(deny file-read* (regex #"^{codex}/{name}_[0-9]+\\.sqlite"))')
     # The keychain files (encrypted; items keep their own access rules): without them macOS
     # tells the owner the login keychain cannot be found
     lines += [f"(allow file-read* (subpath {_sb(home + '/Library/Keychains')}))"]
@@ -204,6 +231,8 @@ class CliGenerator:
                 profile.write_text(sandbox_profile(self.provider, self.exe, self.private), "utf-8")
                 argv = ["/usr/bin/sandbox-exec", "-f", str(profile), *argv]
             code, out, err = _call(argv, stdin, folder, env)
+            if self.provider in SANDBOXED:
+                _kill_users_of(folder)  # helpers that left the process group
             if self.provider == "codex":
                 answer_file = folder / "answer.txt"
                 out = answer_file.read_text("utf-8") if answer_file.exists() else ""
@@ -253,6 +282,24 @@ def _call(argv: list[str], stdin: str | None, cwd: Path, env: dict) -> tuple[int
     if not windows:  # helpers it left behind in its group (e.g. a background worker)
         _kill_tree(proc)
     return proc.returncode, out or "", err or ""
+
+
+def _kill_users_of(folder: Path) -> None:
+    """Kill processes still using ``folder`` (their working folder is in it): a helper that
+    detached into a session of its own and so survived the process-group kill."""
+    try:
+        found = subprocess.run(  # noqa: S603 - a fixed command
+            ["/usr/sbin/lsof", "-t", "+D", str(folder)],
+            capture_output=True,
+            text=True,
+            timeout=DRAIN_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    for pid in {int(p) for p in found.stdout.split() if p.isdigit()} - {os.getpid()}:
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGKILL)
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:

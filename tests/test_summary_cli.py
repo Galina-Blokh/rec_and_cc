@@ -144,6 +144,7 @@ def test_failures_raise_a_fixed_reason_without_any_output(cli, reply, reason):
 
 def test_a_missing_cli_is_unavailable_and_tool_agents_need_macos(monkeypatch):
     monkeypatch.setattr(summary_cli, "find_cli", lambda p: None)
+    monkeypatch.setattr(summary_cli.sys, "platform", "darwin")  # on every CI runner
     with pytest.raises(SummaryUnavailable, match="command was not found"):
         summary_cli.CliGenerator("codex")
     monkeypatch.setattr(summary_cli, "find_cli", lambda p: "/bin/x")
@@ -168,6 +169,11 @@ def test_the_profile_also_hides_the_transcripts_folder(tmp_path):
     profile = summary_cli.sandbox_profile("codex", "/opt/homebrew/bin/codex", [tmp_path])
     assert f'(deny file-read* (subpath "{tmp_path.resolve()}"))' in profile
     assert "Library/Keychains" in profile  # else macOS reports a lost keychain
+    home = Path.home()
+    assert f'(deny file-read* (subpath "{home}/.codex/sessions"))' in profile  # past chats
+    assert "memories_[0-9]+" in profile
+    grok = summary_cli.sandbox_profile("grok", "/opt/homebrew/bin/cursor-agent")
+    assert f'(deny file-read* (subpath "{home}/.cursor/chats"))' in grok
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
