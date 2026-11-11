@@ -88,6 +88,7 @@ def test_claude_code_runs_print_mode_without_tools_and_reads_stdout(cli):
     assert gen.model_name == "opus"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="sandbox-exec profiles are macOS-only")
 def test_codex_runs_read_only_and_reads_its_last_message_file(cli):
     fake = cli((0, "codex answer", ""))
     gen = summary_cli.CliGenerator("codex", "", "xhigh")
@@ -165,6 +166,7 @@ def test_only_listed_environment_variables_are_passed(cli, monkeypatch):
     assert set(env) <= set(summary_cli.ENV_KEEP)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="sandbox-exec profiles are macOS-only")
 def test_the_profile_also_hides_the_transcripts_folder(tmp_path):
     profile = summary_cli.sandbox_profile("codex", "/opt/homebrew/bin/codex", [tmp_path])
     assert f'(deny file-read* (subpath "{tmp_path.resolve()}"))' in profile
