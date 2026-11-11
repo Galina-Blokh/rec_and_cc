@@ -77,7 +77,10 @@ def make_session(tmp_path: Path, segments: list[Segment]) -> Path:
 
 
 def cloud_cfg(provider: str, **settings) -> Config:
+    """A cloud summary config; speaker naming (a request of its own) is off unless a test
+    turns it on (tests/test_speaker_names.py covers it)."""
     cfg = Config()
+    cfg.transcription.names_from_transcript = False
     cfg.summary.provider = provider
     for name, value in settings.items():
         setattr(cfg.summary, name, value)
