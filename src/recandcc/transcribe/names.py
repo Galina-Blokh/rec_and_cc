@@ -50,14 +50,21 @@ def apply_names(
     directory: Path,
     mapping: dict[str, str],
     *,
+    checked_on: list[Segment] | None = None,
     sync_voices: bool = False,
     since: int | None = None,
 ) -> dict[str, str]:
     """Save an already checked label -> name plan (e.g. from speaker_names) the same way.
-    Only labels still in the transcript and names that aren't a label yet are applied; returns
-    what was applied."""
+    ``checked_on``: the segments the plan was checked against; if the transcript changed
+    since, nothing is applied. Only labels still in the transcript and names that aren't a
+    label yet are applied; returns what was applied."""
+
+    def key(segments: list[Segment]) -> list[tuple]:
+        return [(s.start, s.end, s.text, s.speaker) for s in segments]
 
     def plan(segments: list[Segment]) -> dict[str, str]:
+        if checked_on is not None and key(segments) != key(checked_on):
+            return {}  # changed while the model was reading it: the evidence may be gone
         labels = {s.speaker for s in segments}
         taken = {label.casefold() for label in labels}
         return {

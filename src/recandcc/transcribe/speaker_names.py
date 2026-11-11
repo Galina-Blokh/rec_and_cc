@@ -6,14 +6,16 @@ phrasings. Here the summary model reads the timed transcript and answers, as JSO
 invent things, so nothing is trusted without these checks:
 
 - only labels of the transcript that are still unnamed: ``Speaker N``, or ``Others`` when it is
-  the only other label (a 1:1 call); ``Me`` (the owner) is never renamed;
+  the only other label (a 1:1 call) and doesn't introduce two names; ``Me`` (the owner) is
+  never renamed;
 - the name passes ``voices.check_name``, has at most three words, and every word of it is
   written in the transcript (no invented or "corrected" names);
 - the evidence is an exact quote from the transcript (case and spacing aside) that contains
   the name, and it proves the claim by *who* said it: the speaker's own line must introduce
-  them ("I'm James", "my name is Ahmed"); another speaker's line must address them by the name
-  ("Sebastian, ...", "..., Ahmed?") right before they answer or right after they spoke. A
-  mention ("the report from Galina") proves nothing;
+  them at a clause start ("I'm James", "my name is Ahmed"; not quoted speech); another
+  speaker's line must call on them ("Sebastian, ...", "..., Ahmed?") just before they answer
+  (within seconds), or thank/answer them ("Great work, Tobias.") just after they spoke. A
+  mention ("the report from Galina") proves nothing, and the quote must hold the whole name;
 - a name is not an existing label, nor one another speaker introduced themself with, and no
   two labels get the same name (both are dropped).
 
@@ -123,42 +125,70 @@ def _norm(text: str) -> str:
 
 
 _SELF = r"(?:i'm|i am|my name is|my name's|this is|it's|меня зовут|это|я)\s+"
-NEAR = 6  # segments searched for the answer (the addressing speaker may go on a little)
+_GREETING = (
+    r"(?:hi|hello|hey|good morning|good afternoon|привет|здравствуйте)(?: everyone| all)?[,!]?"
+)
+REPLY_S = 6.0  # an answer to an address starts within this many seconds of it
+OVERLAP_S = 0.3  # ... and no earlier than this before the address ends
 
 
-def _self_claim(quote: str, first: str) -> bool:
-    return re.search(_SELF + re.escape(first) + r"\b", quote) is not None
+def _self_claim(text: str, name: str) -> bool:
+    """``text`` (a whole normalised line) introduces its speaker as ``name`` at the start of a
+    clause, not inside reported speech ('He said, "My name is Bob."')."""
+    for m in re.finditer(_SELF + re.escape(name) + r"\b", text):
+        prefix = text[: m.start()].rstrip()
+        clause = re.split(r"[.!?]\s", prefix)[-1] if prefix else ""
+        if any(q in clause for q in '"“”«»'):
+            continue  # quoted: someone else's words
+        if not clause or re.fullmatch(_GREETING, clause) or prefix.endswith((".", "!", "?")):
+            return True
+    return False
 
 
-def _addressed(quote: str, first: str) -> bool:
-    """The name used as an address: at a clause start before a comma or question mark, or
-    after a comma at the end of a clause ("Sebastian, ...", "..., Ahmed?", "work, Tobias.")."""
-    name = re.escape(first)
-    return (
-        re.search(rf"(?:^|[.!?;]\s*)(?:\w+,?\s+)?{name}\s*[,?!]", quote) is not None
-        or re.search(rf",\s*{name}\s*(?:[,.!?]|$)", quote) is not None
-    )
+def _direction(text: str, name: str) -> str | None:
+    """How ``name`` is used in ``text`` (a whole normalised line): "forward" when someone is
+    called on ("Alice, can you ...", "..., Ahmed?"), "back" when the one who just spoke is
+    thanked or answered ("Great work, Tobias."), else None (a mention)."""
+    n = re.escape(name)
+    if re.search(rf"(?:^|[.!?;]\s*)(?:\w+,?\s+)?{n}\s*[,?]", text) or re.search(
+        rf",\s*{n}\s*\?", text
+    ):
+        return "forward"
+    if re.search(rf",\s*{n}\s*(?:[.!]|$)", text):
+        return "back"
+    return None
 
 
-def _proves(label: str, first: str, quote: str, ordered: list[Segment]) -> bool:
-    """Whether ``quote`` (normalised) shows that ``label`` is called ``first``."""
+def _proves(label: str, name: str, quote: str, ordered: list[Segment]) -> bool:
+    """Whether ``quote`` (normalised, containing ``name``) shows that ``label`` is ``name``,
+    judged on the whole line it comes from."""
     texts = [_norm(s.text) for s in ordered]
     for i, text in enumerate(texts):
         if quote not in text:
-            # a quote across two lines starts in this one (else it belongs to the next line)
-            nxt = texts[i + 1] if i + 1 < len(texts) else ""
-            if not nxt or quote in nxt or quote not in f"{text} {nxt}":
-                continue
-        speaker = ordered[i].speaker
-        if speaker == label:
-            if _self_claim(quote, first):
+            continue
+        seg = ordered[i]
+        if seg.speaker == label:
+            if _self_claim(text, name):
                 return True
             continue
-        if not _addressed(quote, first):
-            continue
-        before = ordered[i - 1].speaker if i else None
-        after = next((s.speaker for s in ordered[i + 1 : i + NEAR] if s.speaker != speaker), None)
-        if label in (before, after):
+        way = _direction(text, name)
+        if way == "forward":
+            end, nxt = seg.end, None  # the addressing speaker may go on before the answer
+            for other in ordered[i + 1 :]:
+                if other.speaker != seg.speaker:
+                    nxt = other
+                    break
+                if other.start - end > REPLY_S:
+                    break
+                end = max(end, other.end)
+            if (
+                nxt is not None
+                and nxt.speaker == label
+                and not nxt.overlap
+                and -OVERLAP_S <= nxt.start - end <= REPLY_S
+            ):
+                return True
+        elif way == "back" and i and ordered[i - 1].speaker == label:
             return True
     return False
 
@@ -171,6 +201,8 @@ def checked_names(plan: dict[str, tuple[str, str]], segments: list[Segment]) -> 
     words = set(_WORD.findall(corpus))
     taken = {s.speaker.casefold() for s in segments}
     claims = introduced_names(segments)
+    if len(claims.get(OTHERS, set())) > 1:
+        labels.discard(OTHERS)  # one track, two introduced names: not one person
     accepted: dict[str, str] = {}
     for label, (raw, evidence) in plan.items():
         if label not in labels:
@@ -188,8 +220,8 @@ def checked_names(plan: dict[str, tuple[str, str]], segments: list[Segment]) -> 
             or not all(part in words for part in parts)
             or len(quote) < MIN_EVIDENCE
             or quote not in corpus
-            or parts[0] not in _WORD.findall(quote)
-            or not _proves(label, parts[0], quote, ordered)
+            or " ".join(parts) not in quote  # the whole name, so no surname is invented
+            or not _proves(label, " ".join(parts), quote, ordered)
             or _norm(name) in taken
             or any(
                 _norm(name) in claimed or parts[0] in {c.split()[0] for c in claimed}

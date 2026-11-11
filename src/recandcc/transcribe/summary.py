@@ -615,8 +615,6 @@ def summarize_session(
     with contextlib.suppress(OSError):  # an old fingerprint must not sit next to a new summary
         (directory / SOURCE_NAME).unlink(missing_ok=True)
     path = atomic_write(directory / SUMMARY_NAME, text)
-    with contextlib.suppress(OSError, ValueError):  # the transcript may have new names now
-        data = json.loads((directory / JSON_NAME).read_text(encoding="utf-8"))
     with contextlib.suppress(OSError):  # no fingerprint: export falls back to the mtime rule
         atomic_write(directory / SOURCE_NAME, transcript_fingerprint(data.get("segments", [])))
     log.info(
@@ -652,7 +650,10 @@ def _name_speakers(
         )
         if mapping:
             mapping = names.apply_names(
-                directory, mapping, sync_voices=cfg.transcription.speaker_names
+                directory,
+                mapping,
+                checked_on=segments,
+                sync_voices=cfg.transcription.speaker_names,
             )
     except SummaryUnavailable:
         raise  # e.g. a rejected cloud key: the summary would fail the same way

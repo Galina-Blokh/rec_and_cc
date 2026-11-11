@@ -283,3 +283,74 @@ def test_a_cloud_summary_names_speakers_in_a_first_request(tmp_path, monkeypatch
     assert "Mira sends the release notes" in text
     data = json.loads((d / "transcript.json").read_text("utf-8"))
     assert {s["speaker"] for s in data["segments"]} == {"Me", "Mira", "Tobias"}
+
+
+# --- regressions from the Codex review (gpt-6.1-sol): each was a wrong name before
+
+
+def test_an_others_track_that_introduces_two_names_is_not_one_person():
+    segments = [
+        seg(0, "Me", "Welcome."),
+        seg(3, "Others", "My name is Alice."),
+        seg(6, "Others", "My name is Bob."),
+    ]
+    assert checked_names({"Others": ok("Alice", "My name is Alice")}, segments) == {}
+
+
+def test_quoted_speech_is_not_a_self_introduction():
+    segments = [seg(0, "Me", "Who called?"), seg(3, "Speaker 1", 'He said, "My name is Bob."')]
+    assert checked_names({"Speaker 1": ok("Bob", "My name is Bob")}, segments) == {}
+
+
+def test_the_quote_must_hold_the_whole_name():
+    segments = [
+        seg(0, "Me", "Smith sent the report."),
+        seg(3, "Speaker 1", "For late arrivals, this is Alice from QA."),
+    ]
+    answer = {"Speaker 1": ok("Alice Smith", "this is Alice from QA")}
+    assert checked_names(answer, segments) == {}
+
+
+def test_a_call_on_someone_names_the_one_who_answers_not_the_one_before():
+    segments = [
+        seg(0, "Speaker 1", "The server is fixed."),
+        seg(3, "Me", "Alice, can you give the client update?"),
+        seg(6, "Speaker 2", "Sure, the client is ready."),
+    ]
+    quote = "Alice, can you give the client update"
+    assert checked_names({"Speaker 1": ok("Alice", quote)}, segments) == {}
+    assert checked_names({"Speaker 2": ok("Alice", quote)}, segments) == {"Speaker 2": "Alice"}
+    late = [*segments[:2], seg(20, "Speaker 2", "Sure, the client is ready.")]
+    assert checked_names({"Speaker 2": ok("Alice", quote)}, late) == {}  # no answer in time
+    # the caller goes on talking first: the answer is timed from the end of their turn
+    goes_on = [*segments[:2], seg(6, "Me", "And the dates too."), seg(10, "Speaker 2", "Sure.")]
+    assert checked_names({"Speaker 2": ok("Alice", quote)}, goes_on) == {"Speaker 2": "Alice"}
+
+
+def test_names_are_not_applied_to_a_transcript_that_changed_meanwhile(tmp_path):
+    from recandcc.transcribe import names
+
+    d = session(tmp_path)
+    checked = [Segment(**s) for s in json.loads((d / "transcript.json").read_text())["segments"]]
+    changed = [*MEETING[:3], seg(12, "Speaker 2", "This is Bob, from finance.")]
+    write_outputs(SessionInfo.load(d), changed, 30.0, "fake")
+    assert names.apply_names(d, {"Speaker 2": "Tobias"}, checked_on=checked) == {}
+    data = json.loads((d / "transcript.json").read_text("utf-8"))
+    assert "Tobias" not in {s["speaker"] for s in data["segments"]}
+
+
+def test_the_fingerprint_is_of_the_text_the_summary_read(tmp_path):
+    d = session(tmp_path)
+    before = json.loads((d / "transcript.json").read_text("utf-8"))["segments"]
+    calls = []
+
+    def gen(messages, max_tokens):
+        calls.append(1)
+        if len(calls) == 2:  # the transcript changes while the summary is being written
+            info = SessionInfo.load(d)
+            write_outputs(info, [seg(0, "Me", "Cancel the release.")], 30.0, "fake")
+        return "{}" if len(calls) == 1 else "- Ship on Monday."
+
+    summary.summarize_session(d, Config(output_dir=tmp_path), gen)
+    stored = (d / summary.SOURCE_NAME).read_text("utf-8")
+    assert stored == summary.transcript_fingerprint(before)
