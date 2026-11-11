@@ -128,8 +128,25 @@ _SELF = r"(?:i'm|i am|my name is|my name's|this is|it's|меня зовут|эт
 _GREETING = (
     r"(?:hi|hello|hey|good morning|good afternoon|привет|здравствуйте)(?: everyone| all)?[,!]?"
 )
+_THANKS = r"thanks|thank you|great work|good work|well done|good job|nice work|cheers|спасибо"
+# "<word>, you ..." / "<word>, can ...": calling on someone (fillers excluded below)
+_CALL_ON = re.compile(
+    r"(?:^|[.!?;]\s*)(?:\w+,?\s+)?([^\W\d_]+),\s+(?:you|can|could|would|will|please|go|are|do)\b"
+)
+_NOT_NAME_WORDS = "actually ok okay so well and but yes yeah no now then sorry also"
+_NOT_NAMES = frozenset(_NOT_NAME_WORDS.split())
 REPLY_S = 6.0  # an answer to an address starts within this many seconds of it
 OVERLAP_S = 0.3  # ... and no earlier than this before the address ends
+
+
+def _quoted(prefix: str) -> bool:
+    """Whether text after ``prefix`` is inside an open quote or follows a colon (reported)."""
+    return (
+        prefix.count('"') % 2 == 1
+        or prefix.count("“") > prefix.count("”")
+        or prefix.count("«") > prefix.count("»")
+        or ":" in prefix
+    )
 
 
 def _self_claim(text: str, name: str) -> bool:
@@ -138,8 +155,8 @@ def _self_claim(text: str, name: str) -> bool:
     for m in re.finditer(_SELF + re.escape(name) + r"\b", text):
         prefix = text[: m.start()].rstrip()
         clause = re.split(r"[.!?]\s", prefix)[-1] if prefix else ""
-        if any(q in clause for q in '"“”«»'):
-            continue  # quoted: someone else's words
+        if _quoted(prefix):
+            continue  # inside quotes or after "wrote:": someone else's words
         if not clause or re.fullmatch(_GREETING, clause) or prefix.endswith((".", "!", "?")):
             return True
     return False
@@ -150,6 +167,8 @@ def _direction(text: str, name: str) -> str | None:
     called on ("Alice, can you ...", "..., Ahmed?"), "back" when the one who just spoke is
     thanked or answered ("Great work, Tobias."), else None (a mention)."""
     n = re.escape(name)
+    if re.search(rf"\b(?:{_THANKS})[,!]?\s+{n}\b", text):
+        return "back"  # "Thanks, Alice, that helps.": to the one who just spoke
     if re.search(rf"(?:^|[.!?;]\s*)(?:\w+,?\s+)?{n}\s*[,?]", text) or re.search(
         rf",\s*{n}\s*\?", text
     ):
@@ -157,6 +176,26 @@ def _direction(text: str, name: str) -> str | None:
     if re.search(rf",\s*{n}\s*(?:[.!]|$)", text):
         return "back"
     return None
+
+
+def _calls_someone_else(text: str, name: str) -> bool:
+    """ "Actually, Bob, you go first": the caller turns to another person before the answer."""
+    first = name.split()[0]
+    return any(
+        m.group(1) not in _NOT_NAMES and m.group(1) != first for m in _CALL_ON.finditer(text)
+    )
+
+
+def _answer_words(ordered: list[Segment], texts: list[str], j: int) -> set[str]:
+    """Words of the answer turn that starts at ``ordered[j]`` ("Alice is out today": an answer
+    that says the name is someone else covering)."""
+    words, end = set(_WORD.findall(texts[j])), ordered[j].end
+    for k in range(j + 1, len(ordered)):
+        if ordered[k].speaker != ordered[j].speaker or ordered[k].start - end > REPLY_S:
+            break
+        words |= set(_WORD.findall(texts[k]))
+        end = max(end, ordered[k].end)
+    return {re.sub(r"'s$", "", w) for w in words}
 
 
 def _proves(label: str, name: str, quote: str, ordered: list[Segment]) -> bool:
@@ -173,24 +212,41 @@ def _proves(label: str, name: str, quote: str, ordered: list[Segment]) -> bool:
             continue
         way = _direction(text, name)
         if way == "forward":
-            end, nxt = seg.end, None  # the addressing speaker may go on before the answer
-            for other in ordered[i + 1 :]:
+            end, nxt, j = seg.end, None, i  # the addressing speaker may go on before the answer
+            later = [text[text.find(name) + len(name) :]]  # what the caller says after the name
+            for j in range(i + 1, len(ordered)):
+                other = ordered[j]
                 if other.speaker != seg.speaker:
                     nxt = other
                     break
                 if other.start - end > REPLY_S:
                     break
                 end = max(end, other.end)
+                later.append(texts[j])
             if (
                 nxt is not None
                 and nxt.speaker == label
                 and not nxt.overlap
                 and -OVERLAP_S <= nxt.start - end <= REPLY_S
+                and not _calls_someone_else(" ".join(later), name)
+                and name.split()[0] not in _answer_words(ordered, texts, j)
             ):
                 return True
         elif way == "back" and i and ordered[i - 1].speaker == label:
             return True
     return False
+
+
+def _self_names(ordered: list[Segment], label: str) -> set[str]:
+    """Capitalised names ``label`` introduces itself with in any ``_SELF`` form ("It's Alice
+    here"), casefolded."""
+    found = set()
+    for seg in ordered:
+        if seg.speaker == label:
+            for m in re.finditer(_SELF + r"([^\W\d_]+)", seg.text.replace("’", "'"), re.I):
+                if m.group(1)[:1].isupper():
+                    found.add(m.group(1).casefold())
+    return found
 
 
 def checked_names(plan: dict[str, tuple[str, str]], segments: list[Segment]) -> dict[str, str]:
@@ -201,7 +257,7 @@ def checked_names(plan: dict[str, tuple[str, str]], segments: list[Segment]) -> 
     words = set(_WORD.findall(corpus))
     taken = {s.speaker.casefold() for s in segments}
     claims = introduced_names(segments)
-    if len(claims.get(OTHERS, set())) > 1:
+    if len(claims.get(OTHERS, set()) | _self_names(ordered, OTHERS)) > 1:
         labels.discard(OTHERS)  # one track, two introduced names: not one person
     accepted: dict[str, str] = {}
     for label, (raw, evidence) in plan.items():

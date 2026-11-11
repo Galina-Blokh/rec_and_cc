@@ -354,3 +354,53 @@ def test_the_fingerprint_is_of_the_text_the_summary_read(tmp_path):
     summary.summarize_session(d, Config(output_dir=tmp_path), gen)
     stored = (d / summary.SOURCE_NAME).read_text("utf-8")
     assert stored == summary.transcript_fingerprint(before)
+
+
+# --- regressions from the second Codex pass
+
+
+def test_thanks_names_the_one_who_just_spoke_not_the_next():
+    segments = [
+        seg(0, "Speaker 1", "The deployment is done."),
+        seg(3, "Me", "Thanks, Alice, that helps."),
+        seg(6, "Speaker 2", "Next, the QA update."),
+    ]
+    quote = "Thanks, Alice, that helps"
+    assert checked_names({"Speaker 2": ok("Alice", quote)}, segments) == {}
+    assert checked_names({"Speaker 1": ok("Alice", quote)}, segments) == {"Speaker 1": "Alice"}
+
+
+def test_turning_to_another_person_before_the_answer_voids_the_first_address():
+    segments = [
+        seg(0, "Me", "Alice, can you give the update?"),
+        seg(2, "Me", "Actually, Bob, you go first."),
+        seg(5, "Speaker 1", "Sure, the build is green."),
+    ]
+    quote = "Alice, can you give the update"
+    assert checked_names({"Speaker 1": ok("Alice", quote)}, segments) == {}
+
+
+def test_an_answer_that_says_the_name_is_someone_covering():
+    segments = [
+        seg(0, "Me", "Alice, can you give the update?"),
+        seg(3, "Speaker 1", "Alice is out today. I can cover her update."),
+    ]
+    quote = "Alice, can you give the update"
+    assert checked_names({"Speaker 1": ok("Alice", quote)}, segments) == {}
+
+
+def test_an_introduction_read_out_from_a_message_is_not_the_speaker():
+    segments = [
+        seg(0, "Me", "What did the customer write?"),
+        seg(3, "Speaker 1", 'The customer wrote: "Hello. We need access. My name is Bob."'),
+    ]
+    assert checked_names({"Speaker 1": ok("Bob", "My name is Bob")}, segments) == {}
+
+
+def test_an_others_track_saying_its_alice_and_its_bob_is_two_people():
+    segments = [
+        seg(0, "Me", "Welcome."),
+        seg(3, "Others", "It's Alice here."),
+        seg(6, "Others", "It's Bob here."),
+    ]
+    assert checked_names({"Others": ok("Alice", "It's Alice here")}, segments) == {}
