@@ -41,6 +41,7 @@ from ..cloudsync import (
 )
 from ..config import (
     CONFIG_PATH,
+    KEY_PROVIDERS,
     LOG_DIR,
     Config,
     ConfigLockTimeout,
@@ -73,6 +74,7 @@ from ..settings_window import (
 
 if TYPE_CHECKING:
     from ..transcribe.live import LiveTranscriber
+
 
 log = logging.getLogger(__name__)
 
@@ -2019,7 +2021,7 @@ class Controller:
 
     def _set_summary_provider(self, provider: str, ask: Callable[[str], str], request: int) -> None:
         needs_key = False
-        if provider != "local":
+        if provider in KEY_PROVIDERS:  # Claude Code and Codex use their own sign-in
             from ..transcribe import summary_cloud
 
             needs_key = summary_cloud.get_key(provider) is None
@@ -2042,7 +2044,7 @@ class Controller:
             self._requeue_all_waiting_summaries()
 
     def _requeue_all_waiting_summaries(self) -> None:
-        for provider in ("openai", "anthropic"):
+        for provider in KEY_PROVIDERS:
             self.requeue_waiting_summaries(provider)
 
     def sign_in(self, provider: str, ask: Callable[[str], str]) -> bool:
@@ -2084,7 +2086,7 @@ class Controller:
             from ..transcribe import summary_cloud
 
             failed = False
-            for provider in ("openai", "anthropic"):
+            for provider in KEY_PROVIDERS:
                 try:
                     summary_cloud.delete_key(provider)
                 except Exception as e:  # noqa: BLE001 - keychain unavailable: the type only

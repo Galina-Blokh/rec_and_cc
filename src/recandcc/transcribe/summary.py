@@ -84,7 +84,13 @@ NONE_MARK = "NONE"
 NONE_WORDS = frozenset({NONE_MARK.casefold(), "nothing", "нет", "ничего", "אין"})
 # Cloud summaries: one call on the timestamped transcript; past CLOUD_SINGLE_CALL_CHARS (about
 # 100k tokens) it goes in parts of CLOUD_PART_CHARS first.
-CLOUD_LABELS = {"openai": "OpenAI", "anthropic": "Anthropic"}  # as summary.md's note names them
+CLOUD_LABELS = {  # as summary.md's note names them
+    "openai": "OpenAI",
+    "anthropic": "Anthropic",
+    "claude-code": "Claude Code",
+    "codex": "Codex",
+    "grok": "Grok via Cursor",
+}
 CLOUD_ANSWER_TOKENS = 4_000  # a cloud answer, or a part's notes (the provider adds room to think)
 CLOUD_SINGLE_CALL_CHARS = 400_000
 CLOUD_PART_CHARS = 200_000
@@ -589,11 +595,19 @@ def summarize_session(
             owned.close()
 
     def run_cloud() -> tuple[str, str, str]:
-        from . import summary_cloud  # only a cloud provider imports the network code
+        gen: Any
+        if settings.provider in ("claude-code", "codex", "grok"):
+            from . import summary_cli  # a signed-in coding CLI instead of an API key
 
-        gen = summary_cloud.CloudGenerator(
-            settings.provider, settings.cloud_model, settings.reasoning_effort
-        )
+            gen = summary_cli.CliGenerator(
+                settings.provider, settings.cloud_model, settings.reasoning_effort
+            )
+        else:
+            from . import summary_cloud  # only a cloud provider imports the network code
+
+            gen = summary_cloud.CloudGenerator(
+                settings.provider, settings.cloud_model, settings.reasoning_effort
+            )
         try:  # no local fallback: a failure raises SummaryUnavailable (the queue shows it)
             return run(gen, gen.model_name)
         finally:

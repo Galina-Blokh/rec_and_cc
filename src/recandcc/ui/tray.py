@@ -36,7 +36,7 @@ import pystray  # pyright: ignore[reportMissingImports] - Windows-only dependenc
 from PIL import Image, ImageDraw  # pyright: ignore[reportMissingImports] - Windows-only dependency
 
 from .. import autostart
-from ..config import CONFIG_PATH
+from ..config import CONFIG_PATH, KEY_PROVIDERS
 from ..engine import PROMPTING, RECORDING
 from ..models import Mode, TriggerKind
 from . import notes as notes_ui
@@ -700,7 +700,7 @@ class TrayApp:
             rows = summary_provider_rows(self.cfg.summary.provider)
             items = [summary_item(*row) for row in rows]
             items.append(pystray.Menu.SEPARATOR)
-            items += [sign_in_item(p) for p in ("openai", "anthropic")]
+            items += [sign_in_item(p) for p in KEY_PROVIDERS]
             items.append(Item(SIGN_OUT_TITLE, lambda: self._sign_out()))
             return items
 
