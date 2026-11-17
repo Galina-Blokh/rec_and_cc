@@ -272,10 +272,9 @@ class TkCaptions:
                             st["ended"] = time.monotonic()
                     elif op == "hide":
                         set_visible(False)
-                    elif op == "reveal":
-                        if st["started"] is not None:
-                            render(True)
-                            set_visible(True)
+                    elif op == "reveal" and st["started"] is not None:
+                        render(True)
+                        set_visible(True)
             except queue.Empty:
                 pass
             except Exception:
